@@ -3,6 +3,7 @@ use git2::{Repository, WorktreeAddOptions, WorktreeLockStatus, WorktreePruneOpti
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::cow_worktree;
 use super::{BranchInfo, VcsProvider, WorktreeInfo};
 
 pub struct GitRepository {
@@ -421,53 +422,59 @@ impl VcsProvider for GitRepository {
         // Check if the branch already exists
         let branch_exists = self.branch_exists(branch)?;
 
-        if branch_exists {
-            // Use the existing branch
-            let branch_ref = self
-                .repo
-                .find_branch(branch, git2::BranchType::Local)
-                .with_context(|| format!("Branch '{}' not found", branch))?;
-            let reference = branch_ref.into_reference();
-
-            let mut opts = WorktreeAddOptions::new();
-            opts.reference(Some(&reference));
-
-            self.repo
-                .worktree(&wt_name, path, Some(&opts))
-                .with_context(|| {
-                    format!(
-                        "Failed to create worktree '{}' at '{}'",
-                        wt_name,
-                        path.display()
-                    )
-                })?;
-        } else {
-            // Let git create the branch automatically (named after the worktree)
-            // First create the branch from HEAD, then create the worktree
+        // If the branch doesn't exist yet, create it from HEAD so both the CoW
+        // fast path and the git2 fallback can reference it.
+        if !branch_exists {
             let head = self.repo.head().context("Failed to get HEAD")?;
             let head_commit = head
                 .peel_to_commit()
                 .context("HEAD does not point to a commit")?;
-
-            let new_branch = self
-                .repo
+            self.repo
                 .branch(branch, &head_commit, false)
                 .with_context(|| format!("Failed to create branch '{}'", branch))?;
-
-            let reference = new_branch.into_reference();
-            let mut opts = WorktreeAddOptions::new();
-            opts.reference(Some(&reference));
-
-            self.repo
-                .worktree(&wt_name, path, Some(&opts))
-                .with_context(|| {
-                    format!(
-                        "Failed to create worktree '{}' at '{}'",
-                        wt_name,
-                        path.display()
-                    )
-                })?;
         }
+
+        // ── CoW fast path ──────────────────────────────────────────────
+        // Try to create the worktree using APFS clonefile / reflink.
+        // This avoids a full checkout by registering the worktree with
+        // --no-checkout and then copying files with Copy-on-Write.
+        let source_dir = self.get_repo_root();
+        match cow_worktree::create_cow_worktree(source_dir, path, branch) {
+            Ok(true) => {
+                log::info!(
+                    "Created worktree for '{}' at '{}' using Copy-on-Write",
+                    branch,
+                    path.display()
+                );
+                return Ok(());
+            }
+            Ok(false) => {
+                log::debug!("CoW not available, falling back to git2 worktree creation");
+            }
+            Err(e) => {
+                log::warn!("CoW worktree creation failed: {e:#}. Falling back to git2.");
+            }
+        }
+
+        // ── Standard git2 worktree path ────────────────────────────────
+        let branch_ref = self
+            .repo
+            .find_branch(branch, git2::BranchType::Local)
+            .with_context(|| format!("Branch '{}' not found", branch))?;
+        let reference = branch_ref.into_reference();
+
+        let mut opts = WorktreeAddOptions::new();
+        opts.reference(Some(&reference));
+
+        self.repo
+            .worktree(&wt_name, path, Some(&opts))
+            .with_context(|| {
+                format!(
+                    "Failed to create worktree '{}' at '{}'",
+                    wt_name,
+                    path.display()
+                )
+            })?;
 
         Ok(())
     }

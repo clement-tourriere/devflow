@@ -77,21 +77,21 @@ jobs:
           EXPECTED_STORAGE: apfs_clone
         run: |
           set -euo pipefail
-          PGBRANCH=$GITHUB_WORKSPACE/target/debug/pgbranch
+          DEVFLOW_BIN=$GITHUB_WORKSPACE/target/debug/devflow
 
           # Set up test git repo
-          mkdir -p /tmp/pgbranch-test && cd /tmp/pgbranch-test
+          mkdir -p /tmp/devflow-test && cd /tmp/devflow-test
           git init
           git config user.email "ci@test.com"
           git config user.name "CI"
           git commit --allow-empty -m "init"
 
           # Doctor + Init
-          $PGBRANCH doctor
-          $PGBRANCH --non-interactive init ci-test
+          $DEVFLOW_BIN doctor
+          $DEVFLOW_BIN --non-interactive init ci-test
 
           # Verify storage backend
-          STORAGE=$($PGBRANCH --json status | jq -r '.storage')
+          STORAGE=$($DEVFLOW_BIN --json status | jq -r '.storage')
           echo "Detected storage: $STORAGE"
           if [ "$STORAGE" != "$EXPECTED_STORAGE" ]; then
             echo "ERROR: Expected storage '$EXPECTED_STORAGE' but got '$STORAGE'"
@@ -99,16 +99,16 @@ jobs:
           fi
 
           # Branch lifecycle
-          $PGBRANCH --non-interactive create test-feature
-          $PGBRANCH --json list
-          $PGBRANCH --json connection test-feature
-          $PGBRANCH stop test-feature
-          $PGBRANCH start test-feature
-          $PGBRANCH delete test-feature
-          $PGBRANCH --json list
+          $DEVFLOW_BIN --non-interactive create test-feature
+          $DEVFLOW_BIN --json list
+          $DEVFLOW_BIN --json connection test-feature
+          $DEVFLOW_BIN stop test-feature
+          $DEVFLOW_BIN start test-feature
+          $DEVFLOW_BIN delete test-feature
+          $DEVFLOW_BIN --json list
 
           # Cleanup
-          $PGBRANCH --non-interactive destroy --force
+          $DEVFLOW_BIN --non-interactive destroy --force
 
   integration-linux-zfs:
     name: Integration (Linux / ZFS)
@@ -136,13 +136,13 @@ jobs:
           sudo modprobe zfs
 
       - name: Set up ZFS pool
-        run: $GITHUB_WORKSPACE/target/debug/pgbranch setup-zfs --pool-name pgbranch --size 2G
+        run: $GITHUB_WORKSPACE/target/debug/devflow setup-zfs --pool-name devflow --size 2G
 
-      - name: Redirect pgbranch data to ZFS
+      - name: Redirect devflow data to ZFS
         run: |
           mkdir -p ~/.local/share
-          rm -rf ~/.local/share/pgbranch
-          ln -s /var/lib/pgbranch/data ~/.local/share/pgbranch
+          rm -rf ~/.local/share/devflow
+          ln -s /var/lib/devflow/data ~/.local/share/devflow
 
       - name: Pull postgres image
         run: docker pull postgres:17
@@ -150,34 +150,34 @@ jobs:
       - name: Run integration tests
         env:
           EXPECTED_STORAGE: zfs
-          DEVFLOW_ZFS_DATASET: pgbranch
+          DEVFLOW_ZFS_DATASET: devflow
         run: |
           set -euo pipefail
           RUNNER_HOME="$HOME"
-          PGBRANCH="$GITHUB_WORKSPACE/target/debug/pgbranch"
+          DEVFLOW_BIN="$GITHUB_WORKSPACE/target/debug/devflow"
 
           sudo \
             HOME="$RUNNER_HOME" \
             XDG_DATA_HOME="$RUNNER_HOME/.local/share" \
             EXPECTED_STORAGE="$EXPECTED_STORAGE" \
             DEVFLOW_ZFS_DATASET="$DEVFLOW_ZFS_DATASET" \
-            PGBRANCH="$PGBRANCH" \
+            DEVFLOW_BIN="$DEVFLOW_BIN" \
             bash <<'EOF'
           set -euo pipefail
 
           # Set up test git repo
-          mkdir -p /tmp/pgbranch-test && cd /tmp/pgbranch-test
+          mkdir -p /tmp/devflow-test && cd /tmp/devflow-test
           git init
           git config user.email "ci@test.com"
           git config user.name "CI"
           git commit --allow-empty -m "init"
 
           # Doctor + Init
-          $PGBRANCH doctor
-          $PGBRANCH --non-interactive init ci-test
+          $DEVFLOW_BIN doctor
+          $DEVFLOW_BIN --non-interactive init ci-test
 
           # Verify storage backend
-          STORAGE=$($PGBRANCH --json status | jq -r '.storage')
+          STORAGE=$($DEVFLOW_BIN --json status | jq -r '.storage')
           echo "Detected storage: $STORAGE"
           if [ "$STORAGE" != "$EXPECTED_STORAGE" ]; then
             echo "ERROR: Expected storage '$EXPECTED_STORAGE' but got '$STORAGE'"
@@ -185,16 +185,16 @@ jobs:
           fi
 
           # Branch lifecycle
-          $PGBRANCH --non-interactive create test-feature
-          $PGBRANCH --json list
-          $PGBRANCH --json connection test-feature
-          $PGBRANCH stop test-feature
-          $PGBRANCH start test-feature
-          $PGBRANCH delete test-feature
-          $PGBRANCH --json list
+          $DEVFLOW_BIN --non-interactive create test-feature
+          $DEVFLOW_BIN --json list
+          $DEVFLOW_BIN --json connection test-feature
+          $DEVFLOW_BIN stop test-feature
+          $DEVFLOW_BIN start test-feature
+          $DEVFLOW_BIN delete test-feature
+          $DEVFLOW_BIN --json list
 
           # Cleanup
-          $PGBRANCH --non-interactive destroy --force
+          $DEVFLOW_BIN --non-interactive destroy --force
           EOF
 
   integration-linux-xfs:
@@ -222,14 +222,14 @@ jobs:
           sudo apt-get install -y xfsprogs
           sudo truncate -s 2G /tmp/xfs.img
           sudo mkfs.xfs -m reflink=1 /tmp/xfs.img
-          sudo mkdir -p /mnt/pgbranch-xfs
-          sudo mount -o loop /tmp/xfs.img /mnt/pgbranch-xfs
-          sudo chown -R $(whoami):$(whoami) /mnt/pgbranch-xfs
+          sudo mkdir -p /mnt/devflow-xfs
+          sudo mount -o loop /tmp/xfs.img /mnt/devflow-xfs
+          sudo chown -R $(whoami):$(whoami) /mnt/devflow-xfs
 
-      - name: Redirect pgbranch data to XFS
+      - name: Redirect devflow data to XFS
         run: |
           mkdir -p ~/.local/share
-          ln -sf /mnt/pgbranch-xfs ~/.local/share/pgbranch
+          ln -sf /mnt/devflow-xfs ~/.local/share/devflow
 
       - name: Pull postgres image
         run: docker pull postgres:17
@@ -239,21 +239,21 @@ jobs:
           EXPECTED_STORAGE: reflink
         run: |
           set -euo pipefail
-          PGBRANCH=$GITHUB_WORKSPACE/target/debug/pgbranch
+          DEVFLOW_BIN=$GITHUB_WORKSPACE/target/debug/devflow
 
           # Set up test git repo
-          mkdir -p /tmp/pgbranch-test && cd /tmp/pgbranch-test
+          mkdir -p /tmp/devflow-test && cd /tmp/devflow-test
           git init
           git config user.email "ci@test.com"
           git config user.name "CI"
           git commit --allow-empty -m "init"
 
           # Doctor + Init
-          $PGBRANCH doctor
-          $PGBRANCH --non-interactive init ci-test
+          $DEVFLOW_BIN doctor
+          $DEVFLOW_BIN --non-interactive init ci-test
 
           # Verify storage backend
-          STORAGE=$($PGBRANCH --json status | jq -r '.storage')
+          STORAGE=$($DEVFLOW_BIN --json status | jq -r '.storage')
           echo "Detected storage: $STORAGE"
           if [ "$STORAGE" != "$EXPECTED_STORAGE" ]; then
             echo "ERROR: Expected storage '$EXPECTED_STORAGE' but got '$STORAGE'"
@@ -261,16 +261,16 @@ jobs:
           fi
 
           # Branch lifecycle
-          $PGBRANCH --non-interactive create test-feature
-          $PGBRANCH --json list
-          $PGBRANCH --json connection test-feature
-          $PGBRANCH stop test-feature
-          $PGBRANCH start test-feature
-          $PGBRANCH delete test-feature
-          $PGBRANCH --json list
+          $DEVFLOW_BIN --non-interactive create test-feature
+          $DEVFLOW_BIN --json list
+          $DEVFLOW_BIN --json connection test-feature
+          $DEVFLOW_BIN stop test-feature
+          $DEVFLOW_BIN start test-feature
+          $DEVFLOW_BIN delete test-feature
+          $DEVFLOW_BIN --json list
 
           # Cleanup
-          $PGBRANCH --non-interactive destroy --force
+          $DEVFLOW_BIN --non-interactive destroy --force
 
   integration-linux-btrfs:
     name: Integration (Linux / Btrfs reflink)
@@ -297,14 +297,14 @@ jobs:
           sudo apt-get install -y btrfs-progs
           sudo truncate -s 2G /tmp/btrfs.img
           sudo mkfs.btrfs /tmp/btrfs.img
-          sudo mkdir -p /mnt/pgbranch-btrfs
-          sudo mount -o loop /tmp/btrfs.img /mnt/pgbranch-btrfs
-          sudo chown -R $(whoami):$(whoami) /mnt/pgbranch-btrfs
+          sudo mkdir -p /mnt/devflow-btrfs
+          sudo mount -o loop /tmp/btrfs.img /mnt/devflow-btrfs
+          sudo chown -R $(whoami):$(whoami) /mnt/devflow-btrfs
 
-      - name: Redirect pgbranch data to Btrfs
+      - name: Redirect devflow data to Btrfs
         run: |
           mkdir -p ~/.local/share
-          ln -sf /mnt/pgbranch-btrfs ~/.local/share/pgbranch
+          ln -sf /mnt/devflow-btrfs ~/.local/share/devflow
 
       - name: Pull postgres image
         run: docker pull postgres:17
@@ -314,21 +314,21 @@ jobs:
           EXPECTED_STORAGE: reflink
         run: |
           set -euo pipefail
-          PGBRANCH=$GITHUB_WORKSPACE/target/debug/pgbranch
+          DEVFLOW_BIN=$GITHUB_WORKSPACE/target/debug/devflow
 
           # Set up test git repo
-          mkdir -p /tmp/pgbranch-test && cd /tmp/pgbranch-test
+          mkdir -p /tmp/devflow-test && cd /tmp/devflow-test
           git init
           git config user.email "ci@test.com"
           git config user.name "CI"
           git commit --allow-empty -m "init"
 
           # Doctor + Init
-          $PGBRANCH doctor
-          $PGBRANCH --non-interactive init ci-test
+          $DEVFLOW_BIN doctor
+          $DEVFLOW_BIN --non-interactive init ci-test
 
           # Verify storage backend
-          STORAGE=$($PGBRANCH --json status | jq -r '.storage')
+          STORAGE=$($DEVFLOW_BIN --json status | jq -r '.storage')
           echo "Detected storage: $STORAGE"
           if [ "$STORAGE" != "$EXPECTED_STORAGE" ]; then
             echo "ERROR: Expected storage '$EXPECTED_STORAGE' but got '$STORAGE'"
@@ -336,16 +336,16 @@ jobs:
           fi
 
           # Branch lifecycle
-          $PGBRANCH --non-interactive create test-feature
-          $PGBRANCH --json list
-          $PGBRANCH --json connection test-feature
-          $PGBRANCH stop test-feature
-          $PGBRANCH start test-feature
-          $PGBRANCH delete test-feature
-          $PGBRANCH --json list
+          $DEVFLOW_BIN --non-interactive create test-feature
+          $DEVFLOW_BIN --json list
+          $DEVFLOW_BIN --json connection test-feature
+          $DEVFLOW_BIN stop test-feature
+          $DEVFLOW_BIN start test-feature
+          $DEVFLOW_BIN delete test-feature
+          $DEVFLOW_BIN --json list
 
           # Cleanup
-          $PGBRANCH --non-interactive destroy --force
+          $DEVFLOW_BIN --non-interactive destroy --force
 
   release:
     name: Release
@@ -359,9 +359,9 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact_name: pgbranch-linux-amd64
+            artifact_name: devflow-linux-amd64
           - os: macos-latest
-            artifact_name: pgbranch-macos-arm64
+            artifact_name: devflow-macos-arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -381,7 +381,7 @@ jobs:
       - name: Package binary
         run: |
           mkdir -p dist
-          cp target/release/pgbranch dist/${{ matrix.artifact_name }}
+          cp target/release/devflow dist/${{ matrix.artifact_name }}
           chmod +x dist/${{ matrix.artifact_name }}
 
       - name: Upload release assets

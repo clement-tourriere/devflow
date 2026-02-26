@@ -77,7 +77,7 @@ impl ZfsDriver {
             };
         };
 
-        let probe_name = format!("{root_dataset}/pgbranch_probe_{}", Uuid::new_v4());
+        let probe_name = format!("{root_dataset}/devflow_probe_{}", Uuid::new_v4());
         let create_probe = zfs_output_os(vec![
             OsString::from("create"),
             OsString::from("-p"),
@@ -181,7 +181,7 @@ impl ZfsDriver {
         let child_dataset = branch_dataset_name(config, &project.id, child_branch_id);
         ensure_dataset_absent(&child_dataset).await?;
 
-        let snapshot_name = format!("pgbranch_{}", short_id(child_branch_id));
+        let snapshot_name = format!("devflow_{}", short_id(child_branch_id));
         let snapshot_full = format!("{}@{}", parent_metadata.dataset, snapshot_name);
 
         zfs_output_os(vec![

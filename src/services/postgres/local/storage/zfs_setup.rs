@@ -16,10 +16,10 @@ pub struct ZfsPoolSetupConfig {
 impl Default for ZfsPoolSetupConfig {
     fn default() -> Self {
         Self {
-            pool_name: "pgbranch".to_string(),
-            image_path: PathBuf::from("/var/lib/pgbranch/pgdata.img"),
+            pool_name: "devflow".to_string(),
+            image_path: PathBuf::from("/var/lib/devflow/pgdata.img"),
             image_size: "10G".to_string(),
-            mountpoint: PathBuf::from("/var/lib/pgbranch/data"),
+            mountpoint: PathBuf::from("/var/lib/devflow/data"),
         }
     }
 }
@@ -28,9 +28,9 @@ impl Default for ZfsPoolSetupConfig {
 pub enum ZfsSetupStatus {
     /// A usable ZFS dataset already covers the projects_root.
     AlreadyAvailable { root_dataset: String },
-    /// The "pgbranch" pool exists but wasn't detected as covering projects_root
+    /// The "devflow" pool exists but wasn't detected as covering projects_root
     /// (e.g. data_root mismatch). Returns the pool's mountpoint.
-    PgbranchPoolExists { mountpoint: String },
+    DevflowPoolExists { mountpoint: String },
     /// ZFS tools are installed but no suitable pool exists.
     ToolsAvailableNoPool,
     /// The `zfs` command is not found.
@@ -65,19 +65,19 @@ pub async fn check_zfs_setup_status(projects_root: &Path) -> ZfsSetupStatus {
         }
     }
 
-    // Check if a "pgbranch" pool already exists
+    // Check if a "devflow" pool already exists
     let zpool_result = tokio::process::Command::new("zpool")
-        .args(["list", "-H", "-o", "name,health", "pgbranch"])
+        .args(["list", "-H", "-o", "name,health", "devflow"])
         .output()
         .await;
 
     if let Ok(output) = zpool_result {
         if output.status.success() {
             // Pool exists — figure out its mountpoint
-            let mountpoint = get_pool_mountpoint("pgbranch")
+            let mountpoint = get_pool_mountpoint("devflow")
                 .await
-                .unwrap_or_else(|| "/var/lib/pgbranch/data".to_string());
-            return ZfsSetupStatus::PgbranchPoolExists { mountpoint };
+                .unwrap_or_else(|| "/var/lib/devflow/data".to_string());
+            return ZfsSetupStatus::DevflowPoolExists { mountpoint };
         }
     }
 

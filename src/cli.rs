@@ -6,7 +6,7 @@ use crate::services::{self, ServiceBackend};
 use crate::docker;
 use crate::hooks::{
     approval::ApprovalStore, HookContext, HookEngine, HookEntry, HookPhase, IndexMap,
-    PostCommandExecutor, ServiceContext,
+    ServiceContext,
 };
 use crate::state::LocalStateManager;
 use crate::vcs;
@@ -323,13 +323,8 @@ pub async fn handle_command(
             | Commands::Seed { .. }
     );
 
-    // Commands that use the legacy direct-database approach
-    // (kept for backward compatibility; these are progressively being migrated
-    //  to use the ServiceBackend trait via orchestration)
-    let uses_legacy = false; // All commands now routed through new backend system
-
     // Check if command requires configuration file
-    let requires_config = uses_backend || uses_legacy;
+    let requires_config = uses_backend;
 
     // Load effective configuration (includes local config and environment overrides)
     let (effective_config, config_path) = Config::load_effective_config_with_path_info()?;
@@ -354,7 +349,7 @@ pub async fn handle_command(
     let mut config = effective_config.get_merged_config();
 
     // Inject backends from state (state backends take precedence over committed)
-    let local_state_for_backends = if uses_backend || uses_legacy {
+    let local_state_for_backends = if uses_backend {
         LocalStateManager::new().ok()
     } else {
         None
@@ -363,7 +358,6 @@ pub async fn handle_command(
         if let Some(ref path) = config_path {
             if let Some(state_backends) = state_manager.get_backends(path) {
                 config.backends = Some(state_backends);
-                config.backend = None;
             }
         }
     }
@@ -461,7 +455,6 @@ pub async fn handle_command(
                     let mut config_with_backend = config;
                     if let Some(state_backends) = state.get_backends(&config_path) {
                         config_with_backend.backends = Some(state_backends);
-                        config_with_backend.backend = None;
                     }
 
                     // On Linux, offer ZFS auto-setup before creating the main branch
@@ -594,7 +587,6 @@ pub async fn handle_command(
 
                 // Don't write backends to committed config — store in state
                 config.backends = None;
-                config.backend = None;
                 config.save_to_file(&config_path)?;
                 if !json_output {
                     println!(
@@ -829,7 +821,7 @@ async fn attempt_zfs_auto_setup(non_interactive: bool) -> Option<String> {
             );
             None
         }
-        ZfsSetupStatus::PgbranchPoolExists { mountpoint } => {
+        ZfsSetupStatus::DevflowPoolExists { mountpoint } => {
             println!();
             println!(
                 "ZFS pool 'devflow' already exists (mountpoint: {}).",
@@ -1369,30 +1361,16 @@ async fn build_hook_context(config: &Config, branch_name: &str) -> HookContext {
         target: None,
         base: None,
         service,
-
-        // Legacy template variables for backward compat
-        branch_name: Some(branch_name.to_string()),
-        db_name: Some(db_name.clone()),
-        db_host: Some(config.database.host.clone()),
-        db_port: Some(config.database.port),
-        db_user: Some(config.database.user.clone()),
-        db_password: config.database.password.clone(),
-        template_db: Some(config.database.template_database.clone()),
-        prefix: Some(config.database.database_prefix.clone()),
     }
 }
 
 /// Run hooks for the given phase.
-///
-/// If the config has a `hooks` section, use the new HookEngine.
-/// Otherwise, fall back to the legacy `PostCommandExecutor` for `post_commands`.
-async fn run_hooks_or_post_commands(
+async fn run_hooks(
     config: &Config,
     branch_name: &str,
     phase: HookPhase,
 ) -> Result<()> {
     if let Some(ref hooks_config) = config.hooks {
-        // New hook engine path
         let working_dir =
             std::env::current_dir().map_err(|e| anyhow::anyhow!("Failed to get cwd: {}", e))?;
         let project_key = working_dir
@@ -1403,10 +1381,6 @@ async fn run_hooks_or_post_commands(
         engine
             .run_phase_verbose(&phase, &build_hook_context(config, branch_name).await)
             .await?;
-    } else if !config.post_commands.is_empty() {
-        // Legacy post_commands fallback
-        let executor = PostCommandExecutor::new(config, branch_name)?;
-        executor.execute_all_post_commands().await?;
     }
     Ok(())
 }
@@ -1447,17 +1421,8 @@ fn handle_hook_show(config: &Config, phase_filter: Option<&str>, json_output: bo
     let hooks = match &config.hooks {
         Some(h) if !h.is_empty() => h,
         _ => {
-            if !config.post_commands.is_empty() {
-                println!("No hooks configured (using legacy post_commands).");
-                println!(
-                    "  {} post-command(s) configured.",
-                    config.post_commands.len()
-                );
-                println!("  Migrate to the hooks section for MiniJinja templates and conditions.");
-            } else {
-                println!("No hooks configured.");
-                println!("  Add a 'hooks' section to .devflow.yml to configure lifecycle hooks.");
-            }
+            println!("No hooks configured.");
+            println!("  Add a 'hooks' section to .devflow.yml to configure lifecycle hooks.");
             return Ok(());
         }
     };
@@ -2124,8 +2089,8 @@ async fn handle_backend_command(
                 }
             }
 
-            // Execute hooks (new engine) or legacy post-commands
-            run_hooks_or_post_commands(config, &branch_name, HookPhase::PostServiceCreate).await?;
+            // Execute hooks
+            run_hooks(config, &branch_name, HookPhase::PostServiceCreate).await?;
         }
         Commands::Delete { branch_name } => {
             // Single-backend path (explicit --database or single backend)
@@ -2525,11 +2490,6 @@ async fn handle_backend_command(
                         if !no_verify {
                             if config.hooks.is_some() {
                                 println!("  Would run post-switch hooks");
-                            } else if !config.post_commands.is_empty() {
-                                println!(
-                                    "  Would execute {} post-command(s)",
-                                    config.post_commands.len()
-                                );
                             }
                         }
                         if let Some(ref cmd) = execute {
@@ -2828,7 +2788,7 @@ async fn handle_orchestrated_mutation(
             }
 
             // Run hooks after all services are created
-            run_hooks_or_post_commands(config, &branch_name, HookPhase::PostServiceCreate).await?;
+            run_hooks(config, &branch_name, HookPhase::PostServiceCreate).await?;
         }
         Commands::Delete { branch_name } => {
             let results = services::factory::orchestrate_delete(config, &branch_name).await?;
@@ -3471,7 +3431,7 @@ async fn handle_switch_command(
 
     // ── Hooks ──────────────────────────────────────────────────────────
     if !no_verify {
-        run_hooks_or_post_commands(config, &normalized_branch, HookPhase::PostSwitch).await?;
+        run_hooks(config, &normalized_branch, HookPhase::PostSwitch).await?;
     }
 
     Ok(())
@@ -3507,8 +3467,8 @@ async fn handle_switch_to_main(
         config.database.template_database
     );
 
-    // Execute hooks (new engine) or legacy post-commands
-    run_hooks_or_post_commands(config, main_name, HookPhase::PostSwitch).await?;
+    // Execute hooks
+    run_hooks(config, main_name, HookPhase::PostSwitch).await?;
 
     Ok(())
 }
@@ -3954,7 +3914,6 @@ fn show_effective_config(effective_config: &EffectiveConfig) -> Result<()> {
             || local_config.database.is_some()
             || local_config.git.is_some()
             || local_config.behavior.is_some()
-            || local_config.post_commands.is_some()
         {
             println!("  Local overrides present (see merged config below)");
         } else {

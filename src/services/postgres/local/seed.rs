@@ -165,10 +165,10 @@ async fn seed_from_postgres(
     }
 
     let dump_url_str = dump_url.to_string();
-    let dump_path = "/tmp/pgbranch_dump.Fc";
+    let dump_path = "/tmp/devflow_dump.Fc";
 
     // Create an ephemeral container to run pg_dump, writing to a file
-    let dump_container_name = format!("pgbranch-dump-{}", uuid::Uuid::new_v4());
+    let dump_container_name = format!("devflow-dump-{}", uuid::Uuid::new_v4());
     let config = ContainerCreateBody {
         image: Some(image.to_string()),
         cmd: Some(vec![
@@ -273,13 +273,13 @@ async fn seed_from_postgres(
         docker,
         container_name,
         "/tmp",
-        "pgbranch_seed_dump",
+        "devflow_seed_dump",
         &dump_data,
     )
     .await?;
 
     // Restore using pg_restore
-    let restore_path = "/tmp/pgbranch_seed_dump";
+    let restore_path = "/tmp/devflow_seed_dump";
     let (exit_code, stderr) = docker_exec(
         docker,
         container_name,
@@ -329,7 +329,7 @@ async fn seed_from_file(
         );
     }
 
-    let container_path = "/tmp/pgbranch_seed_dump";
+    let container_path = "/tmp/devflow_seed_dump";
 
     // Read the file and upload it to the container via bollard
     let file_data = tokio::fs::read(&abs_path)
@@ -340,7 +340,7 @@ async fn seed_from_file(
         docker,
         container_name,
         "/tmp",
-        "pgbranch_seed_dump",
+        "devflow_seed_dump",
         &file_data,
     )
     .await?;

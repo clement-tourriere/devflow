@@ -30,7 +30,7 @@ impl LocalDriver {
             };
         }
 
-        let probe_dir = projects_root.join(format!(".pgbranch-apfs-probe-{}", Uuid::new_v4()));
+        let probe_dir = projects_root.join(format!(".devflow-apfs-probe-{}", Uuid::new_v4()));
         let src = probe_dir.join("src.bin");
         let dst = probe_dir.join("dst.bin");
 
@@ -38,7 +38,7 @@ impl LocalDriver {
             tokio::fs::create_dir_all(&probe_dir)
                 .await
                 .with_context(|| format!("failed to create probe dir '{}'", probe_dir.display()))?;
-            tokio::fs::write(&src, b"pgbranch")
+            tokio::fs::write(&src, b"devflow")
                 .await
                 .with_context(|| format!("failed to write probe file '{}'", src.display()))?;
 
@@ -76,7 +76,7 @@ impl LocalDriver {
             };
         }
 
-        let probe_dir = projects_root.join(format!(".pgbranch-reflink-probe-{}", Uuid::new_v4()));
+        let probe_dir = projects_root.join(format!(".devflow-reflink-probe-{}", Uuid::new_v4()));
         let src = probe_dir.join("src.bin");
         let dst = probe_dir.join("dst.bin");
 
@@ -84,7 +84,7 @@ impl LocalDriver {
             tokio::fs::create_dir_all(&probe_dir)
                 .await
                 .with_context(|| format!("failed to create probe dir '{}'", probe_dir.display()))?;
-            tokio::fs::write(&src, b"pgbranch")
+            tokio::fs::write(&src, b"devflow")
                 .await
                 .with_context(|| format!("failed to write probe file '{}'", src.display()))?;
 

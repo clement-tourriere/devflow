@@ -63,13 +63,6 @@ behavior:
   max_branches: 10
   naming_strategy: prefix           # prefix, suffix, or replace
 
-# Single backend (simple setup)
-backend:
-  type: local                       # local, postgres_template, neon, dblab, xata
-  service_type: postgres            # postgres, clickhouse, mysql, generic
-  local:
-    image: postgres:17
-
 # Multi-backend setup
 backends:
   - name: app-db
@@ -105,14 +98,6 @@ hooks:
       command: "echo DATABASE_URL={{ service.app-db.url }} > .env.local"
   pre-merge:
     test: "npm test"
-
-# Legacy post-commands (still supported)
-post_commands:
-  - "echo 'Database ready for {branch_name}!'"
-  - action: replace
-    file: .env.local
-    pattern: "DATABASE_URL=.*"
-    replacement: "DATABASE_URL=postgresql://{db_user}@{db_host}:{db_port}/{db_name}"
 ```
 
 ## Development Commands
@@ -154,8 +139,9 @@ cargo check
 - `src/services/generic/` — Generic Docker backend (Redis, etc.)
 - `src/vcs/mod.rs` — `VcsProvider` trait
 - `src/vcs/git.rs` — Git implementation (branches, worktrees, hooks)
+- `src/vcs/cow_worktree.rs` — Copy-on-Write worktree support (APFS, ZFS, Btrfs, XFS)
 - `src/vcs/jj.rs` — Jujutsu VCS implementation
-- `src/hooks/` — Hook engine (executor, approval, templates, legacy post-commands)
+- `src/hooks/` — Hook engine (executor, approval, templates)
 - `src/state/` — Local state persistence (`~/.local/share/devflow/`)
 - `src/docker.rs` — Docker helper utilities
 - `src/llm.rs` — LLM integration for AI commit messages

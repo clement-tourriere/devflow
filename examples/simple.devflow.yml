@@ -15,19 +15,25 @@ behavior:
   max_branches: 10
   naming_strategy: prefix
 
-# Single backend (created by `devflow init`)
-backend:
-  type: local
-  service_type: postgres
-  local:
-    image: postgres:17
+# Single backend using modern backends array syntax
+backends:
+  - name: app-db
+    type: local
+    service_type: postgres
+    auto_branch: true
+    default: true
+    local:
+      image: postgres:17
 
 # Update .env after branch creation/switch
-post_commands:
-  - action: replace
-    name: Update DATABASE_URL
-    file: .env.local
-    pattern: "DATABASE_URL=.*"
-    replacement: "DATABASE_URL=postgresql://{db_user}@{db_host}:{db_port}/{db_name}"
-    create_if_missing: true
-  - "echo 'Database {db_name} ready for branch {branch_name}!'"
+hooks:
+  post-create:
+    update-env:
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
+      working_dir: "."
+    notify:
+      command: "echo 'Database ready for branch {{ branch.name }}!'"
+  post-switch:
+    update-env:
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
+      working_dir: "."

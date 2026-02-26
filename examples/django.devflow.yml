@@ -1,5 +1,5 @@
 # Django devflow configuration
-# PostgreSQL backend with Django-specific post-commands.
+# PostgreSQL backend with Django-specific lifecycle hooks.
 
 git:
   auto_create_on_branch: true
@@ -15,28 +15,30 @@ behavior:
   max_branches: 5
   naming_strategy: prefix
 
-backend:
-  type: local
-  service_type: postgres
-  local:
-    image: postgres:17
+backends:
+  - name: app-db
+    type: local
+    service_type: postgres
+    auto_branch: true
+    default: true
+    local:
+      image: postgres:17
 
-post_commands:
-  - action: replace
-    name: Update Django database configuration (.env.local)
-    file: .env.local
-    pattern: "DATABASE_URL=.*"
-    replacement: "DATABASE_URL=postgresql://{db_user}@{db_host}:{db_port}/{db_name}"
-    create_if_missing: true
-    condition: "file_exists:manage.py"
-
-  - name: Run Django migrations
-    command: "python manage.py migrate"
-    condition: "file_exists:manage.py"
-    continue_on_error: false
-    environment:
-      DATABASE_URL: "postgresql://{db_user}@{db_host}:{db_port}/{db_name}"
-
-  - name: Restart Docker Compose services
-    command: "docker compose restart"
-    continue_on_error: true
+hooks:
+  post-create:
+    update-env:
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
+      working_dir: "."
+    migrate:
+      command: "python manage.py migrate"
+      working_dir: "."
+    restart-services:
+      command: "docker compose restart"
+      working_dir: "."
+  post-switch:
+    update-env:
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
+      working_dir: "."
+    restart-services:
+      command: "docker compose restart"
+      working_dir: "."

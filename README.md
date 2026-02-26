@@ -12,6 +12,8 @@ It works in four modes:
 - **Cloud** — Neon, DBLab, or Xata APIs
 - **Plugin** — custom backends via JSON-over-stdio protocol
 
+Copy-on-Write storage (APFS, ZFS, Btrfs, XFS) is also applied to worktree directories, making branch switching fast and space-efficient.
+
 ## Install
 
 ```bash
@@ -81,21 +83,7 @@ Custom backends can be built as standalone executables that communicate via JSON
 
 Created by `devflow init`. All sections are optional.
 
-#### Single backend
-
-```yaml
-backend:
-  type: local                       # local, postgres_template, neon, dblab, xata
-  service_type: postgres            # postgres, clickhouse, mysql, generic
-  local:
-    image: postgres:17
-    port_range_start: 55432
-    postgres_user: postgres
-    postgres_password: postgres
-    postgres_db: myapp
-```
-
-#### Multiple backends
+#### Backends
 
 ```yaml
 backends:
@@ -359,60 +347,34 @@ Hooks are executed in definition order (deterministic, using ordered maps).
 
 Hooks that change between runs require approval before execution. This prevents unexpected commands from running automatically via Git hooks. Manage approvals with `devflow hook approvals`.
 
-### Legacy Post-Commands
-
-Post-commands use a simpler `{variable}` syntax and are still supported:
-
-```yaml
-post_commands:
-  # Simple command
-  - "echo 'Database {db_name} ready!'"
-
-  # Command with options
-  - name: "Run migrations"
-    command: "npm run migrate"
-    working_dir: "./backend"
-    condition: "file_exists:package.json"
-    continue_on_error: false
-    environment:
-      DATABASE_URL: "postgresql://{db_user}@{db_host}:{db_port}/{db_name}"
-
-  # File replacement
-  - action: replace
-    file: .env.local
-    pattern: "DATABASE_URL=.*"
-    replacement: "DATABASE_URL=postgresql://{db_user}@{db_host}:{db_port}/{db_name}"
-    create_if_missing: true
-```
-
-**Post-command variables:** `{branch_name}`, `{db_name}`, `{db_host}`, `{db_port}`, `{db_user}`, `{db_password}`, `{template_db}`, `{prefix}`.
-
 ## Examples
 
 Example configuration files are in the [`examples/`](examples/) directory:
 
-- [`simple.devflow.yml`](examples/simple.devflow.yml) — Single PostgreSQL backend with post-commands
+- [`simple.devflow.yml`](examples/simple.devflow.yml) — Single PostgreSQL backend
 - [`multi-service.devflow.yml`](examples/multi-service.devflow.yml) — PostgreSQL + ClickHouse + Redis with lifecycle hooks and worktrees
 - [`django.devflow.yml`](examples/django.devflow.yml) — Django project with migrations and Docker Compose restart
 
 ### Node.js / Express
 
 ```yaml
-backend:
-  type: local
-  service_type: postgres
-  local:
-    image: postgres:17
+backends:
+  - name: app-db
+    type: local
+    service_type: postgres
+    default: true
+    local:
+      image: postgres:17
 
 hooks:
   post-create:
     env:
-      command: "echo DATABASE_URL={{ service.url }} > .env.local"
+      command: "echo DATABASE_URL={{ service.app-db.url }} > .env.local"
     migrate: "npx prisma migrate deploy"
 
   post-switch:
     env:
-      command: "echo DATABASE_URL={{ service.url }} > .env.local"
+      command: "echo DATABASE_URL={{ service.app-db.url }} > .env.local"
 ```
 
 ### Seeding

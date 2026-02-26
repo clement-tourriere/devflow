@@ -87,7 +87,7 @@ pub async fn create_backend_from_named_config(
 ) -> Result<Box<dyn ServiceBackend>> {
     match named.service_type.as_str() {
         "postgres" | "" => {
-            // Legacy path: dispatch on backend_type for postgres services
+            // Dispatch on backend_type for postgres services
             create_postgres_backend(config, named).await
         }
 
@@ -299,7 +299,7 @@ pub async fn create_all_backends(config: &Config) -> Result<Vec<NamedBackend>> {
 
 /// Auto-detect backend when no config section is present.
 async fn create_backend_default(config: &Config) -> Result<Box<dyn ServiceBackend>> {
-    // Backward compatibility: if database config differs from defaults,
+    // If database config differs from defaults,
     // use postgres_template backend
     #[cfg(feature = "backend-postgres-template")]
     if config.database.host != "localhost"
@@ -320,7 +320,7 @@ async fn create_backend_default(config: &Config) -> Result<Box<dyn ServiceBacken
         anyhow::bail!("PostgreSQL template backend not compiled. Rebuild with --features backend-postgres-template");
     }
 
-    // Default to local backend — derive name from cwd for backward compatibility
+    // Default to local backend — derive name from cwd
     #[cfg(feature = "backend-local")]
     {
         let default_name = std::env::current_dir()

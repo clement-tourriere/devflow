@@ -1,10 +1,11 @@
+pub mod cow_worktree;
 pub mod git;
 pub mod jj;
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-// Re-export for backward compatibility during transition
+// Re-export for convenience
 pub use git::GitRepository;
 pub use jj::JjRepository;
 

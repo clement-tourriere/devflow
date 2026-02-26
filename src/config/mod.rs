@@ -13,12 +13,6 @@ pub struct Config {
     pub git: GitConfig,
     #[serde(default)]
     pub behavior: BehaviorConfig,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub post_commands: Vec<PostCommand>,
-    #[serde(skip)]
-    pub current_branch: Option<String>, // Deprecated - kept for backward compatibility, not serialized
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backend: Option<BackendConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backends: Option<Vec<NamedBackendConfig>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -48,33 +42,6 @@ pub struct NamedBackendConfig {
     pub auto_branch: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local: Option<LocalBackendConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub neon: Option<NeonConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dblab: Option<DBLabConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "xata_lite")]
-    pub xata: Option<XataConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clickhouse: Option<ClickHouseConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mysql: Option<MySQLConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generic: Option<GenericDockerConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plugin: Option<PluginConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BackendConfig {
-    #[serde(rename = "type", default = "default_backend_type")]
-    pub backend_type: String,
-    #[serde(
-        default = "default_service_type",
-        skip_serializing_if = "is_default_service_type"
-    )]
-    pub service_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local: Option<LocalBackendConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -330,45 +297,6 @@ pub enum AuthMethod {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum PostCommand {
-    Simple(String),
-    Complex(PostCommandConfig),
-    Replace(ReplaceConfig),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PostCommandConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    pub command: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub working_dir: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub continue_on_error: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub condition: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub environment: Option<std::collections::HashMap<String, String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReplaceConfig {
-    pub action: String, // Must be "replace"
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    pub file: String,
-    pub pattern: String,
-    pub replacement: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub create_if_missing: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub continue_on_error: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub condition: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitConfig {
     #[serde(default = "default_true")]
     pub auto_create_on_branch: bool,
@@ -378,12 +306,7 @@ pub struct GitConfig {
     pub main_branch: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_create_branch_filter: Option<String>,
-    // Keep the old field name for backward compatibility
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        alias = "branch_filter_regex"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_filter_regex: Option<String>,
     #[serde(default = "default_exclude_branches")]
     pub exclude_branches: Vec<String>,
@@ -455,7 +378,6 @@ pub struct LocalConfig {
     pub database: Option<LocalDatabaseConfig>,
     pub git: Option<LocalGitConfig>,
     pub behavior: Option<LocalBehaviorConfig>,
-    pub post_commands: Option<Vec<PostCommand>>,
     pub disabled: Option<bool>,
     pub disabled_branches: Option<Vec<String>>,
     pub worktree: Option<WorktreeConfig>,
@@ -578,9 +500,6 @@ impl Default for Config {
                 max_branches: Some(10),
                 naming_strategy: NamingStrategy::Prefix,
             },
-            post_commands: vec![],
-            current_branch: None, // Deprecated field, always None for new configs
-            backend: None,
             backends: None,
             worktree: None,
             hooks: None,
@@ -603,12 +522,8 @@ impl Config {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
 
-        let mut config: Config = serde_yaml_ng::from_str(&content)
+        let config: Config = serde_yaml_ng::from_str(&content)
             .with_context(|| format!("Failed to parse YAML config file: {}", path.display()))?;
-
-        // Handle backward compatibility: if current_branch was loaded, ignore it
-        // The local state manager will handle current branch tracking
-        config.current_branch = None;
 
         Ok(config)
     }
@@ -778,65 +693,14 @@ impl Config {
         }
     }
 
-    pub fn substitute_template_variables(
-        &self,
-        template: &str,
-        context: &TemplateContext,
-    ) -> String {
-        let mut result = template.to_string();
-
-        result = result.replace("{branch_name}", &context.branch_name);
-        result = result.replace("{db_name}", &context.db_name);
-        result = result.replace("{db_host}", &context.db_host);
-        result = result.replace("{db_port}", &context.db_port.to_string());
-        result = result.replace("{db_user}", &context.db_user);
-        result = result.replace("{template_db}", &context.template_db);
-        result = result.replace("{prefix}", &context.prefix);
-
-        if let Some(ref password) = context.db_password {
-            result = result.replace("{db_password}", password);
-        }
-
-        result
-    }
-
-    // Deprecated methods - current branch is now managed by LocalStateManager
-    #[deprecated(since = "0.1.0", note = "Use LocalStateManager instead")]
-    #[allow(dead_code)]
-    pub fn get_current_branch(&self) -> Option<&String> {
-        self.current_branch.as_ref()
-    }
-
-    #[deprecated(since = "0.1.0", note = "Use LocalStateManager instead")]
-    #[allow(dead_code)]
-    pub fn set_current_branch(&mut self, branch_name: Option<String>) {
-        self.current_branch = branch_name;
-    }
-
     pub fn get_normalized_branch_name(&self, branch_name: &str) -> String {
         Self::sanitize_branch_name(branch_name)
     }
 
-    /// Resolve the list of named backends from either `backends` (new) or `backend` (legacy).
+    /// Resolve the list of named backends from the `backends` config.
     pub fn resolve_backends(&self) -> Vec<NamedBackendConfig> {
         if let Some(ref backends) = self.backends {
             backends.clone()
-        } else if let Some(ref backend) = self.backend {
-            vec![NamedBackendConfig {
-                name: "default".to_string(),
-                backend_type: backend.backend_type.clone(),
-                service_type: backend.service_type.clone(),
-                auto_branch: default_auto_branch(),
-                default: true,
-                local: backend.local.clone(),
-                neon: backend.neon.clone(),
-                dblab: backend.dblab.clone(),
-                xata: backend.xata.clone(),
-                clickhouse: backend.clickhouse.clone(),
-                mysql: backend.mysql.clone(),
-                generic: backend.generic.clone(),
-                plugin: backend.plugin.clone(),
-            }]
         } else {
             vec![]
         }
@@ -864,12 +728,6 @@ impl Config {
 
     /// Validate the backends configuration (no duplicates, not both `backend` and `backends`).
     pub fn validate_backends(&self) -> Result<()> {
-        if self.backend.is_some() && self.backends.is_some() {
-            anyhow::bail!(
-                "Configuration error: cannot specify both 'backend' and 'backends'. \
-                 Use 'backends' for multiple backends or 'backend' for a single one."
-            );
-        }
         if let Some(ref backends) = self.backends {
             // Check for unique names
             let mut seen = std::collections::HashSet::new();
@@ -890,32 +748,6 @@ impl Config {
             }
         }
         Ok(())
-    }
-
-    /// Migrate legacy single `backend` to `backends` array. Returns true if migrated.
-    #[allow(dead_code)]
-    pub fn migrate_to_backends_array(&mut self) -> bool {
-        if self.backend.is_some() && self.backends.is_none() {
-            let backend = self.backend.take().unwrap();
-            self.backends = Some(vec![NamedBackendConfig {
-                name: "default".to_string(),
-                backend_type: backend.backend_type,
-                service_type: backend.service_type,
-                auto_branch: default_auto_branch(),
-                default: true,
-                local: backend.local,
-                neon: backend.neon,
-                dblab: backend.dblab,
-                xata: backend.xata,
-                clickhouse: backend.clickhouse,
-                mysql: backend.mysql,
-                generic: backend.generic,
-                plugin: backend.plugin,
-            }]);
-            true
-        } else {
-            false
-        }
     }
 
     /// Add a named backend. Errors if name exists unless force=true.
@@ -1228,10 +1060,6 @@ impl EffectiveConfig {
                 }
             }
 
-            if let Some(ref post_commands) = local_config.post_commands {
-                merged.post_commands = post_commands.clone();
-            }
-
             if let Some(ref worktree) = local_config.worktree {
                 merged.worktree = Some(worktree.clone());
             }
@@ -1264,33 +1092,6 @@ impl EffectiveConfig {
         }
 
         merged
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TemplateContext {
-    pub branch_name: String,
-    pub db_name: String,
-    pub db_host: String,
-    pub db_port: u16,
-    pub db_user: String,
-    pub db_password: Option<String>,
-    pub template_db: String,
-    pub prefix: String,
-}
-
-impl TemplateContext {
-    pub fn new(config: &Config, branch_name: &str) -> Self {
-        Self {
-            branch_name: branch_name.to_string(),
-            db_name: config.get_database_name(branch_name),
-            db_host: config.database.host.clone(),
-            db_port: config.database.port,
-            db_user: config.database.user.clone(),
-            db_password: config.database.password.clone(),
-            template_db: config.database.template_database.clone(),
-            prefix: config.database.database_prefix.clone(),
-        }
     }
 }
 
@@ -1624,34 +1425,6 @@ backends:
         assert_eq!(auto_branch_backends.len(), 2);
         assert_eq!(auto_branch_backends[0].name, "primary");
         assert_eq!(auto_branch_backends[1].name, "analytics");
-    }
-
-    #[test]
-    fn test_single_backend_resolves_to_named() {
-        let yaml = r#"
-git:
-  auto_create_on_branch: true
-  main_branch: main
-  exclude_branches: [main]
-behavior:
-  auto_cleanup: false
-  naming_strategy: prefix
-backend:
-  type: local
-  service_type: clickhouse
-  clickhouse:
-    image: clickhouse/clickhouse-server:23
-    user: admin
-"#;
-        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
-        let backends = config.resolve_backends();
-        assert_eq!(backends.len(), 1);
-        assert_eq!(backends[0].name, "default");
-        assert_eq!(backends[0].service_type, "clickhouse");
-        assert!(backends[0].default);
-        let ch = backends[0].clickhouse.as_ref().unwrap();
-        assert_eq!(ch.image, "clickhouse/clickhouse-server:23");
-        assert_eq!(ch.user, "admin");
     }
 
     #[test]

@@ -76,7 +76,7 @@ impl LocalBackend {
         } else {
             dirs::data_local_dir()
                 .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
-                .join("pgbranch")
+                .join("devflow")
         };
 
         // Ensure directories exist

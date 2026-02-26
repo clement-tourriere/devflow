@@ -1,3 +1,52 @@
 [tools]
 cargo = "latest"
 rust = "latest"
+
+[tasks.docs]
+description = "Serve documentation site locally"
+run = "open http://localhost:8787 & python3 -m http.server 8787 -d docs"
+
+[tasks.build]
+description = "Build the project (debug)"
+run = "cargo build"
+
+[tasks."build:release"]
+description = "Build the project (release, optimized)"
+run = "cargo build --release"
+
+[tasks.test]
+description = "Run all tests"
+run = "cargo test"
+
+[tasks.check]
+description = "Run cargo check (fast compile check)"
+run = "cargo check"
+
+[tasks.lint]
+description = "Run clippy lints"
+run = "cargo clippy -- -W clippy::all"
+
+[tasks.fmt]
+description = "Format code"
+run = "cargo fmt"
+
+[tasks."fmt:check"]
+description = "Check code formatting without modifying"
+run = "cargo fmt -- --check"
+
+[tasks.dev]
+description = "Build and run devflow (debug)"
+run = "cargo run --"
+raw = true
+
+[tasks.clean]
+description = "Clean build artifacts"
+run = "cargo clean"
+
+[tasks.ci]
+description = "Run full CI pipeline (fmt check + clippy + test)"
+run = """
+cargo fmt -- --check
+cargo clippy -- -W clippy::all
+cargo test
+"""

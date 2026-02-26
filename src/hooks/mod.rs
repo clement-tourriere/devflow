@@ -1,12 +1,8 @@
 pub mod approval;
 pub mod executor;
-pub mod post_commands;
 pub mod template;
 
-// Re-export PostCommandExecutor for backward compatibility with legacy post_commands config
-pub use post_commands::PostCommandExecutor;
-
-// Re-export new hook engine types
+// Re-export hook engine types
 pub use executor::HookEngine;
 #[allow(unused_imports)] // Public API — used by consumers for advanced template rendering
 pub use template::TemplateEngine;
@@ -193,24 +189,6 @@ pub struct HookContext {
     /// Each service exposes: host, port, database, user, password, url
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub service: HashMap<String, ServiceContext>,
-
-    // Legacy template variables for backward compat with {branch_name} etc.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub branch_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub db_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub db_host: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub db_port: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub db_user: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub db_password: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub template_db: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prefix: Option<String>,
 }
 
 /// Connection information for a single service, exposed to templates.

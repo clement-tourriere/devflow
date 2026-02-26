@@ -94,7 +94,7 @@ impl DockerRuntime {
         spec: &ReserveBranchSpec,
     ) -> anyhow::Result<ReservedBranchRuntime> {
         let raw = format!(
-            "pgbranch-{}-{}",
+            "devflow-{}-{}",
             sanitize(&spec.project_name),
             sanitize(&spec.branch_name)
         );
@@ -203,7 +203,7 @@ impl DockerRuntime {
         );
 
         let mut labels = HashMap::new();
-        labels.insert("pgbranch.managed".to_string(), "true".to_string());
+        labels.insert("devflow.managed".to_string(), "true".to_string());
 
         let config = ContainerCreateBody {
             image: Some(spec.image.clone()),
