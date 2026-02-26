@@ -31,7 +31,7 @@ pub fn parse_source(from: &str) -> Result<SeedSource> {
     } else {
         let path = PathBuf::from(from);
         if !path.exists() {
-            anyhow::bail!("File not found: {}", from);
+            anyhow::bail!("Seed file not found: {}. Provide a path to a .sql or .dump file, a postgresql:// URL, or an s3:// URL.", from);
         }
         Ok(SeedSource::LocalFile(path))
     }
@@ -323,7 +323,10 @@ async fn seed_from_file(
     };
 
     if !abs_path.exists() {
-        anyhow::bail!("Seed file not found: {}", abs_path.display());
+        anyhow::bail!(
+            "Seed file not found: {}. Check the path and try again.",
+            abs_path.display()
+        );
     }
 
     let container_path = "/tmp/pgbranch_seed_dump";

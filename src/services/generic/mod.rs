@@ -13,8 +13,8 @@ use bollard::models::{
     ContainerCreateBody, ContainerStateStatusEnum, HostConfig, PortBinding, PortMap,
 };
 use bollard::query_parameters::{
-    CreateContainerOptions, CreateImageOptions, ListContainersOptions, RemoveContainerOptions,
-    StopContainerOptions,
+    CreateContainerOptions, CreateImageOptions, ListContainersOptions, LogsOptionsBuilder,
+    RemoveContainerOptions, StopContainerOptions,
 };
 use bollard::Docker;
 use chrono::Utc;
@@ -51,7 +51,7 @@ pub struct GenericDockerBackend {
 impl GenericDockerBackend {
     pub fn new(service_name: &str, config: &GenericDockerConfig) -> anyhow::Result<Self> {
         let client =
-            Docker::connect_with_local_defaults().context("failed to connect to Docker daemon")?;
+            Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon. Is Docker installed and running? Check with: docker info")?;
 
         Ok(Self {
             service_name: service_name.to_string(),
@@ -394,9 +394,16 @@ impl ServiceBackend for GenericDockerBackend {
     async fn create_branch(
         &self,
         branch_name: &str,
-        _from_branch: Option<&str>,
+        from_branch: Option<&str>,
     ) -> anyhow::Result<BranchInfo> {
         let container_name = self.container_name(branch_name);
+
+        if from_branch.is_some() {
+            eprintln!(
+                "note: generic Docker backend does not support data cloning from parent branches. \
+                 Creating a fresh container instead."
+            );
+        }
 
         // Check if already exists
         match self.container_status(&container_name).await? {
@@ -404,7 +411,7 @@ impl ServiceBackend for GenericDockerBackend {
                 return Ok(BranchInfo {
                     name: branch_name.to_string(),
                     created_at: Some(Utc::now()),
-                    parent_branch: None,
+                    parent_branch: from_branch.map(|s| s.to_string()),
                     database_name: container_name,
                     state: Some("running".to_string()),
                 });
@@ -422,7 +429,7 @@ impl ServiceBackend for GenericDockerBackend {
                 return Ok(BranchInfo {
                     name: branch_name.to_string(),
                     created_at: Some(Utc::now()),
-                    parent_branch: None,
+                    parent_branch: from_branch.map(|s| s.to_string()),
                     database_name: container_name,
                     state: Some("running".to_string()),
                 });
@@ -439,7 +446,7 @@ impl ServiceBackend for GenericDockerBackend {
         Ok(BranchInfo {
             name: branch_name.to_string(),
             created_at: Some(Utc::now()),
-            parent_branch: None,
+            parent_branch: from_branch.map(|s| s.to_string()),
             database_name: container_name,
             state: Some("running".to_string()),
         })
@@ -643,7 +650,9 @@ impl ServiceBackend for GenericDockerBackend {
                 checks.push(DoctorCheck {
                     name: "Docker".to_string(),
                     available: false,
-                    detail: format!("Docker unreachable: {err}"),
+                    detail: format!(
+                        "Docker unreachable: {err}. Is Docker running? Try: docker info"
+                    ),
                 });
             }
         }
@@ -677,6 +686,27 @@ impl ServiceBackend for GenericDockerBackend {
             storage_backend: None,
             image: Some(self.image.clone()),
         })
+    }
+
+    async fn logs(&self, branch_name: &str, tail: Option<usize>) -> anyhow::Result<String> {
+        let container = self.container_name(branch_name);
+        let options = LogsOptionsBuilder::default()
+            .stdout(true)
+            .stderr(true)
+            .tail(&tail.map_or_else(|| "100".to_string(), |n| n.to_string()))
+            .build();
+
+        let stream = self.client.logs(&container, Some(options));
+        let chunks: Vec<_> = stream
+            .try_collect()
+            .await
+            .with_context(|| format!("failed to fetch logs for container '{container}'"))?;
+
+        Ok(chunks
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(""))
     }
 
     fn backend_name(&self) -> &'static str {

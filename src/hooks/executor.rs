@@ -190,15 +190,21 @@ impl HookEngine {
         // Check approval
         if self.require_approval {
             if let Some(ref project_key) = self.project_key {
-                let store = ApprovalStore::load().unwrap_or_default();
+                let mut store = ApprovalStore::load().unwrap_or_default();
                 if !store.is_approved(project_key, &rendered_command) {
-                    // For now, auto-approve and warn. In a future iteration we can
-                    // prompt interactively.
-                    log::info!(
-                        "Hook '{}' not yet approved, auto-approving: {}",
-                        name,
-                        rendered_command
-                    );
+                    match Self::prompt_hook_approval(name, &rendered_command) {
+                        HookApprovalChoice::ApproveAlways => {
+                            if let Err(e) = store.approve(project_key, &rendered_command) {
+                                log::warn!("Failed to persist hook approval: {}", e);
+                            }
+                        }
+                        HookApprovalChoice::ApproveOnce => {
+                            // Run this time but don't persist
+                        }
+                        HookApprovalChoice::Deny => {
+                            return Ok(HookOutcome::Skipped("not approved by user".to_string()));
+                        }
+                    }
                 }
             }
         }
@@ -273,6 +279,43 @@ impl HookEngine {
             Ok(output.status.success())
         }
     }
+
+    /// Prompt the user to approve a hook command before execution.
+    fn prompt_hook_approval(hook_name: &str, rendered_command: &str) -> HookApprovalChoice {
+        println!();
+        println!("  Hook '{}' wants to run:", hook_name);
+        println!("    {}", rendered_command);
+        println!();
+
+        let options = vec![
+            "Approve (always for this command)",
+            "Approve (this time only)",
+            "Deny (skip this hook)",
+        ];
+
+        match inquire::Select::new("Allow this hook to run?", options).prompt() {
+            Ok(choice) => {
+                if choice.starts_with("Approve (always") {
+                    HookApprovalChoice::ApproveAlways
+                } else if choice.starts_with("Approve (this") {
+                    HookApprovalChoice::ApproveOnce
+                } else {
+                    HookApprovalChoice::Deny
+                }
+            }
+            Err(_) => {
+                // On cancel/interrupt, deny
+                println!("  Hook denied.");
+                HookApprovalChoice::Deny
+            }
+        }
+    }
+}
+
+enum HookApprovalChoice {
+    ApproveAlways,
+    ApproveOnce,
+    Deny,
 }
 
 enum HookOutcome {
@@ -339,8 +382,9 @@ fn execute_shell_command(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hooks::{ExtendedHookEntry, HookContext, HookEntry, HookPhase, HooksConfig};
-    use std::collections::HashMap;
+    use crate::hooks::{
+        ExtendedHookEntry, HookContext, HookEntry, HookPhase, HooksConfig, IndexMap,
+    };
 
     fn make_engine(hooks: HooksConfig) -> HookEngine {
         let working_dir = std::env::current_dir().unwrap();
@@ -358,7 +402,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_hooks_returns_empty_result() {
-        let engine = make_engine(HashMap::new());
+        let engine = make_engine(IndexMap::new());
         let result = engine
             .run_phase(&HookPhase::PostCreate, &basic_context())
             .await
@@ -369,8 +413,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_echo_hook() {
-        let mut hooks: HooksConfig = HashMap::new();
-        let mut phase_hooks = HashMap::new();
+        let mut hooks: HooksConfig = IndexMap::new();
+        let mut phase_hooks = IndexMap::new();
         phase_hooks.insert(
             "greet".to_string(),
             HookEntry::Simple("echo hello {{ branch }}".to_string()),
@@ -387,8 +431,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_condition_never_skips() {
-        let mut hooks: HooksConfig = HashMap::new();
-        let mut phase_hooks = HashMap::new();
+        let mut hooks: HooksConfig = IndexMap::new();
+        let mut phase_hooks = IndexMap::new();
         phase_hooks.insert(
             "skip-me".to_string(),
             HookEntry::Extended(ExtendedHookEntry {
@@ -413,8 +457,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_failing_hook_with_continue() {
-        let mut hooks: HooksConfig = HashMap::new();
-        let mut phase_hooks = HashMap::new();
+        let mut hooks: HooksConfig = IndexMap::new();
+        let mut phase_hooks = IndexMap::new();
         phase_hooks.insert(
             "fail-ok".to_string(),
             HookEntry::Extended(ExtendedHookEntry {
@@ -439,8 +483,8 @@ mod tests {
 
     #[test]
     fn test_has_hooks_for() {
-        let mut hooks: HooksConfig = HashMap::new();
-        let mut phase_hooks = HashMap::new();
+        let mut hooks: HooksConfig = IndexMap::new();
+        let mut phase_hooks = IndexMap::new();
         phase_hooks.insert("a".to_string(), HookEntry::Simple("echo a".to_string()));
         hooks.insert(HookPhase::PostCreate, phase_hooks);
 

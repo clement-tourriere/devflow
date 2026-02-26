@@ -48,6 +48,11 @@ pub trait VcsProvider: Send {
     fn delete_branch(&self, name: &str) -> Result<()>;
     fn branch_exists(&self, name: &str) -> Result<bool>;
 
+    /// Checkout/switch to an existing branch (classic mode, no worktrees).
+    fn checkout_branch(&self, _name: &str) -> Result<()> {
+        anyhow::bail!("{} does not support checkout_branch", self.provider_name())
+    }
+
     // ── Worktree operations ────────────────────────────────────────
     fn supports_worktrees(&self) -> bool;
     fn is_worktree(&self) -> bool;

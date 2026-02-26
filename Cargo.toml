@@ -93,6 +93,9 @@ futures-util = { version = "0.3", default-features = false, features = ["std"], 
 tar = { version = "0.4", default-features = false, optional = true }
 which = "8.0.0"
 
+# Ordered maps for deterministic hook execution
+indexmap = { version = "2", default-features = false, features = ["serde"] }
+
 [profile.release]
 # Aggressive size optimization
 opt-level = "s"        # Optimize for size with better runtime performance than "z"

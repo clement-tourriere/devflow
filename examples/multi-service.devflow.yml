@@ -1,0 +1,75 @@
+# Multi-service devflow configuration
+# This example shows PostgreSQL + ClickHouse + Redis with lifecycle hooks.
+
+git:
+  auto_create_on_branch: true
+  auto_switch_on_branch: true
+  main_branch: main
+  exclude_branches:
+    - main
+    - master
+    - develop
+
+behavior:
+  auto_cleanup: true
+  max_branches: 10
+  naming_strategy: prefix
+
+# Multiple backends — each service gets its own branch per git branch
+backends:
+  - name: app-db
+    type: local
+    service_type: postgres
+    auto_branch: true
+    default: true
+    local:
+      image: postgres:17
+
+  - name: analytics
+    type: local
+    service_type: clickhouse
+    auto_branch: true
+    clickhouse:
+      image: clickhouse/clickhouse-server:latest
+
+  - name: cache
+    type: local
+    service_type: generic
+    auto_branch: false
+    generic:
+      image: redis:7-alpine
+      port_mapping: "6379:6379"
+
+# Worktree support — each branch gets its own directory
+worktree:
+  enabled: true
+  path_template: "../{repo}.{branch}"
+  copy_files:
+    - .env.local
+    - .env
+  copy_ignored: true
+
+# Lifecycle hooks (MiniJinja templates)
+hooks:
+  post-create:
+    install: "npm ci"
+    env-setup:
+      command: |
+        cat > .env.local << EOF
+        DATABASE_URL={{ service.app-db.url }}
+        CLICKHOUSE_URL={{ service.analytics.url }}
+        EOF
+      working_dir: "."
+    migrate: "npm run migrate"
+
+  post-switch:
+    update-env:
+      command: |
+        cat > .env.local << EOF
+        DATABASE_URL={{ service.app-db.url }}
+        CLICKHOUSE_URL={{ service.analytics.url }}
+        EOF
+
+  pre-merge:
+    test: "npm test"
+    lint: "npm run lint"

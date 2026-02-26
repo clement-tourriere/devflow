@@ -181,63 +181,70 @@ pub enum HookPhase {
 ### Example .devflow.yml
 
 ```yaml
-version: 1
+# All sections are optional — an empty file is valid.
 
-vcs:
-  type: git
-  default_branch: main
-  worktree:
-    enabled: true
-    path_template: "../{repo}.{branch}"
-    copy_files: [".env.local"]
-    copy_ignored: true
+git:
+  auto_create_on_branch: true
+  auto_switch_on_branch: true
+  main_branch: main
+  auto_create_branch_filter: "^feature/.*"
+  exclude_branches: [main, master]
 
-services:
-  app-db:
-    type: postgres
-    backend: local
+behavior:
+  auto_cleanup: true
+  max_branches: 10
+  naming_strategy: prefix
+
+# Multi-backend setup
+backends:
+  - name: app-db
+    type: local
+    service_type: postgres
     auto_branch: true
-    config:
-      image: postgres:16
-      storage: auto
-      data_root: ~/.devflow/data
+    default: true
+    local:
+      image: postgres:17
       port_range_start: 55432
       postgres_user: dev
       postgres_password: dev
 
-  analytics-db:
-    type: clickhouse
-    backend: local
+  - name: analytics-db
+    type: local
+    service_type: clickhouse
     auto_branch: true
-    config:
+    clickhouse:
       image: clickhouse/clickhouse-server:latest
-      port_range_start: 59000
 
-  legacy-db:
-    type: mysql
-    backend: local
+  - name: legacy-db
+    type: local
+    service_type: mysql
     auto_branch: true
-    config:
+    mysql:
       image: mysql:8
-      port_range_start: 53306
 
-  cache:
-    type: generic
-    backend: local
+  - name: cache
+    type: local
+    service_type: generic
     auto_branch: false
-    config:
+    generic:
       image: redis:7-alpine
       port_mapping: "6379:6379"
       environment:
         REDIS_MAXMEMORY: "100mb"
 
-  cloud-db:
-    type: postgres
-    backend: neon
+  - name: cloud-db
+    type: neon
+    service_type: postgres
     auto_branch: true
-    config:
+    neon:
       api_key: ${NEON_API_KEY}
       project_id: ${NEON_PROJECT_ID}
+
+worktree:
+  enabled: true
+  path_template: "../{repo}.{branch}"
+  copy_files: [".env.local"]
+  copy_ignored: true
 
 hooks:
   post-create:
@@ -258,43 +265,6 @@ hooks:
 
   post-remove:
     cleanup: "docker stop {{ repo }}-{{ branch | sanitize }}-* 2>/dev/null || true"
-
-behavior:
-  auto_cleanup: true
-  max_branches: 10
-  naming_strategy: prefix
-```
-
-### Example .devflow.toml
-
-```toml
-version = 1
-
-[vcs]
-type = "git"
-default_branch = "main"
-
-[vcs.worktree]
-enabled = true
-path_template = "../{repo}.{branch}"
-copy_files = [".env.local"]
-copy_ignored = true
-
-[services.app-db]
-type = "postgres"
-backend = "local"
-auto_branch = true
-
-[services.app-db.config]
-image = "postgres:16"
-storage = "auto"
-port_range_start = 55432
-
-[hooks.post-create]
-install = "npm ci"
-
-[hooks.pre-merge]
-test = "npm test"
 ```
 
 ## CLI Commands

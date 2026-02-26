@@ -5,8 +5,8 @@ use crate::services::{self, ServiceBackend};
 
 use crate::docker;
 use crate::hooks::{
-    approval::ApprovalStore, HookContext, HookEngine, HookEntry, HookPhase, PostCommandExecutor,
-    ServiceContext,
+    approval::ApprovalStore, HookContext, HookEngine, HookEntry, HookPhase, IndexMap,
+    PostCommandExecutor, ServiceContext,
 };
 use crate::state::LocalStateManager;
 use crate::vcs;
@@ -15,21 +15,30 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum Commands {
-    #[command(about = "Create a new database branch")]
+    #[command(
+        about = "Create a new service branch",
+        long_about = "Create a new service branch.\n\nCreates Docker containers and/or cloud branches for the specified branch name.\nIf worktrees are enabled, also creates a Git worktree directory.\n\nExamples:\n  devflow create feature-auth\n  devflow create feature-auth --from develop"
+    )]
     Create {
         #[arg(help = "Name of the branch to create")]
         branch_name: String,
         #[arg(long, help = "Parent branch to clone from")]
         from: Option<String>,
     },
-    #[command(about = "Delete a database branch")]
+    #[command(
+        about = "Delete a service branch (keeps Git branch and worktree)",
+        long_about = "Delete a service branch (keeps Git branch and worktree).\n\nRemoves service branches (containers, cloud branches) but preserves the Git branch\nand any worktree directory. Use 'devflow remove' to delete everything including\nthe Git branch and worktree.\n\nExamples:\n  devflow delete feature-auth"
+    )]
     Delete {
         #[arg(help = "Name of the branch to delete")]
         branch_name: String,
     },
-    #[command(about = "List all database branches")]
+    #[command(about = "List all branches (with service + worktree status)")]
     List,
-    #[command(about = "Initialize devflow configuration")]
+    #[command(
+        about = "Initialize devflow configuration",
+        long_about = "Initialize devflow configuration.\n\nCreates a .devflow.yml config file and sets up the first service backend.\nOn subsequent runs, adds additional backends to the project.\n\nExamples:\n  devflow init                              # Auto-detect name from directory\n  devflow init myapp                        # Explicit name\n  devflow init myapp --backend neon         # Use Neon cloud backend\n  devflow init analytics --service-type clickhouse  # Add ClickHouse service\n  devflow init myapp --from dump.sql        # Seed from a local dump file\n  devflow init myapp --from postgresql://user:pass@host/db  # Seed from URL"
+    )]
     Init {
         #[arg(help = "Database/backend name (defaults to project directory name)")]
         name: Option<String>,
@@ -46,7 +55,7 @@ pub enum Commands {
         )]
         from: Option<String>,
     },
-    #[command(about = "Clean up old database branches")]
+    #[command(about = "Clean up old service branches")]
     Cleanup {
         #[arg(long, help = "Maximum number of branches to keep")]
         max_count: Option<usize>,
@@ -71,7 +80,10 @@ pub enum Commands {
         #[arg(long, hide = true)]
         main_worktree_dir: Option<String>,
     },
-    #[command(about = "Switch to a branch (creates worktree/service branches if needed)")]
+    #[command(
+        about = "Switch to a branch (creates worktree/service branches if needed)",
+        long_about = "Switch to a branch (creates worktree/service branches if needed).\n\nWith no arguments, shows an interactive branch picker with fuzzy search.\nWith a branch name, switches to that branch, creating service branches and\nworktrees if they don't exist.\n\nExamples:\n  devflow switch                     # Interactive picker\n  devflow switch feature-auth        # Switch to existing branch\n  devflow switch -c feature-new      # Create new Git branch and switch\n  devflow switch --template           # Switch to main/template\n  devflow switch feature-auth -x 'npm run migrate'  # Run command after switch"
+    )]
     Switch {
         #[arg(
             help = "Branch name to switch to (optional - if omitted, shows interactive selection)"
@@ -92,24 +104,27 @@ pub enum Commands {
         #[arg(long, help = "Simulate switching without actual operations")]
         dry_run: bool,
     },
-    #[command(about = "Start a stopped database branch container (local backend)")]
+    #[command(about = "Start a stopped branch container (local backend)")]
     Start {
         #[arg(help = "Name of the branch to start")]
         branch_name: String,
     },
-    #[command(about = "Stop a running database branch container (local backend)")]
+    #[command(about = "Stop a running branch container (local backend)")]
     Stop {
         #[arg(help = "Name of the branch to stop")]
         branch_name: String,
     },
-    #[command(about = "Reset a database branch to its parent state (local backend)")]
+    #[command(about = "Reset a branch to its parent state (local backend)")]
     Reset {
         #[arg(help = "Name of the branch to reset")]
         branch_name: String,
     },
     #[command(about = "Run diagnostics and check system health")]
     Doctor,
-    #[command(about = "Show connection info for a database branch")]
+    #[command(
+        about = "Show connection info for a service branch",
+        long_about = "Show connection info for a service branch.\n\nOutputs connection details in various formats for use in scripts and configuration.\n\nExamples:\n  devflow connection feature-auth              # Connection URI\n  devflow connection feature-auth --format env  # Environment variables\n  devflow connection feature-auth --format json # JSON object"
+    )]
     Connection {
         #[arg(help = "Name of the branch")]
         branch_name: String,
@@ -118,12 +133,15 @@ pub enum Commands {
     },
     #[command(about = "Show current project and backend status")]
     Status,
-    #[command(about = "Destroy a database and all its branches (local backend)")]
+    #[command(about = "Destroy all branches and data for a service (local backend)")]
     Destroy {
         #[arg(long, help = "Skip confirmation prompt")]
         force: bool,
     },
-    #[command(about = "Remove a branch, its worktree, and associated service branches")]
+    #[command(
+        about = "Remove a branch, its worktree, and associated service branches",
+        long_about = "Remove a branch, its worktree, and associated service branches.\n\nThis is a comprehensive cleanup command that removes:\n  - The Git branch\n  - The worktree directory (if any)\n  - All associated service branches (containers, cloud branches)\n\nUnlike 'devflow delete' which only removes service branches, 'remove' cleans\nup everything related to the branch.\n\nExamples:\n  devflow remove feature-auth\n  devflow remove feature-auth --force\n  devflow remove feature-auth --keep-services  # Only remove worktree + git branch"
+    )]
     Remove {
         #[arg(help = "Branch name to remove")]
         branch_name: String,
@@ -156,18 +174,22 @@ pub enum Commands {
         #[arg(long, default_value = "10G", help = "Pool image size (sparse file)")]
         size: Option<String>,
     },
-    #[command(about = "Manage lifecycle hooks")]
+    #[command(
+        about = "Manage lifecycle hooks",
+        long_about = "Manage lifecycle hooks.\n\nHooks are MiniJinja-templated commands that run at specific lifecycle phases\n(post-create, post-switch, pre-merge, etc.). Configure them in .devflow.yml\nunder the 'hooks' section.\n\nExamples:\n  devflow hook show                  # List all configured hooks\n  devflow hook show post-create      # Show hooks for a specific phase\n  devflow hook run post-create       # Run hooks for a phase manually\n  devflow hook approvals             # List approved hooks\n  devflow hook approvals --clear     # Clear all approvals"
+    )]
     Hook {
         #[command(subcommand)]
         action: HookCommands,
     },
     #[command(
         name = "shell-init",
-        about = "Print shell integration script (eval \"$(devflow shell-init bash)\")"
+        about = "Print shell integration script (eval \"$(devflow shell-init)\")",
+        long_about = "Print shell integration script.\n\nThe shell wrapper enables automatic 'cd' into worktree directories after\n'devflow switch'. Without it, switch works but you must cd manually.\n\nAdd to your shell profile:\n  eval \"$(devflow shell-init)\"        # auto-detects shell\n  eval \"$(devflow shell-init bash)\"   # ~/.bashrc\n  eval \"$(devflow shell-init zsh)\"    # ~/.zshrc\n  devflow shell-init fish | source    # ~/.config/fish/config.fish\n\nThis creates a 'devflow' shell wrapper function."
     )]
     ShellInit {
-        #[arg(help = "Shell type: bash, zsh, or fish")]
-        shell: String,
+        #[arg(help = "Shell type: bash, zsh, or fish (auto-detected from $SHELL if omitted)")]
+        shell: Option<String>,
     },
     #[command(about = "Commit staged changes with optional AI-generated message")]
     Commit {
@@ -183,10 +205,34 @@ pub enum Commands {
         #[arg(long, help = "Show generated message without committing")]
         dry_run: bool,
     },
-    #[command(about = "Manage plugin backends")]
+    #[command(
+        about = "Manage plugin backends",
+        long_about = "Manage plugin backends.\n\nPlugins extend devflow with custom service backends via JSON-over-stdio protocol.\nAny executable that speaks the protocol can be a backend.\n\nExamples:\n  devflow plugin list                # List configured plugin backends\n  devflow plugin check my-plugin     # Verify a plugin works\n  devflow plugin init ./my-plugin.sh # Generate a plugin scaffold"
+    )]
     Plugin {
         #[command(subcommand)]
         action: PluginCommands,
+    },
+    #[command(
+        about = "Show container logs for a branch",
+        long_about = "Show container logs for a branch.\n\nDisplays stdout/stderr from the Docker container backing a service branch.\nUseful for debugging startup failures, query errors, or crash loops.\n\nExamples:\n  devflow logs main                    # Last 100 lines from main\n  devflow logs feature/auth --tail 50  # Last 50 lines\n  devflow logs main -d analytics       # Logs from a specific backend"
+    )]
+    Logs {
+        branch_name: String,
+        #[arg(long, help = "Number of lines to show (default: 100)")]
+        tail: Option<usize>,
+    },
+    #[command(
+        about = "Seed a branch from an external source",
+        long_about = "Seed a branch database from an external source.\n\nLoads data into an existing branch from a PostgreSQL URL, local dump file,\nor S3 URL. The branch must already exist.\n\nExamples:\n  devflow seed main --from dump.sql                    # Seed from local file\n  devflow seed feature/auth --from postgresql://...     # Seed from live database\n  devflow seed main --from s3://bucket/path/dump.sql   # Seed from S3"
+    )]
+    Seed {
+        branch_name: String,
+        #[arg(
+            long,
+            help = "Source to seed from (PostgreSQL URL, file path, or s3:// URL)"
+        )]
+        from: String,
     },
 }
 
@@ -273,6 +319,8 @@ pub async fn handle_command(
             | Commands::WorktreeSetup
             | Commands::Remove { .. }
             | Commands::Merge { .. }
+            | Commands::Logs { .. }
+            | Commands::Seed { .. }
     );
 
     // Commands that use the legacy direct-database approach
@@ -609,9 +657,22 @@ pub async fn handle_command(
                 } else {
                     let gitignore_path = std::env::current_dir()?.join(".gitignore");
                     if gitignore_path.exists() {
-                        println!("\nSuggestion: Add '.devflow.local.yml' to your .gitignore file:");
-                        println!("   echo '.devflow.local.yml' >> .gitignore");
+                        let gitignore_content =
+                            std::fs::read_to_string(&gitignore_path).unwrap_or_default();
+                        if !gitignore_content.contains(".devflow.local.yml") {
+                            println!(
+                                "\nSuggestion: Add '.devflow.local.yml' to your .gitignore file:"
+                            );
+                            println!("   echo '.devflow.local.yml' >> .gitignore");
+                        }
                     }
+
+                    println!("\nNext steps:");
+                    println!(
+                        "  devflow install-hooks     Install Git hooks for automatic branching"
+                    );
+                    println!("  devflow create <branch>   Create a service branch manually");
+                    println!("  devflow doctor            Check system health and configuration");
                 }
             }
         }
@@ -689,7 +750,11 @@ pub async fn handle_command(
             }
         }
         Commands::ShellInit { shell } => {
-            print_shell_init(&shell)?;
+            let detected_shell = match shell {
+                Some(s) => s,
+                None => detect_shell_from_env()?,
+            };
+            print_shell_init(&detected_shell)?;
         }
         Commands::InstallHooks => {
             let vcs = vcs::detect_vcs_provider(".")?;
@@ -1094,11 +1159,29 @@ fn enrich_branch_list_json(
     serde_json::Value::Array(entries)
 }
 
+/// Detect the current shell from the `$SHELL` environment variable.
+fn detect_shell_from_env() -> Result<String> {
+    let shell_path = std::env::var("SHELL")
+        .context("Cannot auto-detect shell: $SHELL is not set. Please specify a shell: devflow shell-init <bash|zsh|fish>")?;
+    let shell_name = std::path::Path::new(&shell_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or(shell_path.clone());
+    match shell_name.as_str() {
+        "bash" | "zsh" | "fish" => Ok(shell_name),
+        other => anyhow::bail!(
+            "Unsupported shell '{}' (from $SHELL={}). Supported shells: bash, zsh, fish",
+            other,
+            shell_path
+        ),
+    }
+}
+
 /// Print shell integration script for the given shell type.
 ///
 /// Users should add `eval "$(devflow shell-init bash)"` (or zsh/fish) to their
-/// shell profile. This defines a `df` wrapper function that:
-/// 1. Runs `devflow` normally
+/// shell profile. This defines a `devflow` wrapper function that:
+/// 1. Runs `devflow` normally, preserving stderr
 /// 2. Parses `DEVFLOW_CD=<path>` output from `switch` commands
 /// 3. Automatically `cd`s into the target worktree directory
 fn print_shell_init(shell: &str) -> Result<()> {
@@ -1106,9 +1189,10 @@ fn print_shell_init(shell: &str) -> Result<()> {
         "bash" => {
             r#"
 # devflow shell integration (bash)
-df() {
+# Wrapper function that adds auto-cd into worktree directories after switch
+devflow() {
     local output
-    output="$(command devflow "$@" 2>&1)"
+    output="$(command devflow "$@")"
     local exit_code=$?
 
     # Print all output lines, skipping DEVFLOW_CD directives
@@ -1134,9 +1218,10 @@ df() {
         "zsh" => {
             r#"
 # devflow shell integration (zsh)
-df() {
+# Wrapper function that adds auto-cd into worktree directories after switch
+devflow() {
     local output
-    output="$(command devflow "$@" 2>&1)"
+    output="$(command devflow "$@")"
     local exit_code=$?
 
     # Print all output lines, skipping DEVFLOW_CD directives
@@ -1162,8 +1247,9 @@ df() {
         "fish" => {
             r#"
 # devflow shell integration (fish)
-function df --wraps devflow
-    set -l output (command devflow $argv 2>&1)
+# Wrapper function that adds auto-cd into worktree directories after switch
+function devflow --wraps devflow --description "devflow with auto-cd"
+    set -l output (command devflow $argv)
     set -l exit_code $status
 
     for line in $output
@@ -1377,7 +1463,22 @@ fn handle_hook_show(config: &Config, phase_filter: Option<&str>, json_output: bo
     };
 
     // Optionally filter to a single phase
-    let phase_filter_parsed: Option<HookPhase> = phase_filter.map(|s| s.parse().unwrap());
+    let phase_filter_parsed: Option<HookPhase> = match phase_filter {
+        Some(s) => {
+            let parsed: HookPhase = s.parse().unwrap();
+            if let HookPhase::Custom(ref name) = parsed {
+                eprintln!(
+                    "Warning: '{}' is not a built-in phase. Built-in phases: pre-switch, post-create, \
+                     post-start, post-switch, pre-remove, post-remove, pre-commit, pre-merge, \
+                     post-merge, pre-service-create, post-service-create, pre-service-delete, \
+                     post-service-delete, post-service-switch",
+                    name
+                );
+            }
+            Some(parsed)
+        }
+        None => None,
+    };
 
     if json_output {
         let filtered: std::collections::HashMap<_, _> = hooks
@@ -1464,6 +1565,16 @@ async fn handle_hook_run(
 
     let phase: HookPhase = phase_str.parse().unwrap();
 
+    if let HookPhase::Custom(ref name) = phase {
+        eprintln!(
+            "Warning: '{}' is not a built-in phase. Built-in phases: pre-switch, post-create, \
+             post-start, post-switch, pre-remove, post-remove, pre-commit, pre-merge, \
+             post-merge, pre-service-create, post-service-create, pre-service-delete, \
+             post-service-delete, post-service-switch",
+            name
+        );
+    }
+
     // Determine branch name: use override, or try current git branch, or fallback
     let branch_name = if let Some(b) = branch_override {
         b.to_string()
@@ -1499,8 +1610,8 @@ async fn handle_hook_run(
             )
         })?;
 
-        let mut filtered = std::collections::HashMap::new();
-        let mut phase_map = std::collections::HashMap::new();
+        let mut filtered = IndexMap::new();
+        let mut phase_map = IndexMap::new();
         phase_map.insert(name.to_string(), entry.clone());
         filtered.insert(phase.clone(), phase_map);
         filtered
@@ -2450,6 +2561,10 @@ async fn handle_backend_command(
                     json_output,
                 )
                 .await?;
+            } else if non_interactive {
+                anyhow::bail!(
+                    "No branch specified. Use 'devflow switch <branch>' in non-interactive mode."
+                );
             } else {
                 handle_interactive_switch(config, config_path).await?;
             }
@@ -2492,6 +2607,7 @@ async fn handle_backend_command(
                 keep_services,
                 config_path,
                 json_output,
+                non_interactive,
             )
             .await?;
         }
@@ -2501,6 +2617,25 @@ async fn handle_backend_command(
             dry_run,
         } => {
             handle_merge_command(config, target.as_deref(), cleanup, dry_run, json_output).await?;
+        }
+        Commands::Logs { branch_name, tail } => {
+            let output = backend.logs(&branch_name, tail).await?;
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "branch": branch_name,
+                        "logs": output,
+                    }))?
+                );
+            } else {
+                print!("{output}");
+            }
+        }
+        Commands::Seed { branch_name, from } => {
+            println!("Seeding branch '{}' from '{}'...", branch_name, from);
+            backend.seed_from_source(&branch_name, &from).await?;
+            println!("Seed complete.");
         }
         _ => unreachable!(),
     }
@@ -2745,7 +2880,9 @@ fn run_doctor_pre_checks(config: &Config, config_path: &Option<std::path::PathBu
     // Config file
     match config_path {
         Some(path) => println!("  [OK] Config file: {}", path.display()),
-        None => println!("  [WARN] Config file: not found (using defaults)"),
+        None => {
+            println!("  [WARN] Config file: not found (run 'devflow init' to create .devflow.yml)")
+        }
     }
 
     // VCS repository
@@ -2953,7 +3090,7 @@ async fn handle_interactive_switch(
         .and_then(|r| r.current_branch().ok().flatten());
 
     // Create branch items with display info
-    let branch_items: Vec<BranchItem> = branches
+    let mut branch_items: Vec<BranchItem> = branches
         .iter()
         .map(|branch| {
             let is_current = current_git.as_deref() == Some(branch.as_str())
@@ -2967,10 +3104,38 @@ async fn handle_interactive_switch(
         })
         .collect();
 
+    // Add a "Create new branch" option at the end
+    branch_items.push(BranchItem {
+        name: "__create_new__".to_string(),
+        display_name: "+ Create new branch".to_string(),
+        is_current: false,
+    });
+
     // Run interactive selector
     match run_interactive_selector(branch_items) {
         Ok(selected_branch) => {
-            if selected_branch == "main" {
+            if selected_branch == "__create_new__" {
+                // Prompt for a new branch name
+                let new_name = inquire::Text::new("New branch name:")
+                    .with_help_message("Enter the name for the new branch")
+                    .prompt()
+                    .context("Failed to read branch name")?;
+                let new_name = new_name.trim().to_string();
+                if new_name.is_empty() {
+                    anyhow::bail!("Branch name cannot be empty");
+                }
+                handle_switch_command(
+                    config,
+                    &new_name,
+                    config_path,
+                    true,  // create
+                    None,  // base
+                    false, // no_services
+                    false, // no_verify
+                    false, // json_output
+                )
+                .await?;
+            } else if selected_branch == "main" {
                 handle_switch_to_main(config, config_path).await?;
             } else {
                 handle_switch_command(
@@ -3191,9 +3356,8 @@ async fn handle_switch_command(
         }
     } else {
         // ── Classic mode (no worktrees) ────────────────────────────────
-        if create {
-            let vcs_repo =
-                vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
+        let vcs_repo = vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
+        if create || !vcs_repo.branch_exists(branch_name)? {
             if !json_output {
                 println!(
                     "Creating branch '{}' (base: {})",
@@ -3203,6 +3367,11 @@ async fn handle_switch_command(
             }
             vcs_repo.create_branch(branch_name, base)?;
         }
+        // Switch the working directory to the target branch
+        if !json_output {
+            println!("Checking out branch: {}", branch_name);
+        }
+        vcs_repo.checkout_branch(branch_name)?;
     }
 
     // ── Service branching (orchestrated across all auto_branch backends) ──
@@ -3351,6 +3520,7 @@ async fn handle_remove_command(
     keep_services: bool,
     config_path: &Option<std::path::PathBuf>,
     json_output: bool,
+    non_interactive: bool,
 ) -> Result<()> {
     let vcs_repo = vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
 
@@ -3369,10 +3539,10 @@ async fn handle_remove_command(
         }
     }
 
-    // Confirm unless --force (skip prompt in JSON mode — require --force)
+    // Confirm unless --force (skip prompt in JSON/non-interactive mode — require --force)
     if !force {
-        if json_output {
-            anyhow::bail!("Use --force to confirm removal in JSON output mode");
+        if json_output || non_interactive {
+            anyhow::bail!("Use --force to confirm removal in non-interactive or JSON output mode");
         }
         println!("This will remove:");
         println!("  - VCS branch: {}", branch_name);

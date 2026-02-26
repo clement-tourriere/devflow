@@ -53,7 +53,7 @@ impl ZfsDriver {
             };
         }
 
-        let dataset = if let Ok(explicit) = std::env::var("PGBRANCH_ZFS_DATASET") {
+        let dataset = if let Ok(explicit) = std::env::var("DEVFLOW_ZFS_DATASET") {
             if explicit.trim().is_empty() {
                 None
             } else {
@@ -70,7 +70,7 @@ impl ZfsDriver {
             return BackendDetection {
                 available: false,
                 detail: format!(
-                    "no ZFS dataset found for '{}' (set PGBRANCH_ZFS_DATASET to force one)",
+                    "no ZFS dataset found for '{}' (set DEVFLOW_ZFS_DATASET to force one)",
                     projects_root.display()
                 ),
                 root_dataset: None,

@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     #[serde(default, skip_serializing_if = "DatabaseConfig::is_default")]
     pub database: DatabaseConfig,
+    #[serde(default)]
     pub git: GitConfig,
+    #[serde(default)]
     pub behavior: BehaviorConfig,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub post_commands: Vec<PostCommand>,
@@ -368,6 +370,7 @@ pub struct ReplaceConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitConfig {
+    #[serde(default = "default_true")]
     pub auto_create_on_branch: bool,
     #[serde(default = "default_true")]
     pub auto_switch_on_branch: bool,
@@ -382,7 +385,25 @@ pub struct GitConfig {
         alias = "branch_filter_regex"
     )]
     pub branch_filter_regex: Option<String>,
+    #[serde(default = "default_exclude_branches")]
     pub exclude_branches: Vec<String>,
+}
+
+impl Default for GitConfig {
+    fn default() -> Self {
+        Self {
+            auto_create_on_branch: true,
+            auto_switch_on_branch: true,
+            main_branch: "main".to_string(),
+            auto_create_branch_filter: None,
+            branch_filter_regex: None,
+            exclude_branches: vec!["main".to_string(), "master".to_string()],
+        }
+    }
+}
+
+fn default_exclude_branches() -> Vec<String> {
+    vec!["main".to_string(), "master".to_string()]
 }
 
 fn default_true() -> bool {
@@ -399,15 +420,28 @@ fn default_worktree_path_template() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BehaviorConfig {
+    #[serde(default)]
     pub auto_cleanup: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_branches: Option<usize>,
+    #[serde(default)]
     pub naming_strategy: NamingStrategy,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl Default for BehaviorConfig {
+    fn default() -> Self {
+        Self {
+            auto_cleanup: false,
+            max_branches: Some(10),
+            naming_strategy: NamingStrategy::Prefix,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum NamingStrategy {
     #[serde(rename = "prefix")]
+    #[default]
     Prefix,
     #[serde(rename = "suffix")]
     Suffix,

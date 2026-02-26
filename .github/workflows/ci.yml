@@ -150,7 +150,7 @@ jobs:
       - name: Run integration tests
         env:
           EXPECTED_STORAGE: zfs
-          PGBRANCH_ZFS_DATASET: pgbranch
+          DEVFLOW_ZFS_DATASET: pgbranch
         run: |
           set -euo pipefail
           RUNNER_HOME="$HOME"
@@ -160,7 +160,7 @@ jobs:
             HOME="$RUNNER_HOME" \
             XDG_DATA_HOME="$RUNNER_HOME/.local/share" \
             EXPECTED_STORAGE="$EXPECTED_STORAGE" \
-            PGBRANCH_ZFS_DATASET="$PGBRANCH_ZFS_DATASET" \
+            DEVFLOW_ZFS_DATASET="$DEVFLOW_ZFS_DATASET" \
             PGBRANCH="$PGBRANCH" \
             bash <<'EOF'
           set -euo pipefail

@@ -192,6 +192,34 @@ fi
         .to_string()
     }
 
+    fn generate_pre_commit_script(&self) -> String {
+        r#"#!/bin/sh
+# devflow auto-generated hook
+# This hook runs devflow pre-commit lifecycle hooks before each commit.
+
+if command -v devflow >/dev/null 2>&1; then
+    devflow hook run pre-commit
+    exit $?
+fi
+"#
+        .to_string()
+    }
+
+    fn generate_post_rewrite_script(&self) -> String {
+        r#"#!/bin/sh
+# devflow auto-generated hook
+# This hook runs after git rebase or git commit --amend.
+# $1 is the cause: "rebase" or "amend"
+
+CAUSE="$1"
+
+if command -v devflow >/dev/null 2>&1; then
+    devflow hook run "post-rewrite"
+fi
+"#
+        .to_string()
+    }
+
     #[allow(dead_code)]
     pub fn get_repo_root(&self) -> &Path {
         self.repo.workdir().unwrap_or_else(|| self.repo.path())
@@ -278,7 +306,12 @@ impl VcsProvider for GitRepository {
         let mut branch = self
             .repo
             .find_branch(name, git2::BranchType::Local)
-            .with_context(|| format!("Branch '{}' not found", name))?;
+            .with_context(|| {
+                format!(
+                    "Branch '{}' not found. Run 'devflow list' to see available branches.",
+                    name
+                )
+            })?;
         branch
             .delete()
             .with_context(|| format!("Failed to delete branch '{}'", name))?;
@@ -287,6 +320,39 @@ impl VcsProvider for GitRepository {
 
     fn branch_exists(&self, name: &str) -> Result<bool> {
         self.branch_exists(name)
+    }
+
+    fn checkout_branch(&self, name: &str) -> Result<()> {
+        let branch = self
+            .repo
+            .find_branch(name, git2::BranchType::Local)
+            .with_context(|| {
+                format!(
+                    "Branch '{}' not found. Run 'devflow list' to see available branches.",
+                    name
+                )
+            })?;
+        let reference = branch.into_reference();
+        let commit = reference
+            .peel_to_commit()
+            .context("Branch does not point to a commit")?;
+        let tree = commit.tree().context("Failed to get tree from commit")?;
+
+        self.repo
+            .checkout_tree(
+                tree.as_object(),
+                Some(git2::build::CheckoutBuilder::new().safe()),
+            )
+            .with_context(|| format!("Failed to checkout tree for branch '{}'", name))?;
+
+        let refname = reference
+            .name()
+            .ok_or_else(|| anyhow::anyhow!("Branch reference has invalid UTF-8 name"))?;
+        self.repo
+            .set_head(refname)
+            .with_context(|| format!("Failed to set HEAD to branch '{}'", name))?;
+
+        Ok(())
     }
 
     fn supports_worktrees(&self) -> bool {
@@ -477,7 +543,10 @@ impl VcsProvider for GitRepository {
         fs::create_dir_all(&hooks_dir).context("Failed to create hooks directory")?;
 
         let hook_script = self.generate_hook_script();
+        let pre_commit_script = self.generate_pre_commit_script();
+        let post_rewrite_script = self.generate_post_rewrite_script();
 
+        // Install post-checkout hook
         let post_checkout_hook = hooks_dir.join("post-checkout");
         fs::write(&post_checkout_hook, &hook_script)
             .context("Failed to write post-checkout hook")?;
@@ -491,6 +560,7 @@ impl VcsProvider for GitRepository {
                 .context("Failed to set hook permissions")?;
         }
 
+        // Install post-merge hook
         let post_merge_hook = hooks_dir.join("post-merge");
         fs::write(&post_merge_hook, &hook_script).context("Failed to write post-merge hook")?;
 
@@ -500,6 +570,34 @@ impl VcsProvider for GitRepository {
             let mut perms = fs::metadata(&post_merge_hook)?.permissions();
             perms.set_mode(0o755);
             fs::set_permissions(&post_merge_hook, perms)
+                .context("Failed to set hook permissions")?;
+        }
+
+        // Install pre-commit hook
+        let pre_commit_hook = hooks_dir.join("pre-commit");
+        fs::write(&pre_commit_hook, &pre_commit_script)
+            .context("Failed to write pre-commit hook")?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&pre_commit_hook)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&pre_commit_hook, perms)
+                .context("Failed to set hook permissions")?;
+        }
+
+        // Install post-rewrite hook (runs after rebase/amend)
+        let post_rewrite_hook = hooks_dir.join("post-rewrite");
+        fs::write(&post_rewrite_hook, &post_rewrite_script)
+            .context("Failed to write post-rewrite hook")?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&post_rewrite_hook)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&post_rewrite_hook, perms)
                 .context("Failed to set hook permissions")?;
         }
 
@@ -517,6 +615,16 @@ impl VcsProvider for GitRepository {
         let post_merge_hook = hooks_dir.join("post-merge");
         if post_merge_hook.exists() && self.is_devflow_hook(&post_merge_hook)? {
             fs::remove_file(&post_merge_hook).context("Failed to remove post-merge hook")?;
+        }
+
+        let pre_commit_hook = hooks_dir.join("pre-commit");
+        if pre_commit_hook.exists() && self.is_devflow_hook(&pre_commit_hook)? {
+            fs::remove_file(&pre_commit_hook).context("Failed to remove pre-commit hook")?;
+        }
+
+        let post_rewrite_hook = hooks_dir.join("post-rewrite");
+        if post_rewrite_hook.exists() && self.is_devflow_hook(&post_rewrite_hook)? {
+            fs::remove_file(&post_rewrite_hook).context("Failed to remove post-rewrite hook")?;
         }
 
         Ok(())

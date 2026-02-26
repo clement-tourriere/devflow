@@ -7,8 +7,8 @@ use bollard::models::{
     ContainerCreateBody, ContainerStateStatusEnum, ExecConfig, HostConfig, PortBinding, PortMap,
 };
 use bollard::query_parameters::{
-    CreateContainerOptions, CreateImageOptions, ListContainersOptions, RemoveContainerOptions,
-    StopContainerOptions,
+    CreateContainerOptions, CreateImageOptions, ListContainersOptions, LogsOptionsBuilder,
+    RemoveContainerOptions, StopContainerOptions,
 };
 use bollard::Docker;
 use futures_util::TryStreamExt;
@@ -61,7 +61,7 @@ pub struct DockerRuntime {
 impl DockerRuntime {
     pub fn new() -> anyhow::Result<Self> {
         let client =
-            Docker::connect_with_local_defaults().context("failed to connect to Docker daemon")?;
+            Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon. Is Docker installed and running? Check with: docker info")?;
         Ok(Self { client })
     }
 
@@ -81,7 +81,9 @@ impl DockerRuntime {
             }
             Err(err) => DockerDoctorResult {
                 available: false,
-                detail: format!("Docker engine unreachable: {err}"),
+                detail: format!(
+                    "Docker engine unreachable: {err}. Is Docker running? Try: docker info"
+                ),
                 version: None,
             },
         }
@@ -312,6 +314,32 @@ impl DockerRuntime {
             .with_context(|| format!("failed to remove container '{container_name}'"))?;
 
         Ok(())
+    }
+
+    pub async fn container_logs(
+        &self,
+        container_name: &str,
+        tail: Option<usize>,
+    ) -> anyhow::Result<String> {
+        let options = LogsOptionsBuilder::default()
+            .stdout(true)
+            .stderr(true)
+            .tail(&tail.map_or_else(|| "100".to_string(), |n| n.to_string()))
+            .build();
+
+        let stream = self.client.logs(container_name, Some(options));
+        let chunks: Vec<_> = stream
+            .try_collect()
+            .await
+            .with_context(|| format!("failed to fetch logs for container '{container_name}'"))?;
+
+        let output = chunks
+            .iter()
+            .map(|chunk| chunk.to_string())
+            .collect::<Vec<_>>()
+            .join("");
+
+        Ok(output)
     }
 
     pub async fn wait_ready(

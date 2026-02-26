@@ -561,7 +561,7 @@ impl ServiceBackend for LocalBackend {
     async fn test_connection(&self) -> Result<()> {
         let doctor = self.runtime.doctor().await;
         if !doctor.available {
-            anyhow::bail!("Docker is not available: {}", doctor.detail);
+            anyhow::bail!("Docker is not available: {}. Make sure Docker is installed and the daemon is running (try: docker info).", doctor.detail);
         }
         Ok(())
     }
@@ -661,6 +661,18 @@ impl ServiceBackend for LocalBackend {
 
     fn supports_destroy(&self) -> bool {
         true
+    }
+
+    async fn logs(&self, branch_name: &str, tail: Option<usize>) -> Result<String> {
+        let project = self.ensure_project().await?;
+        let branch = self
+            .store()
+            .get_branch_by_name(&project.id, branch_name)?
+            .ok_or_else(|| anyhow::anyhow!("Branch '{}' not found", branch_name))?;
+
+        self.runtime
+            .container_logs(&branch.container_name, tail)
+            .await
     }
 
     async fn destroy_preview(&self) -> Result<Option<(String, Vec<String>)>> {

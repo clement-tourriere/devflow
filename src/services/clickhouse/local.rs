@@ -13,8 +13,8 @@ use bollard::models::{
     ContainerCreateBody, ContainerStateStatusEnum, HostConfig, PortBinding, PortMap,
 };
 use bollard::query_parameters::{
-    CreateContainerOptions, CreateImageOptions, ListContainersOptions, RemoveContainerOptions,
-    StopContainerOptions,
+    CreateContainerOptions, CreateImageOptions, ListContainersOptions, LogsOptionsBuilder,
+    RemoveContainerOptions, StopContainerOptions,
 };
 use bollard::Docker;
 use chrono::Utc;
@@ -43,7 +43,7 @@ pub struct ClickHouseLocalBackend {
 impl ClickHouseLocalBackend {
     pub fn new(service_name: &str, config: &ClickHouseConfig) -> anyhow::Result<Self> {
         let client =
-            Docker::connect_with_local_defaults().context("failed to connect to Docker daemon")?;
+            Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon. Is Docker installed and running? Check with: docker info")?;
 
         let data_root = if let Some(ref root) = config.data_root {
             let expanded = shellexpand(root);
@@ -380,7 +380,7 @@ impl ServiceBackend for ClickHouseLocalBackend {
     async fn create_branch(
         &self,
         branch_name: &str,
-        _from_branch: Option<&str>,
+        from_branch: Option<&str>,
     ) -> anyhow::Result<BranchInfo> {
         let container_name = self.container_name(branch_name);
 
@@ -389,7 +389,7 @@ impl ServiceBackend for ClickHouseLocalBackend {
                 return Ok(BranchInfo {
                     name: branch_name.to_string(),
                     created_at: Some(Utc::now()),
-                    parent_branch: None,
+                    parent_branch: from_branch.map(|s| s.to_string()),
                     database_name: container_name,
                     state: Some("running".to_string()),
                 });
@@ -409,12 +409,56 @@ impl ServiceBackend for ClickHouseLocalBackend {
                 return Ok(BranchInfo {
                     name: branch_name.to_string(),
                     created_at: Some(Utc::now()),
-                    parent_branch: None,
+                    parent_branch: from_branch.map(|s| s.to_string()),
                     database_name: container_name,
                     state: Some("running".to_string()),
                 });
             }
             ContainerStatus::NotFound | ContainerStatus::Other(_) => {}
+        }
+
+        // Clone data from parent branch if specified
+        if let Some(parent_name) = from_branch {
+            let parent_container = self.container_name(parent_name);
+            let parent_data_dir = self.branch_data_dir(parent_name);
+            let new_data_dir = self.branch_data_dir(branch_name);
+
+            if parent_data_dir.exists() {
+                // Stop parent container to ensure data consistency
+                let parent_running = matches!(
+                    self.container_status(&parent_container).await?,
+                    ContainerStatus::Running
+                );
+                if parent_running {
+                    self.client
+                        .stop_container(
+                            &parent_container,
+                            Some(StopContainerOptions {
+                                t: Some(10),
+                                ..Default::default()
+                            }),
+                        )
+                        .await
+                        .with_context(|| {
+                            format!("failed to stop parent container '{parent_container}'")
+                        })?;
+                }
+
+                crate::services::clone_data_dir(&parent_data_dir, &new_data_dir).await?;
+
+                // Restart parent if it was running
+                if parent_running {
+                    self.client
+                        .start_container(
+                            &parent_container,
+                            None::<bollard::query_parameters::StartContainerOptions>,
+                        )
+                        .await
+                        .with_context(|| {
+                            format!("failed to restart parent container '{parent_container}'")
+                        })?;
+                }
+            }
         }
 
         // Allocate two consecutive ports (HTTP + native)
@@ -427,7 +471,7 @@ impl ServiceBackend for ClickHouseLocalBackend {
         Ok(BranchInfo {
             name: branch_name.to_string(),
             created_at: Some(Utc::now()),
-            parent_branch: None,
+            parent_branch: from_branch.map(|s| s.to_string()),
             database_name: container_name,
             state: Some("running".to_string()),
         })
@@ -638,7 +682,9 @@ impl ServiceBackend for ClickHouseLocalBackend {
                 checks.push(DoctorCheck {
                     name: "Docker".to_string(),
                     available: false,
-                    detail: format!("Docker unreachable: {err}"),
+                    detail: format!(
+                        "Docker unreachable: {err}. Is Docker running? Try: docker info"
+                    ),
                 });
             }
         }
@@ -677,6 +723,27 @@ impl ServiceBackend for ClickHouseLocalBackend {
             storage_backend: Some("docker-bind".to_string()),
             image: Some(self.image.clone()),
         })
+    }
+
+    async fn logs(&self, branch_name: &str, tail: Option<usize>) -> anyhow::Result<String> {
+        let container = self.container_name(branch_name);
+        let options = LogsOptionsBuilder::default()
+            .stdout(true)
+            .stderr(true)
+            .tail(&tail.map_or_else(|| "100".to_string(), |n| n.to_string()))
+            .build();
+
+        let stream = self.client.logs(&container, Some(options));
+        let chunks: Vec<_> = stream
+            .try_collect()
+            .await
+            .with_context(|| format!("failed to fetch logs for container '{container}'"))?;
+
+        Ok(chunks
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(""))
     }
 
     fn backend_name(&self) -> &'static str {

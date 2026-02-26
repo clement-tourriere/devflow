@@ -27,32 +27,42 @@ use cli::Commands;
 {usage-heading} {usage}
 
 Branch Management:
-  create              Create a new database branch
-  delete              Delete a database branch
-  list                List all database branches
-  switch              Switch to a database branch (creates if doesn't exist)
-  cleanup             Clean up old database branches
+  create              Create a new service branch
+  delete              Delete a service branch
+  list                List all branches (with service + worktree status)
+  switch              Switch to a branch (creates worktree/service branches if needed)
+  remove              Remove a branch, its worktree, and associated service branches
+  cleanup             Clean up old service branches
 
 Branch Lifecycle (local backend):
-  start               Start a stopped database branch container
-  stop                Stop a running database branch container
-  reset               Reset a database branch to its parent state
-  destroy             Destroy a database and all its branches
+  start               Start a stopped branch container
+  stop                Stop a running branch container
+  reset               Reset a branch to its parent state
+  destroy             Destroy all branches and data for a service
+  seed                Seed a branch from an external source
+
+VCS:
+  merge               Merge current branch into target (with optional cleanup)
+  commit              Commit staged changes (--ai for AI-generated message)
 
 Info:
-  connection          Show connection info for a database branch
+  connection          Show connection info for a branch
   status              Show current project and backend status
+  logs                Show container logs for a branch
 
 Setup & Config:
   init                Initialize devflow configuration
   config              Show current configuration (-v for precedence details)
   doctor              Run diagnostics and check system health
-  install-hooks       Install Git hooks
+  install-hooks       Install Git hooks (auto branch/switch on checkout)
   uninstall-hooks     Uninstall Git hooks
+  shell-init          Print shell integration script (enables worktree cd)
   worktree-setup      Set up devflow in a Git worktree
+  setup-zfs           Set up a file-backed ZFS pool for CoW storage (Linux)
 
-VCS:
-  commit              Commit staged changes (--ai for AI-generated message)
+Extensibility:
+  hook                Manage lifecycle hooks (show, run, approvals)
+  plugin              Manage plugin backends (list, check, init)
 
 Options:
 {options}")]

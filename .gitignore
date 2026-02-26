@@ -23,9 +23,9 @@ Thumbs.db
 # Claude
 .claude/
 
-# pgbranch
-.pgbranch.yml
-.pgbranch.local.yml
+# devflow
+.devflow.yml
+.devflow.local.yml
 
 # Environment
 .env

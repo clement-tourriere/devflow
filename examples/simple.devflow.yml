@@ -1,0 +1,33 @@
+# Simple devflow configuration
+# This example shows a minimal setup with a single local PostgreSQL backend.
+# All sections are optional — even an empty file is valid.
+
+git:
+  auto_create_on_branch: true
+  auto_switch_on_branch: true
+  main_branch: main
+  exclude_branches:
+    - main
+    - master
+
+behavior:
+  auto_cleanup: false
+  max_branches: 10
+  naming_strategy: prefix
+
+# Single backend (created by `devflow init`)
+backend:
+  type: local
+  service_type: postgres
+  local:
+    image: postgres:17
+
+# Update .env after branch creation/switch
+post_commands:
+  - action: replace
+    name: Update DATABASE_URL
+    file: .env.local
+    pattern: "DATABASE_URL=.*"
+    replacement: "DATABASE_URL=postgresql://{db_user}@{db_host}:{db_port}/{db_name}"
+    create_if_missing: true
+  - "echo 'Database {db_name} ready for branch {branch_name}!'"

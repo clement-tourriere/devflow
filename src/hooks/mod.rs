@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
+pub use indexmap::IndexMap;
+
 /// Lifecycle phase at which a hook fires.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -32,6 +34,7 @@ pub enum HookPhase {
     PreCommit,
     PreMerge,
     PostMerge,
+    PostRewrite,
 
     // Service lifecycle
     PreServiceCreate,
@@ -57,6 +60,7 @@ impl fmt::Display for HookPhase {
             HookPhase::PreCommit => write!(f, "pre-commit"),
             HookPhase::PreMerge => write!(f, "pre-merge"),
             HookPhase::PostMerge => write!(f, "post-merge"),
+            HookPhase::PostRewrite => write!(f, "post-rewrite"),
             HookPhase::PreServiceCreate => write!(f, "pre-service-create"),
             HookPhase::PostServiceCreate => write!(f, "post-service-create"),
             HookPhase::PreServiceDelete => write!(f, "pre-service-delete"),
@@ -97,6 +101,7 @@ impl FromStr for HookPhase {
             "pre-commit" => HookPhase::PreCommit,
             "pre-merge" => HookPhase::PreMerge,
             "post-merge" => HookPhase::PostMerge,
+            "post-rewrite" => HookPhase::PostRewrite,
             "pre-service-create" => HookPhase::PreServiceCreate,
             "post-service-create" => HookPhase::PostServiceCreate,
             "pre-service-delete" => HookPhase::PreServiceDelete,
@@ -161,7 +166,7 @@ pub struct ExtendedHookEntry {
 ///   post-switch:
 ///     env: "cat > .env.local ..."
 /// ```
-pub type HooksConfig = HashMap<HookPhase, HashMap<String, HookEntry>>;
+pub type HooksConfig = IndexMap<HookPhase, IndexMap<String, HookEntry>>;
 
 /// Context variables available to hook templates.
 #[derive(Debug, Clone, Default, Serialize)]
