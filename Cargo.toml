@@ -1,19 +1,24 @@
 [package]
-name = "pgbranch"
-version = "0.2.0"
+name = "devflow"
+version = "0.3.0"
 edition = "2021"
-description = "A tool for creating PostgreSQL database branches that sync with Git branches"
+description = "Universal development environment branching tool — worktrees, databases, and stateful services"
 authors = ["Clément Tourrière <clement.tourriere@gmail.com>"]
 license = "MIT"
-repository = "https://github.com/clement-tourriere/pgbranch"
+repository = "https://github.com/clement-tourriere/devflow"
+
+[[bin]]
+name = "devflow"
+path = "src/main.rs"
 
 [features]
-default = ["backend-local", "backend-postgres-template", "backend-neon", "backend-dblab", "backend-xata"]
+default = ["backend-local", "backend-postgres-template", "backend-neon", "backend-dblab", "backend-xata", "llm"]
 backend-local = ["dep:bollard", "dep:rusqlite", "dep:rust-s3", "dep:tar", "dep:bytes", "dep:futures-util", "dep:tempfile", "dep:uuid", "dep:url"]
 backend-postgres-template = ["dep:tokio-postgres"]
 backend-neon = ["dep:reqwest"]
 backend-dblab = ["dep:reqwest"]
 backend-xata = ["dep:reqwest"]
+llm = ["dep:reqwest"]
 
 [dependencies]
 # CLI and argument parsing
@@ -41,6 +46,9 @@ git2 = { version = "0.20", default-features = false }
 
 # Text matching
 regex = { version = "1.11", default-features = false, features = ["std", "perf-cache"] }
+
+# Template engine for hooks
+minijinja = { version = "2", default-features = false, features = ["builtins", "serde"] }
 
 # File system
 dirs = { version = "6.0", default-features = false }
@@ -83,6 +91,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"], 
 
 # Tar archive creation (for bollard upload_to_container)
 tar = { version = "0.4", default-features = false, optional = true }
+which = "8.0.0"
 
 [profile.release]
 # Aggressive size optimization

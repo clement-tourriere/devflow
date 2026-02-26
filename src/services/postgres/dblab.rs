@@ -1,4 +1,4 @@
-use super::{BranchInfo, ConnectionInfo, DatabaseBranchingBackend, DoctorCheck, DoctorReport};
+use super::super::{BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ServiceBackend};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -148,7 +148,7 @@ impl DBLabBackend {
 }
 
 #[async_trait]
-impl DatabaseBranchingBackend for DBLabBackend {
+impl ServiceBackend for DBLabBackend {
     async fn create_branch(
         &self,
         branch_name: &str,

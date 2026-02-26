@@ -1,14 +1,13 @@
-#[cfg(feature = "backend-dblab")]
-pub mod dblab;
 pub mod factory;
+pub mod plugin;
+pub mod postgres;
+
 #[cfg(feature = "backend-local")]
-pub mod local;
-#[cfg(feature = "backend-neon")]
-pub mod neon;
-#[cfg(feature = "backend-postgres-template")]
-pub mod postgres_template;
-#[cfg(feature = "backend-xata")]
-pub mod xata;
+pub mod clickhouse;
+#[cfg(feature = "backend-local")]
+pub mod generic;
+#[cfg(feature = "backend-local")]
+pub mod mysql;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -54,9 +53,11 @@ pub struct DoctorCheck {
     pub detail: String,
 }
 
+/// ServiceBackend is the core trait for all service backends.
+/// (Renamed from DatabaseBranchingBackend as part of the devflow evolution.)
 #[async_trait]
 #[allow(dead_code)]
-pub trait DatabaseBranchingBackend: Send + Sync {
+pub trait ServiceBackend: Send + Sync {
     // Core branching operations
     async fn create_branch(
         &self,

@@ -5,7 +5,7 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 use super::{ZfsBranchMetadata, ZfsProjectConfig};
-use crate::backends::local::model::{Branch, Project};
+use crate::services::postgres::local::model::{Branch, Project};
 
 #[derive(Debug, Clone)]
 pub struct BackendDetection {

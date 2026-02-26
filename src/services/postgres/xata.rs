@@ -1,4 +1,4 @@
-use super::{BranchInfo, ConnectionInfo, DatabaseBranchingBackend, DoctorCheck, DoctorReport};
+use super::super::{BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ServiceBackend};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -177,7 +177,7 @@ impl XataBackend {
 }
 
 #[async_trait]
-impl DatabaseBranchingBackend for XataBackend {
+impl ServiceBackend for XataBackend {
     async fn create_branch(
         &self,
         branch_name: &str,

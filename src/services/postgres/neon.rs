@@ -1,4 +1,4 @@
-use super::{BranchInfo, ConnectionInfo, DatabaseBranchingBackend, DoctorCheck, DoctorReport};
+use super::super::{BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ServiceBackend};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -126,7 +126,7 @@ impl NeonBackend {
 }
 
 #[async_trait]
-impl DatabaseBranchingBackend for NeonBackend {
+impl ServiceBackend for NeonBackend {
     async fn create_branch(
         &self,
         branch_name: &str,

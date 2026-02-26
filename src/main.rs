@@ -1,22 +1,24 @@
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
 
-mod backends;
 mod cli;
 mod config;
 #[cfg(feature = "backend-postgres-template")]
 mod database;
 mod docker;
-mod git;
-mod local_state;
-mod post_commands;
+mod hooks;
+#[cfg(feature = "llm")]
+mod llm;
+mod services;
+mod state;
+mod vcs;
 
 use cli::Commands;
 
 #[derive(Parser)]
-#[command(name = "pgbranch")]
-#[command(about = "A tool for creating PostgreSQL database branches that sync with Git branches")]
-#[command(version = "0.2.0")]
+#[command(name = "devflow")]
+#[command(about = "A universal development environment branching tool")]
+#[command(version = "0.3.0")]
 #[command(disable_help_subcommand = true)]
 #[command(help_template = "\
 {name} {version}
@@ -42,12 +44,15 @@ Info:
   status              Show current project and backend status
 
 Setup & Config:
-  init                Initialize pgbranch configuration
+  init                Initialize devflow configuration
   config              Show current configuration (-v for precedence details)
   doctor              Run diagnostics and check system health
   install-hooks       Install Git hooks
   uninstall-hooks     Uninstall Git hooks
-  worktree-setup      Set up pgbranch in a Git worktree
+  worktree-setup      Set up devflow in a Git worktree
+
+VCS:
+  commit              Commit staged changes (--ai for AI-generated message)
 
 Options:
 {options}")]

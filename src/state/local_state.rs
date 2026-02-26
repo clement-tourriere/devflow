@@ -209,7 +209,7 @@ impl LocalStateManager {
     }
 
     fn get_project_key(&self, project_path: &Path) -> Option<String> {
-        // Use the canonical path of the directory containing .pgbranch.yml as the project key
+        // Use the canonical path of the directory containing .devflow.yml as the project key
         project_path
             .parent()
             .and_then(|dir| dir.canonicalize().ok())
@@ -219,7 +219,7 @@ impl LocalStateManager {
     fn get_state_file_path() -> Result<PathBuf> {
         let config_dir = dirs::config_dir()
             .context("Failed to get user config directory")?
-            .join("pgbranch");
+            .join("devflow");
 
         // Ensure the config directory exists
         fs::create_dir_all(&config_dir).with_context(|| {
@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn test_project_key_generation() {
         let temp_dir = TempDir::new().unwrap();
-        let config_path = temp_dir.path().join(".pgbranch.yml");
+        let config_path = temp_dir.path().join(".devflow.yml");
 
         let manager = LocalStateManager::new().unwrap();
         let project_key = manager.get_project_key(&config_path);
@@ -294,7 +294,7 @@ mod tests {
     #[test]
     fn test_current_branch_operations() {
         let temp_dir = TempDir::new().unwrap();
-        let config_path = temp_dir.path().join(".pgbranch.yml");
+        let config_path = temp_dir.path().join(".devflow.yml");
 
         let mut manager = LocalStateManager::new().unwrap();
 

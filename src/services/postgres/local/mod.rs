@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use uuid::Uuid;
 
-use super::{
-    BranchInfo, ConnectionInfo, DatabaseBranchingBackend, DoctorCheck, DoctorReport, ProjectInfo,
+use super::super::{
+    BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceBackend,
 };
 use crate::config::{Config, LocalBackendConfig};
 use docker::{DockerRuntime, ReserveBranchSpec, StartBranchSpec};
@@ -167,7 +167,7 @@ impl LocalBackend {
 }
 
 #[async_trait]
-impl DatabaseBranchingBackend for LocalBackend {
+impl ServiceBackend for LocalBackend {
     async fn create_branch(
         &self,
         branch_name: &str,

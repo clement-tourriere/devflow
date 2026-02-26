@@ -1,4 +1,4 @@
-use super::{BranchInfo, ConnectionInfo, DatabaseBranchingBackend, DoctorCheck, DoctorReport};
+use super::super::{BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ServiceBackend};
 use crate::config::Config;
 use crate::database::DatabaseManager;
 use anyhow::Result;
@@ -26,7 +26,7 @@ impl PostgresTemplateBackend {
 }
 
 #[async_trait]
-impl DatabaseBranchingBackend for PostgresTemplateBackend {
+impl ServiceBackend for PostgresTemplateBackend {
     async fn create_branch(
         &self,
         branch_name: &str,

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,6 +21,10 @@ pub struct Config {
     pub backends: Option<Vec<NamedBackendConfig>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorktreeConfig>,
+    /// New hook engine configuration (Phase 2).
+    /// Maps hook phase names to named hook entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<crate::hooks::HooksConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +32,18 @@ pub struct NamedBackendConfig {
     pub name: String,
     #[serde(rename = "type", default = "default_backend_type")]
     pub backend_type: String,
+    /// Service type: postgres, clickhouse, mysql, generic (default: postgres)
+    #[serde(
+        default = "default_service_type",
+        skip_serializing_if = "is_default_service_type"
+    )]
+    pub service_type: String,
+    /// Whether to automatically branch this service when git branches are created
+    #[serde(
+        default = "default_auto_branch",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub auto_branch: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -37,12 +54,25 @@ pub struct NamedBackendConfig {
     pub dblab: Option<DBLabConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "xata_lite")]
     pub xata: Option<XataConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clickhouse: Option<ClickHouseConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mysql: Option<MySQLConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generic: Option<GenericDockerConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<PluginConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendConfig {
     #[serde(rename = "type", default = "default_backend_type")]
     pub backend_type: String,
+    #[serde(
+        default = "default_service_type",
+        skip_serializing_if = "is_default_service_type"
+    )]
+    pub service_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local: Option<LocalBackendConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -51,6 +81,14 @@ pub struct BackendConfig {
     pub dblab: Option<DBLabConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "xata_lite")]
     pub xata: Option<XataConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clickhouse: Option<ClickHouseConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mysql: Option<MySQLConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generic: Option<GenericDockerConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<PluginConfig>,
 }
 
 fn default_backend_type() -> String {
@@ -106,10 +144,149 @@ fn default_xata_base_url() -> String {
     "https://api.xata.tech".to_string()
 }
 
+pub fn default_service_type() -> String {
+    "postgres".to_string()
+}
+
+fn is_default_service_type(s: &String) -> bool {
+    s == "postgres"
+}
+
+pub fn default_auto_branch() -> bool {
+    true
+}
+
+/// Configuration for a ClickHouse local backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClickHouseConfig {
+    /// Docker image (default: clickhouse/clickhouse-server:latest)
+    #[serde(default = "default_clickhouse_image")]
+    pub image: String,
+    /// Start of port range for branch-specific instances
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_range_start: Option<u16>,
+    /// Data root directory for persistent storage
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_root: Option<String>,
+    /// Default ClickHouse user
+    #[serde(default = "default_clickhouse_user")]
+    pub user: String,
+    /// Default ClickHouse password
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
+fn default_clickhouse_image() -> String {
+    "clickhouse/clickhouse-server:latest".to_string()
+}
+
+fn default_clickhouse_user() -> String {
+    "default".to_string()
+}
+
+/// Configuration for a MySQL/MariaDB local backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MySQLConfig {
+    /// Docker image (default: mysql:8)
+    #[serde(default = "default_mysql_image")]
+    pub image: String,
+    /// Start of port range for branch-specific instances
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_range_start: Option<u16>,
+    /// Data root directory for persistent storage
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_root: Option<String>,
+    /// Root password for MySQL
+    #[serde(default = "default_mysql_root_password")]
+    pub root_password: String,
+    /// Default database name
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    /// Default user
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// Default user password
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
+fn default_mysql_image() -> String {
+    "mysql:8".to_string()
+}
+
+fn default_mysql_root_password() -> String {
+    "dev".to_string()
+}
+
+/// Configuration for a plugin-based service backend.
+///
+/// Plugin backends delegate all operations to an external executable that
+/// communicates over JSON on stdin/stdout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginConfig {
+    /// Path to the plugin executable (absolute or relative to project root).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Plugin name — resolved as `devflow-plugin-{name}` on PATH.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Timeout in seconds for each plugin invocation (default: 30).
+    #[serde(default = "default_plugin_timeout")]
+    pub timeout: u64,
+    /// Opaque configuration passed to the plugin as JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+}
+
+fn default_plugin_timeout() -> u64 {
+    30
+}
+
+/// Configuration for a generic Docker service backend.
+///
+/// Generic services run arbitrary Docker images and can optionally be "branched"
+/// by creating isolated containers per branch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenericDockerConfig {
+    /// Docker image to run
+    pub image: String,
+    /// Port mapping in Docker format (e.g. "6379:6379")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_mapping: Option<String>,
+    /// Start of port range for branch-specific instances
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_range_start: Option<u16>,
+    /// Environment variables to pass to the container
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub environment: HashMap<String, String>,
+    /// Docker volumes to mount (host:container format)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volumes: Vec<String>,
+    /// Custom command to run (overrides image CMD)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Health check command
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub healthcheck: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorktreeConfig {
+    /// Whether worktree mode is enabled (default: false).
+    /// When true, `devflow switch` creates Git worktrees instead of `git checkout`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Path template for new worktrees.
+    /// Supports `{repo}` and `{branch}` placeholders.
+    /// Default: `"../{repo}.{branch}"`
+    #[serde(default = "default_worktree_path_template")]
+    pub path_template: String,
+    /// Files to copy from the main worktree into each new worktree.
     #[serde(default)]
     pub copy_files: Vec<String>,
+    /// Also copy files that are git-ignored (e.g. `.env.local`).
+    #[serde(default)]
+    pub copy_ignored: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +393,10 @@ fn default_main_branch() -> String {
     "main".to_string()
 }
 
+fn default_worktree_path_template() -> String {
+    "../{repo}.{branch}".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BehaviorConfig {
     pub auto_cleanup: bool,
@@ -318,7 +499,7 @@ impl Default for DatabaseConfig {
             user: "postgres".to_string(),
             password: None,
             template_database: "template0".to_string(),
-            database_prefix: "pgbranch".to_string(),
+            database_prefix: "devflow".to_string(),
             auth: AuthConfig {
                 methods: vec![
                     AuthMethod::Environment,
@@ -368,6 +549,7 @@ impl Default for Config {
             backend: None,
             backends: None,
             worktree: None,
+            hooks: None,
         }
     }
 }
@@ -378,7 +560,7 @@ impl Config {
             let config = Self::from_file(&config_path)?;
             Ok((config, Some(config_path)))
         } else {
-            log::info!("No .pgbranch file found, using default configuration");
+            log::info!("No .devflow file found, using default configuration");
             Ok((Config::default(), None))
         }
     }
@@ -412,7 +594,7 @@ impl Config {
 
         loop {
             // Check for YAML format only
-            for filename in [".pgbranch.yml", ".pgbranch.yaml"] {
+            for filename in [".devflow.yml", ".devflow.yaml"] {
                 let config_path = current_dir.join(filename);
                 if config_path.exists() {
                     return Ok(Some(config_path));
@@ -609,11 +791,17 @@ impl Config {
             vec![NamedBackendConfig {
                 name: "default".to_string(),
                 backend_type: backend.backend_type.clone(),
+                service_type: backend.service_type.clone(),
+                auto_branch: default_auto_branch(),
                 default: true,
                 local: backend.local.clone(),
                 neon: backend.neon.clone(),
                 dblab: backend.dblab.clone(),
                 xata: backend.xata.clone(),
+                clickhouse: backend.clickhouse.clone(),
+                mysql: backend.mysql.clone(),
+                generic: backend.generic.clone(),
+                plugin: backend.plugin.clone(),
             }]
         } else {
             vec![]
@@ -678,11 +866,17 @@ impl Config {
             self.backends = Some(vec![NamedBackendConfig {
                 name: "default".to_string(),
                 backend_type: backend.backend_type,
+                service_type: backend.service_type,
+                auto_branch: default_auto_branch(),
                 default: true,
                 local: backend.local,
                 neon: backend.neon,
                 dblab: backend.dblab,
                 xata: backend.xata,
+                clickhouse: backend.clickhouse,
+                mysql: backend.mysql,
+                generic: backend.generic,
+                plugin: backend.plugin,
             }]);
             true
         } else {
@@ -732,9 +926,9 @@ impl Config {
             let mut lc = LocalConfig::load_from_project_dir(path.parent().unwrap())?;
             // If no local config found and we're in a worktree, try the main worktree
             if lc.is_none() {
-                if let Ok(git_repo) = crate::git::GitRepository::new(".") {
-                    if git_repo.is_worktree() {
-                        if let Some(main_dir) = git_repo.get_main_worktree_dir() {
+                if let Ok(vcs_repo) = crate::vcs::detect_vcs_provider(".") {
+                    if vcs_repo.is_worktree() {
+                        if let Some(main_dir) = vcs_repo.main_worktree_dir() {
                             lc = LocalConfig::load_from_project_dir(&main_dir)?;
                         }
                     }
@@ -758,7 +952,7 @@ impl Config {
 
 impl LocalConfig {
     pub fn load_from_project_dir(project_dir: &Path) -> Result<Option<Self>> {
-        let local_config_path = project_dir.join(".pgbranch.local.yml");
+        let local_config_path = project_dir.join(".devflow.local.yml");
 
         if !local_config_path.exists() {
             return Ok(None);
@@ -786,20 +980,20 @@ impl LocalConfig {
 impl EnvConfig {
     pub fn load_from_env() -> Result<Self> {
         let env_config = EnvConfig {
-            disabled: Self::parse_bool_env("PGBRANCH_DISABLED")?,
-            skip_hooks: Self::parse_bool_env("PGBRANCH_SKIP_HOOKS")?,
-            auto_create: Self::parse_bool_env("PGBRANCH_AUTO_CREATE")?,
-            auto_switch: Self::parse_bool_env("PGBRANCH_AUTO_SWITCH")?,
-            current_branch_disabled: Self::parse_bool_env("PGBRANCH_CURRENT_BRANCH_DISABLED")?,
-            branch_filter_regex: env::var("PGBRANCH_BRANCH_FILTER_REGEX").ok(),
-            database_host: env::var("PGBRANCH_DATABASE_HOST").ok(),
-            database_user: env::var("PGBRANCH_DATABASE_USER").ok(),
-            database_password: env::var("PGBRANCH_DATABASE_PASSWORD").ok(),
-            database_prefix: env::var("PGBRANCH_DATABASE_PREFIX").ok(),
-            database_port: env::var("PGBRANCH_DATABASE_PORT")
+            disabled: Self::parse_bool_env("DEVFLOW_DISABLED")?,
+            skip_hooks: Self::parse_bool_env("DEVFLOW_SKIP_HOOKS")?,
+            auto_create: Self::parse_bool_env("DEVFLOW_AUTO_CREATE")?,
+            auto_switch: Self::parse_bool_env("DEVFLOW_AUTO_SWITCH")?,
+            current_branch_disabled: Self::parse_bool_env("DEVFLOW_CURRENT_BRANCH_DISABLED")?,
+            branch_filter_regex: env::var("DEVFLOW_BRANCH_FILTER_REGEX").ok(),
+            database_host: env::var("DEVFLOW_DATABASE_HOST").ok(),
+            database_user: env::var("DEVFLOW_DATABASE_USER").ok(),
+            database_password: env::var("DEVFLOW_DATABASE_PASSWORD").ok(),
+            database_prefix: env::var("DEVFLOW_DATABASE_PREFIX").ok(),
+            database_port: env::var("DEVFLOW_DATABASE_PORT")
                 .ok()
                 .and_then(|s| s.parse().ok()),
-            disabled_branches: env::var("PGBRANCH_DISABLED_BRANCHES")
+            disabled_branches: env::var("DEVFLOW_DISABLED_BRANCHES")
                 .ok()
                 .map(|s| s.split(',').map(|s| s.trim().to_string()).collect()),
         };
@@ -906,10 +1100,10 @@ impl EffectiveConfig {
             return Ok(true);
         }
 
-        // Get current Git branch and check if it's disabled
-        match crate::git::GitRepository::new(".") {
-            Ok(git_repo) => {
-                if let Ok(Some(current_branch)) = git_repo.get_current_branch() {
+        // Get current VCS branch and check if it's disabled
+        match crate::vcs::detect_vcs_provider(".") {
+            Ok(vcs_repo) => {
+                if let Ok(Some(current_branch)) = vcs_repo.current_branch() {
                     Ok(self.is_branch_disabled(&current_branch))
                 } else {
                     Ok(false)
@@ -1063,5 +1257,418 @@ impl TemplateContext {
             template_db: config.database.template_database.clone(),
             prefix: config.database.database_prefix.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hooks_yaml_parsing_simple() {
+        let yaml = r#"
+git:
+  auto_create_on_branch: true
+  auto_switch_on_branch: true
+  main_branch: main
+  exclude_branches: [main, master]
+behavior:
+  auto_cleanup: false
+  naming_strategy: prefix
+hooks:
+  post-service-create:
+    install: "npm ci"
+    migrate: "npx prisma migrate deploy"
+  post-switch:
+    env: "echo DATABASE_URL=postgresql://{{ service.db.user }}@{{ service.db.host }}:{{ service.db.port }}/{{ service.db.database }}"
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+
+        let hooks = config.hooks.expect("hooks should be Some");
+        assert_eq!(hooks.len(), 2);
+
+        let post_create = hooks
+            .get(&crate::hooks::HookPhase::PostServiceCreate)
+            .expect("post-service-create phase should exist");
+        assert_eq!(post_create.len(), 2);
+
+        // Simple hook entries
+        match post_create.get("install").unwrap() {
+            crate::hooks::HookEntry::Simple(cmd) => assert_eq!(cmd, "npm ci"),
+            _ => panic!("Expected Simple hook entry"),
+        }
+    }
+
+    #[test]
+    fn test_hooks_yaml_parsing_extended() {
+        let yaml = r#"
+git:
+  auto_create_on_branch: true
+  auto_switch_on_branch: true
+  main_branch: main
+  exclude_branches: [main]
+behavior:
+  auto_cleanup: false
+  naming_strategy: prefix
+hooks:
+  post-switch:
+    setup:
+      command: "npm run setup"
+      working_dir: frontend
+      condition: "file_exists:frontend/package.json"
+      continue_on_error: true
+      environment:
+        NODE_ENV: development
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+
+        let hooks = config.hooks.expect("hooks should be Some");
+        let post_switch = hooks
+            .get(&crate::hooks::HookPhase::PostSwitch)
+            .expect("post-switch phase should exist");
+
+        match post_switch.get("setup").unwrap() {
+            crate::hooks::HookEntry::Extended(ext) => {
+                assert_eq!(ext.command, "npm run setup");
+                assert_eq!(ext.working_dir.as_deref(), Some("frontend"));
+                assert_eq!(
+                    ext.condition.as_deref(),
+                    Some("file_exists:frontend/package.json")
+                );
+                assert_eq!(ext.continue_on_error, Some(true));
+                assert!(ext.environment.is_some());
+                assert_eq!(
+                    ext.environment.as_ref().unwrap().get("NODE_ENV").unwrap(),
+                    "development"
+                );
+            }
+            _ => panic!("Expected Extended hook entry"),
+        }
+    }
+
+    #[test]
+    fn test_no_hooks_parses_as_none() {
+        let yaml = r#"
+git:
+  auto_create_on_branch: true
+  auto_switch_on_branch: true
+  main_branch: main
+  exclude_branches: [main]
+behavior:
+  auto_cleanup: false
+  naming_strategy: prefix
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+        assert!(config.hooks.is_none());
+    }
+
+    #[test]
+    fn test_multi_service_backends_parsing() {
+        let yaml = r#"
+git:
+  auto_create_on_branch: true
+  main_branch: main
+  exclude_branches: [main]
+behavior:
+  auto_cleanup: false
+  naming_strategy: prefix
+backends:
+  - name: db
+    type: local
+    service_type: postgres
+    auto_branch: true
+    local:
+      image: postgres:16
+      port_range_start: 15432
+  - name: analytics
+    type: local
+    service_type: clickhouse
+    auto_branch: true
+    clickhouse:
+      image: clickhouse/clickhouse-server:24
+      port_range_start: 18123
+      user: analytics
+  - name: legacy-db
+    type: local
+    service_type: mysql
+    auto_branch: false
+    mysql:
+      image: mysql:8
+      root_password: secret
+      database: legacy
+      user: app
+      password: apppass
+  - name: cache
+    type: local
+    service_type: generic
+    auto_branch: true
+    generic:
+      image: redis:7
+      port_mapping: "6379:6379"
+      environment:
+        REDIS_MAXMEMORY: "256mb"
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+
+        let backends = config.resolve_backends();
+        assert_eq!(backends.len(), 4);
+
+        // Postgres backend
+        assert_eq!(backends[0].name, "db");
+        assert_eq!(backends[0].service_type, "postgres");
+        assert!(backends[0].auto_branch);
+        assert!(backends[0].local.is_some());
+        assert_eq!(
+            backends[0].local.as_ref().unwrap().port_range_start,
+            Some(15432)
+        );
+
+        // ClickHouse backend
+        assert_eq!(backends[1].name, "analytics");
+        assert_eq!(backends[1].service_type, "clickhouse");
+        assert!(backends[1].auto_branch);
+        let ch = backends[1].clickhouse.as_ref().expect("clickhouse config");
+        assert_eq!(ch.image, "clickhouse/clickhouse-server:24");
+        assert_eq!(ch.port_range_start, Some(18123));
+        assert_eq!(ch.user, "analytics");
+
+        // MySQL backend — auto_branch is false
+        assert_eq!(backends[2].name, "legacy-db");
+        assert_eq!(backends[2].service_type, "mysql");
+        assert!(!backends[2].auto_branch);
+        let mysql = backends[2].mysql.as_ref().expect("mysql config");
+        assert_eq!(mysql.root_password, "secret");
+        assert_eq!(mysql.database.as_deref(), Some("legacy"));
+        assert_eq!(mysql.user.as_deref(), Some("app"));
+        assert_eq!(mysql.password.as_deref(), Some("apppass"));
+
+        // Generic Docker backend
+        assert_eq!(backends[3].name, "cache");
+        assert_eq!(backends[3].service_type, "generic");
+        assert!(backends[3].auto_branch);
+        let generic = backends[3].generic.as_ref().expect("generic config");
+        assert_eq!(generic.image, "redis:7");
+        assert_eq!(generic.port_mapping.as_deref(), Some("6379:6379"));
+        assert_eq!(generic.environment.get("REDIS_MAXMEMORY").unwrap(), "256mb");
+    }
+
+    #[test]
+    fn test_clickhouse_config_defaults() {
+        let yaml = r#"
+git:
+  auto_create_on_branch: true
+  main_branch: main
+  exclude_branches: [main]
+behavior:
+  auto_cleanup: false
+  naming_strategy: prefix
+backends:
+  - name: ch
+    type: local
+    service_type: clickhouse
+    clickhouse: {}
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+        let backends = config.resolve_backends();
+        let ch = backends[0].clickhouse.as_ref().unwrap();
+        assert_eq!(ch.image, "clickhouse/clickhouse-server:latest");
+        assert_eq!(ch.user, "default");
+        assert!(ch.password.is_none());
+        assert!(ch.port_range_start.is_none());
+    }
+
+    #[test]
+    fn test_mysql_config_defaults() {
+        let yaml = r#"
+git:
+  auto_create_on_branch: true
+  main_branch: main
+  exclude_branches: [main]
+behavior:
+  auto_cleanup: false
+  naming_strategy: prefix
+backends:
+  - name: mysql
+    type: local
+    service_type: mysql
+    mysql: {}
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+        let backends = config.resolve_backends();
+        let mysql = backends[0].mysql.as_ref().unwrap();
+        assert_eq!(mysql.image, "mysql:8");
+        assert_eq!(mysql.root_password, "dev");
+        assert!(mysql.database.is_none());
+        assert!(mysql.user.is_none());
+    }
+
+    #[test]
+    fn test_generic_docker_config_parsing() {
+        let yaml = r#"
+git:
+  auto_create_on_branch: true
+  main_branch: main
+  exclude_branches: [main]
+behavior:
+  auto_cleanup: false
+  naming_strategy: prefix
+backends:
+  - name: mq
+    type: local
+    service_type: generic
+    generic:
+      image: rabbitmq:3-management
+      port_range_start: 15672
+      environment:
+        RABBITMQ_DEFAULT_USER: guest
+        RABBITMQ_DEFAULT_PASS: guest
+      volumes:
+        - "/tmp/rabbitmq:/var/lib/rabbitmq"
+      command: "rabbitmq-server"
+      healthcheck: "rabbitmq-diagnostics -q ping"
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+        let backends = config.resolve_backends();
+        let generic = backends[0].generic.as_ref().unwrap();
+        assert_eq!(generic.image, "rabbitmq:3-management");
+        assert_eq!(generic.port_range_start, Some(15672));
+        assert_eq!(generic.environment.len(), 2);
+        assert_eq!(generic.volumes, vec!["/tmp/rabbitmq:/var/lib/rabbitmq"]);
+        assert_eq!(generic.command.as_deref(), Some("rabbitmq-server"));
+        assert_eq!(
+            generic.healthcheck.as_deref(),
+            Some("rabbitmq-diagnostics -q ping")
+        );
+    }
+
+    #[test]
+    fn test_service_type_defaults_to_postgres() {
+        let yaml = r#"
+git:
+  auto_create_on_branch: true
+  main_branch: main
+  exclude_branches: [main]
+behavior:
+  auto_cleanup: false
+  naming_strategy: prefix
+backends:
+  - name: mydb
+    type: local
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+        let backends = config.resolve_backends();
+        assert_eq!(backends[0].service_type, "postgres");
+        assert!(backends[0].auto_branch); // default is true
+    }
+
+    #[test]
+    fn test_auto_branch_filtering() {
+        let yaml = r#"
+git:
+  auto_create_on_branch: true
+  main_branch: main
+  exclude_branches: [main]
+behavior:
+  auto_cleanup: false
+  naming_strategy: prefix
+backends:
+  - name: primary
+    type: local
+    auto_branch: true
+  - name: shared
+    type: local
+    auto_branch: false
+  - name: analytics
+    type: local
+    service_type: clickhouse
+    auto_branch: true
+    clickhouse: {}
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+        let backends = config.resolve_backends();
+        let auto_branch_backends: Vec<_> = backends.iter().filter(|b| b.auto_branch).collect();
+        assert_eq!(auto_branch_backends.len(), 2);
+        assert_eq!(auto_branch_backends[0].name, "primary");
+        assert_eq!(auto_branch_backends[1].name, "analytics");
+    }
+
+    #[test]
+    fn test_single_backend_resolves_to_named() {
+        let yaml = r#"
+git:
+  auto_create_on_branch: true
+  main_branch: main
+  exclude_branches: [main]
+behavior:
+  auto_cleanup: false
+  naming_strategy: prefix
+backend:
+  type: local
+  service_type: clickhouse
+  clickhouse:
+    image: clickhouse/clickhouse-server:23
+    user: admin
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+        let backends = config.resolve_backends();
+        assert_eq!(backends.len(), 1);
+        assert_eq!(backends[0].name, "default");
+        assert_eq!(backends[0].service_type, "clickhouse");
+        assert!(backends[0].default);
+        let ch = backends[0].clickhouse.as_ref().unwrap();
+        assert_eq!(ch.image, "clickhouse/clickhouse-server:23");
+        assert_eq!(ch.user, "admin");
+    }
+
+    #[test]
+    fn test_plugin_backend_config_parsing() {
+        let yaml = r#"
+git:
+  auto_create_on_branch: true
+  main_branch: main
+  exclude_branches: [main]
+behavior:
+  auto_cleanup: false
+  naming_strategy: prefix
+backends:
+  - name: my-redis
+    service_type: plugin
+    auto_branch: true
+    plugin:
+      path: "./plugins/devflow-redis"
+      timeout: 45
+      config:
+        image: "redis:7-alpine"
+        port: 16379
+  - name: my-cache
+    service_type: plugin
+    plugin:
+      name: memcached
+      config:
+        memory: 256
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+        let backends = config.resolve_backends();
+        assert_eq!(backends.len(), 2);
+
+        // First plugin backend
+        assert_eq!(backends[0].name, "my-redis");
+        assert_eq!(backends[0].service_type, "plugin");
+        assert!(backends[0].auto_branch);
+        let plugin = backends[0].plugin.as_ref().unwrap();
+        assert_eq!(plugin.path.as_deref(), Some("./plugins/devflow-redis"));
+        assert!(plugin.name.is_none());
+        assert_eq!(plugin.timeout, 45);
+        let cfg = plugin.config.as_ref().unwrap();
+        assert_eq!(cfg["image"], "redis:7-alpine");
+        assert_eq!(cfg["port"], 16379);
+
+        // Second plugin backend (name-based resolution)
+        assert_eq!(backends[1].name, "my-cache");
+        assert_eq!(backends[1].service_type, "plugin");
+        let plugin2 = backends[1].plugin.as_ref().unwrap();
+        assert!(plugin2.path.is_none());
+        assert_eq!(plugin2.name.as_deref(), Some("memcached"));
+        assert_eq!(plugin2.timeout, 30); // default
     }
 }
