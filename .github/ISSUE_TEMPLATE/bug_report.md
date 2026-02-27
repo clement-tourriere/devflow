@@ -27,7 +27,7 @@ What actually happened. Include full error output if available.
 - **devflow version**: (`devflow --version`)
 - **OS**: (e.g. macOS 14, Ubuntu 24.04)
 - **Docker version**: (`docker --version`)
-- **Backend type**: (local, postgres_template, neon, dblab, xata, plugin)
+- **Provider type**: (local, postgres_template, neon, dblab, xata, plugin)
 - **Shell**: (bash, zsh, fish)
 
 ## Config (if relevant)
@@ -39,5 +39,5 @@ What actually happened. Include full error output if available.
 ## Logs
 
 ```
-# Output of `devflow doctor` or container logs (`devflow logs <branch>`)
+# Output of `devflow doctor` or container logs (`devflow service logs <branch>`)
 ```

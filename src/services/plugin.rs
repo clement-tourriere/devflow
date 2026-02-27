@@ -1,6 +1,6 @@
-//! Plugin service backend.
+//! Plugin service provider.
 //!
-//! Delegates all `ServiceBackend` operations to an external executable that
+//! Delegates all `ServiceProvider` operations to an external executable that
 //! communicates over JSON on stdin/stdout (one process spawn per method call).
 //!
 //! ## Protocol
@@ -38,11 +38,11 @@ use tokio::process::Command;
 
 use crate::config::PluginConfig;
 use crate::services::{
-    BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceBackend,
+    BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceProvider,
 };
 
-/// A service backend that delegates to an external plugin executable.
-pub struct PluginBackend {
+/// A service provider that delegates to an external plugin executable.
+pub struct PluginProvider {
     /// Logical service name from the config (e.g. "my-redis").
     service_name: String,
     /// Resolved path to the plugin executable.
@@ -53,8 +53,8 @@ pub struct PluginBackend {
     plugin_config: Option<serde_json::Value>,
 }
 
-impl PluginBackend {
-    /// Create a new `PluginBackend` from the service name and plugin config.
+impl PluginProvider {
+    /// Create a new `PluginProvider` from the service name and plugin config.
     ///
     /// Resolves the executable path from either `path` (direct) or `name`
     /// (looked up as `devflow-plugin-{name}` on `$PATH`).
@@ -217,7 +217,7 @@ impl PluginBackend {
 }
 
 #[async_trait]
-impl ServiceBackend for PluginBackend {
+impl ServiceProvider for PluginProvider {
     async fn create_branch(
         &self,
         branch_name: &str,
@@ -344,12 +344,12 @@ impl ServiceBackend for PluginBackend {
         // Sync method — can't invoke async plugin. Return basic info.
         Some(ProjectInfo {
             name: self.service_name.clone(),
-            storage_backend: Some("plugin".to_string()),
+            storage_driver: Some("plugin".to_string()),
             image: Some(self.executable.display().to_string()),
         })
     }
 
-    fn backend_name(&self) -> &'static str {
+    fn provider_name(&self) -> &'static str {
         "plugin"
     }
 }

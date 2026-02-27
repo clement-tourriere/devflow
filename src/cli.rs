@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::config::{Config, EffectiveConfig};
-use crate::services::{self, ServiceBackend};
+use crate::services::{self, ServiceProvider};
 
 use crate::docker;
 use crate::hooks::{
@@ -15,71 +15,9 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum Commands {
-    #[command(
-        about = "Create a new service branch",
-        long_about = "Create a new service branch.\n\nCreates Docker containers and/or cloud branches for the specified branch name.\nIf worktrees are enabled, also creates a Git worktree directory.\n\nExamples:\n  devflow create feature-auth\n  devflow create feature-auth --from develop"
-    )]
-    Create {
-        #[arg(help = "Name of the branch to create")]
-        branch_name: String,
-        #[arg(long, help = "Parent branch to clone from")]
-        from: Option<String>,
-    },
-    #[command(
-        about = "Delete a service branch (keeps Git branch and worktree)",
-        long_about = "Delete a service branch (keeps Git branch and worktree).\n\nRemoves service branches (containers, cloud branches) but preserves the Git branch\nand any worktree directory. Use 'devflow remove' to delete everything including\nthe Git branch and worktree.\n\nExamples:\n  devflow delete feature-auth"
-    )]
-    Delete {
-        #[arg(help = "Name of the branch to delete")]
-        branch_name: String,
-    },
+    // ── Branch Management ──
     #[command(about = "List all branches (with service + worktree status)")]
     List,
-    #[command(
-        about = "Initialize devflow configuration",
-        long_about = "Initialize devflow configuration.\n\nCreates a .devflow.yml config file and sets up the first service backend.\nOn subsequent runs, adds additional backends to the project.\n\nExamples:\n  devflow init                              # Auto-detect name from directory\n  devflow init myapp                        # Explicit name\n  devflow init myapp --backend neon         # Use Neon cloud backend\n  devflow init analytics --service-type clickhouse  # Add ClickHouse service\n  devflow init myapp --from dump.sql        # Seed from a local dump file\n  devflow init myapp --from postgresql://user:pass@host/db  # Seed from URL"
-    )]
-    Init {
-        #[arg(help = "Database/backend name (defaults to project directory name)")]
-        name: Option<String>,
-        #[arg(long, help = "Force overwrite existing configuration")]
-        force: bool,
-        #[arg(
-            long,
-            help = "Backend type to use (local, postgres_template, neon, dblab, xata)"
-        )]
-        backend: Option<String>,
-        #[arg(
-            long,
-            help = "Seed main branch from source (PostgreSQL URL, file path, or s3:// URL)"
-        )]
-        from: Option<String>,
-    },
-    #[command(about = "Clean up old service branches")]
-    Cleanup {
-        #[arg(long, help = "Maximum number of branches to keep")]
-        max_count: Option<usize>,
-    },
-    #[command(about = "Show current configuration")]
-    Config {
-        #[arg(
-            short,
-            long,
-            help = "Show effective configuration with precedence details"
-        )]
-        verbose: bool,
-    },
-    #[command(about = "Install Git hooks")]
-    InstallHooks,
-    #[command(about = "Uninstall Git hooks")]
-    UninstallHooks,
-    #[command(about = "Handle Git hook execution", hide = true)]
-    GitHook {
-        #[arg(long, hide = true)]
-        worktree: bool,
-        #[arg(long, hide = true)]
-        main_worktree_dir: Option<String>,
-    },
     #[command(
         about = "Switch to a branch (creates worktree/service branches if needed)",
         long_about = "Switch to a branch (creates worktree/service branches if needed).\n\nWith no arguments, shows an interactive branch picker with fuzzy search.\nWith a branch name, switches to that branch, creating service branches and\nworktrees if they don't exist.\n\nExamples:\n  devflow switch                     # Interactive picker\n  devflow switch feature-auth        # Switch to existing branch\n  devflow switch -c feature-new      # Create new Git branch and switch\n  devflow switch --template           # Switch to main/template\n  devflow switch feature-auth -x 'npm run migrate'  # Run command after switch"
@@ -104,56 +42,9 @@ pub enum Commands {
         #[arg(long, help = "Simulate switching without actual operations")]
         dry_run: bool,
     },
-    #[command(about = "Start a stopped branch container (local backend)")]
-    Start {
-        #[arg(help = "Name of the branch to start")]
-        branch_name: String,
-    },
-    #[command(about = "Stop a running branch container (local backend)")]
-    Stop {
-        #[arg(help = "Name of the branch to stop")]
-        branch_name: String,
-    },
-    #[command(about = "Reset a branch to its parent state (local backend)")]
-    Reset {
-        #[arg(help = "Name of the branch to reset")]
-        branch_name: String,
-    },
-    #[command(about = "Run diagnostics and check system health")]
-    Doctor,
-    #[command(
-        about = "Show connection info for a service branch",
-        long_about = "Show connection info for a service branch.\n\nOutputs connection details in various formats for use in scripts and configuration.\n\nExamples:\n  devflow connection feature-auth              # Connection URI\n  devflow connection feature-auth --format env  # Environment variables\n  devflow connection feature-auth --format json # JSON object"
-    )]
-    Connection {
-        #[arg(help = "Name of the branch")]
-        branch_name: String,
-        #[arg(long, help = "Output format: uri, env, or json")]
-        format: Option<String>,
-    },
-    #[command(about = "Show current project and backend status")]
-    Status,
-    #[command(
-        about = "Show automation capabilities",
-        long_about = "Show automation capabilities.
-
-Returns a machine-readable summary of devflow's automation contract, including
-JSON output behavior, non-interactive guarantees, and recommended command usage
-for AI agents and CI pipelines.
-
-Examples:
-  devflow capabilities
-  devflow --json capabilities"
-    )]
-    Capabilities,
-    #[command(about = "Destroy all branches and data for a service (local backend)")]
-    Destroy {
-        #[arg(long, help = "Skip confirmation prompt")]
-        force: bool,
-    },
     #[command(
         about = "Remove a branch, its worktree, and associated service branches",
-        long_about = "Remove a branch, its worktree, and associated service branches.\n\nThis is a comprehensive cleanup command that removes:\n  - The Git branch\n  - The worktree directory (if any)\n  - All associated service branches (containers, cloud branches)\n\nUnlike 'devflow delete' which only removes service branches, 'remove' cleans\nup everything related to the branch.\n\nExamples:\n  devflow remove feature-auth\n  devflow remove feature-auth --force\n  devflow remove feature-auth --keep-services  # Only remove worktree + git branch"
+        long_about = "Remove a branch, its worktree, and associated service branches.\n\nThis is a comprehensive cleanup command that removes:\n  - The Git branch\n  - The worktree directory (if any)\n  - All associated service branches (containers, cloud branches)\n\nUnlike 'devflow service delete' which only removes service branches, 'remove'\ncleans up everything related to the branch.\n\nExamples:\n  devflow remove feature-auth\n  devflow remove feature-auth --force\n  devflow remove feature-auth --keep-services  # Only remove worktree + git branch"
     )]
     Remove {
         #[arg(help = "Branch name to remove")]
@@ -172,6 +63,94 @@ Examples:
         #[arg(long, help = "Simulate merge without actual operations")]
         dry_run: bool,
     },
+    #[command(about = "Clean up old service branches")]
+    Cleanup {
+        #[arg(long, help = "Maximum number of branches to keep")]
+        max_count: Option<usize>,
+    },
+
+    // ── Services ──
+    #[command(
+        about = "Manage services (create, delete, start, stop, reset, ...)",
+        long_about = "Manage service providers and their branches.\n\nService commands operate on the configured service providers (local Docker,\nNeon, DBLab, etc.) to create, delete, and manage branch-isolated environments.\n\nExamples:\n  devflow service add                       # Interactive wizard\n  devflow service add mydb --provider local # Add with explicit options\n  devflow service create feature-auth       # Create service branch\n  devflow service delete feature-auth       # Delete service branch\n  devflow service start feature-auth        # Start a stopped container\n  devflow service stop feature-auth         # Stop a running container\n  devflow service reset feature-auth        # Reset to parent state\n  devflow service connection feature-auth   # Show connection info\n  devflow service status                    # Show service status\n  devflow service list                      # List configured services\n  devflow service remove mydb               # Remove a service config\n  devflow service logs feature-auth         # Show container logs\n  devflow service seed main --from dump.sql # Seed from external source\n  devflow service destroy                   # Destroy all data"
+    )]
+    Service {
+        #[command(subcommand)]
+        action: ServiceCommands,
+    },
+
+    // ── Top-level aliases ──
+    #[command(
+        about = "Show connection info for a service branch (alias for 'service connection')",
+        long_about = "Show connection info for a service branch.\n\nOutputs connection details in various formats for use in scripts and configuration.\nThis is an alias for 'devflow service connection'.\n\nExamples:\n  devflow connection feature-auth              # Connection URI\n  devflow connection feature-auth --format env  # Environment variables\n  devflow connection feature-auth --format json # JSON object"
+    )]
+    Connection {
+        #[arg(help = "Name of the branch")]
+        branch_name: String,
+        #[arg(long, help = "Output format: uri, env, or json")]
+        format: Option<String>,
+    },
+    #[command(about = "Show current project and service status")]
+    Status,
+
+    // ── VCS ──
+    #[command(about = "Commit staged changes with optional AI-generated message")]
+    Commit {
+        #[arg(short, long, help = "Commit message (skips AI generation)")]
+        message: Option<String>,
+        #[arg(long, help = "Generate commit message using LLM")]
+        ai: bool,
+        #[arg(
+            long,
+            help = "Open editor to review/edit AI-generated message before committing"
+        )]
+        edit: bool,
+        #[arg(long, help = "Show generated message without committing")]
+        dry_run: bool,
+    },
+
+    // ── Setup & Config ──
+    #[command(
+        about = "Initialize devflow configuration",
+        long_about = "Initialize devflow configuration.\n\nCreates a .devflow.yml config file. Use 'devflow service add' to configure\nservice providers after initialization.\n\nExamples:\n  devflow init                              # Auto-detect name from directory\n  devflow init myapp                        # Explicit name"
+    )]
+    Init {
+        #[arg(help = "Project name (defaults to directory name)")]
+        name: Option<String>,
+        #[arg(long, help = "Force overwrite existing configuration")]
+        force: bool,
+    },
+    #[command(about = "Show current configuration")]
+    Config {
+        #[arg(
+            short,
+            long,
+            help = "Show effective configuration with precedence details"
+        )]
+        verbose: bool,
+    },
+    #[command(about = "Run diagnostics and check system health")]
+    Doctor,
+    #[command(about = "Install Git hooks")]
+    InstallHooks,
+    #[command(about = "Uninstall Git hooks")]
+    UninstallHooks,
+    #[command(about = "Handle Git hook execution", hide = true)]
+    GitHook {
+        #[arg(long, hide = true)]
+        worktree: bool,
+        #[arg(long, hide = true)]
+        main_worktree_dir: Option<String>,
+    },
+    #[command(
+        name = "shell-init",
+        about = "Print shell integration script (eval \"$(devflow shell-init)\")",
+        long_about = "Print shell integration script.\n\nThe shell wrapper enables automatic 'cd' into worktree directories after\n'devflow switch'. Without it, switch works but you must cd manually.\n\nAdd to your shell profile:\n  eval \"$(devflow shell-init)\"        # auto-detects shell\n  eval \"$(devflow shell-init bash)\"   # ~/.bashrc\n  eval \"$(devflow shell-init zsh)\"    # ~/.zshrc\n  devflow shell-init fish | source    # ~/.config/fish/config.fish\n\nThis creates a 'devflow' shell wrapper function."
+    )]
+    ShellInit {
+        #[arg(help = "Shell type: bash, zsh, or fish (auto-detected from $SHELL if omitted)")]
+        shell: Option<String>,
+    },
     #[command(
         name = "worktree-setup",
         about = "Set up devflow in a Git worktree (copy files, create DB branch)"
@@ -188,6 +167,21 @@ Examples:
         size: Option<String>,
     },
     #[command(
+        about = "Show automation capabilities",
+        long_about = "Show automation capabilities.
+
+Returns a machine-readable summary of devflow's automation contract, including
+JSON output behavior, non-interactive guarantees, and recommended command usage
+for AI agents and CI pipelines.
+
+Examples:
+  devflow capabilities
+  devflow --json capabilities"
+    )]
+    Capabilities,
+
+    // ── Extensibility ──
+    #[command(
         about = "Manage lifecycle hooks",
         long_about = "Manage lifecycle hooks.\n\nHooks are MiniJinja-templated commands that run at specific lifecycle phases\n(post-create, post-switch, pre-merge, etc.). Configure them in .devflow.yml\nunder the 'hooks' section.\n\nExamples:\n  devflow hook show                  # List all configured hooks\n  devflow hook show post-create      # Show hooks for a specific phase\n  devflow hook run post-create       # Run hooks for a phase manually\n  devflow hook approvals             # List approved hooks\n  devflow hook approvals clear       # Clear all approvals"
     )]
@@ -196,39 +190,107 @@ Examples:
         action: HookCommands,
     },
     #[command(
-        name = "shell-init",
-        about = "Print shell integration script (eval \"$(devflow shell-init)\")",
-        long_about = "Print shell integration script.\n\nThe shell wrapper enables automatic 'cd' into worktree directories after\n'devflow switch'. Without it, switch works but you must cd manually.\n\nAdd to your shell profile:\n  eval \"$(devflow shell-init)\"        # auto-detects shell\n  eval \"$(devflow shell-init bash)\"   # ~/.bashrc\n  eval \"$(devflow shell-init zsh)\"    # ~/.zshrc\n  devflow shell-init fish | source    # ~/.config/fish/config.fish\n\nThis creates a 'devflow' shell wrapper function."
-    )]
-    ShellInit {
-        #[arg(help = "Shell type: bash, zsh, or fish (auto-detected from $SHELL if omitted)")]
-        shell: Option<String>,
-    },
-    #[command(about = "Commit staged changes with optional AI-generated message")]
-    Commit {
-        #[arg(short, long, help = "Commit message (skips AI generation)")]
-        message: Option<String>,
-        #[arg(long, help = "Generate commit message using LLM")]
-        ai: bool,
-        #[arg(
-            long,
-            help = "Open editor to review/edit AI-generated message before committing"
-        )]
-        edit: bool,
-        #[arg(long, help = "Show generated message without committing")]
-        dry_run: bool,
-    },
-    #[command(
-        about = "Manage plugin backends",
-        long_about = "Manage plugin backends.\n\nPlugins extend devflow with custom service backends via JSON-over-stdio protocol.\nAny executable that speaks the protocol can be a backend.\n\nExamples:\n  devflow plugin list                    # List configured plugin backends\n  devflow plugin check my-plugin         # Verify a plugin works\n  devflow plugin init my-plugin --lang bash  # Print a plugin scaffold script"
+        about = "Manage plugin services",
+        long_about = "Manage plugin services.\n\nPlugins extend devflow with custom service providers via JSON-over-stdio protocol.\nAny executable that speaks the protocol can be a provider.\n\nExamples:\n  devflow plugin list                    # List configured plugin services\n  devflow plugin check my-plugin         # Verify a plugin works\n  devflow plugin init my-plugin --lang bash  # Print a plugin scaffold script"
     )]
     Plugin {
         #[command(subcommand)]
         action: PluginCommands,
     },
+
+    // ── Hidden ──
+    #[command(about = "Generate shell completions", hide = true)]
+    Completions {
+        #[arg(help = "Shell to generate completions for: bash, zsh, fish, elvish, powershell")]
+        shell: clap_complete::Shell,
+    },
+}
+
+/// Subcommands for `devflow service`.
+#[derive(Subcommand)]
+pub enum ServiceCommands {
+    #[command(
+        about = "Create a new service branch",
+        long_about = "Create a new service branch.\n\nCreates Docker containers and/or cloud branches for the specified branch name.\n\nExamples:\n  devflow service create feature-auth\n  devflow service create feature-auth --from develop"
+    )]
+    Create {
+        #[arg(help = "Name of the branch to create")]
+        branch_name: String,
+        #[arg(long, help = "Parent branch to clone from")]
+        from: Option<String>,
+    },
+    #[command(
+        about = "Delete a service branch (keeps Git branch and worktree)",
+        long_about = "Delete a service branch (keeps Git branch and worktree).\n\nRemoves service branches (containers, cloud branches) but preserves the Git branch\nand any worktree directory. Use 'devflow remove' to delete everything.\n\nExamples:\n  devflow service delete feature-auth"
+    )]
+    Delete {
+        #[arg(help = "Name of the branch to delete")]
+        branch_name: String,
+    },
+    #[command(about = "List configured services")]
+    List,
+    #[command(about = "Show service status")]
+    Status,
+    #[command(
+        about = "Add a new service provider",
+        long_about = "Add a new service provider to the project.\n\nConfigures a new service provider (local Docker, Neon, ClickHouse, etc.) and\nstores it in local state. When run without flags, an interactive wizard guides\nyou through service type, provider, and name selection.\n\nExamples:\n  devflow service add                              # Interactive wizard\n  devflow service add mydb                         # Interactive (name pre-filled)\n  devflow service add mydb --provider neon          # Add Neon cloud provider\n  devflow service add analytics --provider local --service-type clickhouse"
+    )]
+    Add {
+        #[arg(help = "Service name (prompted if omitted)")]
+        name: Option<String>,
+        #[arg(long, help = "Provider type (local, postgres_template, neon, dblab, xata)")]
+        provider: Option<String>,
+        #[arg(long, help = "Service type (postgres, clickhouse, mysql, generic, plugin)")]
+        service_type: Option<String>,
+        #[arg(long, help = "Force overwrite existing service with same name")]
+        force: bool,
+        #[arg(
+            long,
+            help = "Seed main branch from source (PostgreSQL URL, file path, or s3:// URL)"
+        )]
+        from: Option<String>,
+    },
+    #[command(
+        about = "Remove a service provider configuration",
+        long_about = "Remove a service provider from local state.\n\nThis removes the service configuration but does not destroy any data.\nUse 'devflow service destroy' to remove all data first.\n\nExamples:\n  devflow service remove mydb"
+    )]
+    Remove {
+        #[arg(help = "Service name to remove")]
+        name: String,
+    },
+    #[command(about = "Start a stopped branch container (local provider)")]
+    Start {
+        #[arg(help = "Name of the branch to start")]
+        branch_name: String,
+    },
+    #[command(about = "Stop a running branch container (local provider)")]
+    Stop {
+        #[arg(help = "Name of the branch to stop")]
+        branch_name: String,
+    },
+    #[command(about = "Reset a branch to its parent state (local provider)")]
+    Reset {
+        #[arg(help = "Name of the branch to reset")]
+        branch_name: String,
+    },
+    #[command(about = "Destroy all branches and data for a service (local provider)")]
+    Destroy {
+        #[arg(long, help = "Skip confirmation prompt")]
+        force: bool,
+    },
+    #[command(
+        about = "Show connection info for a service branch",
+        long_about = "Show connection info for a service branch.\n\nOutputs connection details in various formats for use in scripts and configuration.\n\nExamples:\n  devflow service connection feature-auth              # Connection URI\n  devflow service connection feature-auth --format env  # Environment variables\n  devflow service connection feature-auth --format json # JSON object"
+    )]
+    Connection {
+        #[arg(help = "Name of the branch")]
+        branch_name: String,
+        #[arg(long, help = "Output format: uri, env, or json")]
+        format: Option<String>,
+    },
     #[command(
         about = "Show container logs for a branch",
-        long_about = "Show container logs for a branch.\n\nDisplays stdout/stderr from the Docker container backing a service branch.\nUseful for debugging startup failures, query errors, or crash loops.\n\nExamples:\n  devflow logs main                    # Last 100 lines from main\n  devflow logs feature/auth --tail 50  # Last 50 lines\n  devflow logs main -d analytics       # Logs from a specific backend"
+        long_about = "Show container logs for a branch.\n\nDisplays stdout/stderr from the Docker container backing a service branch.\nUseful for debugging startup failures, query errors, or crash loops.\n\nExamples:\n  devflow service logs main                    # Last 100 lines from main\n  devflow service logs feature/auth --tail 50  # Last 50 lines\n  devflow service logs main -s analytics       # Logs from a specific service"
     )]
     Logs {
         branch_name: String,
@@ -237,7 +299,7 @@ Examples:
     },
     #[command(
         about = "Seed a branch from an external source",
-        long_about = "Seed a branch database from an external source.\n\nLoads data into an existing branch from a PostgreSQL URL, local dump file,\nor S3 URL. The branch must already exist.\n\nExamples:\n  devflow seed main --from dump.sql                    # Seed from local file\n  devflow seed feature/auth --from postgresql://...     # Seed from live database\n  devflow seed main --from s3://bucket/path/dump.sql   # Seed from S3"
+        long_about = "Seed a branch database from an external source.\n\nLoads data into an existing branch from a PostgreSQL URL, local dump file,\nor S3 URL. The branch must already exist.\n\nExamples:\n  devflow service seed main --from dump.sql                    # Seed from local file\n  devflow service seed feature/auth --from postgresql://...     # Seed from live database\n  devflow service seed main --from s3://bucket/path/dump.sql   # Seed from S3"
     )]
     Seed {
         branch_name: String,
@@ -246,11 +308,6 @@ Examples:
             help = "Source to seed from (PostgreSQL URL, file path, or s3:// URL)"
         )]
         from: String,
-    },
-    #[command(about = "Generate shell completions", hide = true)]
-    Completions {
-        #[arg(help = "Shell to generate completions for: bash, zsh, fish, elvish, powershell")]
-        shell: clap_complete::Shell,
     },
 }
 
@@ -296,7 +353,7 @@ pub enum PluginCommands {
     List,
     #[command(about = "Check if a plugin is reachable and responds correctly")]
     Check {
-        #[arg(help = "Plugin service name (as defined in backends config)")]
+        #[arg(help = "Plugin service name (as defined in services config)")]
         name: String,
     },
     #[command(about = "Print a skeleton plugin script")]
@@ -318,31 +375,24 @@ pub async fn handle_command(
     non_interactive: bool,
     database_name: Option<&str>,
 ) -> Result<()> {
-    // Commands that use the new backend system
-    let uses_backend = matches!(
+    // Commands that need service infrastructure (config loading, state injection)
+    let uses_service = matches!(
         cmd,
-        Commands::Create { .. }
-            | Commands::Delete { .. }
+        Commands::Service { .. }
             | Commands::List
-            | Commands::Start { .. }
-            | Commands::Stop { .. }
-            | Commands::Reset { .. }
-            | Commands::Doctor
             | Commands::Connection { .. }
             | Commands::Status
             | Commands::Cleanup { .. }
-            | Commands::Destroy { .. }
             | Commands::Switch { .. }
             | Commands::GitHook { .. }
             | Commands::WorktreeSetup
             | Commands::Remove { .. }
             | Commands::Merge { .. }
-            | Commands::Logs { .. }
-            | Commands::Seed { .. }
+            | Commands::Doctor
     );
 
     // Check if command requires configuration file
-    let requires_config = uses_backend;
+    let requires_config = uses_service;
 
     // Load effective configuration (includes local config and environment overrides)
     let (effective_config, config_path) = Config::load_effective_config_with_path_info()?;
@@ -359,57 +409,110 @@ pub async fn handle_command(
 
     // Check for required config file after checking if disabled
     if requires_config && config_path.is_none() {
-        // Backend commands allow no config (will use local backend defaults)
-        // This is fine — create_backend_default() handles auto-detection
+        // Service commands allow no config (will use local provider defaults)
+        // This is fine — create_provider_default() handles auto-detection
     }
 
     // Get the merged configuration for normal operations
     let mut config = effective_config.get_merged_config();
 
-    // Inject backends from state (state backends take precedence over committed)
-    let local_state_for_backends = if uses_backend {
+    // Inject services from state (state services take precedence over committed)
+    let local_state_for_services = if uses_service {
         LocalStateManager::new().ok()
     } else {
         None
     };
-    if let Some(ref state_manager) = local_state_for_backends {
+    if let Some(ref state_manager) = local_state_for_services {
         if let Some(ref path) = config_path {
-            if let Some(state_backends) = state_manager.get_backends(path) {
-                config.backends = Some(state_backends);
+            if let Some(state_services) = state_manager.get_services(path) {
+                config.services = Some(state_services);
             }
         }
     }
 
-    // Handle backend-based commands
-    if uses_backend {
+    // Handle service-based commands
+    if uses_service {
         // For GitHook, check if hooks are disabled early
         if matches!(cmd, Commands::GitHook { .. }) && effective_config.should_skip_hooks() {
             log::debug!("Git hooks are disabled via configuration");
             return Ok(());
         }
-        // For doctor, run config/git pre-checks before backend-specific checks
+        // For doctor, run config/git pre-checks before service-specific checks
         if matches!(cmd, Commands::Doctor) && !json_output {
             run_doctor_pre_checks(&config, &config_path);
         }
-        return handle_backend_command(
-            cmd,
-            &mut config,
-            json_output,
-            non_interactive,
-            database_name,
-            &config_path,
-        )
-        .await;
+
+        return match cmd {
+            Commands::Connection {
+                branch_name,
+                format,
+            } => {
+                // Top-level alias: delegate to service connection
+                let svc_cmd = ServiceCommands::Connection {
+                    branch_name,
+                    format,
+                };
+                handle_service_provider_command(
+                    svc_cmd,
+                    &mut config,
+                    json_output,
+                    non_interactive,
+                    database_name,
+                    &config_path,
+                )
+                .await
+            }
+            Commands::Status => {
+                // Top-level status: show both VCS and service info
+                handle_top_level_status(
+                    &mut config,
+                    json_output,
+                    non_interactive,
+                    database_name,
+                    &config_path,
+                )
+                .await
+            }
+            Commands::Service { action } => {
+                handle_service_dispatch(
+                    action,
+                    &mut config,
+                    &effective_config,
+                    json_output,
+                    non_interactive,
+                    database_name,
+                    &config_path,
+                )
+                .await
+            }
+            // Branch management commands that need service context
+            _ => {
+                handle_branch_command(
+                    cmd,
+                    &mut config,
+                    json_output,
+                    non_interactive,
+                    database_name,
+                    &config_path,
+                )
+                .await
+            }
+        };
     }
 
     match cmd {
         Commands::Init {
             name,
             force,
-            backend,
-            from,
         } => {
             let config_path = std::env::current_dir()?.join(".devflow.yml");
+
+            if config_path.exists() && !force {
+                anyhow::bail!(
+                    "Configuration already exists at {}. Use --force to overwrite.",
+                    config_path.display()
+                );
+            }
 
             // Resolve the name: if None, derive from current directory
             let resolved_name = match name {
@@ -420,326 +523,67 @@ pub async fn handle_command(
                     .unwrap_or_else(|| "default".to_string()),
             };
 
-            let backend_type = backend.as_deref().unwrap_or("local").to_string();
-            let is_local = services::factory::BackendType::is_local(&backend_type);
-            let is_postgres_template = matches!(
-                backend_type.as_str(),
-                "postgres_template" | "postgres" | "postgresql"
-            );
+            let mut config = Config {
+                name: Some(resolved_name.clone()),
+                ..Config::default()
+            };
 
-            if config_path.exists() {
-                // --- Subsequent init: add a new backend to state (don't modify .devflow.yml) ---
-                let config = Config::from_file(&config_path)?;
-
-                // Build new named backend config
-                let named_cfg = crate::config::NamedBackendConfig {
-                    name: resolved_name.clone(),
-                    backend_type: backend_type.clone(),
-                    service_type: crate::config::default_service_type(),
-                    auto_branch: crate::config::default_auto_branch(),
-                    default: false,
-                    local: if is_local {
-                        Some(crate::config::LocalBackendConfig {
-                            image: None,
-                            data_root: None,
-                            storage: None,
-                            port_range_start: None,
-                            postgres_user: None,
-                            postgres_password: None,
-                            postgres_db: None,
-                        })
-                    } else {
-                        None
-                    },
-                    neon: None,
-                    dblab: None,
-                    xata: None,
-                    clickhouse: None,
-                    mysql: None,
-                    generic: None,
-                    plugin: None,
-                };
-
-                // Store backend in local state instead of committed config
-                let mut state = LocalStateManager::new()?;
-                state.add_backend(&config_path, named_cfg.clone(), force)?;
-                if !json_output {
-                    println!("Added backend '{}' to local state", resolved_name);
-                }
-
-                // Create main branch for local backends
-                if is_local {
-                    // Build a config with the backend injected so the factory can find it
-                    let mut config_with_backend = config;
-                    if let Some(state_backends) = state.get_backends(&config_path) {
-                        config_with_backend.backends = Some(state_backends);
+            // Auto-detect main branch from VCS
+            if let Ok(vcs) = vcs::detect_vcs_provider(".") {
+                if let Ok(Some(detected_main)) = vcs.default_branch() {
+                    config.git.main_branch = detected_main.clone();
+                    if !json_output {
+                        println!(
+                            "Auto-detected main branch: {} ({})",
+                            detected_main,
+                            vcs.provider_name()
+                        );
                     }
-
-                    // On Linux, offer ZFS auto-setup before creating the main branch
-                    #[cfg(feature = "backend-local")]
-                    if cfg!(target_os = "linux") {
-                        if let Some(data_root) =
-                            attempt_zfs_auto_setup(non_interactive, json_output).await
-                        {
-                            let mut updated_cfg = named_cfg.clone();
-                            if let Some(ref mut local) = updated_cfg.local {
-                                local.data_root = Some(data_root);
-                            }
-                            if let Err(e) =
-                                state.add_backend(&config_path, updated_cfg.clone(), true)
-                            {
-                                log::warn!(
-                                    "Failed to persist updated backend config in local state: {}",
-                                    e
-                                );
-                            }
-                            if let Some(state_backends) = state.get_backends(&config_path) {
-                                config_with_backend.backends = Some(state_backends);
-                            }
-                            init_local_backend_main(
-                                &config_with_backend,
-                                &updated_cfg,
-                                from.as_deref(),
-                                json_output,
-                            )
-                            .await;
-                        } else {
-                            init_local_backend_main(
-                                &config_with_backend,
-                                &named_cfg,
-                                from.as_deref(),
-                                json_output,
-                            )
-                            .await;
-                        }
-                    } else {
-                        init_local_backend_main(
-                            &config_with_backend,
-                            &named_cfg,
-                            from.as_deref(),
-                            json_output,
-                        )
-                        .await;
-                    }
-                    #[cfg(not(feature = "backend-local"))]
-                    {
-                        init_local_backend_main(
-                            &config_with_backend,
-                            &named_cfg,
-                            from.as_deref(),
-                            json_output,
-                        )
-                        .await;
-                    }
+                } else if !json_output {
+                    println!("Could not auto-detect main branch, using default: main");
                 }
+            }
 
-                if json_output {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({
-                            "status": "ok",
-                            "action": "add_backend",
-                            "name": resolved_name,
-                            "backend_type": backend_type,
-                            "config_path": config_path.display().to_string(),
-                        }))?
-                    );
-                }
+            // Don't write services to committed config — use `devflow service add`
+            config.services = None;
+            config.save_to_file(&config_path)?;
+
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "ok",
+                        "action": "init",
+                        "name": resolved_name,
+                        "config_path": config_path.display().to_string(),
+                    }))?
+                );
             } else {
-                // --- First-time init: create .devflow.yml ---
-                let mut config = Config::default();
+                println!(
+                    "Initialized devflow configuration at: {}",
+                    config_path.display()
+                );
 
-                // Auto-detect main branch from VCS
-                if let Ok(vcs) = vcs::detect_vcs_provider(".") {
-                    if let Ok(Some(detected_main)) = vcs.default_branch() {
-                        config.git.main_branch = detected_main.clone();
-                        if !json_output {
-                            println!(
-                                "Auto-detected main branch: {} ({})",
-                                detected_main,
-                                vcs.provider_name()
-                            );
-                        }
-                    } else if !json_output {
-                        println!("Could not auto-detect main branch, using default: main");
+                let gitignore_path = std::env::current_dir()?.join(".gitignore");
+                if gitignore_path.exists() {
+                    let gitignore_content =
+                        std::fs::read_to_string(&gitignore_path).unwrap_or_default();
+                    if !gitignore_content.contains(".devflow.local.yml") {
+                        println!(
+                            "\nSuggestion: Add '.devflow.local.yml' to your .gitignore file:"
+                        );
+                        println!("   echo '.devflow.local.yml' >> .gitignore");
                     }
                 }
 
-                // For postgres_template backend, look for Docker Compose files
-                if is_postgres_template {
-                    let compose_files = docker::find_docker_compose_files();
-                    if !compose_files.is_empty() {
-                        if !json_output {
-                            println!("Found Docker Compose files: {}", compose_files.join(", "));
-                        }
-
-                        if let Some(postgres_config) =
-                            docker::parse_postgres_config_from_files(&compose_files)?
-                        {
-                            let use_postgres_config = if non_interactive || json_output {
-                                false
-                            } else {
-                                docker::prompt_user_for_config_usage(&postgres_config)?
-                            };
-
-                            if use_postgres_config {
-                                if let Some(host) = postgres_config.host {
-                                    config.database.host = host;
-                                }
-                                if let Some(port) = postgres_config.port {
-                                    config.database.port = port;
-                                }
-                                if let Some(user) = postgres_config.user {
-                                    config.database.user = user;
-                                }
-                                if let Some(password) = postgres_config.password {
-                                    config.database.password = Some(password);
-                                }
-                                if let Some(database) = postgres_config.database {
-                                    config.database.template_database = database;
-                                }
-
-                                if !json_output {
-                                    println!("Using PostgreSQL configuration from Docker Compose");
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Build named backend config
-                let named_cfg = crate::config::NamedBackendConfig {
-                    name: resolved_name.clone(),
-                    backend_type: backend_type.clone(),
-                    service_type: crate::config::default_service_type(),
-                    auto_branch: crate::config::default_auto_branch(),
-                    default: true,
-                    local: if is_local {
-                        Some(crate::config::LocalBackendConfig {
-                            image: None,
-                            data_root: None,
-                            storage: None,
-                            port_range_start: None,
-                            postgres_user: None,
-                            postgres_password: None,
-                            postgres_db: None,
-                        })
-                    } else {
-                        None
-                    },
-                    neon: None,
-                    dblab: None,
-                    xata: None,
-                    clickhouse: None,
-                    mysql: None,
-                    generic: None,
-                    plugin: None,
-                };
-
-                // Don't write backends to committed config — store in state
-                config.backends = None;
-                config.save_to_file(&config_path)?;
-                if !json_output {
-                    println!(
-                        "Initialized devflow configuration at: {}",
-                        config_path.display()
-                    );
-                }
-
-                // Store backend in local state
-                let mut state = LocalStateManager::new()?;
-                state.set_backends(&config_path, vec![named_cfg.clone()])?;
-                if !json_output {
-                    println!("Stored backend '{}' in local state", resolved_name);
-                }
-
-                // Inject backends into config so init_local_backend_main can use them
-                config.backends = Some(vec![named_cfg.clone()]);
-
-                // Create main branch for local backends
-                if is_local {
-                    // On Linux, offer ZFS auto-setup before creating the main branch
-                    #[cfg(feature = "backend-local")]
-                    if cfg!(target_os = "linux") {
-                        if let Some(data_root) =
-                            attempt_zfs_auto_setup(non_interactive, json_output).await
-                        {
-                            // Update the named backend config with the ZFS data_root
-                            let mut updated_cfg = named_cfg.clone();
-                            if let Some(ref mut local) = updated_cfg.local {
-                                local.data_root = Some(data_root);
-                            }
-                            // Update in state and injected config
-                            if let Ok(mut state) = LocalStateManager::new() {
-                                if let Err(e) =
-                                    state.set_backends(&config_path, vec![updated_cfg.clone()])
-                                {
-                                    log::warn!(
-                                        "Failed to persist updated backend config in local state: {}",
-                                        e
-                                    );
-                                }
-                            }
-                            config.backends = Some(vec![updated_cfg.clone()]);
-                            init_local_backend_main(
-                                &config,
-                                &updated_cfg,
-                                from.as_deref(),
-                                json_output,
-                            )
-                            .await;
-                        } else {
-                            init_local_backend_main(
-                                &config,
-                                &named_cfg,
-                                from.as_deref(),
-                                json_output,
-                            )
-                            .await;
-                        }
-                    } else {
-                        init_local_backend_main(&config, &named_cfg, from.as_deref(), json_output)
-                            .await;
-                    }
-                    #[cfg(not(feature = "backend-local"))]
-                    {
-                        init_local_backend_main(&config, &named_cfg, from.as_deref(), json_output)
-                            .await;
-                    }
-                }
-
-                // Suggest adding local config to gitignore
-                if json_output {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({
-                            "status": "ok",
-                            "action": "init",
-                            "name": resolved_name,
-                            "backend_type": backend_type,
-                            "config_path": config_path.display().to_string(),
-                        }))?
-                    );
-                } else {
-                    let gitignore_path = std::env::current_dir()?.join(".gitignore");
-                    if gitignore_path.exists() {
-                        let gitignore_content =
-                            std::fs::read_to_string(&gitignore_path).unwrap_or_default();
-                        if !gitignore_content.contains(".devflow.local.yml") {
-                            println!(
-                                "\nSuggestion: Add '.devflow.local.yml' to your .gitignore file:"
-                            );
-                            println!("   echo '.devflow.local.yml' >> .gitignore");
-                        }
-                    }
-
-                    println!("\nNext steps:");
-                    println!(
-                        "  devflow install-hooks     Install Git hooks for automatic branching"
-                    );
-                    println!("  devflow create <branch>   Create a service branch manually");
-                    println!("  devflow doctor            Check system health and configuration");
-                }
+                println!("\nNext steps:");
+                println!(
+                    "  devflow service add          Add a service provider (interactive wizard)"
+                );
+                println!(
+                    "  devflow install-hooks        Install Git hooks for automatic branching"
+                );
+                println!("  devflow doctor               Check system health and configuration");
             }
         }
         Commands::SetupZfs { pool_name, size } => {
@@ -747,13 +591,13 @@ pub async fn handle_command(
                 anyhow::bail!("setup-zfs is only supported on Linux");
             }
 
-            #[cfg(not(feature = "backend-local"))]
+            #[cfg(not(feature = "service-local"))]
             {
                 let _ = (pool_name, size);
-                anyhow::bail!("Local backend not compiled. Rebuild with --features backend-local");
+                anyhow::bail!("Local provider not compiled. Rebuild with --features service-local");
             }
 
-            #[cfg(feature = "backend-local")]
+            #[cfg(feature = "service-local")]
             {
                 use crate::services::postgres::local::storage::zfs_setup::*;
 
@@ -850,7 +694,7 @@ pub async fn handle_command(
                 println!("Automation capabilities:");
                 println!("- JSON mode: single JSON document on stdout (diagnostics on stderr)");
                 println!("- Non-interactive: no prompts; --force required for destroy/remove");
-                println!("- Multi-backend partial failures: command exits non-zero by default");
+                println!("- Multi-service partial failures: command exits non-zero by default");
                 println!("- Recommended flags for agents: --json --non-interactive");
             }
         }
@@ -914,8 +758,8 @@ pub async fn handle_command(
 
 /// Check if ZFS auto-setup should be offered during init (Linux only).
 /// Returns `Some(data_root)` if a pool was created or already exists,
-/// so the caller can set it on the `LocalBackendConfig`.
-#[cfg(feature = "backend-local")]
+/// so the caller can set it on the `LocalServiceConfig`.
+#[cfg(feature = "service-local")]
 async fn attempt_zfs_auto_setup(non_interactive: bool, quiet_output: bool) -> Option<String> {
     use crate::services::postgres::local::storage::zfs_setup::*;
 
@@ -1013,13 +857,13 @@ async fn attempt_zfs_auto_setup(non_interactive: bool, quiet_output: bool) -> Op
     }
 }
 
-async fn init_local_backend_main(
+async fn init_local_service_main(
     config: &Config,
-    named_cfg: &crate::config::NamedBackendConfig,
+    named_cfg: &crate::config::NamedServiceConfig,
     from: Option<&str>,
     quiet_output: bool,
 ) {
-    match services::factory::create_backend_from_named_config(config, named_cfg).await {
+    match services::factory::create_provider_from_named_config(config, named_cfg).await {
         Ok(be) => {
             match be.create_branch("main", None).await {
                 Ok(info) => {
@@ -1065,7 +909,7 @@ async fn init_local_backend_main(
         }
         Err(e) => {
             eprintln!(
-                "Warning: could not initialize backend '{}': {}",
+                "Warning: could not initialize service '{}': {}",
                 named_cfg.name, e
             );
             eprintln!("  You can create the main branch later with: devflow create main");
@@ -1133,7 +977,7 @@ fn print_branch_tree(branches: &[services::BranchInfo], indent: &str) {
 
 /// Print an enriched branch list showing git branches, worktree paths, and service status.
 ///
-/// Unifies information from the VCS provider and the service backend into a single view.
+/// Unifies information from the VCS provider and the service provider into a single view.
 fn print_enriched_branch_list(service_branches: &[services::BranchInfo], config: &Config) {
     // Gather VCS + worktree info
     let vcs_provider = vcs::detect_vcs_provider(".").ok();
@@ -1442,13 +1286,13 @@ async fn build_hook_context(config: &Config, branch_name: &str) -> HookContext {
         }
     });
 
-    // Build service map from all configured backends
+    // Build service map from all configured services
     let mut service = std::collections::HashMap::new();
 
     if let Ok(conn_infos) = services::factory::get_all_connection_info(config, branch_name).await {
         for (name, info) in conn_infos {
             let url = info.connection_string.clone().unwrap_or_else(|| {
-                // No connection string provided by the backend — build a generic
+                // No connection string provided by the provider — build a generic
                 // host:port reference so templates have *something* useful.
                 format!("{}:{}", info.host, info.port)
             });
@@ -1466,7 +1310,7 @@ async fn build_hook_context(config: &Config, branch_name: &str) -> HookContext {
         }
     }
 
-    // Fallback: if no backends populated the service map, use legacy config.database
+    // Fallback: if no services populated the service map, use legacy config.database
     // as a service named "db" for backward compatibility
     if service.is_empty() {
         let url = format!(
@@ -1868,8 +1712,8 @@ async fn handle_plugin_command(
 ) -> Result<()> {
     match action {
         PluginCommands::List => {
-            let backends = config.resolve_backends();
-            let plugins: Vec<_> = backends
+            let services = config.resolve_services();
+            let plugins: Vec<_> = services
                 .iter()
                 .filter(|b| b.service_type == "plugin")
                 .collect();
@@ -1878,9 +1722,9 @@ async fn handle_plugin_command(
                 if json_output {
                     println!("[]");
                 } else {
-                    println!("No plugin backends configured.");
+                    println!("No plugin services configured.");
                     println!(
-                        "Add a backend with service_type: plugin in your .devflow.yml to get started."
+                        "Add a service with service_type: plugin in your .devflow.yml to get started."
                     );
                 }
                 return Ok(());
@@ -1908,7 +1752,7 @@ async fn handle_plugin_command(
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&items)?);
             } else {
-                println!("Plugin backends ({}):", plugins.len());
+                println!("Plugin services ({}):", plugins.len());
                 for p in &plugins {
                     let plugin_cfg = p.plugin.as_ref();
                     let executable = plugin_cfg
@@ -1927,12 +1771,12 @@ async fn handle_plugin_command(
             }
         }
         PluginCommands::Check { name } => {
-            let backends = config.resolve_backends();
-            let named = backends.iter().find(|b| b.name == name).ok_or_else(|| {
+            let services = config.resolve_services();
+            let named = services.iter().find(|b| b.name == name).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Backend '{}' not found in configuration. Available backends: {}",
+                    "Service '{}' not found in configuration. Available services: {}",
                     name,
-                    backends
+                    services
                         .iter()
                         .map(|b| b.name.as_str())
                         .collect::<Vec<_>>()
@@ -1942,7 +1786,7 @@ async fn handle_plugin_command(
 
             if named.service_type != "plugin" {
                 anyhow::bail!(
-                    "Backend '{}' is not a plugin (service_type: '{}')",
+                    "Service '{}' is not a plugin (service_type: '{}')",
                     name,
                     named.service_type
                 );
@@ -1950,16 +1794,16 @@ async fn handle_plugin_command(
 
             let plugin_cfg = named.plugin.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Backend '{}' has type 'plugin' but no plugin config section",
+                    "Service '{}' has type 'plugin' but no plugin config section",
                     name
                 )
             })?;
 
-            // Try to create the backend and invoke backend_name
-            match crate::services::plugin::PluginBackend::new(&name, plugin_cfg) {
-                Ok(backend) => {
+            // Try to create the provider and invoke provider_name
+            match crate::services::plugin::PluginProvider::new(&name, plugin_cfg) {
+                Ok(provider) => {
                     // Try test_connection as a health check
-                    match backend.test_connection().await {
+                    match provider.test_connection().await {
                         Ok(()) => {
                             if json_output {
                                 println!(
@@ -2052,7 +1896,7 @@ fn generate_plugin_skeleton_bash(name: &str) -> String {
 # It should write a JSON response to stdout.
 #
 # Install: chmod +x this file, then reference in .devflow.yml:
-#   backends:
+#   services:
 #     - name: {name}
 #       service_type: plugin
 #       plugin:
@@ -2074,7 +1918,7 @@ ok()    {{ echo "{{\\"ok\\": true,  \\"result\\": $1}}"; }}
 error() {{ echo "{{\\"ok\\": false, \\"error\\": \\"$1\\"}}"; }}
 
 case "$METHOD" in
-  backend_name)
+  provider_name)
     ok "\"{name}\""
     ;;
   test_connection)
@@ -2128,7 +1972,7 @@ This plugin is invoked by devflow with a JSON request on stdin.
 It should write a JSON response to stdout.
 
 Install: chmod +x this file, then reference in .devflow.yml:
-  backends:
+  services:
     - name: {name}
       service_type: plugin
       plugin:
@@ -2154,7 +1998,7 @@ def main():
     config = request.get("config", {{}})
     service_name = request.get("service_name", "")
 
-    if method == "backend_name":
+    if method == "provider_name":
         ok("{name}")
     elif method == "test_connection":
         ok(None)
@@ -2201,7 +2045,8 @@ if __name__ == "__main__":
     )
 }
 
-async fn handle_backend_command(
+/// Handle branch management commands that need service context.
+async fn handle_branch_command(
     cmd: Commands,
     config: &mut Config,
     json_output: bool,
@@ -2209,375 +2054,26 @@ async fn handle_backend_command(
     database_name: Option<&str>,
     config_path: &Option<std::path::PathBuf>,
 ) -> Result<()> {
-    // Aggregation commands (List, Status, Doctor) show all backends when no --database given
-    let is_aggregation = matches!(cmd, Commands::List | Commands::Status | Commands::Doctor);
-    // Orchestratable mutation commands: Create and Delete operate on all auto_branch backends
-    let is_orchestratable_mutation =
-        matches!(cmd, Commands::Create { .. } | Commands::Delete { .. });
-    let has_multiple_backends = config.resolve_backends().len() > 1;
-
-    if is_aggregation && database_name.is_none() && has_multiple_backends {
-        return handle_multi_backend_command(cmd, config, json_output).await;
-    }
-
-    // For Create/Delete: if there are multiple backends and no --database flag,
-    // use orchestration to operate on all auto_branch backends atomically.
-    if is_orchestratable_mutation && database_name.is_none() && has_multiple_backends {
-        return handle_orchestrated_mutation(cmd, config, json_output, non_interactive).await;
-    }
-
-    let named = services::factory::resolve_backend(config, database_name).await?;
-    let backend = named.backend;
-    let resolved_name = named.name;
-
-    // For non-orchestratable mutation commands with multiple backends and no --database, print a note
-    if !is_aggregation
-        && !is_orchestratable_mutation
-        && database_name.is_none()
-        && has_multiple_backends
-    {
-        eprintln!(
-            "note: using default database '{}'. Use --database to target a specific one.",
-            resolved_name
-        );
-    }
-
     match cmd {
-        Commands::Create { branch_name, from } => {
-            // Single-backend path (explicit --database or single backend)
-            let info = backend.create_branch(&branch_name, from.as_deref()).await?;
-
-            // Execute hooks
-            run_hooks(
-                config,
-                &branch_name,
-                HookPhase::PostServiceCreate,
-                json_output,
-                non_interactive,
-            )
-            .await?;
-
-            if json_output {
-                println!("{}", serde_json::to_string_pretty(&info)?);
-            } else {
-                println!("Created service branch: {}", info.name);
-                if let Some(state) = &info.state {
-                    println!("  State: {}", state);
-                }
-                if let Some(parent) = &info.parent_branch {
-                    println!("  Parent: {}", parent);
-                }
-                // Show connection info
-                if let Ok(conn) = backend.get_connection_info(&branch_name).await {
-                    if let Some(ref uri) = conn.connection_string {
-                        println!("  Connection: {}", uri);
-                    }
-                }
-            }
-        }
-        Commands::Delete { branch_name } => {
-            // Single-backend path (explicit --database or single backend)
-            backend.delete_branch(&branch_name).await?;
-            if json_output {
-                println!(
-                    "{}",
-                    serde_json::to_string(&serde_json::json!({
-                        "status": "ok",
-                        "deleted": branch_name
-                    }))?
-                );
-            } else {
-                println!("Deleted service branch: {}", branch_name);
-            }
-        }
         Commands::List => {
-            let branches = backend.list_branches().await?;
+            // List: show combined VCS + service branch info
+            let has_multiple_services = config.resolve_services().len() > 1;
+            if database_name.is_none() && has_multiple_services {
+                return handle_multi_service_aggregation(
+                    ServiceAggregation::List,
+                    config,
+                    json_output,
+                )
+                .await;
+            }
+            let named = services::factory::resolve_provider(config, database_name).await?;
+            let branches = named.provider.list_branches().await?;
             if json_output {
                 let enriched = enrich_branch_list_json(&branches, config);
                 println!("{}", serde_json::to_string_pretty(&enriched)?);
             } else {
-                println!("Branches ({}):", backend.backend_name());
+                println!("Branches ({}):", named.provider.provider_name());
                 print_enriched_branch_list(&branches, config);
-            }
-        }
-        Commands::Start { branch_name } => {
-            if !backend.supports_lifecycle() {
-                anyhow::bail!(
-                    "Backend '{}' does not support start/stop lifecycle",
-                    backend.backend_name()
-                );
-            }
-            backend.start_branch(&branch_name).await?;
-            if json_output {
-                println!(
-                    "{}",
-                    serde_json::to_string(&serde_json::json!({
-                        "status": "ok",
-                        "started": branch_name
-                    }))?
-                );
-            } else {
-                println!("Started branch: {}", branch_name);
-            }
-        }
-        Commands::Stop { branch_name } => {
-            if !backend.supports_lifecycle() {
-                anyhow::bail!(
-                    "Backend '{}' does not support start/stop lifecycle",
-                    backend.backend_name()
-                );
-            }
-            backend.stop_branch(&branch_name).await?;
-            if json_output {
-                println!(
-                    "{}",
-                    serde_json::to_string(&serde_json::json!({
-                        "status": "ok",
-                        "stopped": branch_name
-                    }))?
-                );
-            } else {
-                println!("Stopped branch: {}", branch_name);
-            }
-        }
-        Commands::Reset { branch_name } => {
-            if !backend.supports_lifecycle() {
-                anyhow::bail!(
-                    "Backend '{}' does not support reset",
-                    backend.backend_name()
-                );
-            }
-            backend.reset_branch(&branch_name).await?;
-            if json_output {
-                println!(
-                    "{}",
-                    serde_json::to_string(&serde_json::json!({
-                        "status": "ok",
-                        "reset": branch_name
-                    }))?
-                );
-            } else {
-                println!("Reset branch: {}", branch_name);
-            }
-        }
-        Commands::Doctor => {
-            let report = backend.doctor().await?;
-            if json_output {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                println!("Doctor report ({}):", backend.backend_name());
-                for check in &report.checks {
-                    let icon = if check.available { "OK" } else { "FAIL" };
-                    println!("  [{}] {}: {}", icon, check.name, check.detail);
-                }
-            }
-        }
-        Commands::Connection {
-            branch_name,
-            format,
-        } => {
-            let conn = backend.get_connection_info(&branch_name).await?;
-            // Global --json flag overrides --format
-            let fmt = if json_output {
-                "json"
-            } else {
-                format.as_deref().unwrap_or("uri")
-            };
-            match fmt {
-                "uri" => {
-                    if let Some(ref uri) = conn.connection_string {
-                        println!("{}", uri);
-                    } else {
-                        println!(
-                            "postgresql://{}@{}:{}/{}",
-                            conn.user, conn.host, conn.port, conn.database
-                        );
-                    }
-                }
-                "env" => {
-                    println!("DATABASE_HOST={}", conn.host);
-                    println!("DATABASE_PORT={}", conn.port);
-                    println!("DATABASE_NAME={}", conn.database);
-                    println!("DATABASE_USER={}", conn.user);
-                    if let Some(ref password) = conn.password {
-                        println!("DATABASE_PASSWORD={}", password);
-                    }
-                    if let Some(ref uri) = conn.connection_string {
-                        println!("DATABASE_URL={}", uri);
-                    }
-                }
-                _ => {
-                    println!("{}", serde_json::to_string_pretty(&conn)?);
-                }
-            }
-        }
-        Commands::Status => {
-            let branches = backend.list_branches().await.unwrap_or_default();
-            let running = branches
-                .iter()
-                .filter(|b| b.state.as_deref() == Some("running"))
-                .count();
-            let stopped = branches
-                .iter()
-                .filter(|b| b.state.as_deref() == Some("stopped"))
-                .count();
-            let project_info = backend.project_info();
-
-            if json_output {
-                let mut status = serde_json::json!({
-                    "backend": backend.backend_name(),
-                    "total_branches": branches.len(),
-                    "running": running,
-                    "stopped": stopped,
-                    "supports_lifecycle": backend.supports_lifecycle(),
-                });
-                if let Some(ref info) = project_info {
-                    status["project"] = serde_json::Value::String(info.name.clone());
-                    if let Some(ref storage) = info.storage_backend {
-                        status["storage"] = serde_json::Value::String(storage.clone());
-                    }
-                    if let Some(ref image) = info.image {
-                        status["image"] = serde_json::Value::String(image.clone());
-                    }
-                }
-                println!("{}", serde_json::to_string_pretty(&status)?);
-            } else {
-                println!("Backend: {}", backend.backend_name());
-                if let Some(ref info) = project_info {
-                    println!("Project: {}", info.name);
-                    if let Some(ref storage) = info.storage_backend {
-                        println!("Storage: {}", storage);
-                    }
-                    if let Some(ref image) = info.image {
-                        println!("Image: {}", image);
-                    }
-                }
-                println!(
-                    "Branches: {} total ({} running, {} stopped)",
-                    branches.len(),
-                    running,
-                    stopped
-                );
-                if backend.supports_lifecycle() {
-                    println!("Lifecycle: supported (start/stop/reset)");
-                }
-            }
-        }
-        Commands::Cleanup { max_count } => {
-            let max = max_count.unwrap_or(config.behavior.max_branches.unwrap_or(10));
-            let deleted = backend.cleanup_old_branches(max).await?;
-            if json_output {
-                println!("{}", serde_json::to_string_pretty(&deleted)?);
-            } else if deleted.is_empty() {
-                println!("No branches to clean up");
-            } else {
-                println!(
-                    "Cleaned up {} branches: {}",
-                    deleted.len(),
-                    deleted.join(", ")
-                );
-            }
-        }
-        Commands::Destroy { force } => {
-            if !backend.supports_destroy() {
-                anyhow::bail!(
-                    "Backend '{}' does not support destroy. This command is only available for the local (Docker + CoW) backend.",
-                    backend.backend_name()
-                );
-            }
-
-            let preview = backend.destroy_preview().await?;
-            let (project_name, branch_names) = match preview {
-                Some(p) => p,
-                None => {
-                    if json_output {
-                        println!(
-                            "{}",
-                            serde_json::to_string(&serde_json::json!({
-                                "status": "ok",
-                                "message": "no project found"
-                            }))?
-                        );
-                    } else {
-                        println!(
-                            "No project found for database '{}'. Nothing to destroy.",
-                            resolved_name
-                        );
-                    }
-                    return Ok(());
-                }
-            };
-
-            if !force {
-                if json_output || non_interactive {
-                    anyhow::bail!(
-                        "Use --force to confirm destroy in non-interactive or JSON output mode"
-                    );
-                }
-
-                println!("This will permanently destroy the following:");
-                println!("  Project: {}", project_name);
-                if branch_names.is_empty() {
-                    println!("  Branches: (none)");
-                } else {
-                    println!("  Branches ({}):", branch_names.len());
-                    for name in &branch_names {
-                        println!("    - {}", name);
-                    }
-                }
-                println!();
-                println!("All containers, storage data, and state will be removed.");
-
-                let confirm =
-                    inquire::Confirm::new("Are you sure you want to destroy this project?")
-                        .with_default(false)
-                        .prompt()?;
-
-                if !confirm {
-                    println!("Aborted.");
-                    return Ok(());
-                }
-            }
-
-            let destroyed = backend.destroy_project().await?;
-
-            // Remove the backend entry from local state
-            if let Some(ref path) = config_path {
-                if let Ok(mut state) = LocalStateManager::new() {
-                    if let Err(e) = state.remove_backend(path, &resolved_name) {
-                        log::warn!(
-                            "Failed to remove backend '{}' from local state: {}",
-                            resolved_name,
-                            e
-                        );
-                    }
-                }
-            }
-
-            // Also remove from committed config for backward compat (legacy configs)
-            config.remove_backend(&resolved_name);
-            if let Some(path) = config_path {
-                config.save_to_file(path)?;
-            }
-
-            if json_output {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "status": "ok",
-                        "project": project_name,
-                        "destroyed_branches": destroyed,
-                    }))?
-                );
-            } else {
-                println!(
-                    "Destroyed project '{}' and {} branch(es)",
-                    project_name,
-                    destroyed.len()
-                );
-                for name in &destroyed {
-                    println!("  - {}", name);
-                }
             }
         }
         Commands::Switch {
@@ -2614,9 +2110,9 @@ async fn handle_backend_command(
                                 .replace("{branch}", &branch);
                             wt_path_value = serde_json::Value::String(wt_path);
                         }
-                        let auto_backends: Vec<serde_json::Value> = if !no_services {
+                        let auto_providers: Vec<serde_json::Value> = if !no_services {
                             config
-                                .resolve_backends()
+                                .resolve_services()
                                 .into_iter()
                                 .filter(|b| b.auto_branch)
                                 .map(|b| {
@@ -2637,7 +2133,7 @@ async fn handle_backend_command(
                                 "worktree_enabled": worktree_enabled,
                                 "worktree_path": wt_path_value,
                                 "services_skipped": no_services,
-                                "auto_branch_services": auto_backends,
+                                "auto_branch_services": auto_providers,
                                 "hooks_skipped": no_verify,
                                 "execute": execute,
                             }))?
@@ -2663,21 +2159,21 @@ async fn handle_backend_command(
                             println!("  Worktree path: {}", wt_path);
                         }
                         if !no_services {
-                            let auto_backends = config
-                                .resolve_backends()
+                            let auto_providers = config
+                                .resolve_services()
                                 .into_iter()
                                 .filter(|b| b.auto_branch)
                                 .collect::<Vec<_>>();
-                            if auto_backends.is_empty() {
+                            if auto_providers.is_empty() {
                                 println!(
-                                    "  Would create/switch service branches (default backend)"
+                                    "  Would create/switch service branches (default provider)"
                                 );
                             } else {
                                 println!(
                                     "  Would create/switch service branches on {} service(s):",
-                                    auto_backends.len()
+                                    auto_providers.len()
                                 );
-                                for b in &auto_backends {
+                                for b in &auto_providers {
                                     println!("    - {} ({})", b.name, b.service_type);
                                 }
                             }
@@ -2737,15 +2233,6 @@ async fn handle_backend_command(
                 }
             }
         }
-        Commands::GitHook {
-            worktree,
-            main_worktree_dir,
-        } => {
-            handle_git_hook(config, config_path, worktree, main_worktree_dir).await?;
-        }
-        Commands::WorktreeSetup => {
-            handle_worktree_setup(config, config_path).await?;
-        }
         Commands::Remove {
             branch_name,
             force,
@@ -2769,8 +2256,779 @@ async fn handle_backend_command(
         } => {
             handle_merge_command(config, target.as_deref(), cleanup, dry_run, json_output).await?;
         }
-        Commands::Logs { branch_name, tail } => {
-            let output = backend.logs(&branch_name, tail).await?;
+        Commands::Cleanup { max_count } => {
+            let named = services::factory::resolve_provider(config, database_name).await?;
+            let max = max_count.unwrap_or(config.behavior.max_branches.unwrap_or(10));
+            let deleted = named.provider.cleanup_old_branches(max).await?;
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(&deleted)?);
+            } else if deleted.is_empty() {
+                println!("No branches to clean up");
+            } else {
+                println!(
+                    "Cleaned up {} branches: {}",
+                    deleted.len(),
+                    deleted.join(", ")
+                );
+            }
+        }
+        Commands::Doctor => {
+            let has_multiple_services = config.resolve_services().len() > 1;
+            if database_name.is_none() && has_multiple_services {
+                return handle_multi_service_aggregation(
+                    ServiceAggregation::Doctor,
+                    config,
+                    json_output,
+                )
+                .await;
+            }
+            let named = services::factory::resolve_provider(config, database_name).await?;
+            let report = named.provider.doctor().await?;
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("Doctor report ({}):", named.provider.provider_name());
+                for check in &report.checks {
+                    let icon = if check.available { "OK" } else { "FAIL" };
+                    println!("  [{}] {}: {}", icon, check.name, check.detail);
+                }
+            }
+        }
+        Commands::GitHook {
+            worktree,
+            main_worktree_dir,
+        } => {
+            handle_git_hook(config, config_path, worktree, main_worktree_dir).await?;
+        }
+        Commands::WorktreeSetup => {
+            handle_worktree_setup(config, config_path).await?;
+        }
+        _ => unreachable!(),
+    }
+
+    Ok(())
+}
+
+/// Dispatch `devflow service <action>` subcommands.
+async fn handle_service_dispatch(
+    action: ServiceCommands,
+    config: &mut Config,
+    _effective_config: &EffectiveConfig,
+    json_output: bool,
+    non_interactive: bool,
+    database_name: Option<&str>,
+    config_path: &Option<std::path::PathBuf>,
+) -> Result<()> {
+    match action {
+        ServiceCommands::Add {
+            name,
+            provider,
+            service_type,
+            force,
+            from,
+        } => {
+            let config_path_buf = config_path
+                .clone()
+                .unwrap_or_else(|| std::env::current_dir().unwrap().join(".devflow.yml"));
+
+            // --- Interactive wizard when flags are missing ---
+
+            // 1. Service type selection
+            let service_type = if let Some(st) = service_type {
+                st
+            } else if non_interactive || json_output {
+                crate::config::default_service_type()
+            } else {
+                use inquire::Select;
+                let service_types = vec![
+                    "postgres    — PostgreSQL database",
+                    "clickhouse  — ClickHouse analytics database",
+                    "mysql       — MySQL database",
+                    "generic     — Generic Docker container",
+                    "plugin      — External plugin",
+                ];
+                let selection = Select::new("What type of service?", service_types)
+                    .with_help_message("Use arrow keys to navigate, Enter to select")
+                    .prompt();
+                match selection {
+                    Ok(s) => s.split_whitespace().next().unwrap_or("postgres").to_string(),
+                    Err(inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted) => {
+                        println!("Cancelled.");
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            };
+
+            // 2. Provider selection (choices depend on service type)
+            let provider_type = if let Some(p) = provider {
+                p
+            } else if non_interactive || json_output {
+                "local".to_string()
+            } else {
+                use inquire::Select;
+                let provider_options: Vec<&str> = match service_type.as_str() {
+                    "postgres" => vec![
+                        "local               — Docker container on this machine",
+                        "postgres_template    — Connect to existing PostgreSQL (template-based branching)",
+                        "neon                 — Neon serverless Postgres (cloud)",
+                        "dblab               — Database Lab Engine (clone-based branching)",
+                        "xata                — Xata serverless database (cloud)",
+                    ],
+                    "clickhouse" => vec![
+                        "local               — Docker container on this machine",
+                    ],
+                    "mysql" => vec![
+                        "local               — Docker container on this machine",
+                    ],
+                    "generic" => vec![
+                        "local               — Docker container on this machine",
+                    ],
+                    "plugin" => vec![
+                        "local               — Managed by plugin",
+                    ],
+                    _ => vec![
+                        "local               — Docker container on this machine",
+                    ],
+                };
+
+                if provider_options.len() == 1 {
+                    // Only one option, auto-select but inform the user
+                    let only = provider_options[0].split_whitespace().next().unwrap_or("local").to_string();
+                    println!("Provider: {}", only);
+                    only
+                } else {
+                    let selection = Select::new("Which provider?", provider_options)
+                        .with_help_message("Use arrow keys to navigate, Enter to select")
+                        .prompt();
+                    match selection {
+                        Ok(s) => s.split_whitespace().next().unwrap_or("local").to_string(),
+                        Err(inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted) => {
+                            println!("Cancelled.");
+                            return Ok(());
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+            };
+
+            // 3. Service name
+            let name = if let Some(n) = name {
+                n
+            } else if non_interactive || json_output {
+                anyhow::bail!("Service name is required in non-interactive mode. Usage: devflow service add <name>");
+            } else {
+                use inquire::Text;
+                let default_name = match service_type.as_str() {
+                    "clickhouse" => "analytics",
+                    "mysql" => "mysql",
+                    "generic" => "app",
+                    "plugin" => "plugin",
+                    _ => "db",
+                };
+                let input = Text::new("Service name:")
+                    .with_default(default_name)
+                    .with_help_message("A short identifier for this service (e.g. db, analytics)")
+                    .prompt();
+                match input {
+                    Ok(n) if n.trim().is_empty() => default_name.to_string(),
+                    Ok(n) => n.trim().to_string(),
+                    Err(inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted) => {
+                        println!("Cancelled.");
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            };
+
+            let is_local = services::factory::ProviderType::is_local(&provider_type);
+            let is_postgres_template = matches!(
+                provider_type.as_str(),
+                "postgres_template" | "postgres" | "postgresql"
+            );
+
+            // For postgres_template provider, look for Docker Compose files
+            if is_postgres_template && !json_output {
+                let compose_files = docker::find_docker_compose_files();
+                if !compose_files.is_empty() {
+                    println!("Found Docker Compose files: {}", compose_files.join(", "));
+
+                    if let Ok(Some(postgres_config)) =
+                        docker::parse_postgres_config_from_files(&compose_files)
+                    {
+                        let use_postgres_config = if non_interactive {
+                            false
+                        } else {
+                            docker::prompt_user_for_config_usage(&postgres_config).unwrap_or(false)
+                        };
+
+                        if use_postgres_config {
+                            if let Some(host) = postgres_config.host {
+                                config.database.host = host;
+                            }
+                            if let Some(port) = postgres_config.port {
+                                config.database.port = port;
+                            }
+                            if let Some(user) = postgres_config.user {
+                                config.database.user = user;
+                            }
+                            if let Some(password) = postgres_config.password {
+                                config.database.password = Some(password);
+                            }
+                            if let Some(database) = postgres_config.database {
+                                config.database.template_database = database;
+                            }
+
+                            println!("Using PostgreSQL configuration from Docker Compose");
+                        }
+                    }
+                }
+            }
+
+            // Build named service config
+            let named_cfg = crate::config::NamedServiceConfig {
+                name: name.clone(),
+                provider_type: provider_type.clone(),
+                service_type: service_type.clone(),
+                auto_branch: crate::config::default_auto_branch(),
+                default: false,
+                local: if is_local {
+                    Some(crate::config::LocalServiceConfig {
+                        image: None,
+                        data_root: None,
+                        storage: None,
+                        port_range_start: None,
+                        postgres_user: None,
+                        postgres_password: None,
+                        postgres_db: None,
+                    })
+                } else {
+                    None
+                },
+                neon: None,
+                dblab: None,
+                xata: None,
+                clickhouse: if service_type == "clickhouse" {
+                    Some(crate::config::ClickHouseConfig {
+                        image: "clickhouse/clickhouse-server:latest".to_string(),
+                        port_range_start: None,
+                        data_root: None,
+                        user: "default".to_string(),
+                        password: None,
+                    })
+                } else {
+                    None
+                },
+                mysql: if service_type == "mysql" {
+                    Some(crate::config::MySQLConfig {
+                        image: "mysql:8".to_string(),
+                        port_range_start: None,
+                        data_root: None,
+                        root_password: "dev".to_string(),
+                        database: None,
+                        user: None,
+                        password: None,
+                    })
+                } else {
+                    None
+                },
+                generic: None,
+                plugin: None,
+            };
+
+            // Store service in local state
+            let mut state = LocalStateManager::new()?;
+            state.add_service(&config_path_buf, named_cfg.clone(), force)?;
+            if !json_output {
+                println!("Added service '{}' to local state", name);
+            }
+
+            // Create main branch for local providers
+            if is_local {
+                // Build a config with the service injected so the factory can find it
+                let mut config_with_service = config.clone();
+                if let Some(state_services) = state.get_services(&config_path_buf) {
+                    config_with_service.services = Some(state_services);
+                }
+
+                // On Linux, offer ZFS auto-setup before creating the main branch
+                #[cfg(feature = "service-local")]
+                if cfg!(target_os = "linux") {
+                    if let Some(data_root) =
+                        attempt_zfs_auto_setup(non_interactive, json_output).await
+                    {
+                        let mut updated_cfg = named_cfg.clone();
+                        if let Some(ref mut local) = updated_cfg.local {
+                            local.data_root = Some(data_root);
+                        }
+                        if let Err(e) =
+                            state.add_service(&config_path_buf, updated_cfg.clone(), true)
+                        {
+                            log::warn!(
+                                "Failed to persist updated service config in local state: {}",
+                                e
+                            );
+                        }
+                        if let Some(state_services) = state.get_services(&config_path_buf) {
+                            config_with_service.services = Some(state_services);
+                        }
+                        init_local_service_main(
+                            &config_with_service,
+                            &updated_cfg,
+                            from.as_deref(),
+                            json_output,
+                        )
+                        .await;
+                    } else {
+                        init_local_service_main(
+                            &config_with_service,
+                            &named_cfg,
+                            from.as_deref(),
+                            json_output,
+                        )
+                        .await;
+                    }
+                } else {
+                    init_local_service_main(
+                        &config_with_service,
+                        &named_cfg,
+                        from.as_deref(),
+                        json_output,
+                    )
+                    .await;
+                }
+                #[cfg(not(feature = "service-local"))]
+                {
+                    init_local_service_main(
+                        &config_with_service,
+                        &named_cfg,
+                        from.as_deref(),
+                        json_output,
+                    )
+                    .await;
+                }
+            }
+
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "ok",
+                        "action": "add_service",
+                        "name": name,
+                        "provider_type": provider_type,
+                    }))?
+                );
+            }
+        }
+        ServiceCommands::Remove { name } => {
+            let config_path_buf = config_path
+                .clone()
+                .unwrap_or_else(|| std::env::current_dir().unwrap().join(".devflow.yml"));
+
+            let mut state = LocalStateManager::new()?;
+            state.remove_service(&config_path_buf, &name)?;
+
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "ok",
+                        "action": "remove_service",
+                        "name": name,
+                    }))?
+                );
+            } else {
+                println!("Removed service '{}' from local state", name);
+            }
+        }
+        ServiceCommands::List => {
+            // List configured services (not branches)
+            let has_multiple_services = config.resolve_services().len() > 1;
+            if database_name.is_none() && has_multiple_services {
+                return handle_multi_service_aggregation(
+                    ServiceAggregation::List,
+                    config,
+                    json_output,
+                )
+                .await;
+            }
+            let named = services::factory::resolve_provider(config, database_name).await?;
+            let branches = named.provider.list_branches().await?;
+            if json_output {
+                let enriched = enrich_branch_list_json(&branches, config);
+                println!("{}", serde_json::to_string_pretty(&enriched)?);
+            } else {
+                println!("Branches ({}):", named.provider.provider_name());
+                print_enriched_branch_list(&branches, config);
+            }
+        }
+        ServiceCommands::Status => {
+            let has_multiple_services = config.resolve_services().len() > 1;
+            if database_name.is_none() && has_multiple_services {
+                return handle_multi_service_aggregation(
+                    ServiceAggregation::Status,
+                    config,
+                    json_output,
+                )
+                .await;
+            }
+            let named = services::factory::resolve_provider(config, database_name).await?;
+            let provider = named.provider;
+            let branches = provider.list_branches().await.unwrap_or_default();
+            let running = branches
+                .iter()
+                .filter(|b| b.state.as_deref() == Some("running"))
+                .count();
+            let stopped = branches
+                .iter()
+                .filter(|b| b.state.as_deref() == Some("stopped"))
+                .count();
+            let project_info = provider.project_info();
+
+            if json_output {
+                let mut status = serde_json::json!({
+                    "provider": provider.provider_name(),
+                    "total_branches": branches.len(),
+                    "running": running,
+                    "stopped": stopped,
+                    "supports_lifecycle": provider.supports_lifecycle(),
+                });
+                if let Some(ref info) = project_info {
+                    status["project"] = serde_json::Value::String(info.name.clone());
+                    if let Some(ref storage) = info.storage_driver {
+                        status["storage"] = serde_json::Value::String(storage.clone());
+                    }
+                    if let Some(ref image) = info.image {
+                        status["image"] = serde_json::Value::String(image.clone());
+                    }
+                }
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            } else {
+                println!("Provider: {}", provider.provider_name());
+                if let Some(ref info) = project_info {
+                    println!("Project: {}", info.name);
+                    if let Some(ref storage) = info.storage_driver {
+                        println!("Storage: {}", storage);
+                    }
+                    if let Some(ref image) = info.image {
+                        println!("Image: {}", image);
+                    }
+                }
+                println!(
+                    "Branches: {} total ({} running, {} stopped)",
+                    branches.len(),
+                    running,
+                    stopped
+                );
+                if provider.supports_lifecycle() {
+                    println!("Lifecycle: supported (start/stop/reset)");
+                }
+            }
+        }
+        // Provider operations: delegate to handle_service_provider_command
+        other => {
+            return handle_service_provider_command(
+                other,
+                config,
+                json_output,
+                non_interactive,
+                database_name,
+                config_path,
+            )
+            .await;
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle service provider operations (create, delete, start, stop, reset, destroy, connection, logs, seed).
+async fn handle_service_provider_command(
+    cmd: ServiceCommands,
+    config: &mut Config,
+    json_output: bool,
+    non_interactive: bool,
+    database_name: Option<&str>,
+    config_path: &Option<std::path::PathBuf>,
+) -> Result<()> {
+    // Orchestratable mutation commands: Create and Delete operate on all auto_branch services
+    let is_orchestratable_mutation =
+        matches!(cmd, ServiceCommands::Create { .. } | ServiceCommands::Delete { .. });
+    let has_multiple_services = config.resolve_services().len() > 1;
+
+    // For Create/Delete: if there are multiple services and no --service flag,
+    // use orchestration to operate on all auto_branch services atomically.
+    if is_orchestratable_mutation && database_name.is_none() && has_multiple_services {
+        return handle_orchestrated_mutation(cmd, config, json_output, non_interactive).await;
+    }
+
+    let named = services::factory::resolve_provider(config, database_name).await?;
+    let provider = named.provider;
+    let resolved_name = named.name;
+
+    // For non-orchestratable mutation commands with multiple services and no --service, print a note
+    if !is_orchestratable_mutation
+        && database_name.is_none()
+        && has_multiple_services
+    {
+        eprintln!(
+            "note: using default service '{}'. Use --service to target a specific one.",
+            resolved_name
+        );
+    }
+
+    match cmd {
+        ServiceCommands::Create { branch_name, from } => {
+            // Single-service path (explicit --service or single service)
+            let info = provider.create_branch(&branch_name, from.as_deref()).await?;
+
+            // Execute hooks
+            run_hooks(
+                config,
+                &branch_name,
+                HookPhase::PostServiceCreate,
+                json_output,
+                non_interactive,
+            )
+            .await?;
+
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(&info)?);
+            } else {
+                println!("Created service branch: {}", info.name);
+                if let Some(state) = &info.state {
+                    println!("  State: {}", state);
+                }
+                if let Some(parent) = &info.parent_branch {
+                    println!("  Parent: {}", parent);
+                }
+                // Show connection info
+                if let Ok(conn) = provider.get_connection_info(&branch_name).await {
+                    if let Some(ref uri) = conn.connection_string {
+                        println!("  Connection: {}", uri);
+                    }
+                }
+            }
+        }
+        ServiceCommands::Delete { branch_name } => {
+            // Single-service path (explicit --service or single service)
+            provider.delete_branch(&branch_name).await?;
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "status": "ok",
+                        "deleted": branch_name
+                    }))?
+                );
+            } else {
+                println!("Deleted service branch: {}", branch_name);
+            }
+        }
+        ServiceCommands::Start { branch_name } => {
+            if !provider.supports_lifecycle() {
+                anyhow::bail!(
+                    "Service '{}' does not support start/stop lifecycle",
+                    provider.provider_name()
+                );
+            }
+            provider.start_branch(&branch_name).await?;
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "status": "ok",
+                        "started": branch_name
+                    }))?
+                );
+            } else {
+                println!("Started branch: {}", branch_name);
+            }
+        }
+        ServiceCommands::Stop { branch_name } => {
+            if !provider.supports_lifecycle() {
+                anyhow::bail!(
+                    "Service '{}' does not support start/stop lifecycle",
+                    provider.provider_name()
+                );
+            }
+            provider.stop_branch(&branch_name).await?;
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "status": "ok",
+                        "stopped": branch_name
+                    }))?
+                );
+            } else {
+                println!("Stopped branch: {}", branch_name);
+            }
+        }
+        ServiceCommands::Reset { branch_name } => {
+            if !provider.supports_lifecycle() {
+                anyhow::bail!(
+                    "Service '{}' does not support reset",
+                    provider.provider_name()
+                );
+            }
+            provider.reset_branch(&branch_name).await?;
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "status": "ok",
+                        "reset": branch_name
+                    }))?
+                );
+            } else {
+                println!("Reset branch: {}", branch_name);
+            }
+        }
+        ServiceCommands::Connection {
+            branch_name,
+            format,
+        } => {
+            let conn = provider.get_connection_info(&branch_name).await?;
+            // Global --json flag overrides --format
+            let fmt = if json_output {
+                "json"
+            } else {
+                format.as_deref().unwrap_or("uri")
+            };
+            match fmt {
+                "uri" => {
+                    if let Some(ref uri) = conn.connection_string {
+                        println!("{}", uri);
+                    } else {
+                        println!(
+                            "postgresql://{}@{}:{}/{}",
+                            conn.user, conn.host, conn.port, conn.database
+                        );
+                    }
+                }
+                "env" => {
+                    println!("DATABASE_HOST={}", conn.host);
+                    println!("DATABASE_PORT={}", conn.port);
+                    println!("DATABASE_NAME={}", conn.database);
+                    println!("DATABASE_USER={}", conn.user);
+                    if let Some(ref password) = conn.password {
+                        println!("DATABASE_PASSWORD={}", password);
+                    }
+                    if let Some(ref uri) = conn.connection_string {
+                        println!("DATABASE_URL={}", uri);
+                    }
+                }
+                _ => {
+                    println!("{}", serde_json::to_string_pretty(&conn)?);
+                }
+            }
+        }
+        ServiceCommands::Destroy { force } => {
+            if !provider.supports_destroy() {
+                anyhow::bail!(
+                    "Service '{}' does not support destroy. This command is only available for the local (Docker + CoW) provider.",
+                    provider.provider_name()
+                );
+            }
+
+            let preview = provider.destroy_preview().await?;
+            let (project_name, branch_names) = match preview {
+                Some(p) => p,
+                None => {
+                    if json_output {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&serde_json::json!({
+                                "status": "ok",
+                                "message": "no project found"
+                            }))?
+                        );
+                    } else {
+                        println!(
+                            "No project found for service '{}'. Nothing to destroy.",
+                            resolved_name
+                        );
+                    }
+                    return Ok(());
+                }
+            };
+
+            if !force {
+                if json_output || non_interactive {
+                    anyhow::bail!(
+                        "Use --force to confirm destroy in non-interactive or JSON output mode"
+                    );
+                }
+
+                println!("This will permanently destroy the following:");
+                println!("  Project: {}", project_name);
+                if branch_names.is_empty() {
+                    println!("  Branches: (none)");
+                } else {
+                    println!("  Branches ({}):", branch_names.len());
+                    for name in &branch_names {
+                        println!("    - {}", name);
+                    }
+                }
+                println!();
+                println!("All containers, storage data, and state will be removed.");
+
+                let confirm =
+                    inquire::Confirm::new("Are you sure you want to destroy this project?")
+                        .with_default(false)
+                        .prompt()?;
+
+                if !confirm {
+                    println!("Aborted.");
+                    return Ok(());
+                }
+            }
+
+            let destroyed = provider.destroy_project().await?;
+
+            // Remove the service entry from local state
+            if let Some(ref path) = config_path {
+                if let Ok(mut state) = LocalStateManager::new() {
+                    if let Err(e) = state.remove_service(path, &resolved_name) {
+                        log::warn!(
+                            "Failed to remove service '{}' from local state: {}",
+                            resolved_name,
+                            e
+                        );
+                    }
+                }
+            }
+
+            // Also remove from committed config for backward compat (legacy configs)
+            config.remove_service(&resolved_name);
+            if let Some(path) = config_path {
+                config.save_to_file(path)?;
+            }
+
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "ok",
+                        "project": project_name,
+                        "destroyed_branches": destroyed,
+                    }))?
+                );
+            } else {
+                println!(
+                    "Destroyed project '{}' and {} branch(es)",
+                    project_name,
+                    destroyed.len()
+                );
+                for name in &destroyed {
+                    println!("  - {}", name);
+                }
+            }
+        }
+        ServiceCommands::Logs { branch_name, tail } => {
+            let output = provider.logs(&branch_name, tail).await?;
             if json_output {
                 println!(
                     "{}",
@@ -2783,11 +3041,11 @@ async fn handle_backend_command(
                 print!("{output}");
             }
         }
-        Commands::Seed { branch_name, from } => {
+        ServiceCommands::Seed { branch_name, from } => {
             if !json_output {
                 println!("Seeding branch '{}' from '{}'...", branch_name, from);
             }
-            backend.seed_from_source(&branch_name, &from).await?;
+            provider.seed_from_source(&branch_name, &from).await?;
             if json_output {
                 println!(
                     "{}",
@@ -2801,28 +3059,164 @@ async fn handle_backend_command(
                 println!("Seed complete.");
             }
         }
+        // Add, Remove, List, Status are handled by handle_service_dispatch
         _ => unreachable!(),
     }
 
     Ok(())
 }
 
-/// Handle aggregation commands (List, Status, Doctor) across all backends.
-async fn handle_multi_backend_command(
-    cmd: Commands,
+/// Show top-level status: VCS info + service status.
+async fn handle_top_level_status(
+    config: &mut Config,
+    json_output: bool,
+    _non_interactive: bool,
+    database_name: Option<&str>,
+    _config_path: &Option<std::path::PathBuf>,
+) -> Result<()> {
+    // Show VCS info
+    let vcs_info = vcs::detect_vcs_provider(".")
+        .ok()
+        .and_then(|vcs| {
+            let branch = vcs.current_branch().ok()?;
+            Some(serde_json::json!({
+                "provider": vcs.provider_name(),
+                "branch": branch,
+            }))
+        });
+
+    // Show service info
+    let has_multiple_services = config.resolve_services().len() > 1;
+    if database_name.is_none() && has_multiple_services {
+        let all_providers = services::factory::create_all_providers(config).await?;
+        if json_output {
+            let mut services_map = serde_json::Map::new();
+            for named in &all_providers {
+                let branches = named.provider.list_branches().await.unwrap_or_default();
+                let running = branches
+                    .iter()
+                    .filter(|b| b.state.as_deref() == Some("running"))
+                    .count();
+                let stopped = branches
+                    .iter()
+                    .filter(|b| b.state.as_deref() == Some("stopped"))
+                    .count();
+                services_map.insert(
+                    named.name.clone(),
+                    serde_json::json!({
+                        "provider": named.provider.provider_name(),
+                        "total_branches": branches.len(),
+                        "running": running,
+                        "stopped": stopped,
+                    }),
+                );
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "vcs": vcs_info,
+                    "services": services_map,
+                }))?
+            );
+        } else {
+            if let Some(ref info) = vcs_info {
+                println!(
+                    "VCS: {} (branch: {})",
+                    info["provider"].as_str().unwrap_or("unknown"),
+                    info["branch"].as_str().unwrap_or("unknown")
+                );
+                println!();
+            }
+            for named in &all_providers {
+                let branches = named.provider.list_branches().await.unwrap_or_default();
+                let running = branches
+                    .iter()
+                    .filter(|b| b.state.as_deref() == Some("running"))
+                    .count();
+                let stopped = branches
+                    .iter()
+                    .filter(|b| b.state.as_deref() == Some("stopped"))
+                    .count();
+                println!("[{}] ({}):", named.name, named.provider.provider_name());
+                println!(
+                    "  Branches: {} total ({} running, {} stopped)",
+                    branches.len(),
+                    running,
+                    stopped
+                );
+            }
+        }
+    } else {
+        let named = services::factory::resolve_provider(config, database_name).await?;
+        let branches = named.provider.list_branches().await.unwrap_or_default();
+        let running = branches
+            .iter()
+            .filter(|b| b.state.as_deref() == Some("running"))
+            .count();
+        let stopped = branches
+            .iter()
+            .filter(|b| b.state.as_deref() == Some("stopped"))
+            .count();
+
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "vcs": vcs_info,
+                    "service": {
+                        "name": named.name,
+                        "provider": named.provider.provider_name(),
+                        "total_branches": branches.len(),
+                        "running": running,
+                        "stopped": stopped,
+                    },
+                }))?
+            );
+        } else {
+            if let Some(ref info) = vcs_info {
+                println!(
+                    "VCS: {} (branch: {})",
+                    info["provider"].as_str().unwrap_or("unknown"),
+                    info["branch"].as_str().unwrap_or("unknown")
+                );
+                println!();
+            }
+            println!("Service: {} ({})", named.name, named.provider.provider_name());
+            println!(
+                "  Branches: {} total ({} running, {} stopped)",
+                branches.len(),
+                running,
+                stopped
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Internal enum for multi-service aggregation dispatch.
+enum ServiceAggregation {
+    List,
+    Status,
+    Doctor,
+}
+
+/// Handle aggregation commands (List, Status, Doctor) across all services.
+async fn handle_multi_service_aggregation(
+    aggregation: ServiceAggregation,
     config: &Config,
     json_output: bool,
 ) -> Result<()> {
-    let all_backends = services::factory::create_all_backends(config).await?;
+    let all_providers = services::factory::create_all_providers(config).await?;
 
-    match cmd {
-        Commands::List => {
-            // Gather all service branches from all backends
+    match aggregation {
+        ServiceAggregation::List => {
+            // Gather all service branches from all services
             let mut all_service_branches: Vec<services::BranchInfo> = Vec::new();
             if json_output {
                 let mut map = serde_json::Map::new();
-                for named in &all_backends {
-                    let branches = named.backend.list_branches().await.unwrap_or_default();
+                for named in &all_providers {
+                    let branches = named.provider.list_branches().await.unwrap_or_default();
                     map.insert(
                         named.name.clone(),
                         enrich_branch_list_json(&branches, config),
@@ -2830,20 +3224,20 @@ async fn handle_multi_backend_command(
                 }
                 println!("{}", serde_json::to_string_pretty(&map)?);
             } else {
-                for named in &all_backends {
-                    let branches = named.backend.list_branches().await.unwrap_or_default();
+                for named in &all_providers {
+                    let branches = named.provider.list_branches().await.unwrap_or_default();
                     all_service_branches.extend(branches);
-                    println!("[{}] ({}):", named.name, named.backend.backend_name());
+                    println!("[{}] ({}):", named.name, named.provider.provider_name());
                 }
                 print_enriched_branch_list(&all_service_branches, config);
                 println!();
             }
         }
-        Commands::Status => {
+        ServiceAggregation::Status => {
             if json_output {
                 let mut map = serde_json::Map::new();
-                for named in &all_backends {
-                    let branches = named.backend.list_branches().await.unwrap_or_default();
+                for named in &all_providers {
+                    let branches = named.provider.list_branches().await.unwrap_or_default();
                     let running = branches
                         .iter()
                         .filter(|b| b.state.as_deref() == Some("running"))
@@ -2852,18 +3246,18 @@ async fn handle_multi_backend_command(
                         .iter()
                         .filter(|b| b.state.as_deref() == Some("stopped"))
                         .count();
-                    let project_info = named.backend.project_info();
+                    let project_info = named.provider.project_info();
 
                     let mut status = serde_json::json!({
-                        "backend": named.backend.backend_name(),
+                        "provider": named.provider.provider_name(),
                         "total_branches": branches.len(),
                         "running": running,
                         "stopped": stopped,
-                        "supports_lifecycle": named.backend.supports_lifecycle(),
+                        "supports_lifecycle": named.provider.supports_lifecycle(),
                     });
                     if let Some(ref info) = project_info {
                         status["project"] = serde_json::Value::String(info.name.clone());
-                        if let Some(ref storage) = info.storage_backend {
+                        if let Some(ref storage) = info.storage_driver {
                             status["storage"] = serde_json::Value::String(storage.clone());
                         }
                         if let Some(ref image) = info.image {
@@ -2874,8 +3268,8 @@ async fn handle_multi_backend_command(
                 }
                 println!("{}", serde_json::to_string_pretty(&map)?);
             } else {
-                for named in &all_backends {
-                    let branches = named.backend.list_branches().await.unwrap_or_default();
+                for named in &all_providers {
+                    let branches = named.provider.list_branches().await.unwrap_or_default();
                     let running = branches
                         .iter()
                         .filter(|b| b.state.as_deref() == Some("running"))
@@ -2884,12 +3278,12 @@ async fn handle_multi_backend_command(
                         .iter()
                         .filter(|b| b.state.as_deref() == Some("stopped"))
                         .count();
-                    let project_info = named.backend.project_info();
+                    let project_info = named.provider.project_info();
 
-                    println!("[{}] ({}):", named.name, named.backend.backend_name());
+                    println!("[{}] ({}):", named.name, named.provider.provider_name());
                     if let Some(ref info) = project_info {
                         println!("  Project: {}", info.name);
-                        if let Some(ref storage) = info.storage_backend {
+                        if let Some(ref storage) = info.storage_driver {
                             println!("  Storage: {}", storage);
                         }
                         if let Some(ref image) = info.image {
@@ -2902,28 +3296,28 @@ async fn handle_multi_backend_command(
                         running,
                         stopped
                     );
-                    if named.backend.supports_lifecycle() {
+                    if named.provider.supports_lifecycle() {
                         println!("  Lifecycle: supported (start/stop/reset)");
                     }
                     println!();
                 }
             }
         }
-        Commands::Doctor => {
+        ServiceAggregation::Doctor => {
             if json_output {
                 let mut map = serde_json::Map::new();
-                for named in &all_backends {
-                    let report = named.backend.doctor().await?;
+                for named in &all_providers {
+                    let report = named.provider.doctor().await?;
                     map.insert(named.name.clone(), serde_json::to_value(&report)?);
                 }
                 println!("{}", serde_json::to_string_pretty(&map)?);
             } else {
-                for named in &all_backends {
-                    let report = named.backend.doctor().await?;
+                for named in &all_providers {
+                    let report = named.provider.doctor().await?;
                     println!(
                         "[{}] Doctor report ({}):",
                         named.name,
-                        named.backend.backend_name()
+                        named.provider.provider_name()
                     );
                     for check in &report.checks {
                         let icon = if check.available { "OK" } else { "FAIL" };
@@ -2933,21 +3327,20 @@ async fn handle_multi_backend_command(
                 }
             }
         }
-        _ => unreachable!(),
     }
 
     Ok(())
 }
 
-/// Handle Create/Delete across all auto-branch backends when no specific --database is given.
+/// Handle Create/Delete across all auto-branch services when no specific --service is given.
 async fn handle_orchestrated_mutation(
-    cmd: Commands,
+    cmd: ServiceCommands,
     config: &Config,
     json_output: bool,
     non_interactive: bool,
 ) -> Result<()> {
     match cmd {
-        Commands::Create { branch_name, from } => {
+        ServiceCommands::Create { branch_name, from } => {
             let results =
                 services::factory::orchestrate_create(config, &branch_name, from.as_deref())
                     .await?;
@@ -3025,7 +3418,7 @@ async fn handle_orchestrated_mutation(
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             }
         }
-        Commands::Delete { branch_name } => {
+        ServiceCommands::Delete { branch_name } => {
             let results = services::factory::orchestrate_delete(config, &branch_name).await?;
             let success_count = results.iter().filter(|r| r.success).count();
             let fail_count = results.iter().filter(|r| !r.success).count();
@@ -3284,9 +3677,9 @@ async fn handle_interactive_switch(
     config: &Config,
     config_path: &Option<std::path::PathBuf>,
 ) -> Result<()> {
-    // Get available branches from the default backend
-    let mut branches = match services::factory::resolve_backend(config, None).await {
-        Ok(named) => match named.backend.list_branches().await {
+    // Get available branches from the default provider
+    let mut branches = match services::factory::resolve_provider(config, None).await {
+        Ok(named) => match named.provider.list_branches().await {
             Ok(branch_infos) => branch_infos.into_iter().map(|b| b.name).collect::<Vec<_>>(),
             Err(_) => Vec::new(),
         },
@@ -3599,88 +3992,117 @@ async fn handle_switch_command(
         vcs_repo.checkout_branch(branch_name)?;
     }
 
-    // ── Service branching (orchestrated across all auto_branch backends) ──
+    // ── Service branching (orchestrated across all auto_branch services) ──
     let normalized_branch = config.get_normalized_branch_name(branch_name);
 
     if !no_services {
-        if !json_output {
-            println!("Switching service branches: {}", normalized_branch);
-        }
+        // Check if any services are configured before attempting service branching
+        let has_services = !config.resolve_services().is_empty();
 
-        // Update current branch in local state
-        if let Some(ref path) = config_path {
-            if let Ok(mut state) = LocalStateManager::new() {
-                if let Err(e) = state.set_current_branch(path, Some(normalized_branch.clone())) {
-                    log::warn!("Failed to persist current branch in local state: {}", e);
+        if has_services {
+            if !json_output {
+                println!("Switching service branches: {}", normalized_branch);
+            }
+
+            // Update current branch in local state
+            if let Some(ref path) = config_path {
+                if let Ok(mut state) = LocalStateManager::new() {
+                    if let Err(e) =
+                        state.set_current_branch(path, Some(normalized_branch.clone()))
+                    {
+                        log::warn!("Failed to persist current branch in local state: {}", e);
+                    }
                 }
             }
-        }
 
-        // Orchestrate switch across all auto-branch backends
-        let results =
-            services::factory::orchestrate_switch(config, &normalized_branch, None).await?;
+            // Orchestrate switch across all auto-branch services
+            let results =
+                services::factory::orchestrate_switch(config, &normalized_branch, None).await?;
 
-        let success_count = results.iter().filter(|r| r.success).count();
-        let fail_count = results.iter().filter(|r| !r.success).count();
+            let success_count = results.iter().filter(|r| r.success).count();
+            let fail_count = results.iter().filter(|r| !r.success).count();
 
-        if json_output {
-            let service_results: Vec<serde_json::Value> = results
-                .iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "service": r.service_name,
-                        "success": r.success,
-                        "message": r.message,
+            if json_output {
+                let service_results: Vec<serde_json::Value> = results
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "service": r.service_name,
+                            "success": r.success,
+                            "message": r.message,
+                        })
                     })
-                })
-                .collect();
-            json_summary = Some(serde_json::json!({
-                "branch": normalized_branch,
-                "worktree_path": worktree_path,
-                "worktree_created": worktree_created,
-                "services_switched": success_count,
-                "services_failed": fail_count,
-                "service_results": service_results,
-            }));
-        } else {
-            for r in &results {
-                if r.success {
-                    log::info!("[{}] {}", r.service_name, r.message);
-                } else {
-                    println!("Warning: {}", r.message);
+                    .collect();
+                json_summary = Some(serde_json::json!({
+                    "branch": normalized_branch,
+                    "worktree_path": worktree_path,
+                    "worktree_created": worktree_created,
+                    "services_switched": success_count,
+                    "services_failed": fail_count,
+                    "service_results": service_results,
+                }));
+            } else {
+                for r in &results {
+                    if r.success {
+                        log::info!("[{}] {}", r.service_name, r.message);
+                    } else {
+                        println!("Warning: {}", r.message);
+                    }
+                }
+
+                if success_count > 0 && fail_count == 0 {
+                    println!(
+                        "Switched to service branch: {} ({} service(s))",
+                        normalized_branch, success_count
+                    );
+                } else if success_count > 0 {
+                    println!(
+                        "Switched to service branch: {} ({}/{} service(s), {} failed)",
+                        normalized_branch,
+                        success_count,
+                        results.len(),
+                        fail_count
+                    );
+                } else if !results.is_empty() {
+                    println!(
+                        "Warning: Failed to switch service branches on all {} service(s)",
+                        results.len()
+                    );
                 }
             }
 
-            if success_count > 0 && fail_count == 0 {
-                println!(
-                    "Switched to service branch: {} ({} service(s))",
-                    normalized_branch, success_count
-                );
-            } else if success_count > 0 {
-                println!(
-                    "Switched to service branch: {} ({}/{} service(s), {} failed)",
-                    normalized_branch,
-                    success_count,
-                    results.len(),
-                    fail_count
-                );
-            } else if !results.is_empty() {
-                println!(
-                    "Warning: Failed to switch service branches on all {} service(s)",
+            if fail_count > 0 {
+                if let Some(summary) = json_summary.take() {
+                    println!("{}", serde_json::to_string_pretty(&summary)?);
+                }
+                anyhow::bail!(
+                    "Failed to switch service branches on {}/{} service(s)",
+                    fail_count,
                     results.len()
                 );
             }
-        }
-
-        if fail_count > 0 {
-            if let Some(summary) = json_summary.take() {
-                println!("{}", serde_json::to_string_pretty(&summary)?);
+        } else {
+            // No services configured — just do VCS switch, update state
+            if let Some(ref path) = config_path {
+                if let Ok(mut state) = LocalStateManager::new() {
+                    if let Err(e) =
+                        state.set_current_branch(path, Some(normalized_branch.clone()))
+                    {
+                        log::warn!("Failed to persist current branch in local state: {}", e);
+                    }
+                }
             }
-            anyhow::bail!(
-                "Failed to switch service branches on {}/{} service(s)",
-                fail_count,
-                results.len()
-            );
+            if json_output {
+                json_summary = Some(serde_json::json!({
+                    "branch": normalized_branch,
+                    "worktree_path": worktree_path,
+                    "worktree_created": worktree_created,
+                    "services": "none_configured",
+                }));
+            } else {
+                println!("Switched branch: {}", normalized_branch);
+                println!("  (no services configured — use 'devflow service add' to add one)");
+            }
         }
     } else {
         // Still update state even if skipping services
@@ -3729,76 +4151,116 @@ async fn handle_switch_to_main(
     no_verify: bool,
     non_interactive: bool,
 ) -> Result<()> {
-    let main_name = "_main";
+    let main_branch = &config.git.main_branch;
 
     if !json_output {
-        println!("Switching to main database");
+        println!("Switching to main branch: {}", main_branch);
     }
 
-    // Update current branch in local state to a special main marker
+    // ── Switch the git branch / worktree ───────────────────────────────
+    let worktree_enabled = config.worktree.as_ref().is_some_and(|wt| wt.enabled);
+    let mut worktree_path: Option<String> = None;
+
+    if worktree_enabled {
+        let vcs_repo = vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
+        if let Some(wt_path) = vcs_repo.worktree_path(main_branch)? {
+            if !json_output {
+                println!("Switching to existing worktree: {}", wt_path.display());
+                println!("DEVFLOW_CD={}", wt_path.display());
+            }
+            worktree_path = Some(wt_path.display().to_string());
+        } else {
+            // Main branch is typically the bare repo root — just checkout
+            let vcs_repo =
+                vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
+            vcs_repo.checkout_branch(main_branch)?;
+        }
+    } else {
+        // Classic mode — switch the working directory to the main branch
+        let vcs_repo = vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
+        vcs_repo.checkout_branch(main_branch)?;
+    }
+
+    // Update current branch in local state
     if let Some(ref path) = config_path {
         if let Ok(mut state) = LocalStateManager::new() {
-            if let Err(e) = state.set_current_branch(path, Some(main_name.to_string())) {
+            if let Err(e) = state.set_current_branch(path, Some(main_branch.to_string())) {
                 log::warn!("Failed to persist current branch in local state: {}", e);
             }
         }
     }
 
-    // Switch to main on all auto-branch backends
-    let results = services::factory::orchestrate_switch(config, "main", None).await?;
-    let success_count = results.iter().filter(|r| r.success).count();
-    let fail_count = results.iter().filter(|r| !r.success).count();
+    // ── Switch services to main ────────────────────────────────────────
+    let has_services = !config.resolve_services().is_empty();
     let mut json_summary: Option<serde_json::Value> = None;
 
-    if json_output {
-        let service_results: Vec<serde_json::Value> = results
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "service": r.service_name,
-                    "success": r.success,
-                    "message": r.message,
-                })
-            })
-            .collect();
-        json_summary = Some(serde_json::json!({
-            "branch": main_name,
-            "database": config.database.template_database,
-            "services_switched": success_count,
-            "services_failed": fail_count,
-            "service_results": service_results,
-        }));
-    } else if fail_count == 0 {
-        println!(
-            "Switched to main database: {} ({} service(s))",
-            config.database.template_database, success_count
-        );
-    } else {
-        println!(
-            "Switched to main database: {} ({}/{} service(s), {} failed)",
-            config.database.template_database,
-            success_count,
-            results.len(),
-            fail_count
-        );
-    }
+    if has_services {
+        let results = services::factory::orchestrate_switch(config, "main", None).await?;
+        let success_count = results.iter().filter(|r| r.success).count();
+        let fail_count = results.iter().filter(|r| !r.success).count();
 
-    if fail_count > 0 {
-        if let Some(summary) = json_summary.take() {
-            println!("{}", serde_json::to_string_pretty(&summary)?);
+        if json_output {
+            let service_results: Vec<serde_json::Value> = results
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "service": r.service_name,
+                        "success": r.success,
+                        "message": r.message,
+                    })
+                })
+                .collect();
+            json_summary = Some(serde_json::json!({
+                "branch": main_branch,
+                "worktree_path": worktree_path,
+                "services_switched": success_count,
+                "services_failed": fail_count,
+                "service_results": service_results,
+            }));
+        } else if fail_count == 0 {
+            println!(
+                "Switched to main branch: {} ({} service(s))",
+                main_branch, success_count
+            );
+        } else {
+            println!(
+                "Switched to main branch: {} ({}/{} service(s), {} failed)",
+                main_branch,
+                success_count,
+                results.len(),
+                fail_count
+            );
         }
-        anyhow::bail!(
-            "Failed to switch to main on {}/{} service(s)",
-            fail_count,
-            results.len()
-        );
+
+        if fail_count > 0 {
+            if let Some(summary) = json_summary.take() {
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+            }
+            anyhow::bail!(
+                "Failed to switch to main on {}/{} service(s)",
+                fail_count,
+                results.len()
+            );
+        }
+    } else {
+        // No services configured
+        if json_output {
+            json_summary = Some(serde_json::json!({
+                "branch": main_branch,
+                "worktree_path": worktree_path,
+                "services": "none_configured",
+            }));
+        } else {
+            println!("Switched to main branch: {}", main_branch);
+            println!("  (no services configured — use 'devflow service add' to add one)");
+        }
     }
 
     // Execute hooks
     if !no_verify {
         run_hooks(
             config,
-            main_name,
+            main_branch,
             HookPhase::PostSwitch,
             json_output,
             non_interactive,
@@ -4187,7 +4649,7 @@ async fn handle_merge_command(
             }
         }
 
-        // Delete service branches across all auto-branch backends
+        // Delete service branches across all auto-branch services
         let normalized = config.get_normalized_branch_name(&source);
         let results = services::factory::orchestrate_delete(config, &normalized).await;
         match results {
@@ -4369,28 +4831,28 @@ fn show_effective_config(effective_config: &EffectiveConfig) -> Result<()> {
 
     println!();
 
-    // Show backend source
-    println!("Backends:");
+    // Show service source
+    println!("Services:");
     if let Ok(state) = LocalStateManager::new() {
-        // Try to find config path to look up state backends
+        // Try to find config path to look up state services
         let config_path = Config::find_config_file().ok().flatten();
-        let state_backends = config_path.as_ref().and_then(|p| state.get_backends(p));
+        let state_services = config_path.as_ref().and_then(|p| state.get_services(p));
 
-        if let Some(ref backends) = state_backends {
+        if let Some(ref services) = state_services {
             println!("  Source: local state (~/.config/devflow/local_state.yml)");
-            for b in backends {
+            for b in services {
                 let default_marker = if b.default { " (default)" } else { "" };
-                println!("  - {} [{}]{}", b.name, b.backend_type, default_marker);
+                println!("  - {} [{}]{}", b.name, b.provider_type, default_marker);
             }
         } else {
-            let committed_backends = effective_config.config.resolve_backends();
-            if committed_backends.is_empty() {
+            let committed_services = effective_config.config.resolve_services();
+            if committed_services.is_empty() {
                 println!("  (none configured)");
             } else {
                 println!("  Source: committed config (.devflow.yml)");
-                for b in &committed_backends {
+                for b in &committed_services {
                     let default_marker = if b.default { " (default)" } else { "" };
-                    println!("  - {} [{}]{}", b.name, b.backend_type, default_marker);
+                    println!("  - {} [{}]{}", b.name, b.provider_type, default_marker);
                 }
             }
         }

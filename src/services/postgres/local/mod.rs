@@ -15,9 +15,9 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use super::super::{
-    BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceBackend,
+    BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceProvider,
 };
-use crate::config::{Config, LocalBackendConfig};
+use crate::config::{Config, LocalServiceConfig};
 use docker::{DockerRuntime, ReserveBranchSpec, StartBranchSpec};
 use model::BranchState;
 use state::{NewBranch, NewProject, Store};
@@ -27,8 +27,9 @@ const DEFAULT_IMAGE: &str = "postgres:17";
 const DEFAULT_PORT_RANGE_START: u16 = 55432;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub struct LocalBackend {
+pub struct LocalProvider {
     project_name: String,
+    service_name: String,
     image: String,
     port_range_start: u16,
     pg_user: String,
@@ -40,11 +41,11 @@ pub struct LocalBackend {
     data_root: PathBuf,
 }
 
-impl LocalBackend {
+impl LocalProvider {
     pub async fn new(
-        backend_name: &str,
-        _config: &Config,
-        local_config: Option<&LocalBackendConfig>,
+        service_name: &str,
+        config: &Config,
+        local_config: Option<&LocalServiceConfig>,
     ) -> Result<Self> {
         let image = local_config
             .and_then(|c| c.image.as_deref())
@@ -97,10 +98,12 @@ impl LocalBackend {
         let runtime = DockerRuntime::new().context("failed to initialize Docker runtime")?;
         let storage = StorageCoordinator::new(projects_root.clone());
 
-        let project_name = backend_name.to_string();
+        let project_name = config.project_name();
+        let service_name = service_name.to_string();
 
         Ok(Self {
             project_name,
+            service_name,
             image,
             port_range_start,
             pg_user,
@@ -128,14 +131,14 @@ impl LocalBackend {
         let project = self.store().create_project(NewProject {
             name: self.project_name.clone(),
             image: self.image.clone(),
-            storage_backend: selection.backend,
+            storage_driver: selection.driver,
             storage_config: selection.config,
         })?;
 
         log::info!(
             "Auto-created project '{}' with {} storage",
             self.project_name,
-            project.storage_backend.as_str()
+            project.storage_driver.as_str()
         );
         Ok(project)
     }
@@ -167,7 +170,7 @@ impl LocalBackend {
 }
 
 #[async_trait]
-impl ServiceBackend for LocalBackend {
+impl ServiceProvider for LocalProvider {
     async fn create_branch(
         &self,
         branch_name: &str,
@@ -203,6 +206,7 @@ impl ServiceBackend for LocalBackend {
             .runtime
             .reserve_branch(&ReserveBranchSpec {
                 project_name: self.project_name.clone(),
+                service_name: self.service_name.clone(),
                 branch_name: branch_name.to_string(),
             })
             .await?;
@@ -601,7 +605,7 @@ impl ServiceBackend for LocalBackend {
             available: true,
             detail: format!(
                 "Using {} for new projects",
-                storage_report.default_backend.as_str()
+                storage_report.default_driver.as_str()
             ),
         });
 
@@ -645,12 +649,12 @@ impl ServiceBackend for LocalBackend {
             .ok()??;
         Some(ProjectInfo {
             name: project.name,
-            storage_backend: Some(project.storage_backend.as_str().to_string()),
+            storage_driver: Some(project.storage_driver.as_str().to_string()),
             image: Some(project.image),
         })
     }
 
-    fn backend_name(&self) -> &'static str {
+    fn provider_name(&self) -> &'static str {
         "Local (Docker + CoW)"
     }
 

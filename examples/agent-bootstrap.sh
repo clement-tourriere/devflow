@@ -7,13 +7,14 @@ set -euo pipefail
 #   ./examples/agent-bootstrap.sh [project-name]
 #
 # Optional env:
-#   DEVFLOW_BOOTSTRAP_BACKEND=local|postgres_template|neon|dblab|xata
+#   DEVFLOW_BOOTSTRAP_PROVIDER=local|postgres_template|neon|dblab|xata
 
 PROJECT_NAME="${1:-$(basename "$PWD")}" 
-BACKEND="${DEVFLOW_BOOTSTRAP_BACKEND:-local}"
+PROVIDER="${DEVFLOW_BOOTSTRAP_PROVIDER:-local}"
 
 if [ ! -f ".devflow.yml" ]; then
-  devflow --json --non-interactive init "$PROJECT_NAME" --backend "$BACKEND"
+  devflow --json --non-interactive init "$PROJECT_NAME"
+  devflow --json --non-interactive service add db --provider "$PROVIDER"
 fi
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then

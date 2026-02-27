@@ -15,8 +15,8 @@ behavior:
   max_branches: 10
   naming_strategy: prefix
 
-# Multiple backends — each service gets its own branch per git branch
-backends:
+# Multiple services — each service gets its own branch per git branch
+services:
   - name: app-db
     type: local
     service_type: postgres

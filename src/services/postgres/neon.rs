@@ -1,4 +1,4 @@
-use super::super::{BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ServiceBackend};
+use super::super::{BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ServiceProvider};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -6,7 +6,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
-pub struct NeonBackend {
+pub struct NeonProvider {
     client: Client,
     api_key: String,
     project_id: String,
@@ -55,7 +55,7 @@ struct ListEndpointsResponse {
     endpoints: Vec<NeonEndpoint>,
 }
 
-impl NeonBackend {
+impl NeonProvider {
     pub fn new(api_key: String, project_id: String, base_url: Option<String>) -> Result<Self> {
         let client = Client::new();
         let base_url = base_url.unwrap_or_else(|| "https://console.neon.tech/api/v2".to_string());
@@ -126,7 +126,7 @@ impl NeonBackend {
 }
 
 #[async_trait]
-impl ServiceBackend for NeonBackend {
+impl ServiceProvider for NeonProvider {
     async fn create_branch(
         &self,
         branch_name: &str,
@@ -251,7 +251,7 @@ impl ServiceBackend for NeonBackend {
         })
     }
 
-    fn backend_name(&self) -> &'static str {
+    fn provider_name(&self) -> &'static str {
         "Neon"
     }
 

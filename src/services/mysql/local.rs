@@ -1,4 +1,4 @@
-//! MySQL/MariaDB local backend — manages branch-isolated MySQL Docker containers.
+//! MySQL/MariaDB local provider — manages branch-isolated MySQL Docker containers.
 //!
 //! Each branch gets its own MySQL container. Data is stored in bind-mounted
 //! directories under `data_root/mysql/{service_name}/{branch_name}/`.
@@ -23,12 +23,13 @@ use tokio::time::{sleep, Instant};
 
 use crate::config::MySQLConfig;
 use crate::services::{
-    BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceBackend,
+    BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceProvider,
 };
 
 const MYSQL_PORT: u16 = 3306;
 
-pub struct MySQLLocalBackend {
+pub struct MySQLLocalProvider {
+    project_name: String,
     service_name: String,
     image: String,
     port_range_start: u16,
@@ -40,8 +41,8 @@ pub struct MySQLLocalBackend {
     client: Docker,
 }
 
-impl MySQLLocalBackend {
-    pub fn new(service_name: &str, config: &MySQLConfig) -> anyhow::Result<Self> {
+impl MySQLLocalProvider {
+    pub fn new(project_name: &str, service_name: &str, config: &MySQLConfig) -> anyhow::Result<Self> {
         let client =
             Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon. Is Docker installed and running? Check with: docker info")?;
 
@@ -56,6 +57,7 @@ impl MySQLLocalBackend {
         };
 
         Ok(Self {
+            project_name: project_name.to_string(),
             service_name: service_name.to_string(),
             image: config.image.clone(),
             port_range_start: config.port_range_start.unwrap_or(53306),
@@ -70,7 +72,8 @@ impl MySQLLocalBackend {
 
     fn container_name(&self, branch_name: &str) -> String {
         let raw = format!(
-            "devflow-mysql-{}-{}",
+            "devflow-{}-{}-{}",
+            sanitize(&self.project_name),
             sanitize(&self.service_name),
             sanitize(branch_name)
         );
@@ -318,7 +321,7 @@ impl MySQLLocalBackend {
     }
 
     async fn list_managed_containers(&self) -> anyhow::Result<Vec<(String, String, bool)>> {
-        let prefix = format!("devflow-mysql-{}-", sanitize(&self.service_name));
+        let prefix = format!("devflow-{}-{}-", sanitize(&self.project_name), sanitize(&self.service_name));
 
         let options = ListContainersOptions {
             all: true,
@@ -373,7 +376,7 @@ impl MySQLLocalBackend {
 }
 
 #[async_trait]
-impl ServiceBackend for MySQLLocalBackend {
+impl ServiceProvider for MySQLLocalProvider {
     async fn create_branch(
         &self,
         branch_name: &str,
@@ -718,7 +721,7 @@ impl ServiceBackend for MySQLLocalBackend {
     fn project_info(&self) -> Option<ProjectInfo> {
         Some(ProjectInfo {
             name: self.service_name.clone(),
-            storage_backend: Some("docker-bind".to_string()),
+            storage_driver: Some("docker-bind".to_string()),
             image: Some(self.image.clone()),
         })
     }
@@ -744,7 +747,7 @@ impl ServiceBackend for MySQLLocalBackend {
             .join(""))
     }
 
-    fn backend_name(&self) -> &'static str {
+    fn provider_name(&self) -> &'static str {
         "MySQL (Docker)"
     }
 

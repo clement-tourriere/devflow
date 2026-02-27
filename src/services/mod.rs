@@ -2,11 +2,11 @@ pub mod factory;
 pub mod plugin;
 pub mod postgres;
 
-#[cfg(feature = "backend-local")]
+#[cfg(feature = "service-local")]
 pub mod clickhouse;
-#[cfg(feature = "backend-local")]
+#[cfg(feature = "service-local")]
 pub mod generic;
-#[cfg(feature = "backend-local")]
+#[cfg(feature = "service-local")]
 pub mod mysql;
 
 use anyhow::Result;
@@ -37,7 +37,7 @@ pub struct ConnectionInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectInfo {
     pub name: String,
-    pub storage_backend: Option<String>,
+    pub storage_driver: Option<String>,
     pub image: Option<String>,
 }
 
@@ -53,11 +53,11 @@ pub struct DoctorCheck {
     pub detail: String,
 }
 
-/// ServiceBackend is the core trait for all service backends.
+/// ServiceProvider is the core trait for all service providers.
 /// (Renamed from DatabaseBranchingBackend as part of the devflow evolution.)
 #[async_trait]
 #[allow(dead_code)]
-pub trait ServiceBackend: Send + Sync {
+pub trait ServiceProvider: Send + Sync {
     // Core branching operations
     async fn create_branch(
         &self,
@@ -83,7 +83,7 @@ pub trait ServiceBackend: Send + Sync {
         63
     }
 
-    // Lifecycle management (for local backend with Docker containers)
+    // Lifecycle management (for local provider with Docker containers)
     async fn start_branch(&self, _branch_name: &str) -> Result<()> {
         Ok(())
     }
@@ -124,7 +124,7 @@ pub trait ServiceBackend: Send + Sync {
         Ok(deleted)
     }
 
-    // Project destruction (local backend)
+    // Project destruction (local provider)
     fn supports_destroy(&self) -> bool {
         false
     }
@@ -132,12 +132,12 @@ pub trait ServiceBackend: Send + Sync {
         Ok(None)
     }
     async fn destroy_project(&self) -> Result<Vec<String>> {
-        anyhow::bail!("This backend does not support project destruction")
+        anyhow::bail!("This provider does not support project destruction")
     }
 
     // Data seeding
     async fn seed_from_source(&self, _branch_name: &str, _source: &str) -> Result<()> {
-        anyhow::bail!("This backend does not support seeding from external sources")
+        anyhow::bail!("This provider does not support seeding from external sources")
     }
 
     // Diagnostics
@@ -146,30 +146,30 @@ pub trait ServiceBackend: Send + Sync {
     // Test connection
     async fn test_connection(&self) -> Result<()>;
 
-    // Init project (for local backend)
+    // Init project (for local provider)
     async fn init_project(&self, _project_name: &str) -> Result<()> {
         Ok(())
     }
 
-    // Project metadata (optional, implemented by local backend)
+    // Project metadata (optional, implemented by local provider)
     fn project_info(&self) -> Option<ProjectInfo> {
         None
     }
 
-    // Container logs (for Docker-based backends)
+    // Container logs (for Docker-based providers)
     async fn logs(&self, _branch_name: &str, _tail: Option<usize>) -> Result<String> {
-        anyhow::bail!("This backend does not support logs (not a local Docker backend)")
+        anyhow::bail!("This provider does not support logs (not a local Docker provider)")
     }
 
-    // Get backend display name
-    fn backend_name(&self) -> &'static str;
+    // Get provider display name
+    fn provider_name(&self) -> &'static str;
 }
 
 /// Clone a directory using platform-optimal Copy-on-Write when available.
 ///
 /// On macOS, attempts APFS clone (`cp -cR`), falling back to regular copy.
 /// On Linux, attempts reflink (`cp -a --reflink=auto`), falling back to regular copy.
-#[cfg(feature = "backend-local")]
+#[cfg(feature = "service-local")]
 pub async fn clone_data_dir(source: &std::path::Path, target: &std::path::Path) -> Result<()> {
     use anyhow::Context;
 

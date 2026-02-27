@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Project name (derived from `devflow init <name>` or the directory name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(default, skip_serializing_if = "DatabaseConfig::is_default")]
     pub database: DatabaseConfig,
     #[serde(default)]
@@ -14,7 +17,7 @@ pub struct Config {
     #[serde(default)]
     pub behavior: BehaviorConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backends: Option<Vec<NamedBackendConfig>>,
+    pub services: Option<Vec<NamedServiceConfig>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorktreeConfig>,
     /// New hook engine configuration (Phase 2).
@@ -24,10 +27,10 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NamedBackendConfig {
+pub struct NamedServiceConfig {
     pub name: String,
-    #[serde(rename = "type", default = "default_backend_type")]
-    pub backend_type: String,
+    #[serde(rename = "type", default = "default_provider_type")]
+    pub provider_type: String,
     /// Service type: postgres, clickhouse, mysql, generic (default: postgres)
     #[serde(
         default = "default_service_type",
@@ -43,7 +46,7 @@ pub struct NamedBackendConfig {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local: Option<LocalBackendConfig>,
+    pub local: Option<LocalServiceConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub neon: Option<NeonConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -60,12 +63,12 @@ pub struct NamedBackendConfig {
     pub plugin: Option<PluginConfig>,
 }
 
-fn default_backend_type() -> String {
+fn default_provider_type() -> String {
     "local".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LocalBackendConfig {
+pub struct LocalServiceConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -125,7 +128,7 @@ pub fn default_auto_branch() -> bool {
     true
 }
 
-/// Configuration for a ClickHouse local backend.
+/// Configuration for a ClickHouse local provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClickHouseConfig {
     /// Docker image (default: clickhouse/clickhouse-server:latest)
@@ -153,7 +156,7 @@ fn default_clickhouse_user() -> String {
     "default".to_string()
 }
 
-/// Configuration for a MySQL/MariaDB local backend.
+/// Configuration for a MySQL/MariaDB local provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MySQLConfig {
     /// Docker image (default: mysql:8)
@@ -187,9 +190,9 @@ fn default_mysql_root_password() -> String {
     "dev".to_string()
 }
 
-/// Configuration for a plugin-based service backend.
+/// Configuration for a plugin-based service provider.
 ///
-/// Plugin backends delegate all operations to an external executable that
+/// Plugin providers delegate all operations to an external executable that
 /// communicates over JSON on stdin/stdout.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginConfig {
@@ -211,7 +214,7 @@ fn default_plugin_timeout() -> u64 {
     30
 }
 
-/// Configuration for a generic Docker service backend.
+/// Configuration for a generic Docker service provider.
 ///
 /// Generic services run arbitrary Docker images and can optionally be "branched"
 /// by creating isolated containers per branch.
@@ -486,6 +489,7 @@ impl DatabaseConfig {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            name: None,
             database: DatabaseConfig::default(),
             git: GitConfig {
                 auto_create_on_branch: true,
@@ -500,7 +504,7 @@ impl Default for Config {
                 max_branches: Some(10),
                 naming_strategy: NamingStrategy::Prefix,
             },
-            backends: None,
+            services: None,
             worktree: None,
             hooks: None,
         }
@@ -508,6 +512,18 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Return the project name, falling back to the directory name of the
+    /// config file (or the current working directory).
+    pub fn project_name(&self) -> String {
+        if let Some(ref name) = self.name {
+            return name.clone();
+        }
+        std::env::current_dir()
+            .ok()
+            .and_then(|d| d.file_name().map(|n| n.to_string_lossy().to_string()))
+            .unwrap_or_else(|| "default".to_string())
+    }
+
     pub fn load_with_path_info() -> Result<(Self, Option<std::path::PathBuf>)> {
         if let Some(config_path) = Self::find_config_file()? {
             let config = Self::from_file(&config_path)?;
@@ -705,44 +721,44 @@ impl Config {
         Self::sanitize_branch_name(branch_name)
     }
 
-    /// Resolve the list of named backends from the `backends` config.
-    pub fn resolve_backends(&self) -> Vec<NamedBackendConfig> {
-        if let Some(ref backends) = self.backends {
-            backends.clone()
+    /// Resolve the list of named services from the `services` config.
+    pub fn resolve_services(&self) -> Vec<NamedServiceConfig> {
+        if let Some(ref services) = self.services {
+            services.clone()
         } else {
             vec![]
         }
     }
 
-    /// Return the name of the default backend (the one with `default: true`, or the first).
+    /// Return the name of the default service (the one with `default: true`, or the first).
     #[allow(dead_code)]
-    pub fn default_backend_name(&self) -> Option<String> {
-        let backends = self.resolve_backends();
-        if backends.is_empty() {
+    pub fn default_service_name(&self) -> Option<String> {
+        let services = self.resolve_services();
+        if services.is_empty() {
             return None;
         }
-        backends
+        services
             .iter()
             .find(|b| b.default)
-            .or(backends.first())
+            .or(services.first())
             .map(|b| b.name.clone())
     }
 
-    /// Look up a named backend config by name.
+    /// Look up a named service config by name.
     #[allow(dead_code)]
-    pub fn get_backend_config(&self, name: &str) -> Option<NamedBackendConfig> {
-        self.resolve_backends().into_iter().find(|b| b.name == name)
+    pub fn get_service_config(&self, name: &str) -> Option<NamedServiceConfig> {
+        self.resolve_services().into_iter().find(|b| b.name == name)
     }
 
-    /// Validate the backends configuration (no duplicates, not both `backend` and `backends`).
-    pub fn validate_backends(&self) -> Result<()> {
-        if let Some(ref backends) = self.backends {
+    /// Validate the services configuration (no duplicates, at most one default).
+    pub fn validate_services(&self) -> Result<()> {
+        if let Some(ref services) = self.services {
             // Check for unique names
             let mut seen = std::collections::HashSet::new();
             let mut default_count = 0;
-            for b in backends {
+            for b in services {
                 if !seen.insert(&b.name) {
-                    anyhow::bail!("Duplicate backend name: '{}'", b.name);
+                    anyhow::bail!("Duplicate service name: '{}'", b.name);
                 }
                 if b.default {
                     default_count += 1;
@@ -750,7 +766,7 @@ impl Config {
             }
             if default_count > 1 {
                 anyhow::bail!(
-                    "At most one backend can be marked as default, found {}",
+                    "At most one service can be marked as default, found {}",
                     default_count
                 );
             }
@@ -758,35 +774,35 @@ impl Config {
         Ok(())
     }
 
-    /// Add a named backend. Errors if name exists unless force=true.
+    /// Add a named service. Errors if name exists unless force=true.
     #[allow(dead_code)]
-    pub fn add_backend(&mut self, named: NamedBackendConfig, force: bool) -> Result<()> {
-        let backends = self.backends.get_or_insert_with(Vec::new);
+    pub fn add_service(&mut self, named: NamedServiceConfig, force: bool) -> Result<()> {
+        let services = self.services.get_or_insert_with(Vec::new);
 
-        if let Some(pos) = backends.iter().position(|b| b.name == named.name) {
+        if let Some(pos) = services.iter().position(|b| b.name == named.name) {
             if force {
-                backends[pos] = named;
+                services[pos] = named;
             } else {
                 anyhow::bail!(
-                    "Backend '{}' already exists. Use --force to overwrite.",
-                    backends[pos].name
+                    "Service '{}' already exists. Use --force to overwrite.",
+                    services[pos].name
                 );
             }
         } else {
             // Set default if it's the first entry
             let mut named = named;
-            if backends.is_empty() {
+            if services.is_empty() {
                 named.default = true;
             }
-            backends.push(named);
+            services.push(named);
         }
 
         Ok(())
     }
 
-    pub fn remove_backend(&mut self, name: &str) {
-        if let Some(ref mut backends) = self.backends {
-            backends.retain(|b| b.name != name);
+    pub fn remove_service(&mut self, name: &str) {
+        if let Some(ref mut services) = self.services {
+            services.retain(|b| b.name != name);
         }
     }
 
@@ -1208,7 +1224,7 @@ behavior:
     }
 
     #[test]
-    fn test_multi_service_backends_parsing() {
+    fn test_multi_services_parsing() {
         let yaml = r#"
 git:
   auto_create_on_branch: true
@@ -1217,7 +1233,7 @@ git:
 behavior:
   auto_cleanup: false
   naming_strategy: prefix
-backends:
+services:
   - name: db
     type: local
     service_type: postgres
@@ -1255,43 +1271,43 @@ backends:
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
 
-        let backends = config.resolve_backends();
-        assert_eq!(backends.len(), 4);
+        let services = config.resolve_services();
+        assert_eq!(services.len(), 4);
 
-        // Postgres backend
-        assert_eq!(backends[0].name, "db");
-        assert_eq!(backends[0].service_type, "postgres");
-        assert!(backends[0].auto_branch);
-        assert!(backends[0].local.is_some());
+        // Postgres service
+        assert_eq!(services[0].name, "db");
+        assert_eq!(services[0].service_type, "postgres");
+        assert!(services[0].auto_branch);
+        assert!(services[0].local.is_some());
         assert_eq!(
-            backends[0].local.as_ref().unwrap().port_range_start,
+            services[0].local.as_ref().unwrap().port_range_start,
             Some(15432)
         );
 
-        // ClickHouse backend
-        assert_eq!(backends[1].name, "analytics");
-        assert_eq!(backends[1].service_type, "clickhouse");
-        assert!(backends[1].auto_branch);
-        let ch = backends[1].clickhouse.as_ref().expect("clickhouse config");
+        // ClickHouse service
+        assert_eq!(services[1].name, "analytics");
+        assert_eq!(services[1].service_type, "clickhouse");
+        assert!(services[1].auto_branch);
+        let ch = services[1].clickhouse.as_ref().expect("clickhouse config");
         assert_eq!(ch.image, "clickhouse/clickhouse-server:24");
         assert_eq!(ch.port_range_start, Some(18123));
         assert_eq!(ch.user, "analytics");
 
-        // MySQL backend — auto_branch is false
-        assert_eq!(backends[2].name, "legacy-db");
-        assert_eq!(backends[2].service_type, "mysql");
-        assert!(!backends[2].auto_branch);
-        let mysql = backends[2].mysql.as_ref().expect("mysql config");
+        // MySQL service — auto_branch is false
+        assert_eq!(services[2].name, "legacy-db");
+        assert_eq!(services[2].service_type, "mysql");
+        assert!(!services[2].auto_branch);
+        let mysql = services[2].mysql.as_ref().expect("mysql config");
         assert_eq!(mysql.root_password, "secret");
         assert_eq!(mysql.database.as_deref(), Some("legacy"));
         assert_eq!(mysql.user.as_deref(), Some("app"));
         assert_eq!(mysql.password.as_deref(), Some("apppass"));
 
-        // Generic Docker backend
-        assert_eq!(backends[3].name, "cache");
-        assert_eq!(backends[3].service_type, "generic");
-        assert!(backends[3].auto_branch);
-        let generic = backends[3].generic.as_ref().expect("generic config");
+        // Generic Docker service
+        assert_eq!(services[3].name, "cache");
+        assert_eq!(services[3].service_type, "generic");
+        assert!(services[3].auto_branch);
+        let generic = services[3].generic.as_ref().expect("generic config");
         assert_eq!(generic.image, "redis:7");
         assert_eq!(generic.port_mapping.as_deref(), Some("6379:6379"));
         assert_eq!(generic.environment.get("REDIS_MAXMEMORY").unwrap(), "256mb");
@@ -1307,15 +1323,15 @@ git:
 behavior:
   auto_cleanup: false
   naming_strategy: prefix
-backends:
+services:
   - name: ch
     type: local
     service_type: clickhouse
     clickhouse: {}
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
-        let backends = config.resolve_backends();
-        let ch = backends[0].clickhouse.as_ref().unwrap();
+        let services = config.resolve_services();
+        let ch = services[0].clickhouse.as_ref().unwrap();
         assert_eq!(ch.image, "clickhouse/clickhouse-server:latest");
         assert_eq!(ch.user, "default");
         assert!(ch.password.is_none());
@@ -1332,15 +1348,15 @@ git:
 behavior:
   auto_cleanup: false
   naming_strategy: prefix
-backends:
+services:
   - name: mysql
     type: local
     service_type: mysql
     mysql: {}
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
-        let backends = config.resolve_backends();
-        let mysql = backends[0].mysql.as_ref().unwrap();
+        let services = config.resolve_services();
+        let mysql = services[0].mysql.as_ref().unwrap();
         assert_eq!(mysql.image, "mysql:8");
         assert_eq!(mysql.root_password, "dev");
         assert!(mysql.database.is_none());
@@ -1357,7 +1373,7 @@ git:
 behavior:
   auto_cleanup: false
   naming_strategy: prefix
-backends:
+services:
   - name: mq
     type: local
     service_type: generic
@@ -1373,8 +1389,8 @@ backends:
       healthcheck: "rabbitmq-diagnostics -q ping"
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
-        let backends = config.resolve_backends();
-        let generic = backends[0].generic.as_ref().unwrap();
+        let services = config.resolve_services();
+        let generic = services[0].generic.as_ref().unwrap();
         assert_eq!(generic.image, "rabbitmq:3-management");
         assert_eq!(generic.port_range_start, Some(15672));
         assert_eq!(generic.environment.len(), 2);
@@ -1396,14 +1412,14 @@ git:
 behavior:
   auto_cleanup: false
   naming_strategy: prefix
-backends:
+services:
   - name: mydb
     type: local
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
-        let backends = config.resolve_backends();
-        assert_eq!(backends[0].service_type, "postgres");
-        assert!(backends[0].auto_branch); // default is true
+        let services = config.resolve_services();
+        assert_eq!(services[0].service_type, "postgres");
+        assert!(services[0].auto_branch); // default is true
     }
 
     #[test]
@@ -1416,7 +1432,7 @@ git:
 behavior:
   auto_cleanup: false
   naming_strategy: prefix
-backends:
+services:
   - name: primary
     type: local
     auto_branch: true
@@ -1430,15 +1446,15 @@ backends:
     clickhouse: {}
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
-        let backends = config.resolve_backends();
-        let auto_branch_backends: Vec<_> = backends.iter().filter(|b| b.auto_branch).collect();
-        assert_eq!(auto_branch_backends.len(), 2);
-        assert_eq!(auto_branch_backends[0].name, "primary");
-        assert_eq!(auto_branch_backends[1].name, "analytics");
+        let services = config.resolve_services();
+        let auto_branch_services: Vec<_> = services.iter().filter(|b| b.auto_branch).collect();
+        assert_eq!(auto_branch_services.len(), 2);
+        assert_eq!(auto_branch_services[0].name, "primary");
+        assert_eq!(auto_branch_services[1].name, "analytics");
     }
 
     #[test]
-    fn test_plugin_backend_config_parsing() {
+    fn test_plugin_service_config_parsing() {
         let yaml = r#"
 git:
   auto_create_on_branch: true
@@ -1447,7 +1463,7 @@ git:
 behavior:
   auto_cleanup: false
   naming_strategy: prefix
-backends:
+services:
   - name: my-redis
     service_type: plugin
     auto_branch: true
@@ -1465,14 +1481,14 @@ backends:
         memory: 256
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
-        let backends = config.resolve_backends();
-        assert_eq!(backends.len(), 2);
+        let services = config.resolve_services();
+        assert_eq!(services.len(), 2);
 
-        // First plugin backend
-        assert_eq!(backends[0].name, "my-redis");
-        assert_eq!(backends[0].service_type, "plugin");
-        assert!(backends[0].auto_branch);
-        let plugin = backends[0].plugin.as_ref().unwrap();
+        // First plugin service
+        assert_eq!(services[0].name, "my-redis");
+        assert_eq!(services[0].service_type, "plugin");
+        assert!(services[0].auto_branch);
+        let plugin = services[0].plugin.as_ref().unwrap();
         assert_eq!(plugin.path.as_deref(), Some("./plugins/devflow-redis"));
         assert!(plugin.name.is_none());
         assert_eq!(plugin.timeout, 45);
@@ -1480,10 +1496,10 @@ backends:
         assert_eq!(cfg["image"], "redis:7-alpine");
         assert_eq!(cfg["port"], 16379);
 
-        // Second plugin backend (name-based resolution)
-        assert_eq!(backends[1].name, "my-cache");
-        assert_eq!(backends[1].service_type, "plugin");
-        let plugin2 = backends[1].plugin.as_ref().unwrap();
+        // Second plugin service (name-based resolution)
+        assert_eq!(services[1].name, "my-cache");
+        assert_eq!(services[1].service_type, "plugin");
+        let plugin2 = services[1].plugin.as_ref().unwrap();
         assert!(plugin2.path.is_none());
         assert_eq!(plugin2.name.as_deref(), Some("memcached"));
         assert_eq!(plugin2.timeout, 30); // default

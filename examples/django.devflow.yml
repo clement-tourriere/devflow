@@ -1,5 +1,5 @@
 # Django devflow configuration
-# PostgreSQL backend with Django-specific lifecycle hooks.
+# PostgreSQL service with Django-specific lifecycle hooks.
 
 git:
   auto_create_on_branch: true
@@ -15,7 +15,7 @@ behavior:
   max_branches: 5
   naming_strategy: prefix
 
-backends:
+services:
   - name: app-db
     type: local
     service_type: postgres

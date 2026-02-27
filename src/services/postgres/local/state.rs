@@ -3,13 +3,13 @@ use std::path::Path;
 use anyhow::Context;
 use rusqlite::Connection;
 
-use super::model::{now_epoch_millis, Branch, BranchState, Project, StorageBackend};
+use super::model::{now_epoch_millis, Branch, BranchState, Project, StorageDriver};
 
 #[derive(Debug)]
 pub struct NewProject {
     pub name: String,
     pub image: String,
-    pub storage_backend: StorageBackend,
+    pub storage_driver: StorageDriver,
     pub storage_config: Option<String>,
 }
 
@@ -50,7 +50,7 @@ impl Store {
               id TEXT PRIMARY KEY,
               name TEXT NOT NULL UNIQUE,
               image TEXT NOT NULL,
-              storage_backend TEXT NOT NULL DEFAULT 'copy',
+              storage_driver TEXT NOT NULL DEFAULT 'copy',
               storage_config TEXT NULL,
               created_at INTEGER NOT NULL
             );
@@ -77,7 +77,7 @@ impl Store {
         ensure_column(
             &self.conn,
             "projects",
-            "storage_backend",
+            "storage_driver",
             "TEXT NOT NULL DEFAULT 'copy'",
         )?;
         ensure_column(&self.conn, "projects", "storage_config", "TEXT NULL")?;
@@ -89,18 +89,18 @@ impl Store {
     #[allow(dead_code)]
     pub fn list_projects(&self) -> anyhow::Result<Vec<Project>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, image, storage_backend, storage_config, created_at FROM projects ORDER BY created_at DESC"
+            "SELECT id, name, image, storage_driver, storage_config, created_at FROM projects ORDER BY created_at DESC"
         )?;
 
         let rows = stmt.query_map([], |row| {
-            let backend_text: String = row.get(3)?;
-            let storage_backend =
-                StorageBackend::from_str(&backend_text).unwrap_or(StorageBackend::Copy);
+            let driver_text: String = row.get(3)?;
+            let storage_driver =
+                StorageDriver::from_str(&driver_text).unwrap_or(StorageDriver::Copy);
             Ok(Project {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 image: row.get(2)?,
-                storage_backend,
+                storage_driver,
                 storage_config: row.get(4)?,
                 created_at: row.get(5)?,
             })
@@ -112,19 +112,19 @@ impl Store {
 
     pub fn get_project_by_name(&self, name: &str) -> anyhow::Result<Option<Project>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, image, storage_backend, storage_config, created_at FROM projects WHERE name = ?1"
+            "SELECT id, name, image, storage_driver, storage_config, created_at FROM projects WHERE name = ?1"
         )?;
 
         let mut rows = stmt.query([name])?;
         if let Some(row) = rows.next()? {
-            let backend_text: String = row.get(3)?;
-            let storage_backend =
-                StorageBackend::from_str(&backend_text).unwrap_or(StorageBackend::Copy);
+            let driver_text: String = row.get(3)?;
+            let storage_driver =
+                StorageDriver::from_str(&driver_text).unwrap_or(StorageDriver::Copy);
             return Ok(Some(Project {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 image: row.get(2)?,
-                storage_backend,
+                storage_driver,
                 storage_config: row.get(4)?,
                 created_at: row.get(5)?,
             }));
@@ -138,15 +138,15 @@ impl Store {
         let id = uuid::Uuid::new_v4().to_string();
 
         self.conn.execute(
-            "INSERT INTO projects(id, name, image, storage_backend, storage_config, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![id, input.name, input.image, input.storage_backend.as_str(), input.storage_config, created_at],
+            "INSERT INTO projects(id, name, image, storage_driver, storage_config, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![id, input.name, input.image, input.storage_driver.as_str(), input.storage_config, created_at],
         ).context("failed to insert project")?;
 
         Ok(Project {
             id,
             name: input.name,
             image: input.image,
-            storage_backend: input.storage_backend,
+            storage_driver: input.storage_driver,
             storage_config: input.storage_config,
             created_at,
         })

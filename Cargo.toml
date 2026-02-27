@@ -1,6 +1,6 @@
 [package]
 name = "devflow"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Universal development environment branching tool — worktrees, databases, and stateful services"
 authors = ["Clément Tourrière <clement.tourriere@gmail.com>"]
@@ -12,12 +12,12 @@ name = "devflow"
 path = "src/main.rs"
 
 [features]
-default = ["backend-local", "backend-postgres-template", "backend-neon", "backend-dblab", "backend-xata", "llm"]
-backend-local = ["dep:bollard", "dep:rusqlite", "dep:rust-s3", "dep:tar", "dep:bytes", "dep:futures-util", "dep:tempfile", "dep:uuid", "dep:url"]
-backend-postgres-template = ["dep:tokio-postgres"]
-backend-neon = ["dep:reqwest"]
-backend-dblab = ["dep:reqwest"]
-backend-xata = ["dep:reqwest"]
+default = ["service-local", "service-postgres-template", "service-neon", "service-dblab", "service-xata", "llm"]
+service-local = ["dep:bollard", "dep:rusqlite", "dep:rust-s3", "dep:tar", "dep:bytes", "dep:futures-util", "dep:tempfile", "dep:uuid", "dep:url"]
+service-postgres-template = ["dep:tokio-postgres"]
+service-neon = ["dep:reqwest"]
+service-dblab = ["dep:reqwest"]
+service-xata = ["dep:reqwest"]
 llm = ["dep:reqwest"]
 
 [dependencies]

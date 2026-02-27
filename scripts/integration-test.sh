@@ -53,30 +53,30 @@ if [ "$STORAGE" != "$EXPECTED_STORAGE" ]; then
 fi
 
 # 3. Branch lifecycle: create -> list -> connection -> stop -> start -> delete
-echo "--- create test-feature ---"
-$DEVFLOW_BIN --non-interactive create test-feature
+echo "--- service create test-feature ---"
+$DEVFLOW_BIN --non-interactive service create test-feature
 
 echo "--- list ---"
 $DEVFLOW_BIN --json list
 
-echo "--- connection ---"
-$DEVFLOW_BIN --json connection test-feature
+echo "--- service connection ---"
+$DEVFLOW_BIN --json service connection test-feature
 
-echo "--- stop ---"
-$DEVFLOW_BIN stop test-feature
+echo "--- service stop ---"
+$DEVFLOW_BIN service stop test-feature
 
-echo "--- start ---"
-$DEVFLOW_BIN start test-feature
+echo "--- service start ---"
+$DEVFLOW_BIN service start test-feature
 
-echo "--- delete ---"
-$DEVFLOW_BIN delete test-feature
+echo "--- service delete ---"
+$DEVFLOW_BIN service delete test-feature
 
 echo "--- list (post-delete) ---"
 $DEVFLOW_BIN --json list
 
 # 4. Cleanup
-echo "--- destroy ---"
-$DEVFLOW_BIN --non-interactive destroy --force
+echo "--- service destroy ---"
+$DEVFLOW_BIN --non-interactive service destroy --force
 
 echo ""
 echo "=== All integration tests passed ==="

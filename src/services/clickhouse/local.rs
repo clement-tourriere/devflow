@@ -1,4 +1,4 @@
-//! ClickHouse local backend — manages branch-isolated ClickHouse Docker containers.
+//! ClickHouse local provider — manages branch-isolated ClickHouse Docker containers.
 //!
 //! Each branch gets its own ClickHouse container. Data is stored in bind-mounted
 //! directories under `data_root/clickhouse/{service_name}/{branch_name}/`.
@@ -23,14 +23,15 @@ use tokio::time::{sleep, Instant};
 
 use crate::config::ClickHouseConfig;
 use crate::services::{
-    BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceBackend,
+    BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceProvider,
 };
 
 /// Default ClickHouse ports: HTTP 8123, native TCP 9000.
 const CLICKHOUSE_HTTP_PORT: u16 = 8123;
 const CLICKHOUSE_NATIVE_PORT: u16 = 9000;
 
-pub struct ClickHouseLocalBackend {
+pub struct ClickHouseLocalProvider {
+    project_name: String,
     service_name: String,
     image: String,
     port_range_start: u16,
@@ -40,8 +41,8 @@ pub struct ClickHouseLocalBackend {
     client: Docker,
 }
 
-impl ClickHouseLocalBackend {
-    pub fn new(service_name: &str, config: &ClickHouseConfig) -> anyhow::Result<Self> {
+impl ClickHouseLocalProvider {
+    pub fn new(project_name: &str, service_name: &str, config: &ClickHouseConfig) -> anyhow::Result<Self> {
         let client =
             Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon. Is Docker installed and running? Check with: docker info")?;
 
@@ -56,6 +57,7 @@ impl ClickHouseLocalBackend {
         };
 
         Ok(Self {
+            project_name: project_name.to_string(),
             service_name: service_name.to_string(),
             image: config.image.clone(),
             port_range_start: config.port_range_start.unwrap_or(59000),
@@ -68,7 +70,8 @@ impl ClickHouseLocalBackend {
 
     fn container_name(&self, branch_name: &str) -> String {
         let raw = format!(
-            "devflow-ch-{}-{}",
+            "devflow-{}-{}-{}",
+            sanitize(&self.project_name),
             sanitize(&self.service_name),
             sanitize(branch_name)
         );
@@ -321,7 +324,7 @@ impl ClickHouseLocalBackend {
     }
 
     async fn list_managed_containers(&self) -> anyhow::Result<Vec<(String, String, bool)>> {
-        let prefix = format!("devflow-ch-{}-", sanitize(&self.service_name));
+        let prefix = format!("devflow-{}-{}-", sanitize(&self.project_name), sanitize(&self.service_name));
 
         let options = ListContainersOptions {
             all: true,
@@ -376,7 +379,7 @@ impl ClickHouseLocalBackend {
 }
 
 #[async_trait]
-impl ServiceBackend for ClickHouseLocalBackend {
+impl ServiceProvider for ClickHouseLocalProvider {
     async fn create_branch(
         &self,
         branch_name: &str,
@@ -720,7 +723,7 @@ impl ServiceBackend for ClickHouseLocalBackend {
     fn project_info(&self) -> Option<ProjectInfo> {
         Some(ProjectInfo {
             name: self.service_name.clone(),
-            storage_backend: Some("docker-bind".to_string()),
+            storage_driver: Some("docker-bind".to_string()),
             image: Some(self.image.clone()),
         })
     }
@@ -746,7 +749,7 @@ impl ServiceBackend for ClickHouseLocalBackend {
             .join(""))
     }
 
-    fn backend_name(&self) -> &'static str {
+    fn provider_name(&self) -> &'static str {
         "ClickHouse (Docker)"
     }
 

@@ -1,4 +1,4 @@
-//! ClickHouse service backend module.
+//! ClickHouse service provider module.
 
-#[cfg(feature = "backend-local")]
+#[cfg(feature = "service-local")]
 pub mod local;

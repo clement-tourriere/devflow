@@ -1,4 +1,4 @@
-//! Generic Docker service backend.
+//! Generic Docker service provider.
 //!
 //! Runs arbitrary Docker images as branch-isolated containers.
 //! Each branch gets its own container instance. Data persistence is optional
@@ -23,11 +23,13 @@ use tokio::time::{sleep, Instant};
 
 use crate::config::GenericDockerConfig;
 use crate::services::{
-    BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceBackend,
+    BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceProvider,
 };
 
-/// A generic Docker service backend that manages branch-isolated containers.
-pub struct GenericDockerBackend {
+/// A generic Docker service provider that manages branch-isolated containers.
+pub struct GenericDockerProvider {
+    /// Project name from config (e.g. "myapp").
+    project_name: String,
     /// Logical service name from config (e.g. "cache", "search").
     service_name: String,
     /// Docker image to use.
@@ -48,12 +50,13 @@ pub struct GenericDockerBackend {
     client: Docker,
 }
 
-impl GenericDockerBackend {
-    pub fn new(service_name: &str, config: &GenericDockerConfig) -> anyhow::Result<Self> {
+impl GenericDockerProvider {
+    pub fn new(project_name: &str, service_name: &str, config: &GenericDockerConfig) -> anyhow::Result<Self> {
         let client =
             Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon. Is Docker installed and running? Check with: docker info")?;
 
         Ok(Self {
+            project_name: project_name.to_string(),
             service_name: service_name.to_string(),
             image: config.image.clone(),
             port_mapping: config.port_mapping.clone(),
@@ -68,7 +71,8 @@ impl GenericDockerBackend {
 
     fn container_name(&self, branch_name: &str) -> String {
         let raw = format!(
-            "devflow-{}-{}",
+            "devflow-{}-{}-{}",
+            sanitize(&self.project_name),
             sanitize(&self.service_name),
             sanitize(branch_name)
         );
@@ -333,7 +337,7 @@ impl GenericDockerBackend {
 
     /// List all devflow-managed containers for this service.
     async fn list_managed_containers(&self) -> anyhow::Result<Vec<(String, String, bool)>> {
-        let prefix = format!("devflow-{}-", sanitize(&self.service_name));
+        let prefix = format!("devflow-{}-{}-", sanitize(&self.project_name), sanitize(&self.service_name));
 
         let options = ListContainersOptions {
             all: true,
@@ -390,7 +394,7 @@ impl GenericDockerBackend {
 }
 
 #[async_trait]
-impl ServiceBackend for GenericDockerBackend {
+impl ServiceProvider for GenericDockerProvider {
     async fn create_branch(
         &self,
         branch_name: &str,
@@ -400,7 +404,7 @@ impl ServiceBackend for GenericDockerBackend {
 
         if from_branch.is_some() {
             eprintln!(
-                "note: generic Docker backend does not support data cloning from parent branches. \
+                "note: generic Docker provider does not support data cloning from parent branches. \
                  Creating a fresh container instead."
             );
         }
@@ -683,7 +687,7 @@ impl ServiceBackend for GenericDockerBackend {
     fn project_info(&self) -> Option<ProjectInfo> {
         Some(ProjectInfo {
             name: self.service_name.clone(),
-            storage_backend: None,
+            storage_driver: None,
             image: Some(self.image.clone()),
         })
     }
@@ -709,7 +713,7 @@ impl ServiceBackend for GenericDockerBackend {
             .join(""))
     }
 
-    fn backend_name(&self) -> &'static str {
+    fn provider_name(&self) -> &'static str {
         "Generic Docker"
     }
 

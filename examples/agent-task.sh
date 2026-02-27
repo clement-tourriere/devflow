@@ -16,4 +16,4 @@ BRANCH="agent/${TASK_ID}"
 
 # --no-verify avoids interactive hook approvals in headless runs.
 devflow --json --non-interactive switch "$BRANCH" --no-verify >/dev/null
-devflow --json connection "$BRANCH"
+devflow --json service connection "$BRANCH"

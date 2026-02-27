@@ -1,5 +1,5 @@
 # Simple devflow configuration
-# This example shows a minimal setup with a single local PostgreSQL backend.
+# This example shows a minimal setup with a single local PostgreSQL service.
 # All sections are optional — even an empty file is valid.
 
 git:
@@ -15,8 +15,8 @@ behavior:
   max_branches: 10
   naming_strategy: prefix
 
-# Single backend using modern backends array syntax
-backends:
+# Single service using modern services array syntax
+services:
   - name: app-db
     type: local
     service_type: postgres

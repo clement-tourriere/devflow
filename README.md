@@ -1,16 +1,19 @@
 # devflow
 
-Isolated development branch environments for every Git branch — automatically.
+Isolated dev environments for every Git branch — automatically.
+
+> **[Full Documentation](docs/index.html)** | **[AI Agent Guide](AGENTS.md)** | **[Changelog](CHANGELOG.md)**
 
 ## What It Does
 
-devflow gives each Git branch its own set of services: databases, caches, or anything that runs in Docker. When you `git checkout feature-auth`, devflow automatically spins up (or switches to) a PostgreSQL, ClickHouse, MySQL, or Redis instance that belongs to that branch. Data is cloned from the parent branch using Copy-on-Write, so branching is near-instant and uses almost no extra disk space.
+devflow gives each Git branch its own isolated development environment: worktrees, databases, caches, and any stateful service. When you `git checkout feature-auth`, devflow automatically creates (or switches to) a dedicated worktree and spins up PostgreSQL, ClickHouse, MySQL, or Redis instances that belong to that branch. Data is cloned from the parent branch using Copy-on-Write, so branching is near-instant and uses almost no extra disk space.
 
 It works in four modes:
 - **Local** — Docker containers with CoW storage (APFS, ZFS, Btrfs, XFS)
 - **Template** — PostgreSQL's `CREATE DATABASE ... WITH TEMPLATE` on an existing server
 - **Cloud** — Neon, DBLab, or Xata APIs
 - **Plugin** — custom backends via JSON-over-stdio protocol
+- **AI-Ready** — `--json` output, `llms.txt`, `AGENTS.md`, and agent scripts for autonomous coding agents
 
 Copy-on-Write storage (APFS, ZFS, Btrfs, XFS) is also applied to worktree directories, making branch switching fast and space-efficient.
 
@@ -19,10 +22,11 @@ Copy-on-Write storage (APFS, ZFS, Btrfs, XFS) is also applied to worktree direct
 ```bash
 git clone https://github.com/clement-tourriere/devflow.git
 cd devflow
+mise trust && mise install   # installs the Rust toolchain
 cargo install --path .
 ```
 
-Requires Rust 1.70+ and Docker (for local mode). See [Full Install](#full-install) for platform-specific instructions.
+Requires [mise](https://mise.jdx.dev) (or Rust 1.70+ installed manually) and Docker or [OrbStack](https://orbstack.dev) (for local mode). See [Full Install](#full-install) for platform-specific instructions.
 
 ## Quick Start
 
@@ -45,6 +49,37 @@ devflow connection feature/auth --format env    # DATABASE_URL=...
 ```
 
 That's it. Your feature branch now has its own database. Schema changes, test data, and migrations are completely isolated from main.
+
+### Adding devflow to an Existing Project
+
+Already have a database with data you want to keep? Seed it during init:
+
+```bash
+# Seed from a running PostgreSQL instance
+devflow init myapp --from postgresql://user:pass@localhost:5432/myapp
+
+# Or from a SQL dump file
+devflow init myapp --from ./backup.sql
+
+# Install hooks
+devflow install-hooks
+
+# Update your app's DATABASE_URL to use devflow
+devflow connection main --format env    # DATABASE_URL=postgresql://...
+```
+
+Every branch created from main inherits the seeded data via Copy-on-Write. See the [full documentation](docs/index.html#existing-project) for a detailed walkthrough including local overrides with `.devflow.local.yml`.
+
+### Using mise
+
+devflow ships with a [`mise.toml`](mise.toml) for [mise](https://mise.jdx.dev) users. mise manages the Rust toolchain and provides task shortcuts:
+
+```bash
+mise install          # Install Rust toolchain
+mise run build        # Build devflow
+mise run test         # Run all tests
+mise run docs         # Serve documentation locally at localhost:8787
+```
 
 ## How It Works
 

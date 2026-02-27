@@ -5,7 +5,7 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub image: String,
-    pub storage_backend: StorageBackend,
+    pub storage_driver: StorageDriver,
     pub storage_config: Option<String>,
     pub created_at: i64,
 }
@@ -26,14 +26,14 @@ pub struct Branch {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum StorageBackend {
+pub enum StorageDriver {
     Zfs,
     ApfsClone,
     Reflink,
     Copy,
 }
 
-impl StorageBackend {
+impl StorageDriver {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Zfs => "zfs",

@@ -8,7 +8,7 @@ use super::{ZfsBranchMetadata, ZfsProjectConfig};
 use crate::services::postgres::local::model::{Branch, Project};
 
 #[derive(Debug, Clone)]
-pub struct BackendDetection {
+pub struct DriverDetection {
     pub available: bool,
     pub detail: String,
     pub root_dataset: Option<String>,
@@ -22,11 +22,11 @@ impl ZfsDriver {
         Self
     }
 
-    pub async fn detect(&self, projects_root: &Path) -> BackendDetection {
+    pub async fn detect(&self, projects_root: &Path) -> DriverDetection {
         if !cfg!(target_os = "linux") {
-            return BackendDetection {
+            return DriverDetection {
                 available: false,
-                detail: "ZFS backend is only supported on Linux".to_string(),
+                detail: "ZFS driver is only supported on Linux".to_string(),
                 root_dataset: None,
             };
         }
@@ -34,7 +34,7 @@ impl ZfsDriver {
         let list_output = match zfs_output(["list", "-H", "-o", "name,mountpoint"]).await {
             Ok(output) => output,
             Err(err) => {
-                return BackendDetection {
+                return DriverDetection {
                     available: false,
                     detail: format!("unable to run zfs list: {err}"),
                     root_dataset: None,
@@ -43,7 +43,7 @@ impl ZfsDriver {
         };
 
         if !list_output.status.success() {
-            return BackendDetection {
+            return DriverDetection {
                 available: false,
                 detail: format!(
                     "zfs list failed: {}",
@@ -67,7 +67,7 @@ impl ZfsDriver {
         };
 
         let Some(root_dataset) = dataset else {
-            return BackendDetection {
+            return DriverDetection {
                 available: false,
                 detail: format!(
                     "no ZFS dataset found for '{}' (set DEVFLOW_ZFS_DATASET to force one)",
@@ -94,7 +94,7 @@ impl ZfsDriver {
                 ])
                 .await;
 
-                BackendDetection {
+                DriverDetection {
                     available: true,
                     detail: format!("ZFS available with root dataset '{root_dataset}'"),
                     root_dataset: Some(root_dataset),
@@ -121,13 +121,13 @@ impl ZfsDriver {
                     )
                 };
 
-                BackendDetection {
+                DriverDetection {
                     available: false,
                     detail,
                     root_dataset: Some(root_dataset),
                 }
             }
-            Err(err) => BackendDetection {
+            Err(err) => DriverDetection {
                 available: false,
                 detail: format!(
                     "ZFS dataset detected ('{root_dataset}') but probe command failed: {err}"

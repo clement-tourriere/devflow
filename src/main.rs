@@ -3,7 +3,7 @@ use clap::{CommandFactory, Parser};
 
 mod cli;
 mod config;
-#[cfg(feature = "backend-postgres-template")]
+#[cfg(feature = "service-postgres-template")]
 mod database;
 mod docker;
 mod hooks;
@@ -18,7 +18,7 @@ use cli::Commands;
 #[derive(Parser)]
 #[command(name = "devflow")]
 #[command(about = "A universal development environment branching tool")]
-#[command(version = "0.3.0")]
+#[command(version = "0.4.0")]
 #[command(disable_help_subcommand = true)]
 #[command(help_template = "\
 {name} {version}
@@ -27,29 +27,33 @@ use cli::Commands;
 {usage-heading} {usage}
 
 Branch Management:
-  create              Create a new service branch
-  delete              Delete a service branch
   list                List all branches (with service + worktree status)
   switch              Switch to a branch (creates worktree/service branches if needed)
   remove              Remove a branch, its worktree, and associated service branches
+  merge               Merge current branch into target (with optional cleanup)
   cleanup             Clean up old service branches
 
-Branch Lifecycle (local backend):
-  start               Start a stopped branch container
-  stop                Stop a running branch container
-  reset               Reset a branch to its parent state
-  destroy             Destroy all branches and data for a service
-  seed                Seed a branch from an external source
+Services:
+  service add         Add a new service provider
+  service remove      Remove a service provider configuration
+  service list        List configured services
+  service status      Show service status
+  service create      Create a new service branch
+  service delete      Delete a service branch
+  service start       Start a stopped branch container (local provider)
+  service stop        Stop a running branch container (local provider)
+  service reset       Reset a branch to its parent state (local provider)
+  service destroy     Destroy all branches and data for a service
+  service connection  Show connection info for a service branch
+  service logs        Show container logs for a branch
+  service seed        Seed a branch from an external source
+
+Top-level Aliases:
+  connection          Show connection info (alias for 'service connection')
+  status              Show current project and service status
 
 VCS:
-  merge               Merge current branch into target (with optional cleanup)
   commit              Commit staged changes (--ai for AI-generated message)
-
-Info:
-  connection          Show connection info for a branch
-  status              Show current project and backend status
-  capabilities        Show machine-readable automation capabilities
-  logs                Show container logs for a branch
 
 Setup & Config:
   init                Initialize devflow configuration
@@ -63,7 +67,7 @@ Setup & Config:
 
 Extensibility:
   hook                Manage lifecycle hooks (show, run, approvals)
-  plugin              Manage plugin backends (list, check, init)
+  plugin              Manage plugin services (list, check, init)
 
 Options:
 {options}")]
@@ -79,9 +83,9 @@ struct Cli {
     #[arg(long, global = true)]
     non_interactive: bool,
 
-    /// Target a specific named database (from 'backends' config)
-    #[arg(short = 'd', long, global = true)]
-    database: Option<String>,
+    /// Target a specific named service (from configured services)
+    #[arg(short = 's', long, global = true)]
+    service: Option<String>,
 }
 
 #[tokio::main]
@@ -92,7 +96,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(cmd) => {
-            cli::handle_command(cmd, cli.json, cli.non_interactive, cli.database.as_deref()).await?
+            cli::handle_command(cmd, cli.json, cli.non_interactive, cli.service.as_deref()).await?
         }
         None => {
             // Print help when no command is provided

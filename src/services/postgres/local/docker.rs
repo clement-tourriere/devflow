@@ -28,6 +28,7 @@ pub enum ContainerStatus {
 #[derive(Debug, Clone)]
 pub struct ReserveBranchSpec {
     pub project_name: String,
+    pub service_name: String,
     pub branch_name: String,
 }
 
@@ -94,8 +95,9 @@ impl DockerRuntime {
         spec: &ReserveBranchSpec,
     ) -> anyhow::Result<ReservedBranchRuntime> {
         let raw = format!(
-            "devflow-{}-{}",
+            "devflow-{}-{}-{}",
             sanitize(&spec.project_name),
+            sanitize(&spec.service_name),
             sanitize(&spec.branch_name)
         );
         // Docker container names must be <= 128 chars

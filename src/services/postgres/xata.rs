@@ -1,4 +1,4 @@
-use super::super::{BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ServiceBackend};
+use super::super::{BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ServiceProvider};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_BASE_URL: &str = "https://api.xata.tech";
 
 #[derive(Debug, Clone)]
-pub struct XataBackend {
+pub struct XataProvider {
     client: Client,
     api_key: String,
     base_url: String,
@@ -51,7 +51,7 @@ struct BranchCredentials {
     database: Option<String>,
 }
 
-impl XataBackend {
+impl XataProvider {
     pub fn new(
         api_key: String,
         organization_id: String,
@@ -177,7 +177,7 @@ impl XataBackend {
 }
 
 #[async_trait]
-impl ServiceBackend for XataBackend {
+impl ServiceProvider for XataProvider {
     async fn create_branch(
         &self,
         branch_name: &str,
@@ -305,7 +305,7 @@ impl ServiceBackend for XataBackend {
         })
     }
 
-    fn backend_name(&self) -> &'static str {
+    fn provider_name(&self) -> &'static str {
         "Xata"
     }
 

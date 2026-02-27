@@ -163,7 +163,23 @@ pub fn detect_vcs_kind<P: AsRef<Path>>(path: P) -> Option<VcsKind> {
 
 /// Walk up from `start` looking for `.jj/` and `.git/` directories.
 fn find_vcs_markers(start: &Path) -> (bool, bool) {
-    let mut current = start.to_path_buf();
+    // Resolve relative paths (e.g. ".") to absolute so that pop() can walk
+    // up the directory tree.  Fall back to the raw path when canonicalize
+    // fails (e.g. the path does not exist yet).
+    let mut current = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| {
+            let abs = if start.is_relative() {
+                cwd.join(start)
+            } else {
+                start.to_path_buf()
+            };
+            // Use dunce::canonicalize or std; the important thing is an
+            // absolute path so pop() works.
+            abs.canonicalize().ok()
+        })
+        .unwrap_or_else(|| start.to_path_buf());
+
     if current.is_file() {
         current.pop();
     }

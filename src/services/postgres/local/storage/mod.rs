@@ -7,11 +7,11 @@ use std::path::Path;
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 
-use super::model::{Branch, Project, StorageBackend};
+use super::model::{Branch, Project, StorageDriver};
 
 #[derive(Debug, Clone)]
 pub struct StorageSelection {
-    pub backend: StorageBackend,
+    pub driver: StorageDriver,
     pub config: Option<String>,
 }
 
@@ -26,7 +26,7 @@ pub struct StorageDoctorEntry {
 #[derive(Debug, Clone)]
 pub struct StorageDoctorReport {
     pub entries: Vec<StorageDoctorEntry>,
-    pub default_backend: StorageBackend,
+    pub default_driver: StorageDriver,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,71 +61,71 @@ impl StorageCoordinator {
         let apfs_report = self.local.detect_apfs(&self.projects_root).await;
         let reflink_report = self.local.detect_reflink(&self.projects_root).await;
 
-        let default_backend = if zfs_report.available {
-            StorageBackend::Zfs
+        let default_driver = if zfs_report.available {
+            StorageDriver::Zfs
         } else if apfs_report.available {
-            StorageBackend::ApfsClone
+            StorageDriver::ApfsClone
         } else if reflink_report.available {
-            StorageBackend::Reflink
+            StorageDriver::Reflink
         } else {
-            StorageBackend::Copy
+            StorageDriver::Copy
         };
 
         let entries = vec![
             StorageDoctorEntry {
-                kind: StorageBackend::Zfs.as_str().to_string(),
+                kind: StorageDriver::Zfs.as_str().to_string(),
                 available: zfs_report.available,
                 detail: zfs_report.detail,
-                selected: default_backend == StorageBackend::Zfs,
+                selected: default_driver == StorageDriver::Zfs,
             },
             StorageDoctorEntry {
-                kind: StorageBackend::ApfsClone.as_str().to_string(),
+                kind: StorageDriver::ApfsClone.as_str().to_string(),
                 available: apfs_report.available,
                 detail: apfs_report.detail,
-                selected: default_backend == StorageBackend::ApfsClone,
+                selected: default_driver == StorageDriver::ApfsClone,
             },
             StorageDoctorEntry {
-                kind: StorageBackend::Reflink.as_str().to_string(),
+                kind: StorageDriver::Reflink.as_str().to_string(),
                 available: reflink_report.available,
                 detail: reflink_report.detail,
-                selected: default_backend == StorageBackend::Reflink,
+                selected: default_driver == StorageDriver::Reflink,
             },
             StorageDoctorEntry {
-                kind: StorageBackend::Copy.as_str().to_string(),
+                kind: StorageDriver::Copy.as_str().to_string(),
                 available: true,
                 detail: "portable full copy fallback".to_string(),
-                selected: default_backend == StorageBackend::Copy,
+                selected: default_driver == StorageDriver::Copy,
             },
         ];
 
         StorageDoctorReport {
             entries,
-            default_backend,
+            default_driver,
         }
     }
 
     pub async fn select_for_new_project(&self) -> StorageSelection {
         let report = self.doctor().await;
 
-        match report.default_backend {
-            StorageBackend::Zfs => {
+        match report.default_driver {
+            StorageDriver::Zfs => {
                 let zfs_report = self.zfs.detect(&self.projects_root).await;
                 if let Some(root_dataset) = zfs_report.root_dataset {
                     let config = ZfsProjectConfig { root_dataset };
                     return StorageSelection {
-                        backend: StorageBackend::Zfs,
+                        driver: StorageDriver::Zfs,
                         config: Some(
                             serde_json::to_string(&config).unwrap_or_else(|_| "{}".to_string()),
                         ),
                     };
                 }
                 StorageSelection {
-                    backend: StorageBackend::Copy,
+                    driver: StorageDriver::Copy,
                     config: None,
                 }
             }
             other => StorageSelection {
-                backend: other,
+                driver: other,
                 config: None,
             },
         }
@@ -137,26 +137,26 @@ impl StorageCoordinator {
         branch_id: &str,
         data_dir: &Path,
     ) -> anyhow::Result<Option<String>> {
-        match project.storage_backend {
-            StorageBackend::Zfs => {
+        match project.storage_driver {
+            StorageDriver::Zfs => {
                 let config = parse_zfs_config(project)?;
                 self.zfs
                     .create_empty(project, &config, branch_id, data_dir)
                     .await
             }
-            StorageBackend::ApfsClone => {
+            StorageDriver::ApfsClone => {
                 self.local
                     .prepare_empty(data_dir, local_driver::LocalMode::ApfsClone)
                     .await?;
                 Ok(None)
             }
-            StorageBackend::Reflink => {
+            StorageDriver::Reflink => {
                 self.local
                     .prepare_empty(data_dir, local_driver::LocalMode::Reflink)
                     .await?;
                 Ok(None)
             }
-            StorageBackend::Copy => {
+            StorageDriver::Copy => {
                 self.local
                     .prepare_empty(data_dir, local_driver::LocalMode::Copy)
                     .await?;
@@ -172,14 +172,14 @@ impl StorageCoordinator {
         child_branch_id: &str,
         child_data_dir: &Path,
     ) -> anyhow::Result<Option<String>> {
-        match project.storage_backend {
-            StorageBackend::Zfs => {
+        match project.storage_driver {
+            StorageDriver::Zfs => {
                 let config = parse_zfs_config(project)?;
                 self.zfs
                     .clone_from_parent(project, &config, parent, child_branch_id, child_data_dir)
                     .await
             }
-            StorageBackend::ApfsClone => {
+            StorageDriver::ApfsClone => {
                 self.local
                     .clone_dir(
                         std::path::PathBuf::from(&parent.data_dir).as_path(),
@@ -189,7 +189,7 @@ impl StorageCoordinator {
                     .await?;
                 Ok(None)
             }
-            StorageBackend::Reflink => {
+            StorageDriver::Reflink => {
                 self.local
                     .clone_dir(
                         std::path::PathBuf::from(&parent.data_dir).as_path(),
@@ -199,7 +199,7 @@ impl StorageCoordinator {
                     .await?;
                 Ok(None)
             }
-            StorageBackend::Copy => {
+            StorageDriver::Copy => {
                 self.local
                     .clone_dir(
                         std::path::PathBuf::from(&parent.data_dir).as_path(),
@@ -217,12 +217,12 @@ impl StorageCoordinator {
         project: &Project,
         branch: &Branch,
     ) -> anyhow::Result<()> {
-        match project.storage_backend {
-            StorageBackend::Zfs => {
+        match project.storage_driver {
+            StorageDriver::Zfs => {
                 let config = parse_zfs_config(project)?;
                 self.zfs.delete_branch(project, &config, branch).await
             }
-            StorageBackend::ApfsClone | StorageBackend::Reflink | StorageBackend::Copy => {
+            StorageDriver::ApfsClone | StorageDriver::Reflink | StorageDriver::Copy => {
                 self.local
                     .remove_dir(std::path::PathBuf::from(&branch.data_dir).as_path())
                     .await
@@ -231,8 +231,8 @@ impl StorageCoordinator {
     }
 
     pub async fn delete_project_data(&self, project: &Project) -> anyhow::Result<()> {
-        match project.storage_backend {
-            StorageBackend::Zfs => {
+        match project.storage_driver {
+            StorageDriver::Zfs => {
                 let config = parse_zfs_config(project)?;
                 let project_dataset = format!("{}/projects/{}", config.root_dataset, project.id);
                 // Recursively destroy the entire project dataset and children
@@ -265,7 +265,7 @@ impl StorageCoordinator {
                         })?;
                 }
             }
-            StorageBackend::ApfsClone | StorageBackend::Reflink | StorageBackend::Copy => {
+            StorageDriver::ApfsClone | StorageDriver::Reflink | StorageDriver::Copy => {
                 let project_dir = self.projects_root.join(&project.id);
                 if tokio::fs::metadata(&project_dir).await.is_ok() {
                     tokio::fs::remove_dir_all(&project_dir)

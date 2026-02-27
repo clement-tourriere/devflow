@@ -45,7 +45,7 @@
 - **Config format**: Both YAML and TOML (auto-detect)
 - **Backward compat**: Clean break from pgbranch — no migration path
 - **VCS support**: Git + worktrees now, jj (Jujutsu) architecture-ready
-- **Service backends**: All existing PG backends + ClickHouse + MySQL + Generic Docker
+- **Service providers**: All existing PG backends + ClickHouse + MySQL + Generic Docker
 
 ## Differentiators vs. Worktrunk
 
@@ -195,8 +195,8 @@ behavior:
   max_branches: 10
   naming_strategy: prefix
 
-# Multi-backend setup
-backends:
+# Multi-provider setup
+services:
   - name: app-db
     type: local
     service_type: postgres
@@ -287,11 +287,12 @@ devflow (df)
 │   ├── list                 # List all configured services
 │   ├── create [branch]      # Create service branch(es)
 │   ├── delete [branch]      # Delete service branch(es)
-│   ├── start [branch]       # Start service (local backends)
+│   ├── start [branch]       # Start service (local providers)
 │   ├── stop [branch]        # Stop service
 │   ├── reset [branch]       # Reset to parent state
 │   ├── connection [service] # Show connection info
 │   ├── seed [service]       # Seed from source
+│   ├── destroy [--force]    # Remove all containers and data
 │   └── doctor               # Health check
 │
 ├── hook                     # Hook management
@@ -308,8 +309,7 @@ devflow (df)
 │
 ├── install-hooks            # Install VCS hooks
 ├── uninstall-hooks          # Remove VCS hooks
-├── doctor                   # Full system health check
-└── destroy                  # Remove all project data
+└── doctor                   # Full system health check
 ```
 
 ## Target Project Structure

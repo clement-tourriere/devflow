@@ -1,69 +1,69 @@
-#[cfg(feature = "backend-dblab")]
-use super::postgres::dblab::DBLabBackend;
-#[cfg(feature = "backend-local")]
-use super::postgres::local::LocalBackend;
-#[cfg(feature = "backend-neon")]
-use super::postgres::neon::NeonBackend;
-#[cfg(feature = "backend-postgres-template")]
-use super::postgres::template::PostgresTemplateBackend;
-#[cfg(feature = "backend-xata")]
-use super::postgres::xata::XataBackend;
+#[cfg(feature = "service-dblab")]
+use super::postgres::dblab::DBLabProvider;
+#[cfg(feature = "service-local")]
+use super::postgres::local::LocalProvider;
+#[cfg(feature = "service-neon")]
+use super::postgres::neon::NeonProvider;
+#[cfg(feature = "service-postgres-template")]
+use super::postgres::template::PostgresTemplateProvider;
+#[cfg(feature = "service-xata")]
+use super::postgres::xata::XataProvider;
 
-#[cfg(feature = "backend-local")]
-use super::clickhouse::local::ClickHouseLocalBackend;
-#[cfg(feature = "backend-local")]
-use super::generic::GenericDockerBackend;
-#[cfg(feature = "backend-local")]
-use super::mysql::local::MySQLLocalBackend;
+#[cfg(feature = "service-local")]
+use super::clickhouse::local::ClickHouseLocalProvider;
+#[cfg(feature = "service-local")]
+use super::generic::GenericDockerProvider;
+#[cfg(feature = "service-local")]
+use super::mysql::local::MySQLLocalProvider;
 
-use super::plugin::PluginBackend;
-use super::ServiceBackend;
-use crate::config::{Config, NamedBackendConfig};
+use super::plugin::PluginProvider;
+use super::ServiceProvider;
+use crate::config::{Config, NamedServiceConfig};
 use anyhow::{Context, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum BackendType {
-    #[cfg(feature = "backend-local")]
+pub enum ProviderType {
+    #[cfg(feature = "service-local")]
     Local,
-    #[cfg(feature = "backend-postgres-template")]
+    #[cfg(feature = "service-postgres-template")]
     PostgresTemplate,
-    #[cfg(feature = "backend-neon")]
+    #[cfg(feature = "service-neon")]
     Neon,
-    #[cfg(feature = "backend-dblab")]
+    #[cfg(feature = "service-dblab")]
     DBLab,
-    #[cfg(feature = "backend-xata")]
+    #[cfg(feature = "service-xata")]
     Xata,
 }
 
-impl BackendType {
+impl ProviderType {
     pub fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
-            #[cfg(feature = "backend-local")]
-            "local" | "docker" => Ok(BackendType::Local),
-            #[cfg(not(feature = "backend-local"))]
-            "local" | "docker" => anyhow::bail!("Local backend not compiled. Rebuild with --features backend-local"),
+            #[cfg(feature = "service-local")]
+            "local" | "docker" => Ok(ProviderType::Local),
+            #[cfg(not(feature = "service-local"))]
+            "local" | "docker" => anyhow::bail!("Local provider not compiled. Rebuild with --features service-local"),
 
-            #[cfg(feature = "backend-postgres-template")]
-            "postgres_template" | "postgres" | "postgresql" => Ok(BackendType::PostgresTemplate),
-            #[cfg(not(feature = "backend-postgres-template"))]
-            "postgres_template" | "postgres" | "postgresql" => anyhow::bail!("PostgreSQL template backend not compiled. Rebuild with --features backend-postgres-template"),
+            #[cfg(feature = "service-postgres-template")]
+            "postgres_template" | "postgres" | "postgresql" => Ok(ProviderType::PostgresTemplate),
+            #[cfg(not(feature = "service-postgres-template"))]
+            "postgres_template" | "postgres" | "postgresql" => anyhow::bail!("PostgreSQL template provider not compiled. Rebuild with --features service-postgres-template"),
 
-            #[cfg(feature = "backend-neon")]
-            "neon" => Ok(BackendType::Neon),
-            #[cfg(not(feature = "backend-neon"))]
-            "neon" => anyhow::bail!("Neon backend not compiled. Rebuild with --features backend-neon"),
+            #[cfg(feature = "service-neon")]
+            "neon" => Ok(ProviderType::Neon),
+            #[cfg(not(feature = "service-neon"))]
+            "neon" => anyhow::bail!("Neon provider not compiled. Rebuild with --features service-neon"),
 
-            #[cfg(feature = "backend-dblab")]
-            "dblab" | "database_lab" => Ok(BackendType::DBLab),
-            #[cfg(not(feature = "backend-dblab"))]
-            "dblab" | "database_lab" => anyhow::bail!("DBLab backend not compiled. Rebuild with --features backend-dblab"),
+            #[cfg(feature = "service-dblab")]
+            "dblab" | "database_lab" => Ok(ProviderType::DBLab),
+            #[cfg(not(feature = "service-dblab"))]
+            "dblab" | "database_lab" => anyhow::bail!("DBLab provider not compiled. Rebuild with --features service-dblab"),
 
-            #[cfg(feature = "backend-xata")]
-            "xata" | "xata_lite" => Ok(BackendType::Xata),
-            #[cfg(not(feature = "backend-xata"))]
-            "xata" | "xata_lite" => anyhow::bail!("Xata backend not compiled. Rebuild with --features backend-xata"),
+            #[cfg(feature = "service-xata")]
+            "xata" | "xata_lite" => Ok(ProviderType::Xata),
+            #[cfg(not(feature = "service-xata"))]
+            "xata" | "xata_lite" => anyhow::bail!("Xata provider not compiled. Rebuild with --features service-xata"),
 
-            _ => anyhow::bail!("Unknown backend type: {}. Valid types: local, postgres_template, neon, dblab, xata", s),
+            _ => anyhow::bail!("Unknown provider type: {}. Valid types: local, postgres_template, neon, dblab, xata", s),
         }
     }
 
@@ -72,26 +72,28 @@ impl BackendType {
     }
 }
 
-pub struct NamedBackend {
+pub struct NamedService {
     pub name: String,
-    pub backend: Box<dyn ServiceBackend>,
+    pub provider: Box<dyn ServiceProvider>,
 }
 
-/// Create a backend from a NamedBackendConfig.
+/// Create a provider from a NamedServiceConfig.
 ///
 /// Dispatches based on `service_type` first (postgres, clickhouse, mysql, generic),
-/// then on `backend_type` (local, neon, dblab, etc.) for postgres services.
-pub async fn create_backend_from_named_config(
+/// then on `provider_type` (local, neon, dblab, etc.) for postgres services.
+pub async fn create_provider_from_named_config(
     config: &Config,
-    named: &NamedBackendConfig,
-) -> Result<Box<dyn ServiceBackend>> {
+    named: &NamedServiceConfig,
+) -> Result<Box<dyn ServiceProvider>> {
+    let project_name = config.project_name();
+
     match named.service_type.as_str() {
         "postgres" | "" => {
-            // Dispatch on backend_type for postgres services
-            create_postgres_backend(config, named).await
+            // Dispatch on provider_type for postgres services
+            create_postgres_provider(config, named).await
         }
 
-        #[cfg(feature = "backend-local")]
+        #[cfg(feature = "service-local")]
         "clickhouse" => {
             let ch_config = named.clickhouse.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -99,16 +101,16 @@ pub async fn create_backend_from_named_config(
                     named.name
                 )
             })?;
-            let backend = ClickHouseLocalBackend::new(&named.name, ch_config)
-                .context("Failed to create ClickHouse backend")?;
-            Ok(Box::new(backend))
+            let provider = ClickHouseLocalProvider::new(&project_name, &named.name, ch_config)
+                .context("Failed to create ClickHouse provider")?;
+            Ok(Box::new(provider))
         }
-        #[cfg(not(feature = "backend-local"))]
+        #[cfg(not(feature = "service-local"))]
         "clickhouse" => {
-            anyhow::bail!("ClickHouse backend requires the 'backend-local' feature (Docker support). Rebuild with --features backend-local")
+            anyhow::bail!("ClickHouse provider requires the 'service-local' feature (Docker support). Rebuild with --features service-local")
         }
 
-        #[cfg(feature = "backend-local")]
+        #[cfg(feature = "service-local")]
         "mysql" | "mariadb" => {
             let mysql_config = named.mysql.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -117,16 +119,16 @@ pub async fn create_backend_from_named_config(
                     named.service_type
                 )
             })?;
-            let backend = MySQLLocalBackend::new(&named.name, mysql_config)
-                .context("Failed to create MySQL backend")?;
-            Ok(Box::new(backend))
+            let provider = MySQLLocalProvider::new(&project_name, &named.name, mysql_config)
+                .context("Failed to create MySQL provider")?;
+            Ok(Box::new(provider))
         }
-        #[cfg(not(feature = "backend-local"))]
+        #[cfg(not(feature = "service-local"))]
         "mysql" | "mariadb" => {
-            anyhow::bail!("MySQL backend requires the 'backend-local' feature (Docker support). Rebuild with --features backend-local")
+            anyhow::bail!("MySQL provider requires the 'service-local' feature (Docker support). Rebuild with --features service-local")
         }
 
-        #[cfg(feature = "backend-local")]
+        #[cfg(feature = "service-local")]
         "generic" => {
             let generic_config = named.generic.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -134,13 +136,13 @@ pub async fn create_backend_from_named_config(
                     named.name
                 )
             })?;
-            let backend = GenericDockerBackend::new(&named.name, generic_config)
-                .context("Failed to create generic Docker backend")?;
-            Ok(Box::new(backend))
+            let provider = GenericDockerProvider::new(&project_name, &named.name, generic_config)
+                .context("Failed to create generic Docker provider")?;
+            Ok(Box::new(provider))
         }
-        #[cfg(not(feature = "backend-local"))]
+        #[cfg(not(feature = "service-local"))]
         "generic" => {
-            anyhow::bail!("Generic Docker backend requires the 'backend-local' feature. Rebuild with --features backend-local")
+            anyhow::bail!("Generic Docker provider requires the 'service-local' feature. Rebuild with --features service-local")
         }
 
         "plugin" => {
@@ -150,9 +152,9 @@ pub async fn create_backend_from_named_config(
                     named.name
                 )
             })?;
-            let backend = PluginBackend::new(&named.name, plugin_config)
-                .context("Failed to create plugin backend")?;
-            Ok(Box::new(backend))
+            let provider = PluginProvider::new(&named.name, plugin_config)
+                .context("Failed to create plugin provider")?;
+            Ok(Box::new(provider))
         }
 
         other => {
@@ -165,196 +167,196 @@ pub async fn create_backend_from_named_config(
     }
 }
 
-/// Create a postgres-specific backend, dispatching on `backend_type`.
-async fn create_postgres_backend(
+/// Create a postgres-specific provider, dispatching on `provider_type`.
+async fn create_postgres_provider(
     config: &Config,
-    named: &NamedBackendConfig,
-) -> Result<Box<dyn ServiceBackend>> {
-    let backend_type = BackendType::from_str(&named.backend_type)?;
+    named: &NamedServiceConfig,
+) -> Result<Box<dyn ServiceProvider>> {
+    let provider_type = ProviderType::from_str(&named.provider_type)?;
 
-    match backend_type {
-        #[cfg(feature = "backend-local")]
-        BackendType::Local => {
+    match provider_type {
+        #[cfg(feature = "service-local")]
+        ProviderType::Local => {
             let local_config = named.local.as_ref();
-            let backend = LocalBackend::new(&named.name, config, local_config)
+            let provider = LocalProvider::new(&named.name, config, local_config)
                 .await
-                .context("Failed to create local backend")?;
-            Ok(Box::new(backend))
+                .context("Failed to create local provider")?;
+            Ok(Box::new(provider))
         }
-        #[cfg(feature = "backend-postgres-template")]
-        BackendType::PostgresTemplate => {
-            let backend = PostgresTemplateBackend::new(config)
+        #[cfg(feature = "service-postgres-template")]
+        ProviderType::PostgresTemplate => {
+            let provider = PostgresTemplateProvider::new(config)
                 .await
-                .context("Failed to create PostgreSQL template backend")?;
-            Ok(Box::new(backend))
+                .context("Failed to create PostgreSQL template provider")?;
+            Ok(Box::new(provider))
         }
-        #[cfg(feature = "backend-neon")]
-        BackendType::Neon => {
+        #[cfg(feature = "service-neon")]
+        ProviderType::Neon => {
             if let Some(ref neon_config) = named.neon {
-                let backend = NeonBackend::new(
+                let provider = NeonProvider::new(
                     resolve_env_var(&neon_config.api_key)?,
                     resolve_env_var(&neon_config.project_id)?,
                     Some(neon_config.base_url.clone()),
                 )?;
-                Ok(Box::new(backend))
+                Ok(Box::new(provider))
             } else {
-                anyhow::bail!("Neon backend selected but no neon configuration provided");
+                anyhow::bail!("Neon provider selected but no neon configuration provided");
             }
         }
-        #[cfg(feature = "backend-dblab")]
-        BackendType::DBLab => {
+        #[cfg(feature = "service-dblab")]
+        ProviderType::DBLab => {
             if let Some(ref dblab_config) = named.dblab {
-                let backend = DBLabBackend::new(
+                let provider = DBLabProvider::new(
                     resolve_env_var(&dblab_config.api_url)?,
                     resolve_env_var(&dblab_config.auth_token)?,
                 )?;
-                Ok(Box::new(backend))
+                Ok(Box::new(provider))
             } else {
-                anyhow::bail!("DBLab backend selected but no dblab configuration provided");
+                anyhow::bail!("DBLab provider selected but no dblab configuration provided");
             }
         }
-        #[cfg(feature = "backend-xata")]
-        BackendType::Xata => {
+        #[cfg(feature = "service-xata")]
+        ProviderType::Xata => {
             if let Some(ref xata_config) = named.xata {
-                let backend = XataBackend::new(
+                let provider = XataProvider::new(
                     resolve_env_var(&xata_config.api_key)?,
                     resolve_env_var(&xata_config.organization_id)?,
                     resolve_env_var(&xata_config.project_id)?,
                     Some(xata_config.base_url.clone()),
                 )?;
-                Ok(Box::new(backend))
+                Ok(Box::new(provider))
             } else {
-                anyhow::bail!("Xata backend selected but no xata configuration provided");
+                anyhow::bail!("Xata provider selected but no xata configuration provided");
             }
         }
     }
 }
 
-/// Resolve a single backend by name (or the default).
-pub async fn resolve_backend(config: &Config, backend_name: Option<&str>) -> Result<NamedBackend> {
-    config.validate_backends()?;
+/// Resolve a single service provider by name (or the default).
+pub async fn resolve_provider(config: &Config, service_name: Option<&str>) -> Result<NamedService> {
+    config.validate_services()?;
 
-    let backends = config.resolve_backends();
+    let services = config.resolve_services();
 
-    // If backends list is populated, use it
-    if !backends.is_empty() {
-        let named = if let Some(name) = backend_name {
-            backends
+    // If services list is populated, use it
+    if !services.is_empty() {
+        let named = if let Some(name) = service_name {
+            services
                 .iter()
                 .find(|b| b.name == name)
-                .ok_or_else(|| anyhow::anyhow!("Backend '{}' not found in configuration", name))?
+                .ok_or_else(|| anyhow::anyhow!("Service '{}' not found in configuration", name))?
         } else {
-            backends
+            services
                 .iter()
                 .find(|b| b.default)
-                .or(backends.first())
-                .ok_or_else(|| anyhow::anyhow!("No backends configured"))?
+                .or(services.first())
+                .ok_or_else(|| anyhow::anyhow!("No services configured"))?
         };
 
-        let backend = create_backend_from_named_config(config, named).await?;
-        return Ok(NamedBackend {
+        let provider = create_provider_from_named_config(config, named).await?;
+        return Ok(NamedService {
             name: named.name.clone(),
-            backend,
+            provider,
         });
     }
 
-    // No backends or backend config — fall back to auto-detection
-    if backend_name.is_some() {
-        anyhow::bail!("--database specified but no backends configured");
+    // No services or service config — fall back to auto-detection
+    if service_name.is_some() {
+        anyhow::bail!("--database specified but no services configured");
     }
 
-    let backend = create_backend_default(config).await?;
-    Ok(NamedBackend {
+    let provider = create_provider_default(config).await?;
+    Ok(NamedService {
         name: "default".to_string(),
-        backend,
+        provider,
     })
 }
 
-/// Instantiate all configured backends.
-pub async fn create_all_backends(config: &Config) -> Result<Vec<NamedBackend>> {
-    config.validate_backends()?;
+/// Instantiate all configured service providers.
+pub async fn create_all_providers(config: &Config) -> Result<Vec<NamedService>> {
+    config.validate_services()?;
 
-    let named_configs = config.resolve_backends();
+    let named_configs = config.resolve_services();
 
     if named_configs.is_empty() {
         // Fall back to default auto-detection
-        let backend = create_backend_default(config).await?;
-        return Ok(vec![NamedBackend {
+        let provider = create_provider_default(config).await?;
+        return Ok(vec![NamedService {
             name: "default".to_string(),
-            backend,
+            provider,
         }]);
     }
 
     let mut result = Vec::with_capacity(named_configs.len());
     for named in &named_configs {
-        let backend = create_backend_from_named_config(config, named).await?;
-        result.push(NamedBackend {
+        let provider = create_provider_from_named_config(config, named).await?;
+        result.push(NamedService {
             name: named.name.clone(),
-            backend,
+            provider,
         });
     }
 
     Ok(result)
 }
 
-/// Auto-detect backend when no config section is present.
-async fn create_backend_default(config: &Config) -> Result<Box<dyn ServiceBackend>> {
+/// Auto-detect provider when no config section is present.
+async fn create_provider_default(config: &Config) -> Result<Box<dyn ServiceProvider>> {
     // If database config differs from defaults,
-    // use postgres_template backend
-    #[cfg(feature = "backend-postgres-template")]
+    // use postgres_template provider
+    #[cfg(feature = "service-postgres-template")]
     if config.database.host != "localhost"
         || config.database.port != 5432
         || config.database.template_database != "template0"
     {
-        let backend = PostgresTemplateBackend::new(config)
+        let provider = PostgresTemplateProvider::new(config)
             .await
-            .context("Failed to create PostgreSQL template backend")?;
-        return Ok(Box::new(backend));
+            .context("Failed to create PostgreSQL template provider")?;
+        return Ok(Box::new(provider));
     }
 
-    #[cfg(not(feature = "backend-postgres-template"))]
+    #[cfg(not(feature = "service-postgres-template"))]
     if config.database.host != "localhost"
         || config.database.port != 5432
         || config.database.template_database != "template0"
     {
-        anyhow::bail!("PostgreSQL template backend not compiled. Rebuild with --features backend-postgres-template");
+        anyhow::bail!("PostgreSQL template provider not compiled. Rebuild with --features service-postgres-template");
     }
 
-    // Default to local backend — derive name from cwd
-    #[cfg(feature = "backend-local")]
+    // Default to local provider — derive name from cwd
+    #[cfg(feature = "service-local")]
     {
         let default_name = std::env::current_dir()
             .ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .unwrap_or_else(|| "default".to_string());
-        let backend = LocalBackend::new(&default_name, config, None)
+        let provider = LocalProvider::new(&default_name, config, None)
             .await
-            .context("Failed to create local backend")?;
-        Ok(Box::new(backend))
+            .context("Failed to create local provider")?;
+        Ok(Box::new(provider))
     }
 
-    #[cfg(not(feature = "backend-local"))]
+    #[cfg(not(feature = "service-local"))]
     {
-        anyhow::bail!("Local backend not compiled. Rebuild with --features backend-local");
+        anyhow::bail!("Local provider not compiled. Rebuild with --features service-local");
     }
 }
 
-/// Instantiate only backends with `auto_branch: true`.
+/// Instantiate only services with `auto_branch: true`.
 ///
-/// These are the backends that should be automatically branched when a git
+/// These are the services that should be automatically branched when a git
 /// branch is created/switched/deleted. Falls back to default auto-detection
-/// if no backends are configured.
-pub async fn create_auto_branch_backends(config: &Config) -> Result<Vec<NamedBackend>> {
-    config.validate_backends()?;
+/// if no services are configured.
+pub async fn create_auto_branch_providers(config: &Config) -> Result<Vec<NamedService>> {
+    config.validate_services()?;
 
-    let named_configs = config.resolve_backends();
+    let named_configs = config.resolve_services();
 
     if named_configs.is_empty() {
-        // Fall back to default auto-detection (single backend, implicitly auto_branch)
-        let backend = create_backend_default(config).await?;
-        return Ok(vec![NamedBackend {
+        // Fall back to default auto-detection (single service, implicitly auto_branch)
+        let provider = create_provider_default(config).await?;
+        return Ok(vec![NamedService {
             name: "default".to_string(),
-            backend,
+            provider,
         }]);
     }
 
@@ -366,17 +368,17 @@ pub async fn create_auto_branch_backends(config: &Config) -> Result<Vec<NamedBac
 
     let mut result = Vec::with_capacity(auto_configs.len());
     for named in auto_configs {
-        let backend = create_backend_from_named_config(config, named).await?;
-        result.push(NamedBackend {
+        let provider = create_provider_from_named_config(config, named).await?;
+        result.push(NamedService {
             name: named.name.clone(),
-            backend,
+            provider,
         });
     }
 
     Ok(result)
 }
 
-/// Result of an orchestrated operation on a single backend.
+/// Result of an orchestrated operation on a single service.
 #[derive(Debug)]
 pub struct OrchestrationResult {
     pub service_name: String,
@@ -385,21 +387,21 @@ pub struct OrchestrationResult {
     pub branch_info: Option<super::BranchInfo>,
 }
 
-/// Create a branch across all auto-branch backends.
+/// Create a branch across all auto-branch services.
 ///
-/// Iterates over all backends with `auto_branch: true` and calls
+/// Iterates over all services with `auto_branch: true` and calls
 /// `create_branch()` on each. Collects results with partial failure
-/// tolerance — one backend failing doesn't prevent others from succeeding.
+/// tolerance — one service failing doesn't prevent others from succeeding.
 pub async fn orchestrate_create(
     config: &Config,
     branch_name: &str,
     from_branch: Option<&str>,
 ) -> Result<Vec<OrchestrationResult>> {
-    let backends = create_auto_branch_backends(config).await?;
-    let mut results = Vec::with_capacity(backends.len());
+    let providers = create_auto_branch_providers(config).await?;
+    let mut results = Vec::with_capacity(providers.len());
 
-    for named in &backends {
-        let result = match named.backend.create_branch(branch_name, from_branch).await {
+    for named in &providers {
+        let result = match named.provider.create_branch(branch_name, from_branch).await {
             Ok(info) => OrchestrationResult {
                 service_name: named.name.clone(),
                 success: true,
@@ -419,20 +421,20 @@ pub async fn orchestrate_create(
     Ok(results)
 }
 
-/// Delete a branch across all auto-branch backends.
+/// Delete a branch across all auto-branch services.
 ///
-/// Iterates over all backends with `auto_branch: true` and calls
+/// Iterates over all services with `auto_branch: true` and calls
 /// `delete_branch()` on each. Partial failures are tolerated.
 pub async fn orchestrate_delete(
     config: &Config,
     branch_name: &str,
 ) -> Result<Vec<OrchestrationResult>> {
-    let backends = create_auto_branch_backends(config).await?;
-    let mut results = Vec::with_capacity(backends.len());
+    let providers = create_auto_branch_providers(config).await?;
+    let mut results = Vec::with_capacity(providers.len());
 
-    for named in &backends {
-        // Skip backends that don't have this branch
-        let has_branch = match named.backend.branch_exists(branch_name).await {
+    for named in &providers {
+        // Skip services that don't have this branch
+        let has_branch = match named.provider.branch_exists(branch_name).await {
             Ok(v) => v,
             Err(e) => {
                 results.push(OrchestrationResult {
@@ -458,7 +460,7 @@ pub async fn orchestrate_delete(
             continue;
         }
 
-        let result = match named.backend.delete_branch(branch_name).await {
+        let result = match named.provider.delete_branch(branch_name).await {
             Ok(_) => OrchestrationResult {
                 service_name: named.name.clone(),
                 success: true,
@@ -478,9 +480,9 @@ pub async fn orchestrate_delete(
     Ok(results)
 }
 
-/// Switch to a branch across all auto-branch backends.
+/// Switch to a branch across all auto-branch services.
 ///
-/// For each backend with `auto_branch: true`:
+/// For each service with `auto_branch: true`:
 /// 1. If the branch doesn't exist, create it
 /// 2. Switch to the branch
 ///
@@ -490,12 +492,12 @@ pub async fn orchestrate_switch(
     branch_name: &str,
     from_branch: Option<&str>,
 ) -> Result<Vec<OrchestrationResult>> {
-    let backends = create_auto_branch_backends(config).await?;
-    let mut results = Vec::with_capacity(backends.len());
+    let providers = create_auto_branch_providers(config).await?;
+    let mut results = Vec::with_capacity(providers.len());
 
-    for named in &backends {
+    for named in &providers {
         // Check if branch already exists
-        let exists = match named.backend.branch_exists(branch_name).await {
+        let exists = match named.provider.branch_exists(branch_name).await {
             Ok(v) => v,
             Err(e) => {
                 results.push(OrchestrationResult {
@@ -510,7 +512,7 @@ pub async fn orchestrate_switch(
 
         let result = if !exists {
             // Create the branch first
-            match named.backend.create_branch(branch_name, from_branch).await {
+            match named.provider.create_branch(branch_name, from_branch).await {
                 Ok(info) => OrchestrationResult {
                     service_name: named.name.clone(),
                     success: true,
@@ -529,7 +531,7 @@ pub async fn orchestrate_switch(
             }
         } else {
             // Branch exists, just switch
-            match named.backend.switch_to_branch(branch_name).await {
+            match named.provider.switch_to_branch(branch_name).await {
                 Ok(info) => OrchestrationResult {
                     service_name: named.name.clone(),
                     success: true,
@@ -550,23 +552,23 @@ pub async fn orchestrate_switch(
     Ok(results)
 }
 
-/// Get connection info from all auto-branch backends for a given branch.
+/// Get connection info from all services for a given branch.
 ///
 /// Returns a map of service_name -> ConnectionInfo. Used by the hook context
 /// builder to populate per-service template variables.
 ///
-/// Queries ALL configured backends (not just auto-branch ones) so hooks can
-/// reference any service.  Backends that fail to return connection info for
+/// Queries ALL configured services (not just auto-branch ones) so hooks can
+/// reference any service.  Services that fail to return connection info for
 /// the given branch are silently skipped.
 pub async fn get_all_connection_info(
     config: &Config,
     branch_name: &str,
 ) -> Result<Vec<(String, super::ConnectionInfo)>> {
-    let backends = create_all_backends(config).await?;
-    let mut results = Vec::with_capacity(backends.len());
+    let providers = create_all_providers(config).await?;
+    let mut results = Vec::with_capacity(providers.len());
 
-    for named in &backends {
-        match named.backend.get_connection_info(branch_name).await {
+    for named in &providers {
+        match named.provider.get_connection_info(branch_name).await {
             Ok(info) => results.push((named.name.clone(), info)),
             Err(e) => {
                 log::debug!(

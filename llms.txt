@@ -1,18 +1,18 @@
 # devflow
 
-> Isolated development branch environments for every Git branch — databases, caches, and stateful services that sync with your Git workflow.
+> Isolated dev environments for every Git branch — worktrees, databases, caches, and stateful services that sync with your Git workflow.
 
-devflow maps each Git branch to an isolated set of services. When you
-`git checkout feature-auth`, devflow automatically spins up (or switches to)
-service instances that belong to that branch. Data is cloned using
-Copy-on-Write for near-instant, space-efficient branching.
+devflow gives each Git branch its own isolated development environment. When you
+`git checkout feature-auth`, devflow automatically creates (or switches to)
+a dedicated worktree and service instances that belong to that branch. Data is
+cloned using Copy-on-Write for near-instant, space-efficient branching.
 
 ## Automation defaults
 
 - Always pass `--json --non-interactive` for machine-safe execution.
 - Use `--no-verify` on `switch` in headless environments to skip hook approval prompts.
 - Use `devflow --json capabilities` to detect automation guarantees at runtime.
-- Non-zero exit code means failure; partial multi-backend failures also return non-zero.
+- Non-zero exit code means failure; partial multi-provider failures also return non-zero.
 
 ## Docs
 
@@ -20,7 +20,7 @@ Copy-on-Write for near-instant, space-efficient branching.
 - [AGENTS.md](AGENTS.md): Agent-first onboarding, bootstrap flow, suggested agent loop, and automation contract.
 - [CLAUDE.md](CLAUDE.md): Project structure, config schema, development commands, and AI agent context.
 - [CHANGELOG.md](CHANGELOG.md): Version history and release notes.
-- [docs/index.html](docs/index.html): Full single-page documentation site with search, dark/light theme.
+- [docs/index.html](docs/index.html): Full single-page documentation site with dark/light theme.
 
 ## Agent workflows
 
@@ -32,14 +32,14 @@ Copy-on-Write for near-instant, space-efficient branching.
 
 ## Source (for code agents)
 
-- [src/cli.rs](src/cli.rs): Command routing, JSON/non-interactive behavior, multi-backend orchestration.
+- [src/cli.rs](src/cli.rs): Command routing, JSON/non-interactive behavior, multi-provider orchestration.
 - [src/config/mod.rs](src/config/mod.rs): Config loading, 3-tier merging, env var overrides, validation.
-- [src/services/mod.rs](src/services/mod.rs): `ServiceBackend` trait — the interface all backends implement.
-- [src/services/factory.rs](src/services/factory.rs): Backend creation, dispatch, multi-backend orchestration.
+- [src/services/mod.rs](src/services/mod.rs): `ServiceProvider` trait — the interface all providers implement.
+- [src/services/factory.rs](src/services/factory.rs): Provider creation, dispatch, multi-provider orchestration.
 - [src/hooks/executor.rs](src/hooks/executor.rs): Hook execution engine, approval checks, conditions.
 - [src/hooks/template.rs](src/hooks/template.rs): MiniJinja template engine with custom filters.
 - [src/vcs/mod.rs](src/vcs/mod.rs): VCS abstraction (Git + Jujutsu), auto-detection.
-- [src/services/plugin.rs](src/services/plugin.rs): Plugin backend protocol (JSON-over-stdio).
+- [src/services/plugin.rs](src/services/plugin.rs): Plugin provider protocol (JSON-over-stdio).
 
 ## Optional
 

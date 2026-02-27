@@ -6,7 +6,7 @@ devflow is a Rust-based tool that provides branching support for development ser
 ## Core Concepts
 - **Service branching**: Each Git branch gets its own isolated set of services (databases, caches, etc.)
 - **Git worktree integration**: Optionally creates worktree directories per branch for true parallel development
-- **Multi-backend**: Local Docker containers, PostgreSQL TEMPLATE, Neon, DBLab, Xata, or custom plugins
+- **Multi-provider**: Local Docker containers, PostgreSQL TEMPLATE, Neon, DBLab, Xata, or custom plugins
 - **Multi-service**: A single project can manage multiple services (e.g., PostgreSQL + ClickHouse + Redis)
 - **Lifecycle hooks**: MiniJinja-templated commands that run at specific phases (post-create, pre-merge, etc.)
 - **Copy-on-Write storage**: Uses APFS clones (macOS), ZFS snapshots, Btrfs/XFS reflinks for near-instant branching
@@ -14,7 +14,7 @@ devflow is a Rust-based tool that provides branching support for development ser
 ## Key Features
 - **Automatic Git integration**: Creates/switches service branches on `git checkout` via Git hooks
 - **Git worktree management**: Creates worktree directories with configurable path templates and file copying
-- **Multi-service support**: PostgreSQL, ClickHouse, MySQL, generic Docker, and plugin backends
+- **Multi-service support**: PostgreSQL, ClickHouse, MySQL, generic Docker, and plugin providers
 - **Hook engine**: MiniJinja templates with custom filters (`sanitize`, `sanitize_db`, `hash_port`)
 - **Seed support**: Seed databases from PostgreSQL URLs, local dump files, or S3
 - **Shell integration**: `eval "$(devflow shell-init)"` for automatic `cd` into worktrees
@@ -63,8 +63,8 @@ behavior:
   max_branches: 10
   naming_strategy: prefix           # prefix, suffix, or replace
 
-# Multi-backend setup
-backends:
+# Multi-provider setup
+services:
   - name: app-db
     type: local
     service_type: postgres

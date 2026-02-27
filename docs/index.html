@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>devflow — Universal Development Environment Branching Tool</title>
-<meta name="description" content="Isolated services for every Git branch — automatically. Databases, caches, and stateful services that sync with your Git workflow.">
+<meta name="description" content="Isolated dev environments for every Git branch — automatically. Worktrees, databases, caches, and stateful services that sync with your Git workflow.">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" id="hljs-light">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" id="hljs-dark" disabled>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
@@ -586,6 +586,8 @@ hr {
     <a href="#installation" class="nav-sub">Installation</a>
     <a href="#first-branch" class="nav-sub">Your First Branch</a>
     <a href="#shell-integration" class="nav-sub">Shell Integration</a>
+    <a href="#existing-project" class="nav-sub">Existing Project</a>
+    <a href="#mise" class="nav-sub">Using mise</a>
 
     <div class="nav-group">Concepts</div>
     <a href="#core-concepts">Core Concepts</a>
@@ -598,14 +600,14 @@ hr {
     <a href="#config-schema" class="nav-sub">Full Schema</a>
     <a href="#env-vars" class="nav-sub">Environment Variables</a>
 
-    <div class="nav-group">Backends</div>
-    <a href="#backends">Backends</a>
-    <a href="#backend-local" class="nav-sub">Local Docker</a>
-    <a href="#backend-template" class="nav-sub">PostgreSQL Template</a>
-    <a href="#backend-neon" class="nav-sub">Neon</a>
-    <a href="#backend-dblab" class="nav-sub">DBLab</a>
-    <a href="#backend-xata" class="nav-sub">Xata</a>
-    <a href="#backend-plugin" class="nav-sub">Plugin</a>
+    <div class="nav-group">Providers</div>
+    <a href="#providers">Providers</a>
+    <a href="#provider-local" class="nav-sub">Local Docker</a>
+    <a href="#provider-template" class="nav-sub">PostgreSQL Template</a>
+    <a href="#provider-neon" class="nav-sub">Neon</a>
+    <a href="#provider-dblab" class="nav-sub">DBLab</a>
+    <a href="#provider-xata" class="nav-sub">Xata</a>
+    <a href="#provider-plugin" class="nav-sub">Plugin</a>
 
     <div class="nav-group">Features</div>
     <a href="#services">Services</a>
@@ -613,6 +615,7 @@ hr {
     <a href="#hooks">Hooks</a>
     <a href="#seeding">Seeding</a>
     <a href="#ai-automation">AI &amp; Automation</a>
+    <a href="#agent-integration" class="nav-sub">Agent Integration</a>
     <a href="#vcs-support">VCS Support</a>
 
     <div class="nav-group">Reference</div>
@@ -627,16 +630,16 @@ hr {
 
 <!-- ===== HERO ===== -->
 <section class="hero" id="hero">
-  <h1>Isolated services for<br>every Git branch &mdash; <span>automatically</span>.</h1>
+  <h1>Isolated dev environments for<br>every Git branch &mdash; <span>automatically</span>.</h1>
   <p class="tagline">
-    devflow gives each Git branch its own databases, caches, and stateful services.
+    devflow gives each Git branch its own worktree, databases, caches, and stateful services.
     Branch your entire development environment with a single command.
   </p>
 
   <div class="hero-features">
     <div class="hero-feature">
       <div class="icon blue">&#9881;</div>
-      <div><strong>Automatic</strong><br>Git hooks create and switch services on checkout</div>
+      <div><strong>Automatic</strong><br>Git hooks create and switch environments on checkout</div>
     </div>
     <div class="hero-feature">
       <div class="icon green">&#9889;</div>
@@ -649,6 +652,10 @@ hr {
     <div class="hero-feature">
       <div class="icon orange">&#9729;</div>
       <div><strong>Flexible</strong><br>Local Docker, cloud (Neon, DBLab, Xata), or custom plugins</div>
+    </div>
+    <div class="hero-feature">
+      <div class="icon green">&#9878;</div>
+      <div><strong>AI-Ready</strong><br>JSON output, <a href="#ai-automation" style="color: var(--green); text-decoration: underline;">llms.txt</a>, and agent scripts &mdash; built for autonomous coding agents</div>
     </div>
   </div>
 
@@ -675,20 +682,17 @@ hr {
 
   <h4>Requirements</h4>
   <ul>
-    <li><strong>Rust 1.70+</strong> &mdash; for building from source</li>
-    <li><strong>Docker</strong> &mdash; for local backend (Docker Desktop on macOS, docker.io on Linux)</li>
+    <li><strong><a href="https://mise.jdx.dev">mise</a></strong> &mdash; manages the Rust toolchain automatically (or install Rust 1.70+ manually)</li>
+    <li><strong>Docker</strong> &mdash; for local services (<a href="https://www.docker.com/products/docker-desktop/">Docker Desktop</a> or <a href="https://orbstack.dev">OrbStack</a> on macOS, <code>docker.io</code> on Linux)</li>
     <li><strong>Git</strong> &mdash; any recent version</li>
   </ul>
 
   <h4>macOS</h4>
   <p>No special setup needed. APFS cloning is used automatically for Copy-on-Write storage.</p>
-<pre><code class="language-bash"># Install Rust (if not already installed)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-
-# Build and install devflow
+<pre><code class="language-bash"># Build and install devflow
 git clone https://github.com/clement-tourriere/devflow.git
 cd devflow
+mise trust && mise install   # installs the Rust toolchain
 cargo install --path .</code></pre>
 
   <h4>Ubuntu / Debian</h4>
@@ -698,13 +702,10 @@ sudo apt-get install -y docker.io
 sudo usermod -aG docker $USER
 newgrp docker
 
-# Install Rust (if not already installed)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-
 # Build and install devflow
 git clone https://github.com/clement-tourriere/devflow.git
 cd devflow
+mise trust && mise install   # installs the Rust toolchain
 cargo install --path .</code></pre>
 
   <h4>Optional: ZFS on Linux (for instant branching)</h4>
@@ -728,22 +729,22 @@ devflow doctor</code></pre>
   <div class="steps">
     <div class="step">
       <h4>Initialize devflow in your project</h4>
-      <p>Navigate to your Git repository and run <code>devflow init</code>. This creates a <code>.devflow.yml</code> config file and a "main" service branch.</p>
+      <p>Navigate to your Git repository and run <code>devflow init</code>. This creates a <code>.devflow.yml</code> config file.</p>
 <pre><code class="language-bash">cd ~/my-project
 devflow init myapp</code></pre>
-      <p>The interactive wizard will ask you to choose a backend type (default: local Docker) and a Docker image (default: <code>postgres:17</code>).</p>
+      <p>Then add a service provider with <code>devflow service add</code>. The interactive wizard walks you through choosing a service type (Postgres, ClickHouse, MySQL, …), a provider (local Docker, Neon, DBLab, …), and a name.</p>
     </div>
 
     <div class="step">
       <h4>Install Git hooks</h4>
-      <p>This sets up automatic service branching whenever you <code>git checkout</code>.</p>
+      <p>This sets up automatic environment branching whenever you <code>git checkout</code>.</p>
 <pre><code class="language-bash">devflow install-hooks</code></pre>
       <p>Four hooks are installed: <code>post-checkout</code>, <code>post-merge</code>, <code>pre-commit</code>, and <code>post-rewrite</code>.</p>
     </div>
 
     <div class="step">
       <h4>Create a feature branch</h4>
-      <p>Just use Git as normal. The post-checkout hook creates an isolated service branch automatically.</p>
+      <p>Just use Git as normal. The post-checkout hook creates an isolated environment for your branch automatically.</p>
 <pre><code class="language-bash">git checkout -b feature/auth</code></pre>
       <p>Behind the scenes, devflow pauses the parent container, clones the data directory using Copy-on-Write, and starts a new container pointing at the clone.</p>
     </div>
@@ -802,6 +803,128 @@ devflow shell-init fish | source
 eval "$(devflow shell-init)"</code></pre>
 
   <p>The wrapper intercepts <code>devflow switch</code> output, detects <code>DEVFLOW_CD=&lt;path&gt;</code> directives, and automatically changes your working directory to the worktree.</p>
+
+  <!-- Existing Project -->
+  <h3 id="existing-project">Adding devflow to an Existing Project</h3>
+  <p>
+    Already have a project with a running database? devflow can adopt it. Here's how to add branch-isolated services to an existing codebase.
+  </p>
+
+  <div class="steps">
+    <div class="step">
+      <h4>Initialize in your existing repo</h4>
+      <p>Navigate to your project's Git repository root and run <code>devflow init</code>. Then add a service with <code>devflow service add</code>. The interactive wizard walks you through service type, provider, and name selection.</p>
+<pre><code class="language-bash">cd ~/my-existing-project
+devflow init myapp</code></pre>
+      <p>This creates a <code>.devflow.yml</code> config file and starts a fresh "main" service branch. If you already have a <code>.devflow.yml</code>, use <code>--force</code> to overwrite:</p>
+<pre><code class="language-bash">devflow init myapp --force</code></pre>
+    </div>
+
+    <div class="step">
+      <h4>Seed from your existing database</h4>
+      <p>If you have an existing database with schema and data you want to keep, seed the main service branch during init:</p>
+<pre><code class="language-bash"># Seed from a running PostgreSQL instance
+devflow init myapp --from postgresql://user:pass@localhost:5432/myapp
+
+# Or seed from a SQL dump file
+devflow init myapp --from ./backup.sql
+
+# Or seed from an S3 backup
+devflow init myapp --from s3://my-backups/postgres/latest.dump</code></pre>
+      <p>Every branch created from main will automatically inherit this data via Copy-on-Write &mdash; no extra copies needed.</p>
+    </div>
+
+    <div class="step">
+      <h4>Add local overrides (optional)</h4>
+      <p>If team members need different settings (ports, images, credentials), create a <code>.devflow.local.yml</code> next to <code>.devflow.yml</code>. This file is merged on top of the main config and should be gitignored.</p>
+<pre><code class="language-yaml"># .devflow.local.yml — personal overrides, not committed
+services:
+  - name: app-db
+    local:
+      port_range_start: 60000    # Avoid conflicts with your local PG</code></pre>
+<pre><code class="language-bash"># Add to .gitignore
+echo ".devflow.local.yml" >> .gitignore</code></pre>
+    </div>
+
+    <div class="step">
+      <h4>Install hooks and verify</h4>
+<pre><code class="language-bash"># Install Git hooks for automatic branching
+devflow install-hooks
+
+# Verify everything is set up correctly
+devflow doctor</code></pre>
+      <p><code>devflow doctor</code> checks your config, Docker, Git hooks, storage driver, and connectivity. Fix any issues it reports before continuing.</p>
+    </div>
+
+    <div class="step">
+      <h4>Update your app's connection string</h4>
+      <p>Point your application at the devflow-managed database instead of your manually-managed one. Use <code>devflow connection</code> to get the new connection info:</p>
+<pre><code class="language-bash"># Get connection string
+devflow connection main
+# → postgresql://postgres:postgres@localhost:55432/myapp
+
+# Or export as environment variable
+eval $(devflow connection main --format env)
+# → sets DATABASE_URL=postgresql://...</code></pre>
+      <p>Update your <code>.env</code>, <code>settings.py</code>, <code>database.yml</code>, or equivalent to use this URL. From now on, devflow manages your database lifecycle.</p>
+    </div>
+
+    <div class="step">
+      <h4>Start branching</h4>
+      <p>You're set. Create a feature branch and devflow handles the rest:</p>
+<pre><code class="language-bash">git checkout -b feature/new-schema
+# → devflow automatically creates an isolated database clone
+
+# Run your migrations safely — they only affect this branch
+npm run migrate   # or: python manage.py migrate / rails db:migrate
+
+# Switch back — main database is untouched
+git checkout main</code></pre>
+    </div>
+  </div>
+
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div><strong>Framework examples:</strong> See the <a href="#examples">Examples &amp; Recipes</a> section for framework-specific walkthroughs (Django, Rails, Node.js/Prisma) including migration hooks and Docker Compose integration.</div>
+  </div>
+
+  <!-- mise -->
+  <h3 id="mise">Using mise as a Task Runner</h3>
+  <p>
+    <a href="https://mise.jdx.dev">mise</a> is a polyglot dev tool manager and task runner. devflow ships with a <code>mise.toml</code> that provides pre-configured tasks for building, testing, and serving documentation. If you use mise, it also manages your Rust and Cargo toolchain automatically.
+  </p>
+
+  <h4>Install mise</h4>
+<pre><code class="language-bash"># macOS
+brew install mise
+
+# Linux
+curl https://mise.jdx.dev/install.sh | sh
+
+# Then activate (add to your shell profile)
+eval "$(mise activate bash)"   # or zsh/fish</code></pre>
+
+  <h4>Available tasks</h4>
+  <table>
+    <thead>
+      <tr><th>Command</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>mise run build</code></td><td>Build devflow (debug mode)</td></tr>
+      <tr><td><code>mise run build:release</code></td><td>Build devflow (optimized release)</td></tr>
+      <tr><td><code>mise run test</code></td><td>Run all tests</td></tr>
+      <tr><td><code>mise run lint</code></td><td>Run clippy lints</td></tr>
+      <tr><td><code>mise run fmt</code></td><td>Format code</td></tr>
+      <tr><td><code>mise run docs</code></td><td>Serve documentation site locally at <code>localhost:8787</code></td></tr>
+      <tr><td><code>mise run ci</code></td><td>Run the full CI pipeline (fmt + clippy + test)</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-success">
+    <span class="callout-icon">&#10003;</span>
+    <div>With mise, new contributors can get started with just <code>mise install && mise run build</code> &mdash; no need to manually install Rust or configure toolchains.</div>
+  </div>
+
 </section>
 
 <!-- ================================================================== -->
@@ -810,7 +933,7 @@ eval "$(devflow shell-init)"</code></pre>
 <section class="section" id="core-concepts">
   <h2><span class="number">02</span> Core Concepts</h2>
   <p class="section-desc">
-    Understand how devflow branches your development environment and the architecture behind instant, isolated service branches.
+    Understand how devflow branches your development environment and the architecture behind instant, isolated environment branching.
   </p>
 
   <h3>How Branching Works</h3>
@@ -825,7 +948,7 @@ eval "$(devflow shell-init)"</code></pre>
                       │  VCS Layer   │         Service Layer             │
                       │              │                                   │
                       │  ┌────────┐  │  ┌────────────────────────────┐  │
-                      │  │  Git   │  │  │     ServiceBackend trait    │  │
+                      │  │  Git   │  │  │    ServiceProvider trait     │  │
                       │  │ branch │  │  │  (create/delete/switch/     │  │
                       │  │   +    │  │  │   connect/start/stop)       │  │
                       │  │worktree│  │  ├───────┬───────┬────────────┤  │
@@ -849,13 +972,13 @@ eval "$(devflow shell-init)"</code></pre>
   <ol>
     <li><strong>Git checkout</strong> triggers the <code>post-checkout</code> hook</li>
     <li>The hook calls <code>devflow git-hook</code>, which detects the branch change</li>
-    <li>devflow orchestrates across all configured backends &mdash; creating or switching service branches</li>
+    <li>devflow orchestrates across all configured providers &mdash; creating or switching service branches</li>
     <li>Lifecycle hooks fire (e.g., update <code>.env</code>, run migrations)</li>
     <li>If worktrees are enabled, the shell wrapper <code>cd</code>s you into the right directory</li>
   </ol>
 
   <h3 id="cow-storage">Copy-on-Write Storage</h3>
-  <p>When you create a branch with the local Docker backend, devflow clones the entire data directory from the parent. With Copy-on-Write filesystems, this clone is <strong>near-instant</strong> and uses <strong>almost no extra disk space</strong>. Only blocks that change after the clone are duplicated.</p>
+  <p>When you create a branch with the local Docker provider, devflow clones the entire data directory from the parent. With Copy-on-Write filesystems, this clone is <strong>near-instant</strong> and uses <strong>almost no extra disk space</strong>. Only blocks that change after the clone are duplicated.</p>
 
   <table>
     <thead>
@@ -972,7 +1095,7 @@ devflow/myapp/feature   # clone from snapshot (instant, zero-copy)</code></pre>
 
   <div class="callout callout-info">
     <span class="callout-icon">&#9432;</span>
-    <div>Backends are stored in <strong>local state</strong> (<code>~/.config/devflow/local_state.yml</code>), not in the committed config file. This keeps API keys and machine-specific settings out of your repo.</div>
+    <div>Services are stored in <strong>local state</strong> (<code>~/.config/devflow/local_state.yml</code>), not in the committed config file. This keeps API keys and machine-specific settings out of your repo.</div>
   </div>
 
   <p>Use <code>devflow config -v</code> to see the effective config with precedence details (which value came from which source).</p>
@@ -982,7 +1105,7 @@ devflow/myapp/feature   # clone from snapshot (instant, zero-copy)</code></pre>
 
   <h4>Minimal Config</h4>
 <pre><code class="language-yaml"># This is all you need — devflow init generates this
-backends:
+services:
   - name: app-db
     type: local
     service_type: postgres
@@ -1016,14 +1139,14 @@ behavior:
                                        #   replace → feature_auth
 
 # ============================================
-# Backends
+# Services
 # ============================================
-backends:
-  - name: app-db                       # Unique name for this backend
-    type: local                        # Backend type
+services:
+  - name: app-db                       # Unique name for this service
+    type: local                        # Provider type
     service_type: postgres             # Service type
     auto_branch: true                  # Branch this service with git (default: true)
-    default: true                      # Default target for -d flag
+    default: true                      # Default target for -s flag
     local:
       image: postgres:17
 
@@ -1143,11 +1266,11 @@ hooks:
 
   <div class="callout callout-warning">
     <span class="callout-icon">&#9888;</span>
-    <div>Use the <code>backends</code> array syntax to configure one or more service backends.</div>
+    <div>Use the <code>services</code> array syntax to configure one or more service providers.</div>
   </div>
 
   <h3>Config Value Interpolation</h3>
-  <p>API keys and secrets in backend configs support <code>${ENV_VAR}</code> syntax for environment variable interpolation:</p>
+  <p>API keys and secrets in service configs support <code>${ENV_VAR}</code> syntax for environment variable interpolation:</p>
 <pre><code class="language-yaml">neon:
   api_key: ${NEON_API_KEY}        # Resolved at runtime from environment
   project_id: ${NEON_PROJECT_ID}</code></pre>
@@ -1191,12 +1314,12 @@ hooks:
 </section>
 
 <!-- ================================================================== -->
-<!-- BACKENDS                                                            -->
+<!-- PROVIDERS                                                           -->
 <!-- ================================================================== -->
-<section class="section" id="backends">
-  <h2><span class="number">04</span> Backends</h2>
+<section class="section" id="providers">
+  <h2><span class="number">04</span> Providers</h2>
   <p class="section-desc">
-    Backends define <em>where</em> and <em>how</em> your service branches run. From local Docker containers to cloud APIs to custom plugins, devflow supports a range of deployment targets.
+    Providers define <em>where</em> and <em>how</em> your service branches run. From local Docker containers to cloud APIs to custom plugins, devflow supports a range of deployment targets.
   </p>
 
   <div class="card-grid">
@@ -1222,16 +1345,16 @@ hooks:
     </div>
     <div class="card">
       <h4><span class="badge badge-orange">plugin</span> Plugin</h4>
-      <p>Custom backends via JSON-over-stdio protocol. Build your own in any language.</p>
+      <p>Custom providers via JSON-over-stdio protocol. Build your own in any language.</p>
     </div>
   </div>
 
   <!-- Local Docker -->
-  <h3 id="backend-local">Local Docker Backend</h3>
-  <p>The default and most feature-rich backend. Each branch gets its own Docker container with bind-mounted data. Copy-on-Write storage makes branching near-instant.</p>
+  <h3 id="provider-local">Local Docker Provider</h3>
+  <p>The default and most feature-rich provider. Each branch gets its own Docker container with bind-mounted data. Copy-on-Write storage makes branching near-instant.</p>
 
   <h4>PostgreSQL (Local)</h4>
-<pre><code class="language-yaml">backends:
+<pre><code class="language-yaml">services:
   - name: app-db
     type: local
     service_type: postgres
@@ -1247,7 +1370,7 @@ hooks:
   <p>Containers are named <code>devflow-{project}-{branch}</code>. Each gets a unique port, so multiple branches can run simultaneously.</p>
 
   <h4>ClickHouse (Local)</h4>
-<pre><code class="language-yaml">backends:
+<pre><code class="language-yaml">services:
   - name: analytics
     type: local
     service_type: clickhouse
@@ -1261,7 +1384,7 @@ hooks:
   <p>Containers are named <code>devflow-ch-{service}-{branch}</code>. Two consecutive ports are allocated (HTTP + native protocol).</p>
 
   <h4>MySQL / MariaDB (Local)</h4>
-<pre><code class="language-yaml">backends:
+<pre><code class="language-yaml">services:
   - name: app-mysql
     type: local
     service_type: mysql
@@ -1277,7 +1400,7 @@ hooks:
   <p>Containers are named <code>devflow-mysql-{service}-{branch}</code>.</p>
 
   <h4>Generic Docker (Any Image)</h4>
-<pre><code class="language-yaml">backends:
+<pre><code class="language-yaml">services:
   - name: cache
     type: local
     service_type: generic
@@ -1291,7 +1414,7 @@ hooks:
         - "/tmp/redis-data:/data"
       command: "redis-server --save 60 1"
       healthcheck: "redis-cli ping"</code></pre>
-  <p>Containers are named <code>devflow-{service}-{branch}</code>. The generic backend does <strong>not</strong> support data cloning from parent branches &mdash; set <code>auto_branch: false</code> to share a single instance across branches, or <code>true</code> for separate empty containers per branch.</p>
+  <p>Containers are named <code>devflow-{service}-{branch}</code>. The generic provider does <strong>not</strong> support data cloning from parent branches &mdash; set <code>auto_branch: false</code> to share a single instance across branches, or <code>true</code> for separate empty containers per branch.</p>
 
   <div class="callout callout-info">
     <span class="callout-icon">&#9432;</span>
@@ -1299,9 +1422,9 @@ hooks:
   </div>
 
   <!-- PostgreSQL Template -->
-  <h3 id="backend-template">PostgreSQL Template Backend</h3>
+  <h3 id="provider-template">PostgreSQL Template Provider</h3>
   <p>Uses PostgreSQL's native <code>CREATE DATABASE ... WITH TEMPLATE</code> mechanism. No Docker required &mdash; just an existing PostgreSQL server.</p>
-<pre><code class="language-yaml">backends:
+<pre><code class="language-yaml">services:
   - name: app-db
     type: postgres_template
     service_type: postgres
@@ -1317,13 +1440,13 @@ database:
 
   <div class="callout callout-warning">
     <span class="callout-icon">&#9888;</span>
-    <div>The template database must have <strong>no active connections</strong> during branching. This backend works best for smaller databases or development servers.</div>
+    <div>The template database must have <strong>no active connections</strong> during branching. This provider works best for smaller databases or development servers.</div>
   </div>
 
   <!-- Neon -->
-  <h3 id="backend-neon">Neon</h3>
+  <h3 id="provider-neon">Neon</h3>
   <p>Neon provides serverless PostgreSQL with instant, copy-on-write branching built into their cloud platform.</p>
-<pre><code class="language-yaml">backends:
+<pre><code class="language-yaml">services:
   - name: cloud-db
     type: neon
     service_type: postgres
@@ -1336,9 +1459,9 @@ database:
   <p>Neon supports <strong>point-in-time branching</strong> &mdash; you can create a branch from a specific timestamp, not just the current state.</p>
 
   <!-- DBLab -->
-  <h3 id="backend-dblab">DBLab</h3>
+  <h3 id="provider-dblab">DBLab</h3>
   <p>Database Lab Engine creates thin clones of production-size databases for development and testing.</p>
-<pre><code class="language-yaml">backends:
+<pre><code class="language-yaml">services:
   - name: staging-db
     type: dblab
     service_type: postgres
@@ -1348,9 +1471,9 @@ database:
       auth_token: ${DBLAB_TOKEN}</code></pre>
 
   <!-- Xata -->
-  <h3 id="backend-xata">Xata</h3>
+  <h3 id="provider-xata">Xata</h3>
   <p>Xata provides managed PostgreSQL with branch support through their platform API.</p>
-<pre><code class="language-yaml">backends:
+<pre><code class="language-yaml">services:
   - name: xata-db
     type: xata
     service_type: postgres
@@ -1362,11 +1485,11 @@ database:
       base_url: https://api.xata.tech  # Default</code></pre>
 
   <!-- Plugin -->
-  <h3 id="backend-plugin">Plugin Backend</h3>
-  <p>Build custom backends in any language. Plugins are standalone executables that communicate with devflow via a JSON-over-stdio protocol.</p>
+  <h3 id="provider-plugin">Plugin Provider</h3>
+  <p>Build custom providers in any language. Plugins are standalone executables that communicate with devflow via a JSON-over-stdio protocol.</p>
 
   <h4>Configuration</h4>
-<pre><code class="language-yaml">backends:
+<pre><code class="language-yaml">services:
   - name: custom-service
     type: local
     service_type: plugin
@@ -1454,7 +1577,7 @@ devflow plugin check my-plugin</code></pre>
   <h3>Single vs. Multi-Service</h3>
   <p>For simple projects with one database:</p>
 <pre><code class="language-yaml"># Single service — simple and clean
-backends:
+services:
   - name: app-db
     type: local
     service_type: postgres
@@ -1464,7 +1587,7 @@ backends:
 
   <p>For projects with multiple databases or services:</p>
 <pre><code class="language-yaml"># Multiple services — each branched independently
-backends:
+services:
   - name: app-db
     type: local
     service_type: postgres
@@ -1493,24 +1616,24 @@ backends:
       </tr>
       <tr>
         <td><code>default: true</code></td>
-        <td>When you run <code>devflow connection &lt;branch&gt;</code> without <code>-d</code>, this is the service whose connection info is shown. Only one backend should be marked as default.</td>
+        <td>When you run <code>devflow connection &lt;branch&gt;</code> without <code>-s</code>, this is the service whose connection info is shown. Only one service should be marked as default.</td>
       </tr>
     </tbody>
   </table>
 
-  <h3>Targeting Specific Backends</h3>
-  <p>Use the <code>-d</code> flag to target a specific named backend:</p>
-<pre><code class="language-bash"># Get connection info for the analytics backend
-devflow connection feature/auth -d analytics
+  <h3>Targeting Specific Services</h3>
+  <p>Use the <code>-s</code> flag to target a specific named service:</p>
+<pre><code class="language-bash"># Get connection info for the analytics service
+devflow connection feature/auth -s analytics
 
-# Start a specific backend
-devflow start feature/auth -d app-db
+# Start a specific service
+devflow service start feature/auth -s app-db
 
-# Seed a specific backend
-devflow seed feature/auth -d app-db --from dump.sql</code></pre>
+# Seed a specific service
+devflow service seed feature/auth -s app-db --from dump.sql</code></pre>
 
-  <h3>Multi-Backend Orchestration</h3>
-  <p>When you run <code>devflow create</code>, <code>switch</code>, or <code>delete</code>, devflow orchestrates across <strong>all</strong> backends with <code>auto_branch: true</code>. Operations are performed sequentially with <strong>partial failure tolerance</strong> &mdash; if one backend fails, the others continue.</p>
+  <h3>Multi-Provider Orchestration</h3>
+  <p>When you run <code>devflow service create</code>, <code>switch</code>, or <code>service delete</code>, devflow orchestrates across <strong>all</strong> services with <code>auto_branch: true</code>. Operations are performed sequentially with <strong>partial failure tolerance</strong> &mdash; if one provider fails, the others continue.</p>
 
   <h3>Connection Info Formats</h3>
 <pre><code class="language-bash"># URI format (default)
@@ -1938,8 +2061,8 @@ devflow seed feature/auth --from postgresql://readonly:pass@replica:5432/mydb
 # Seed from S3
 devflow seed main --from s3://my-bucket/backups/latest.dump
 
-# Seed a specific backend (multi-service)
-devflow seed main -d app-db --from dump.sql</code></pre>
+# Seed a specific service (multi-service)
+devflow service seed main -s app-db --from dump.sql</code></pre>
 
   <h3>How Seeding Works</h3>
 
@@ -1974,8 +2097,79 @@ devflow seed main -d app-db --from dump.sql</code></pre>
 <section class="section" id="ai-automation">
   <h2><span class="number">09</span> AI &amp; Automation</h2>
   <p class="section-desc">
-    devflow integrates with LLMs for AI-powered commit messages and provides structured output for CI/CD pipelines and AI agent workflows.
+    devflow is designed for both human developers and autonomous agents. It provides AI-powered commit messages, structured JSON output for CI/CD pipelines, and first-class support for AI coding agents that need isolated database sandboxes.
   </p>
+
+  <div class="callout callout-success">
+    <span class="callout-icon">&#10003;</span>
+    <div>
+      <strong>Why devflow for AI agents?</strong> Each agent task gets its own database &mdash; fully isolated, instantly cloned via Copy-on-Write. No shared state between parallel agents, no conflicts, no cleanup headaches. The <code>--json --non-interactive</code> flags make every command machine-safe, and <code>llms.txt</code> gives agents all the context they need.
+    </div>
+  </div>
+
+  <h3 id="agent-integration">Agent Integration</h3>
+  <p>devflow follows the <a href="https://llmstxt.org">llms.txt convention</a> and ships with everything an AI coding agent needs to operate autonomously:</p>
+
+  <div class="card-grid">
+    <div class="card">
+      <h4><code>AGENTS.md</code></h4>
+      <p>Agent-first onboarding guide: recommended flags, bootstrap scripts, suggested agent loop, and automation contract. Most AI coding tools automatically read this file.</p>
+    </div>
+    <div class="card">
+      <h4><code>llms.txt</code></h4>
+      <p>Curated index following the <a href="https://llmstxt.org">llms.txt convention</a> &mdash; a concise map of all agent-relevant files, docs, and source code entry points.</p>
+    </div>
+    <div class="card">
+      <h4><code>llms-full.txt</code></h4>
+      <p>Comprehensive flat context dump: every CLI command, the full config schema, all hook phases, and template variables. Designed to be ingested in a single prompt.</p>
+    </div>
+    <div class="card">
+      <h4><code>examples/agent-*.sh</code></h4>
+      <p>Ready-to-use scripts: <code>agent-bootstrap.sh</code> for idempotent repo setup and <code>agent-task.sh</code> for task-scoped branch environments.</p>
+    </div>
+  </div>
+
+  <h4>Agent Lifecycle</h4>
+  <p>The typical agent workflow follows this pattern:</p>
+
+  <div class="diagram">    ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+    │  Bootstrap   │ ──▶ │    Create    │ ──▶ │     Work     │ ──▶ │   Cleanup    │
+    │              │     │   Branch     │     │              │     │              │
+    │ devflow init │     │  + Get Conn  │     │ Agent runs   │     │  devflow     │
+    │ install-hooks│     │  devflow     │     │ migrations,  │     │  delete      │
+    │ (idempotent) │     │  switch/     │     │ tests, code  │     │              │
+    │              │     │  create      │     │ against an   │     │ (or reset    │
+    │              │     │              │     │ isolated DB  │     │  to retry)   │
+    └──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
+         once               per task             per task              per task</div>
+
+  <h4>Quick start for agents</h4>
+<pre><code class="language-bash"># One-time bootstrap (idempotent — safe to re-run)
+./examples/agent-bootstrap.sh
+
+# Per-task: create isolated environment and get connection string
+./examples/agent-task.sh issue-123</code></pre>
+
+  <h4>Integration with AI coding tools</h4>
+  <p>Popular AI coding assistants automatically discover devflow's agent context:</p>
+
+  <table>
+    <thead>
+      <tr><th>Tool</th><th>Context File</th><th>How It Works</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Claude Code</strong></td><td><code>CLAUDE.md</code></td><td>Auto-loaded as project context; includes config schema, dev commands, project structure</td></tr>
+      <tr><td><strong>OpenCode</strong></td><td><code>AGENTS.md</code></td><td>Auto-loaded as project instructions; bootstrap flow and automation contract</td></tr>
+      <tr><td><strong>Cursor</strong></td><td><code>AGENTS.md</code></td><td>Reference from <code>.cursor/rules</code> or load as context in chat</td></tr>
+      <tr><td><strong>GitHub Copilot</strong></td><td><code>AGENTS.md</code></td><td>Available as workspace context; agent scripts run in Copilot Workspace</td></tr>
+      <tr><td><strong>Custom agents</strong></td><td><code>llms.txt</code> / <code>llms-full.txt</code></td><td>Machine-readable context; ingest <code>llms-full.txt</code> for complete reference</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div>The <code>AGENTS.md</code> file is the recommended entry point for any AI agent. It contains the essential flags (<code>--json --non-interactive</code>), bootstrap scripts, and the automation contract that agents should follow.</div>
+  </div>
 
   <h3>AI Commit Messages</h3>
   <p>Generate conventional commit messages from your staged changes using any OpenAI-compatible LLM:</p>
@@ -2030,7 +2224,7 @@ export DEVFLOW_LLM_MODEL="llama3.1"</code></pre>
   <p>The system prompt enforces <strong>Conventional Commits</strong> format. Diffs larger than 32KB are truncated with a notice to the model.</p>
 
   <h3>JSON Output Mode</h3>
-  <p>Automation commands support <code>--json</code> for structured output, making devflow easy to integrate with CI/CD pipelines and agent workflows.</p>
+  <p>All core commands support <code>--json</code> for structured output, making devflow trivially scriptable from any language or agent framework.</p>
 
 <pre><code class="language-bash"># Create a branch and get structured output
 devflow --json create feature/auth
@@ -2046,7 +2240,7 @@ devflow --json list
 
 # Status as JSON
 devflow --json status
-# → {"project": "myapp", "current_branch": "main", "backends": [...]}</code></pre>
+# → {"project": "myapp", "current_branch": "main", "services": [...]}</code></pre>
 
   <h4>Automation Capabilities</h4>
   <p>Use this command to detect machine-facing guarantees at runtime:</p>
@@ -2054,7 +2248,7 @@ devflow --json status
 # → {"schema_version":"1.0", "non_interactive": {...}, ...}</code></pre>
 
   <h3>Non-Interactive Mode</h3>
-  <p>Skip all prompts and use sensible defaults. Essential for CI/CD and scripts:</p>
+  <p>Skip all prompts and use sensible defaults. Essential for CI/CD, scripts, and AI agents:</p>
 <pre><code class="language-bash"># All commands in non-interactive mode
 devflow --non-interactive create feature/auth
 devflow --non-interactive switch feature/auth --no-verify
@@ -2062,19 +2256,14 @@ devflow --non-interactive destroy --force</code></pre>
 
   <h4>Automation Contract</h4>
   <ul>
-    <li>Multi-backend <code>create</code>, <code>delete</code>, and <code>switch</code> exit non-zero if any backend fails</li>
+    <li>Multi-provider <code>create</code>, <code>delete</code>, and <code>switch</code> exit non-zero if any provider fails</li>
     <li><code>destroy</code> and <code>remove</code> require <code>--force</code> in <code>--json</code> or <code>--non-interactive</code> mode</li>
     <li>Unapproved hooks fail in non-interactive mode (no approval prompts)</li>
+    <li>Use <code>devflow --json capabilities</code> to detect guarantees at runtime</li>
   </ul>
 
   <h3>AI Agent Workflow</h3>
-  <p>Give each AI agent task an isolated environment with its own database, test data, and connection strings:</p>
-  <p>Reusable scripts are available in <code>examples/agent-bootstrap.sh</code> and <code>examples/agent-task.sh</code>.</p>
-  <p>LLM-oriented docs indexes are available at <code>llms.txt</code> and <code>llms-full.txt</code>.</p>
-
-<pre><code class="language-bash"># Quick task setup
-./examples/agent-bootstrap.sh
-./examples/agent-task.sh issue-123</code></pre>
+  <p>Give each AI agent task an isolated environment with its own database, test data, and connection strings. Here's the complete pattern:</p>
 
 <pre><code class="language-bash">#!/bin/bash
 # === AI Agent Sandbox Script ===
@@ -2152,7 +2341,7 @@ jobs:
   </p>
 
   <h3>Git Integration</h3>
-  <p>Git is the primary and most feature-complete VCS backend, powered by the <code>git2</code> library (libgit2 bindings).</p>
+  <p>Git is the primary and most feature-complete VCS provider, powered by the <code>git2</code> library (libgit2 bindings).</p>
 
   <h4>Installed Git Hooks</h4>
   <p><code>devflow install-hooks</code> installs four hooks:</p>
@@ -2201,7 +2390,7 @@ jobs:
 
   <div class="callout callout-warning">
     <span class="callout-icon">&#9888;</span>
-    <div>Jujutsu support is functional but less mature than Git. Hook installation and some worktree features may have limitations compared to the Git backend.</div>
+    <div>Jujutsu support is functional but less mature than Git. Hook installation and some worktree features may have limitations compared to the Git provider.</div>
   </div>
 </section>
 
@@ -2215,7 +2404,7 @@ jobs:
   </p>
 
   <h3>Global Flags</h3>
-<pre><code class="language-bash">devflow [--json] [--non-interactive] [-d &lt;backend-name&gt;] &lt;command&gt;</code></pre>
+<pre><code class="language-bash">devflow [--json] [--non-interactive] [-s &lt;service-name&gt;] &lt;command&gt;</code></pre>
   <table>
     <thead>
       <tr><th>Flag</th><th>Description</th></tr>
@@ -2223,7 +2412,7 @@ jobs:
     <tbody>
       <tr><td><code>--json</code></td><td>Output structured JSON for core automation commands</td></tr>
       <tr><td><code>--non-interactive</code></td><td>Skip all prompts, use defaults</td></tr>
-      <tr><td><code>-d &lt;name&gt;</code></td><td>Target a specific named backend</td></tr>
+      <tr><td><code>-s &lt;name&gt;</code></td><td>Target a specific named service</td></tr>
     </tbody>
   </table>
 
@@ -2232,9 +2421,8 @@ jobs:
   <h3>Setup &amp; Configuration</h3>
 
   <h4><code>devflow init [name]</code></h4>
-  <p>Initialize devflow in a Git repository. Creates <code>.devflow.yml</code> and a main service branch.</p>
+  <p>Initialize devflow in a Git repository. Creates <code>.devflow.yml</code>.</p>
 <pre><code class="language-bash">devflow init myapp                      # Interactive setup
-devflow init myapp --backend neon        # Specify backend type
 devflow init myapp --from dump.sql       # Seed main branch during init
 devflow init myapp --force               # Overwrite existing config</code></pre>
 
@@ -2285,7 +2473,7 @@ devflow remove feature/auth --force       # Skip confirmation
 devflow remove feature/auth --keep-services  # Keep service branches</code></pre>
 
   <h4><code>devflow list</code></h4>
-  <p>List all branches with enriched status (Git branch + worktree + service status across all backends).</p>
+  <p>List all branches with enriched status (Git branch + worktree + service status across all providers).</p>
 
   <h4><code>devflow switch [branch]</code></h4>
   <p>Switch to a branch, creating worktrees and service branches as needed.</p>
@@ -2313,7 +2501,7 @@ devflow cleanup --max-count 5            # Keep only 5 most recent</code></pre>
 
   <hr>
 
-  <h3>Branch Lifecycle (Local Backend)</h3>
+  <h3>Branch Lifecycle (Local Provider)</h3>
 
   <h4><code>devflow start &lt;branch&gt;</code></h4>
   <p>Start a stopped container.</p>
@@ -2346,7 +2534,7 @@ devflow logs feature/auth --tail 50      # Last 50 lines</code></pre>
   <h3>Info &amp; Diagnostics</h3>
 
   <h4><code>devflow status</code></h4>
-  <p>Show project and backend status with multi-backend aggregation.</p>
+  <p>Show project and service status with multi-provider aggregation.</p>
 
   <h4><code>devflow capabilities</code></h4>
   <p>Show machine-readable automation guarantees for agents and CI.</p>
@@ -2358,7 +2546,7 @@ devflow --json capabilities</code></pre>
 <pre><code class="language-bash">devflow connection feature/auth              # URI (default)
 devflow connection feature/auth --format env # Env vars (DATABASE_URL=...)
 devflow connection feature/auth --format json # JSON object
-devflow connection feature/auth -d analytics # Specific backend</code></pre>
+devflow connection feature/auth -s analytics # Specific service</code></pre>
 
   <hr>
 
@@ -2395,10 +2583,10 @@ devflow hook approvals clear              # Clear all approvals</code></pre>
   <h3>Plugins</h3>
 
   <h4><code>devflow plugin list</code></h4>
-  <p>List all configured plugin backends.</p>
+  <p>List all configured plugin providers.</p>
 
   <h4><code>devflow plugin check &lt;name&gt;</code></h4>
-  <p>Verify a plugin backend is reachable and responds correctly.</p>
+  <p>Verify a plugin provider is reachable and responds correctly.</p>
 
   <h4><code>devflow plugin init &lt;name&gt;</code></h4>
   <p>Generate a plugin scaffold.</p>
@@ -2424,7 +2612,7 @@ devflow plugin init my-plugin --lang python  # Python scaffold</code></pre>
 
   <h3>Node.js / Express with Prisma</h3>
 <pre><code class="language-yaml"># .devflow.yml
-backends:
+services:
   - name: app-db
     type: local
     service_type: postgres
@@ -2459,7 +2647,7 @@ behavior:
   auto_cleanup: true
   max_branches: 5
 
-backends:
+services:
   - name: app-db
     type: local
     service_type: postgres
@@ -2489,7 +2677,7 @@ hooks:
 
   <h3>Ruby on Rails</h3>
 <pre><code class="language-yaml"># .devflow.yml
-backends:
+services:
   - name: app-db
     type: local
     service_type: postgres
@@ -2530,7 +2718,7 @@ behavior:
   auto_cleanup: true
   max_branches: 10
 
-backends:
+services:
   - name: app-db
     type: local
     service_type: postgres
@@ -2588,7 +2776,7 @@ hooks:
 
   <h3>Neon Cloud Setup</h3>
 <pre><code class="language-yaml"># .devflow.yml — Zero Docker, fully managed
-backends:
+services:
   - name: cloud-db
     type: neon
     service_type: postgres
@@ -2610,13 +2798,14 @@ export NEON_API_KEY="neon_..."
 export NEON_PROJECT_ID="proj_..."
 
 # Initialize
-devflow init myapp --backend neon
+devflow init myapp
+devflow service add mydb --provider neon --service-type postgres
 devflow install-hooks
 
 # Now every git checkout creates a Neon branch
 git checkout -b feature/auth</code></pre>
 
-  <h3>Plugin Backend: Custom Bash Plugin</h3>
+  <h3>Plugin Provider: Custom Bash Plugin</h3>
 <pre><code class="language-bash">#!/bin/bash
 # devflow-plugin-my-custom (saved as executable on PATH)
 # Minimal devflow plugin that manages SQLite databases
@@ -2664,7 +2853,7 @@ case "$METHOD" in
 esac</code></pre>
 
 <pre><code class="language-yaml"># .devflow.yml — Using the custom plugin
-backends:
+services:
   - name: custom-db
     type: local
     service_type: plugin
@@ -2760,8 +2949,8 @@ devflow merge --cleanup
     <li>Git hooks are installed</li>
     <li>Branch filter regex is valid</li>
     <li>Docker is running and accessible</li>
-    <li>Storage backend is available (APFS/ZFS/reflink)</li>
-    <li>Backend-specific connectivity (database connections, API endpoints)</li>
+    <li>Storage driver is available (APFS/ZFS/reflink)</li>
+    <li>Provider-specific connectivity (database connections, API endpoints)</li>
   </ul>
 
   <h3>Common Issues</h3>
@@ -2843,7 +3032,7 @@ export DEVFLOW_SKIP_HOOKS=true</code></pre>
       <tr><th>Path</th><th>Contents</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>~/.config/devflow/local_state.yml</code></td><td>Project state (backends, current branch per project)</td></tr>
+      <tr><td><code>~/.config/devflow/local_state.yml</code></td><td>Project state (services, current branch per project)</td></tr>
       <tr><td><code>~/.config/devflow/hook_approvals.yml</code></td><td>Hook approval records</td></tr>
       <tr><td><code>~/.local/share/devflow/</code></td><td>Default data root for container volumes</td></tr>
       <tr><td><code>.devflow.yml</code></td><td>Project config (committed)</td></tr>
@@ -2871,10 +3060,10 @@ rm -rf ~/.local/share/devflow/</code></pre>
 <!-- ===== FOOTER ===== -->
 <div class="footer">
   <p>
-    <strong>devflow</strong> v0.3.0 &mdash; MIT License &mdash;
+    <strong>devflow</strong> v0.4.0 &mdash; MIT License &mdash;
     <a href="https://github.com/clement-tourriere/devflow">GitHub</a>
   </p>
-  <p class="text-muted">Isolated services for every Git branch &mdash; automatically.</p>
+  <p class="text-muted">Isolated dev environments for every Git branch &mdash; automatically.</p>
 </div>
 
 </div><!-- /.main -->

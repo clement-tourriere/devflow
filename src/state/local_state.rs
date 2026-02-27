@@ -1,4 +1,4 @@
-use crate::config::NamedBackendConfig;
+use crate::config::NamedServiceConfig;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -19,7 +19,7 @@ pub struct ProjectState {
     pub current_branch: Option<String>,
     pub last_updated: chrono::DateTime<chrono::Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backends: Option<Vec<NamedBackendConfig>>,
+    pub services: Option<Vec<NamedServiceConfig>>,
 }
 
 pub struct LocalStateManager {
@@ -116,17 +116,17 @@ impl LocalStateManager {
             )
         })?;
 
-        // Preserve existing backends when updating current branch
-        let existing_backends = self
+        // Preserve existing services when updating current branch
+        let existing_services = self
             .state
             .projects
             .get(&project_key)
-            .and_then(|p| p.backends.clone());
+            .and_then(|p| p.services.clone());
 
         let project_state = ProjectState {
             current_branch: branch,
             last_updated: chrono::Utc::now(),
-            backends: existing_backends,
+            services: existing_services,
         };
 
         self.state.projects.insert(project_key, project_state);
@@ -135,18 +135,19 @@ impl LocalStateManager {
         Ok(())
     }
 
-    pub fn get_backends(&self, project_path: &Path) -> Option<Vec<NamedBackendConfig>> {
+    pub fn get_services(&self, project_path: &Path) -> Option<Vec<NamedServiceConfig>> {
         let project_key = self.get_project_key(project_path)?;
         self.state
             .projects
             .get(&project_key)
-            .and_then(|project| project.backends.clone())
+            .and_then(|project| project.services.clone())
     }
 
-    pub fn set_backends(
+    #[allow(dead_code)]
+    pub fn set_services(
         &mut self,
         project_path: &Path,
-        backends: Vec<NamedBackendConfig>,
+        services: Vec<NamedServiceConfig>,
     ) -> Result<()> {
         self.refresh_state()?;
 
@@ -163,7 +164,7 @@ impl LocalStateManager {
         let project_state = ProjectState {
             current_branch,
             last_updated: chrono::Utc::now(),
-            backends: Some(backends),
+            services: Some(services),
         };
 
         self.state.projects.insert(project_key, project_state);
@@ -171,10 +172,10 @@ impl LocalStateManager {
         Ok(())
     }
 
-    pub fn add_backend(
+    pub fn add_service(
         &mut self,
         project_path: &Path,
-        backend: NamedBackendConfig,
+        service: NamedServiceConfig,
         force: bool,
     ) -> Result<()> {
         self.refresh_state()?;
@@ -188,31 +189,31 @@ impl LocalStateManager {
 
         let existing = self.state.projects.get(&project_key);
         let current_branch = existing.and_then(|p| p.current_branch.clone());
-        let mut backends = existing
-            .and_then(|p| p.backends.clone())
+        let mut services = existing
+            .and_then(|p| p.services.clone())
             .unwrap_or_default();
 
-        if let Some(pos) = backends.iter().position(|b| b.name == backend.name) {
+        if let Some(pos) = services.iter().position(|b| b.name == service.name) {
             if force {
-                backends[pos] = backend;
+                services[pos] = service;
             } else {
                 anyhow::bail!(
-                    "Backend '{}' already exists. Use --force to overwrite.",
-                    backends[pos].name
+                    "Service '{}' already exists. Use --force to overwrite.",
+                    services[pos].name
                 );
             }
         } else {
-            let mut backend = backend;
-            if backends.is_empty() {
-                backend.default = true;
+            let mut service = service;
+            if services.is_empty() {
+                service.default = true;
             }
-            backends.push(backend);
+            services.push(service);
         }
 
         let project_state = ProjectState {
             current_branch,
             last_updated: chrono::Utc::now(),
-            backends: Some(backends),
+            services: Some(services),
         };
 
         self.state.projects.insert(project_key, project_state);
@@ -220,7 +221,7 @@ impl LocalStateManager {
         Ok(())
     }
 
-    pub fn remove_backend(&mut self, project_path: &Path, name: &str) -> Result<()> {
+    pub fn remove_service(&mut self, project_path: &Path, name: &str) -> Result<()> {
         self.refresh_state()?;
 
         let project_key = self.get_project_key(project_path).ok_or_else(|| {
@@ -231,8 +232,8 @@ impl LocalStateManager {
         })?;
 
         if let Some(project) = self.state.projects.get_mut(&project_key) {
-            if let Some(ref mut backends) = project.backends {
-                backends.retain(|b| b.name != name);
+            if let Some(ref mut services) = project.services {
+                services.retain(|b| b.name != name);
             }
             project.last_updated = chrono::Utc::now();
             self.save_state()?;

@@ -4,7 +4,7 @@ use anyhow::{anyhow, Context};
 use tokio::process::Command;
 use uuid::Uuid;
 
-use super::zfs_driver::BackendDetection;
+use super::zfs_driver::DriverDetection;
 
 #[derive(Debug, Clone, Copy)]
 pub enum LocalMode {
@@ -21,11 +21,11 @@ impl LocalDriver {
         Self
     }
 
-    pub async fn detect_apfs(&self, projects_root: &Path) -> BackendDetection {
+    pub async fn detect_apfs(&self, projects_root: &Path) -> DriverDetection {
         if !cfg!(target_os = "macos") {
-            return BackendDetection {
+            return DriverDetection {
                 available: false,
-                detail: "APFS clone backend only applies on macOS".to_string(),
+                detail: "APFS clone driver only applies on macOS".to_string(),
                 root_dataset: None,
             };
         }
@@ -54,12 +54,12 @@ impl LocalDriver {
         let _ = tokio::fs::remove_dir_all(&probe_dir).await;
 
         match result {
-            Ok(()) => BackendDetection {
+            Ok(()) => DriverDetection {
                 available: true,
                 detail: "APFS clone probe succeeded".to_string(),
                 root_dataset: None,
             },
-            Err(err) => BackendDetection {
+            Err(err) => DriverDetection {
                 available: false,
                 detail: format!("APFS clone probe failed: {err}"),
                 root_dataset: None,
@@ -67,11 +67,11 @@ impl LocalDriver {
         }
     }
 
-    pub async fn detect_reflink(&self, projects_root: &Path) -> BackendDetection {
+    pub async fn detect_reflink(&self, projects_root: &Path) -> DriverDetection {
         if !cfg!(target_os = "linux") {
-            return BackendDetection {
+            return DriverDetection {
                 available: false,
-                detail: "reflink backend probe only runs on Linux".to_string(),
+                detail: "reflink driver probe only runs on Linux".to_string(),
                 root_dataset: None,
             };
         }
@@ -101,12 +101,12 @@ impl LocalDriver {
         let _ = tokio::fs::remove_dir_all(&probe_dir).await;
 
         match result {
-            Ok(()) => BackendDetection {
+            Ok(()) => DriverDetection {
                 available: true,
                 detail: "reflink clone probe succeeded".to_string(),
                 root_dataset: None,
             },
-            Err(err) => BackendDetection {
+            Err(err) => DriverDetection {
                 available: false,
                 detail: format!("reflink clone probe failed: {err}"),
                 root_dataset: None,

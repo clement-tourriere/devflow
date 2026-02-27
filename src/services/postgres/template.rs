@@ -1,16 +1,16 @@
-use super::super::{BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ServiceBackend};
+use super::super::{BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ServiceProvider};
 use crate::config::Config;
 use crate::database::DatabaseManager;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 
-pub struct PostgresTemplateBackend {
+pub struct PostgresTemplateProvider {
     config: Config,
     db_manager: DatabaseManager,
 }
 
-impl PostgresTemplateBackend {
+impl PostgresTemplateProvider {
     pub async fn new(config: &Config) -> Result<Self> {
         let db_manager = DatabaseManager::new(config.clone());
 
@@ -26,7 +26,7 @@ impl PostgresTemplateBackend {
 }
 
 #[async_trait]
-impl ServiceBackend for PostgresTemplateBackend {
+impl ServiceProvider for PostgresTemplateProvider {
     async fn create_branch(
         &self,
         branch_name: &str,
@@ -183,7 +183,7 @@ impl ServiceBackend for PostgresTemplateBackend {
         Ok(DoctorReport { checks })
     }
 
-    fn backend_name(&self) -> &'static str {
+    fn provider_name(&self) -> &'static str {
         "PostgreSQL Template"
     }
 

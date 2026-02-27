@@ -1,10 +1,10 @@
-#[cfg(feature = "backend-dblab")]
+#[cfg(feature = "service-dblab")]
 pub mod dblab;
-#[cfg(feature = "backend-local")]
+#[cfg(feature = "service-local")]
 pub mod local;
-#[cfg(feature = "backend-neon")]
+#[cfg(feature = "service-neon")]
 pub mod neon;
-#[cfg(feature = "backend-postgres-template")]
+#[cfg(feature = "service-postgres-template")]
 pub mod template;
-#[cfg(feature = "backend-xata")]
+#[cfg(feature = "service-xata")]
 pub mod xata;

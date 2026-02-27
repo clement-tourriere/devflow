@@ -1,4 +1,4 @@
-use super::super::{BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ServiceBackend};
+use super::super::{BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ServiceProvider};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -6,7 +6,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
-pub struct DBLabBackend {
+pub struct DBLabProvider {
     client: Client,
     api_url: String,
     auth_token: String,
@@ -65,7 +65,7 @@ struct ListSnapshotsResponse {
     snapshots: Vec<DBLabSnapshot>,
 }
 
-impl DBLabBackend {
+impl DBLabProvider {
     pub fn new(api_url: String, auth_token: String) -> Result<Self> {
         let client = Client::new();
 
@@ -148,7 +148,7 @@ impl DBLabBackend {
 }
 
 #[async_trait]
-impl ServiceBackend for DBLabBackend {
+impl ServiceProvider for DBLabProvider {
     async fn create_branch(
         &self,
         branch_name: &str,
@@ -297,7 +297,7 @@ impl ServiceBackend for DBLabBackend {
         })
     }
 
-    fn backend_name(&self) -> &'static str {
+    fn provider_name(&self) -> &'static str {
         "Database Lab Engine"
     }
 }
