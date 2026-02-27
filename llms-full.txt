@@ -1,0 +1,50 @@
+# devflow Agent Context
+
+This file is a compact, agent-oriented context summary for local usage.
+
+## What devflow is
+
+devflow maps each Git branch to an isolated development branch environment.
+An environment can include one or more stateful services (PostgreSQL,
+ClickHouse, MySQL, generic Docker, cloud backends, plugins), optional worktree
+management, and lifecycle hooks.
+
+## Automation-safe defaults
+
+- Use `--json --non-interactive` for machine executions.
+- Use `--no-verify` with `switch` in headless runs unless hooks are pre-approved.
+- Treat non-zero exit as failure; partial multi-backend failures return non-zero.
+
+## Minimal agent loop
+
+```bash
+TASK_ID="issue-123"
+BRANCH="agent/$TASK_ID"
+
+devflow --json --non-interactive switch "$BRANCH" --no-verify
+CONN=$(devflow --json connection "$BRANCH" | jq -r '.connection_string')
+
+# run task against $CONN
+
+devflow --json --non-interactive reset "$BRANCH"   # optional retry
+devflow --json --non-interactive delete "$BRANCH"  # cleanup
+```
+
+## Key guarantees for agents
+
+- `create`, `delete`, and `switch` over multi-backend setups fail with non-zero
+  when any backend operation fails.
+- `destroy` and `remove` require `--force` when running with `--json` or
+  `--non-interactive`.
+- Hook approvals are required for unapproved hook commands; in
+  non-interactive mode, unapproved hooks fail the command.
+- `devflow --json capabilities` returns a machine-readable contract summary.
+
+## Primary references
+
+- `AGENTS.md`
+- `README.md`
+- `docs/index.html`
+- `src/cli.rs`
+- `src/services/factory.rs`
+- `src/hooks/executor.rs`

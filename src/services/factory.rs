@@ -432,11 +432,19 @@ pub async fn orchestrate_delete(
 
     for named in &backends {
         // Skip backends that don't have this branch
-        let has_branch = named
-            .backend
-            .branch_exists(branch_name)
-            .await
-            .unwrap_or(false);
+        let has_branch = match named.backend.branch_exists(branch_name).await {
+            Ok(v) => v,
+            Err(e) => {
+                results.push(OrchestrationResult {
+                    service_name: named.name.clone(),
+                    success: false,
+                    message: format!("Failed to check branch existence on {}: {}", named.name, e),
+                    branch_info: None,
+                });
+                continue;
+            }
+        };
+
         if !has_branch {
             results.push(OrchestrationResult {
                 service_name: named.name.clone(),
@@ -487,11 +495,18 @@ pub async fn orchestrate_switch(
 
     for named in &backends {
         // Check if branch already exists
-        let exists = named
-            .backend
-            .branch_exists(branch_name)
-            .await
-            .unwrap_or(false);
+        let exists = match named.backend.branch_exists(branch_name).await {
+            Ok(v) => v,
+            Err(e) => {
+                results.push(OrchestrationResult {
+                    service_name: named.name.clone(),
+                    success: false,
+                    message: format!("Failed to check branch existence on {}: {}", named.name, e),
+                    branch_info: None,
+                });
+                continue;
+            }
+        };
 
         let result = if !exists {
             // Create the branch first

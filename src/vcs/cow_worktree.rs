@@ -7,6 +7,7 @@ pub enum CowCapability {
     /// macOS APFS clonefile (cp -c)
     Apfs,
     /// Linux reflink (cp --reflink=always) — Btrfs, XFS
+    #[allow(dead_code)]
     Reflink,
     /// No CoW support detected
     None,

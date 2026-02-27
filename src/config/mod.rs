@@ -653,7 +653,15 @@ impl Config {
             return false;
         }
 
-        if let Some(filter) = &self.git.branch_filter_regex {
+        // Prefer the newer branch_filter_regex, but keep supporting
+        // auto_create_branch_filter for backward compatibility.
+        let create_filter = self
+            .git
+            .branch_filter_regex
+            .as_ref()
+            .or(self.git.auto_create_branch_filter.as_ref());
+
+        if let Some(filter) = create_filter {
             match regex::Regex::new(filter) {
                 Ok(re) => re.is_match(branch_name),
                 Err(_) => {
@@ -948,8 +956,10 @@ impl EffectiveConfig {
     fn branch_matches_patterns(branch_name: &str, patterns: &[String]) -> bool {
         patterns.iter().any(|pattern| {
             if pattern.contains('*') {
-                // Simple glob pattern matching
-                let regex_pattern = pattern.replace('*', ".*");
+                // Simple glob pattern matching (*), with all other regex
+                // metacharacters escaped to avoid surprising matches.
+                let escaped = regex::escape(pattern);
+                let regex_pattern = format!("^{}$", escaped.replace("\\*", ".*"));
                 match regex::Regex::new(&regex_pattern) {
                     Ok(re) => re.is_match(branch_name),
                     Err(_) => false,
@@ -1477,5 +1487,24 @@ backends:
         assert!(plugin2.path.is_none());
         assert_eq!(plugin2.name.as_deref(), Some("memcached"));
         assert_eq!(plugin2.timeout, 30); // default
+    }
+
+    #[test]
+    fn test_should_create_branch_uses_branch_filter_regex() {
+        let mut config = Config::default();
+        config.git.branch_filter_regex = Some("^feature/.*".to_string());
+
+        assert!(config.should_create_branch("feature/auth"));
+        assert!(!config.should_create_branch("bugfix/auth"));
+    }
+
+    #[test]
+    fn test_should_create_branch_falls_back_to_auto_create_branch_filter() {
+        let mut config = Config::default();
+        config.git.branch_filter_regex = None;
+        config.git.auto_create_branch_filter = Some("^chore/.*".to_string());
+
+        assert!(config.should_create_branch("chore/deps"));
+        assert!(!config.should_create_branch("feature/deps"));
     }
 }

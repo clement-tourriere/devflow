@@ -2,7 +2,11 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::ErrorKind;
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 
 /// Tracks which hook commands a user has approved for a given project.
 ///
@@ -24,6 +28,11 @@ pub struct ApprovalRecord {
 }
 
 impl ApprovalStore {
+    fn refresh_from_disk(&mut self) -> Result<()> {
+        *self = Self::load()?;
+        Ok(())
+    }
+
     /// Load the approval store from the user config directory.
     pub fn load() -> Result<Self> {
         let path = Self::store_path()?;
@@ -46,9 +55,21 @@ impl ApprovalStore {
                 .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
         }
 
+        let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+        let _lock = acquire_file_lock(&lock_path)?;
+
         let content =
             serde_yaml_ng::to_string(self).context("Failed to serialize approval store")?;
-        fs::write(&path, content)
+
+        let tmp_path = PathBuf::from(format!("{}.tmp.{}", path.display(), std::process::id()));
+        fs::write(&tmp_path, content).with_context(|| {
+            format!(
+                "Failed to write temporary approval store: {}",
+                tmp_path.display()
+            )
+        })?;
+
+        fs::rename(&tmp_path, &path)
             .with_context(|| format!("Failed to write approval store: {}", path.display()))?;
 
         Ok(())
@@ -66,6 +87,8 @@ impl ApprovalStore {
 
     /// Approve a command for a project.
     pub fn approve(&mut self, project_key: &str, command: &str) -> Result<()> {
+        self.refresh_from_disk()?;
+
         let hash = Self::hash_command(command);
         let record = ApprovalRecord {
             command: command.to_string(),
@@ -83,6 +106,8 @@ impl ApprovalStore {
     /// Approve all commands for a project at once.
     #[allow(dead_code)]
     pub fn approve_all(&mut self, project_key: &str, commands: &[String]) -> Result<()> {
+        self.refresh_from_disk()?;
+
         let project_approvals = self.projects.entry(project_key.to_string()).or_default();
 
         for command in commands {
@@ -101,6 +126,8 @@ impl ApprovalStore {
 
     /// Clear all approvals for a project.
     pub fn clear_project(&mut self, project_key: &str) -> Result<()> {
+        self.refresh_from_disk()?;
+
         self.projects.remove(project_key);
         self.save()
     }
@@ -108,6 +135,8 @@ impl ApprovalStore {
     /// Clear all approvals globally.
     #[allow(dead_code)]
     pub fn clear_all(&mut self) -> Result<()> {
+        self.refresh_from_disk()?;
+
         self.projects.clear();
         self.save()
     }
@@ -135,4 +164,51 @@ impl ApprovalStore {
         command.hash(&mut hasher);
         format!("{:016x}", hasher.finish())
     }
+}
+
+struct FileLockGuard {
+    path: PathBuf,
+}
+
+impl Drop for FileLockGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn acquire_file_lock(lock_path: &PathBuf) -> Result<FileLockGuard> {
+    const MAX_ATTEMPTS: usize = 200;
+    const SLEEP_MS: u64 = 25;
+    const STALE_LOCK_SECS: u64 = 30;
+
+    for _ in 0..MAX_ATTEMPTS {
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(lock_path)
+        {
+            Ok(_) => {
+                return Ok(FileLockGuard {
+                    path: lock_path.clone(),
+                });
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                if let Ok(metadata) = fs::metadata(lock_path) {
+                    if let Ok(modified) = metadata.modified() {
+                        if modified.elapsed().unwrap_or_default().as_secs() > STALE_LOCK_SECS {
+                            let _ = fs::remove_file(lock_path);
+                            continue;
+                        }
+                    }
+                }
+                thread::sleep(Duration::from_millis(SLEEP_MS));
+            }
+            Err(e) => {
+                let msg = format!("Failed to acquire lock '{}': {}", lock_path.display(), e);
+                return Err(e).context(msg);
+            }
+        }
+    }
+
+    anyhow::bail!("Timed out waiting for lock file '{}'", lock_path.display())
 }

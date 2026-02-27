@@ -3,7 +3,11 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LocalState {
@@ -23,6 +27,57 @@ pub struct LocalStateManager {
     state: LocalState,
 }
 
+struct FileLockGuard {
+    path: PathBuf,
+}
+
+impl Drop for FileLockGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn lock_file_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.lock", path.display()))
+}
+
+fn acquire_file_lock(lock_path: &Path) -> Result<FileLockGuard> {
+    const MAX_ATTEMPTS: usize = 200;
+    const SLEEP_MS: u64 = 25;
+    const STALE_LOCK_SECS: u64 = 30;
+
+    for _ in 0..MAX_ATTEMPTS {
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(lock_path)
+        {
+            Ok(_) => {
+                return Ok(FileLockGuard {
+                    path: lock_path.to_path_buf(),
+                });
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                if let Ok(metadata) = fs::metadata(lock_path) {
+                    if let Ok(modified) = metadata.modified() {
+                        if modified.elapsed().unwrap_or_default().as_secs() > STALE_LOCK_SECS {
+                            let _ = fs::remove_file(lock_path);
+                            continue;
+                        }
+                    }
+                }
+                thread::sleep(Duration::from_millis(SLEEP_MS));
+            }
+            Err(e) => {
+                let msg = format!("Failed to acquire lock '{}': {}", lock_path.display(), e);
+                return Err(e).context(msg);
+            }
+        }
+    }
+
+    anyhow::bail!("Timed out waiting for lock file '{}'", lock_path.display())
+}
+
 impl LocalStateManager {
     pub fn new() -> Result<Self> {
         let state_file_path = Self::get_state_file_path()?;
@@ -32,6 +87,11 @@ impl LocalStateManager {
             state_file_path,
             state,
         })
+    }
+
+    fn refresh_state(&mut self) -> Result<()> {
+        self.state = Self::load_state(&self.state_file_path)?;
+        Ok(())
     }
 
     pub fn get_current_branch(&self, project_path: &Path) -> Option<String> {
@@ -47,6 +107,8 @@ impl LocalStateManager {
         project_path: &Path,
         branch: Option<String>,
     ) -> Result<()> {
+        self.refresh_state()?;
+
         let project_key = self.get_project_key(project_path).ok_or_else(|| {
             anyhow::anyhow!(
                 "Failed to get project key for path: {}",
@@ -86,6 +148,8 @@ impl LocalStateManager {
         project_path: &Path,
         backends: Vec<NamedBackendConfig>,
     ) -> Result<()> {
+        self.refresh_state()?;
+
         let project_key = self.get_project_key(project_path).ok_or_else(|| {
             anyhow::anyhow!(
                 "Failed to get project key for path: {}",
@@ -113,6 +177,8 @@ impl LocalStateManager {
         backend: NamedBackendConfig,
         force: bool,
     ) -> Result<()> {
+        self.refresh_state()?;
+
         let project_key = self.get_project_key(project_path).ok_or_else(|| {
             anyhow::anyhow!(
                 "Failed to get project key for path: {}",
@@ -155,6 +221,8 @@ impl LocalStateManager {
     }
 
     pub fn remove_backend(&mut self, project_path: &Path, name: &str) -> Result<()> {
+        self.refresh_state()?;
+
         let project_key = self.get_project_key(project_path).ok_or_else(|| {
             anyhow::anyhow!(
                 "Failed to get project key for path: {}",
@@ -175,6 +243,8 @@ impl LocalStateManager {
 
     #[allow(dead_code)]
     pub fn cleanup_old_projects(&mut self, max_age_days: u32) -> Result<()> {
+        self.refresh_state()?;
+
         let cutoff = chrono::Utc::now() - chrono::Duration::days(max_age_days as i64);
 
         let old_projects: Vec<String> = self
@@ -257,10 +327,26 @@ impl LocalStateManager {
     }
 
     fn save_state(&self) -> Result<()> {
+        let lock_path = lock_file_path(&self.state_file_path);
+        let _lock = acquire_file_lock(&lock_path)?;
+
         let content = serde_yaml_ng::to_string(&self.state)
             .context("Failed to serialize local state to YAML")?;
 
-        fs::write(&self.state_file_path, content).with_context(|| {
+        let tmp_path = PathBuf::from(format!(
+            "{}.tmp.{}",
+            self.state_file_path.display(),
+            std::process::id()
+        ));
+
+        fs::write(&tmp_path, content).with_context(|| {
+            format!(
+                "Failed to write temporary local state file: {}",
+                tmp_path.display()
+            )
+        })?;
+
+        fs::rename(&tmp_path, &self.state_file_path).with_context(|| {
             format!(
                 "Failed to write local state file: {}",
                 self.state_file_path.display()

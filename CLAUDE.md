@@ -55,7 +55,7 @@ git:
   auto_create_on_branch: true       # Auto-create service branch on git checkout
   auto_switch_on_branch: true       # Auto-switch services on git checkout
   main_branch: main                 # Main git branch
-  auto_create_branch_filter: "^feature/.*"  # Only branch for matching patterns
+  branch_filter_regex: "^feature/.*"  # Only branch for matching patterns
   exclude_branches: [main, master]  # Never create branches for these
 
 behavior:
@@ -91,11 +91,11 @@ hooks:
   post-create:
     migrate: "npm run migrate"
     env-setup:
-      command: "echo DATABASE_URL={{ service.app-db.url }} > .env.local"
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
       working_dir: "."
   post-switch:
     update-env:
-      command: "echo DATABASE_URL={{ service.app-db.url }} > .env.local"
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
   pre-merge:
     test: "npm test"
 ```

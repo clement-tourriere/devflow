@@ -668,7 +668,7 @@ hr {
 <section class="section" id="getting-started">
   <h2><span class="number">01</span> Getting Started</h2>
   <p class="section-desc">
-    Go from zero to isolated database branches in under five minutes. This guide covers installation, your first branch, and automatic Git integration.
+    Go from zero to isolated development branches in under five minutes. This guide covers installation, your first branch environment, and automatic Git integration.
   </p>
 
   <h3 id="installation">Installation</h3>
@@ -723,7 +723,7 @@ devflow doctor</code></pre>
 
   <!-- First Branch -->
   <h3 id="first-branch">Your First Branch</h3>
-  <p>Here's a complete walkthrough from project initialization to your first isolated database branch.</p>
+  <p>Here's a complete walkthrough from project initialization to your first isolated development branch environment.</p>
 
   <div class="steps">
     <div class="step">
@@ -998,7 +998,7 @@ git:
   auto_create_on_branch: true          # Create service branches on git checkout
   auto_switch_on_branch: true          # Switch services on git checkout
   main_branch: main                    # Main git branch (auto-detected on init)
-  auto_create_branch_filter: "^feature/.*"  # Regex — only branch for matching patterns
+  branch_filter_regex: "^feature/.*"  # Regex — only branch for matching patterns
   exclude_branches:                    # Never create service branches for these
     - main
     - master
@@ -1123,7 +1123,7 @@ hooks:
   post-create:
     install: "npm ci"
     env-setup:
-      command: "echo DATABASE_URL={{ service.app-db.url }} > .env.local"
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
       working_dir: "."
       continue_on_error: false
       condition: "file_exists:package.json"
@@ -1134,7 +1134,7 @@ hooks:
 
   post-switch:
     update-env:
-      command: "echo DATABASE_URL={{ service.app-db.url }} > .env.local"
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
 
   pre-merge:
     test:
@@ -1431,11 +1431,12 @@ database:
   </table>
 
   <h4>Scaffolding a Plugin</h4>
-<pre><code class="language-bash"># Generate a Bash plugin scaffold
-devflow plugin init my-plugin --lang bash
+<pre><code class="language-bash"># Print a Bash plugin scaffold script (stdout)
+devflow plugin init my-plugin --lang bash > devflow-plugin-my-plugin
+chmod +x devflow-plugin-my-plugin
 
-# Generate a Python plugin scaffold
-devflow plugin init my-plugin --lang python
+# Print a Python plugin scaffold script (stdout)
+devflow plugin init my-plugin --lang python > devflow-plugin-my-plugin.py
 
 # Verify a plugin is working
 devflow plugin check my-plugin</code></pre>
@@ -1610,7 +1611,7 @@ devflow worktree-setup</code></pre>
 <pre><code class="language-bash"># Enable shell integration (one-time setup in ~/.zshrc)
 eval "$(devflow shell-init)"
 
-# Start a new feature — creates worktree + database branch
+# Start a new feature — creates worktree + isolated service environment
 devflow switch -c feature/auth
 # → Created worktree at ../my-project.feature-auth
 # → Created service branch feature/auth
@@ -1691,7 +1692,7 @@ devflow switch
       background: false              # Run in foreground (blocking)
       environment:                   # Extra environment variables
         NODE_ENV: development
-        DATABASE_URL: "{{ service.app-db.url }}"</code></pre>
+        DATABASE_URL: "{{ service['app-db'].url }}"</code></pre>
 
   <h3>Template Variables</h3>
   <p>Hook commands are rendered with <a href="https://docs.rs/minijinja/latest/minijinja/" target="_blank">MiniJinja</a> (Jinja2-compatible). All template variables are available in both commands and environment values.</p>
@@ -1719,7 +1720,7 @@ devflow switch
 
   <div class="callout callout-info">
     <span class="callout-icon">&#9432;</span>
-    <div>For single-backend setups, service variables are also available without the name prefix: <code>{{ service.url }}</code>, <code>{{ service.host }}</code>, etc.</div>
+    <div>Use named service access in templates, especially for names containing hyphens (for example: <code>{{ service['app-db'].url }}</code>).</div>
   </div>
 
   <h3>Custom Filters</h3>
@@ -1800,7 +1801,7 @@ devflow switch
       condition: "test '{{ branch }}' = 'staging'"</code></pre>
 
   <h3>Hook Approval System</h3>
-  <p>For security, hooks from <code>.devflow.yml</code> require user approval before running for the first time. This prevents unexpected commands from executing via Git hooks.</p>
+  <p>For security, hooks from <code>.devflow.yml</code> require user approval before running for the first time. This prevents unexpected commands from executing via Git hooks. In <code>--non-interactive</code> mode, unapproved hooks fail instead of prompting.</p>
 
   <p>When a new hook is detected, devflow prompts:</p>
   <ul>
@@ -1815,7 +1816,7 @@ devflow switch
 devflow hook approvals
 
 # Clear all approvals (will re-prompt)
-devflow hook approvals --clear</code></pre>
+devflow hook approvals clear</code></pre>
 
   <h3>Running Hooks Manually</h3>
 <pre><code class="language-bash"># Show all configured hooks
@@ -1846,7 +1847,7 @@ devflow hook run post-create --branch feature/auth</code></pre>
     env-setup:
       command: |
         cat > .env.local << EOF
-        DATABASE_URL={{ service.app-db.url }}
+        DATABASE_URL={{ service['app-db'].url }}
         CLICKHOUSE_URL=http://{{ service.analytics.host }}:{{ service.analytics.port }}
         REDIS_URL=redis://{{ service.cache.host }}:{{ service.cache.port }}
         EOF
@@ -1856,7 +1857,7 @@ devflow hook run post-create --branch feature/auth</code></pre>
     migrate:
       command: "npm run migrate"
       environment:
-        DATABASE_URL: "{{ service.app-db.url }}"
+        DATABASE_URL: "{{ service['app-db'].url }}"
       continue_on_error: false
 
   post-switch:
@@ -1864,7 +1865,7 @@ devflow hook run post-create --branch feature/auth</code></pre>
     update-env:
       command: |
         cat > .env.local << EOF
-        DATABASE_URL={{ service.app-db.url }}
+        DATABASE_URL={{ service['app-db'].url }}
         CLICKHOUSE_URL=http://{{ service.analytics.host }}:{{ service.analytics.port }}
         REDIS_URL=redis://{{ service.cache.host }}:{{ service.cache.port }}
         EOF
@@ -2029,11 +2030,11 @@ export DEVFLOW_LLM_MODEL="llama3.1"</code></pre>
   <p>The system prompt enforces <strong>Conventional Commits</strong> format. Diffs larger than 32KB are truncated with a notice to the model.</p>
 
   <h3>JSON Output Mode</h3>
-  <p>Every command supports <code>--json</code> for structured output, making devflow easy to integrate with CI/CD pipelines and automation scripts.</p>
+  <p>Automation commands support <code>--json</code> for structured output, making devflow easy to integrate with CI/CD pipelines and agent workflows.</p>
 
 <pre><code class="language-bash"># Create a branch and get structured output
 devflow --json create feature/auth
-# → {"name": "feature/auth", "connection_string": "postgresql://...", ...}
+# → {"name": "feature/auth", "state": "running", ...}
 
 # Get connection info as JSON
 devflow --json connection feature/auth
@@ -2047,41 +2048,63 @@ devflow --json list
 devflow --json status
 # → {"project": "myapp", "current_branch": "main", "backends": [...]}</code></pre>
 
+  <h4>Automation Capabilities</h4>
+  <p>Use this command to detect machine-facing guarantees at runtime:</p>
+<pre><code class="language-bash">devflow --json capabilities
+# → {"schema_version":"1.0", "non_interactive": {...}, ...}</code></pre>
+
   <h3>Non-Interactive Mode</h3>
   <p>Skip all prompts and use sensible defaults. Essential for CI/CD and scripts:</p>
 <pre><code class="language-bash"># All commands in non-interactive mode
 devflow --non-interactive create feature/auth
-devflow --non-interactive switch feature/auth
+devflow --non-interactive switch feature/auth --no-verify
 devflow --non-interactive destroy --force</code></pre>
+
+  <h4>Automation Contract</h4>
+  <ul>
+    <li>Multi-backend <code>create</code>, <code>delete</code>, and <code>switch</code> exit non-zero if any backend fails</li>
+    <li><code>destroy</code> and <code>remove</code> require <code>--force</code> in <code>--json</code> or <code>--non-interactive</code> mode</li>
+    <li>Unapproved hooks fail in non-interactive mode (no approval prompts)</li>
+  </ul>
 
   <h3>AI Agent Workflow</h3>
   <p>Give each AI agent task an isolated environment with its own database, test data, and connection strings:</p>
+  <p>Reusable scripts are available in <code>examples/agent-bootstrap.sh</code> and <code>examples/agent-task.sh</code>.</p>
+  <p>LLM-oriented docs indexes are available at <code>llms.txt</code> and <code>llms-full.txt</code>.</p>
+
+<pre><code class="language-bash"># Quick task setup
+./examples/agent-bootstrap.sh
+./examples/agent-task.sh issue-123</code></pre>
 
 <pre><code class="language-bash">#!/bin/bash
 # === AI Agent Sandbox Script ===
 
+# 0. One-time bootstrap (idempotent)
+./examples/agent-bootstrap.sh
+
 # 1. Create isolated environment for the agent task
-RESULT=$(devflow --json --non-interactive create agent-task-$TASK_ID)
-CONN=$(echo "$RESULT" | jq -r '.connection_string')
+BRANCH="agent-task-$TASK_ID"
+devflow --json --non-interactive create "$BRANCH" >/dev/null
+CONN=$(devflow --json connection "$BRANCH" | jq -r '.connection_string')
 
 # 2. Seed with test data if needed
-devflow --non-interactive seed agent-task-$TASK_ID --from test-data.sql
+devflow --non-interactive seed "$BRANCH" --from test-data.sql
 
-# 3. Agent works against isolated database
+# 3. Agent works against an isolated development environment
 export DATABASE_URL="$CONN"
 python agent.py --task "$TASK_ID"
 
 # 4. Reset to clean state if agent needs to retry
-devflow --non-interactive reset agent-task-$TASK_ID
+devflow --non-interactive reset "$BRANCH"
 
 # 5. Re-run agent
 python agent.py --task "$TASK_ID"
 
 # 6. Check container logs on failure
-devflow logs agent-task-$TASK_ID
+devflow logs "$BRANCH"
 
 # 7. Clean up
-devflow --non-interactive delete agent-task-$TASK_ID</code></pre>
+devflow --non-interactive delete "$BRANCH"</code></pre>
 
   <h3>CI/CD Pipeline Integration</h3>
 <pre><code class="language-yaml"># GitHub Actions example
@@ -2099,7 +2122,7 @@ jobs:
       - name: Install devflow
         run: cargo install --path .
 
-      - name: Create preview database
+      - name: Create preview environment
         run: |
           devflow --json --non-interactive init myapp
           devflow --json --non-interactive create pr-${{ github.event.number }}
@@ -2188,7 +2211,7 @@ jobs:
 <section class="section" id="cli-reference">
   <h2><span class="number">11</span> CLI Reference</h2>
   <p class="section-desc">
-    Complete reference for all devflow commands, organized by category. Every command supports <code>--json</code> and <code>--non-interactive</code> global flags.
+    Complete reference for all devflow commands, organized by category. Core automation commands support <code>--json</code> and <code>--non-interactive</code> global flags.
   </p>
 
   <h3>Global Flags</h3>
@@ -2198,7 +2221,7 @@ jobs:
       <tr><th>Flag</th><th>Description</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>--json</code></td><td>Output structured JSON for all commands</td></tr>
+      <tr><td><code>--json</code></td><td>Output structured JSON for core automation commands</td></tr>
       <tr><td><code>--non-interactive</code></td><td>Skip all prompts, use defaults</td></tr>
       <tr><td><code>-d &lt;name&gt;</code></td><td>Target a specific named backend</td></tr>
     </tbody>
@@ -2305,6 +2328,7 @@ devflow cleanup --max-count 5            # Keep only 5 most recent</code></pre>
   <p>Destroy all containers and data for the project.</p>
 <pre><code class="language-bash">devflow destroy                          # With confirmation prompt
 devflow destroy --force                  # Skip confirmation</code></pre>
+  <p>In <code>--json</code> or <code>--non-interactive</code> mode, <code>--force</code> is required.</p>
 
   <h4><code>devflow seed &lt;branch&gt; --from &lt;source&gt;</code></h4>
   <p>Seed a branch from a PostgreSQL URL, file, or S3 object.</p>
@@ -2323,6 +2347,11 @@ devflow logs feature/auth --tail 50      # Last 50 lines</code></pre>
 
   <h4><code>devflow status</code></h4>
   <p>Show project and backend status with multi-backend aggregation.</p>
+
+  <h4><code>devflow capabilities</code></h4>
+  <p>Show machine-readable automation guarantees for agents and CI.</p>
+<pre><code class="language-bash">devflow capabilities
+devflow --json capabilities</code></pre>
 
   <h4><code>devflow connection &lt;branch&gt;</code></h4>
   <p>Show connection info for a branch.</p>
@@ -2359,7 +2388,7 @@ devflow hook run post-create --branch feat/x  # For a different branch</code></p
   <h4><code>devflow hook approvals</code></h4>
   <p>Manage the hook approval store.</p>
 <pre><code class="language-bash">devflow hook approvals                    # List approved hooks
-devflow hook approvals --clear            # Clear all approvals</code></pre>
+devflow hook approvals clear              # Clear all approvals</code></pre>
 
   <hr>
 
@@ -2537,7 +2566,7 @@ hooks:
     env-setup:
       command: |
         cat > .env.local << EOF
-        DATABASE_URL={{ service.app-db.url }}
+        DATABASE_URL={{ service['app-db'].url }}
         CLICKHOUSE_URL=http://{{ service.analytics.host }}:{{ service.analytics.port }}
         REDIS_URL=redis://localhost:6379
         EOF
@@ -2548,7 +2577,7 @@ hooks:
     update-env:
       command: |
         cat > .env.local << EOF
-        DATABASE_URL={{ service.app-db.url }}
+        DATABASE_URL={{ service['app-db'].url }}
         CLICKHOUSE_URL=http://{{ service.analytics.host }}:{{ service.analytics.port }}
         REDIS_URL=redis://localhost:6379
         EOF
@@ -2670,7 +2699,7 @@ for TASK in "${TASKS[@]}"; do
     # Get connection string
     CONN=$(devflow --json connection "agent/$TASK" | jq -r '.connection_string')
 
-    # Run agent with isolated database
+    # Run agent with an isolated development environment
     DATABASE_URL="$CONN" python run_agent.py --task "$TASK"
 
     # Cleanup
@@ -2688,7 +2717,7 @@ echo "All agent tasks completed."</code></pre>
 # Morning: start a new feature
 devflow switch -c feature/user-profiles
 # → Creates worktree at ../my-app.feature-user-profiles
-# → Creates isolated database branch (CoW clone)
+# → Creates an isolated development branch environment (CoW clone)
 # → Copies .env.local, runs npm ci, runs migrations
 
 # Make schema changes, add data, iterate...
@@ -2697,7 +2726,7 @@ npm test
 
 # Afternoon: review a teammate's PR
 devflow switch feature/payment-v2
-# → Switches to their worktree + database
+# → Switches to their worktree + service environment
 # → Your feature branch's database is untouched
 npm test
 devflow logs feature/payment-v2  # Check if anything went wrong

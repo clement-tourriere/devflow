@@ -48,6 +48,7 @@ VCS:
 Info:
   connection          Show connection info for a branch
   status              Show current project and backend status
+  capabilities        Show machine-readable automation capabilities
   logs                Show container logs for a branch
 
 Setup & Config:

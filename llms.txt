@@ -1,0 +1,35 @@
+# devflow
+
+> devflow creates isolated development branch environments for every Git branch, including stateful services (databases, caches, queues), with automation-friendly CLI behavior.
+
+Use these defaults for agent runs:
+
+- Prefer `--json --non-interactive` for machine-safe execution.
+- Use `devflow --json capabilities` to detect automation guarantees.
+- Use `--no-verify` on `switch` in headless environments to avoid interactive hook approvals.
+
+## Start Here
+
+- [AGENTS.md](AGENTS.md): Agent-first onboarding, bootstrap flow, and automation contract.
+- [README.md](README.md): Product overview, quickstart, and command examples.
+- [docs/index.html](docs/index.html): Full command and configuration reference.
+
+## Agent Workflows
+
+- [examples/agent-bootstrap.sh](examples/agent-bootstrap.sh): Idempotent setup for agents/CI.
+- [examples/agent-task.sh](examples/agent-task.sh): Create/switch task environment and fetch connection info.
+- [examples/simple.devflow.yml](examples/simple.devflow.yml): Minimal single-service setup.
+- [examples/multi-service.devflow.yml](examples/multi-service.devflow.yml): Multi-service setup with hooks/worktrees.
+
+## Core Implementation
+
+- [src/cli.rs](src/cli.rs): Command routing, JSON/non-interactive behavior, orchestration.
+- [src/config/mod.rs](src/config/mod.rs): Config loading, merging, and branch filter logic.
+- [src/services/factory.rs](src/services/factory.rs): Multi-backend orchestration semantics.
+- [src/hooks/executor.rs](src/hooks/executor.rs): Hook execution, approvals, and non-interactive behavior.
+- [src/vcs/git.rs](src/vcs/git.rs): Git provider and hook integration details.
+
+## Optional
+
+- [DEVFLOW_PLAN.md](DEVFLOW_PLAN.md): Historical design notes and roadmap ideas.
+- [CLAUDE.md](CLAUDE.md): Additional project guidance and examples.

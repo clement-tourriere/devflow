@@ -504,16 +504,19 @@ impl ServiceBackend for LocalBackend {
                 }
 
                 let data_dir = PathBuf::from(&branch.data_dir);
-                let new_metadata = self
+                let clone_result = self
                     .storage
                     .clone_branch_from_parent(&project, &parent_branch, &branch.id, &data_dir)
-                    .await?;
+                    .await;
 
                 if parent_running {
                     self.runtime
                         .unpause_branch(&parent_branch.container_name)
-                        .await?;
+                        .await
+                        .context("failed to unpause parent branch after reset clone attempt")?;
                 }
+
+                let new_metadata = clone_result?;
 
                 if let Some(metadata) = &new_metadata {
                     self.store()

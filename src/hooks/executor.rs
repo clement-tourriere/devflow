@@ -17,6 +17,10 @@ pub struct HookEngine {
     project_key: Option<String>,
     /// Whether to require approval for hooks from project config
     require_approval: bool,
+    /// Whether interactive prompts are allowed.
+    non_interactive: bool,
+    /// Whether to suppress hook stdout-friendly output.
+    quiet_output: bool,
 }
 
 /// Result of running hooks for a phase.
@@ -51,6 +55,25 @@ impl HookEngine {
             working_dir,
             project_key,
             require_approval: true,
+            non_interactive: false,
+            quiet_output: false,
+        }
+    }
+
+    /// Create a HookEngine for automated executions where prompts are not allowed.
+    pub fn new_non_interactive(
+        hooks_config: HooksConfig,
+        working_dir: PathBuf,
+        project_key: Option<String>,
+    ) -> Self {
+        Self {
+            template_engine: TemplateEngine::new(),
+            hooks_config,
+            working_dir,
+            project_key,
+            require_approval: true,
+            non_interactive: true,
+            quiet_output: false,
         }
     }
 
@@ -62,7 +85,15 @@ impl HookEngine {
             working_dir,
             project_key: None,
             require_approval: false,
+            non_interactive: false,
+            quiet_output: false,
         }
+    }
+
+    /// Return a cloned engine configuration with output verbosity configured.
+    pub fn with_quiet_output(mut self, quiet: bool) -> Self {
+        self.quiet_output = quiet;
+        self
     }
 
     /// Check whether the config has any hooks for the given phase.
@@ -114,7 +145,7 @@ impl HookEngine {
 
                     if continue_on_error {
                         log::warn!("Hook '{}' failed (continuing): {}", name, e);
-                        println!("  Warning: hook '{}' failed: {}", name, e);
+                        eprintln!("  Warning: hook '{}' failed: {}", name, e);
                         result.failed += 1;
                         result.errors.push(format!("{}: {}", name, e));
                     } else {
@@ -175,10 +206,58 @@ impl HookEngine {
         // Check condition
         if let Some(ext) = &extended {
             if let Some(ref condition) = ext.condition {
-                if !self.evaluate_condition(condition, context)? {
+                let rendered_condition = self.template_engine.render(condition, context)?;
+
+                // Shell-based conditions are executable code too, so they must be
+                // approved before evaluation when approvals are enabled.
+                if self.require_approval && Self::condition_uses_shell(&rendered_condition) {
+                    if self.non_interactive && self.project_key.is_none() {
+                        anyhow::bail!(
+                            "Cannot evaluate hook condition '{}' in non-interactive mode without a project key",
+                            rendered_condition
+                        );
+                    }
+
+                    if let Some(ref project_key) = self.project_key {
+                        let approval_command = format!("condition: {}", rendered_condition);
+                        let mut store = ApprovalStore::load().unwrap_or_default();
+                        if !store.is_approved(project_key, &approval_command) {
+                            if self.non_interactive {
+                                anyhow::bail!(
+                                    "Hook condition for '{}' requires approval in non-interactive mode: {}",
+                                    name,
+                                    rendered_condition
+                                );
+                            }
+                            match Self::prompt_hook_approval(
+                                &format!("{} (condition)", name),
+                                &rendered_condition,
+                            ) {
+                                HookApprovalChoice::ApproveAlways => {
+                                    if let Err(e) = store.approve(project_key, &approval_command) {
+                                        log::warn!(
+                                            "Failed to persist hook condition approval: {}",
+                                            e
+                                        );
+                                    }
+                                }
+                                HookApprovalChoice::ApproveOnce => {
+                                    // Run this time but don't persist
+                                }
+                                HookApprovalChoice::Deny => {
+                                    return Ok(HookOutcome::Skipped(
+                                        "condition command not approved by user".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !self.evaluate_condition(&rendered_condition)? {
                     return Ok(HookOutcome::Skipped(format!(
                         "condition '{}' was false",
-                        condition
+                        rendered_condition
                     )));
                 }
             }
@@ -189,9 +268,23 @@ impl HookEngine {
 
         // Check approval
         if self.require_approval {
+            if self.non_interactive && self.project_key.is_none() {
+                anyhow::bail!(
+                    "Cannot evaluate hook '{}' in non-interactive mode without a project key",
+                    name
+                );
+            }
+
             if let Some(ref project_key) = self.project_key {
                 let mut store = ApprovalStore::load().unwrap_or_default();
                 if !store.is_approved(project_key, &rendered_command) {
+                    if self.non_interactive {
+                        anyhow::bail!(
+                            "Hook '{}' requires approval in non-interactive mode: {}",
+                            name,
+                            rendered_command
+                        );
+                    }
                     match Self::prompt_hook_approval(name, &rendered_command) {
                         HookApprovalChoice::ApproveAlways => {
                             if let Err(e) = store.approve(project_key, &rendered_command) {
@@ -219,9 +312,17 @@ impl HookEngine {
             let env_vars = extended.and_then(|e| e.environment.clone());
             let ctx_clone = context.clone();
             let te = TemplateEngine::new();
+            let quiet_output = self.quiet_output;
 
             tokio::spawn(async move {
-                match execute_shell_command(&cmd, &wd, env_vars.as_ref(), &ctx_clone, &te) {
+                match execute_shell_command(
+                    &cmd,
+                    &wd,
+                    env_vars.as_ref(),
+                    &ctx_clone,
+                    &te,
+                    !quiet_output,
+                ) {
                     Ok(_) => log::debug!("Background hook '{}' completed", hook_name),
                     Err(e) => log::warn!("Background hook '{}' failed: {}", hook_name, e),
                 }
@@ -231,7 +332,9 @@ impl HookEngine {
         }
 
         // Blocking execution
-        println!("  Running: {} ({})", name, rendered_command);
+        if !self.quiet_output {
+            println!("  Running: {} ({})", name, rendered_command);
+        }
 
         let working_dir = if let Some(ext) = &extended {
             ext.working_dir
@@ -250,15 +353,13 @@ impl HookEngine {
             env_vars.as_ref(),
             context,
             &self.template_engine,
+            !self.quiet_output,
         )?;
 
         Ok(HookOutcome::Succeeded)
     }
 
-    fn evaluate_condition(&self, condition: &str, context: &HookContext) -> Result<bool> {
-        // First render the condition through the template engine
-        let rendered = self.template_engine.render(condition, context)?;
-
+    fn evaluate_condition(&self, rendered: &str) -> Result<bool> {
         if let Some(file_path) = rendered.strip_prefix("file_exists:") {
             let full_path = self.working_dir.join(file_path.trim());
             Ok(full_path.exists())
@@ -272,12 +373,21 @@ impl HookEngine {
         } else {
             // Treat unknown conditions as shell commands: exit 0 = true
             let output = Command::new("sh")
-                .args(["-c", &rendered])
+                .args(["-c", rendered])
                 .current_dir(&self.working_dir)
                 .output()
                 .with_context(|| format!("Failed to evaluate condition: {}", rendered))?;
             Ok(output.status.success())
         }
+    }
+
+    fn condition_uses_shell(rendered: &str) -> bool {
+        !rendered.starts_with("file_exists:")
+            && !rendered.starts_with("dir_exists:")
+            && rendered != "always"
+            && rendered != "true"
+            && rendered != "never"
+            && rendered != "false"
     }
 
     /// Prompt the user to approve a hook command before execution.
@@ -331,6 +441,7 @@ fn execute_shell_command(
     environment: Option<&HashMap<String, String>>,
     context: &HookContext,
     template_engine: &TemplateEngine,
+    print_stdout: bool,
 ) -> Result<()> {
     let mut cmd = if cfg!(target_os = "windows") {
         let mut cmd = Command::new("cmd");
@@ -372,7 +483,7 @@ fn execute_shell_command(
 
     // Print stdout if non-empty
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if !stdout.trim().is_empty() {
+    if print_stdout && !stdout.trim().is_empty() {
         println!("{}", stdout.trim());
     }
 

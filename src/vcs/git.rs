@@ -151,7 +151,7 @@ impl GitRepository {
     fn generate_hook_script(&self) -> String {
         r#"#!/bin/sh
 # devflow auto-generated hook
-# This hook automatically creates database branches when switching Git branches
+# This hook automatically creates service branches when switching Git branches
 
 # For post-checkout hook, check if this is a branch checkout (not file checkout)
 # Parameters: $1=previous HEAD, $2=new HEAD, $3=checkout type (1=branch, 0=file)
@@ -187,7 +187,7 @@ if command -v devflow >/dev/null 2>&1; then
     # Run devflow git-hook command to handle branch creation
     devflow git-hook
 else
-    echo "devflow not found in PATH, skipping database branch creation"
+    echo "devflow not found in PATH, skipping service branch creation"
 fi
 "#
         .to_string()

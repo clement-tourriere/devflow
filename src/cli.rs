@@ -133,6 +133,19 @@ pub enum Commands {
     },
     #[command(about = "Show current project and backend status")]
     Status,
+    #[command(
+        about = "Show automation capabilities",
+        long_about = "Show automation capabilities.
+
+Returns a machine-readable summary of devflow's automation contract, including
+JSON output behavior, non-interactive guarantees, and recommended command usage
+for AI agents and CI pipelines.
+
+Examples:
+  devflow capabilities
+  devflow --json capabilities"
+    )]
+    Capabilities,
     #[command(about = "Destroy all branches and data for a service (local backend)")]
     Destroy {
         #[arg(long, help = "Skip confirmation prompt")]
@@ -176,7 +189,7 @@ pub enum Commands {
     },
     #[command(
         about = "Manage lifecycle hooks",
-        long_about = "Manage lifecycle hooks.\n\nHooks are MiniJinja-templated commands that run at specific lifecycle phases\n(post-create, post-switch, pre-merge, etc.). Configure them in .devflow.yml\nunder the 'hooks' section.\n\nExamples:\n  devflow hook show                  # List all configured hooks\n  devflow hook show post-create      # Show hooks for a specific phase\n  devflow hook run post-create       # Run hooks for a phase manually\n  devflow hook approvals             # List approved hooks\n  devflow hook approvals --clear     # Clear all approvals"
+        long_about = "Manage lifecycle hooks.\n\nHooks are MiniJinja-templated commands that run at specific lifecycle phases\n(post-create, post-switch, pre-merge, etc.). Configure them in .devflow.yml\nunder the 'hooks' section.\n\nExamples:\n  devflow hook show                  # List all configured hooks\n  devflow hook show post-create      # Show hooks for a specific phase\n  devflow hook run post-create       # Run hooks for a phase manually\n  devflow hook approvals             # List approved hooks\n  devflow hook approvals clear       # Clear all approvals"
     )]
     Hook {
         #[command(subcommand)]
@@ -207,7 +220,7 @@ pub enum Commands {
     },
     #[command(
         about = "Manage plugin backends",
-        long_about = "Manage plugin backends.\n\nPlugins extend devflow with custom service backends via JSON-over-stdio protocol.\nAny executable that speaks the protocol can be a backend.\n\nExamples:\n  devflow plugin list                # List configured plugin backends\n  devflow plugin check my-plugin     # Verify a plugin works\n  devflow plugin init ./my-plugin.sh # Generate a plugin scaffold"
+        long_about = "Manage plugin backends.\n\nPlugins extend devflow with custom service backends via JSON-over-stdio protocol.\nAny executable that speaks the protocol can be a backend.\n\nExamples:\n  devflow plugin list                    # List configured plugin backends\n  devflow plugin check my-plugin         # Verify a plugin works\n  devflow plugin init my-plugin --lang bash  # Print a plugin scaffold script"
     )]
     Plugin {
         #[command(subcommand)]
@@ -297,7 +310,7 @@ pub enum PluginCommands {
 pub async fn handle_command(
     cmd: Commands,
     json_output: bool,
-    _non_interactive: bool,
+    non_interactive: bool,
     database_name: Option<&str>,
 ) -> Result<()> {
     // Commands that use the new backend system
@@ -377,7 +390,7 @@ pub async fn handle_command(
             cmd,
             &mut config,
             json_output,
-            _non_interactive,
+            non_interactive,
             database_name,
             &config_path,
         )
@@ -460,12 +473,21 @@ pub async fn handle_command(
                     // On Linux, offer ZFS auto-setup before creating the main branch
                     #[cfg(feature = "backend-local")]
                     if cfg!(target_os = "linux") {
-                        if let Some(data_root) = attempt_zfs_auto_setup(_non_interactive).await {
+                        if let Some(data_root) =
+                            attempt_zfs_auto_setup(non_interactive, json_output).await
+                        {
                             let mut updated_cfg = named_cfg.clone();
                             if let Some(ref mut local) = updated_cfg.local {
                                 local.data_root = Some(data_root);
                             }
-                            let _ = state.add_backend(&config_path, updated_cfg.clone(), true);
+                            if let Err(e) =
+                                state.add_backend(&config_path, updated_cfg.clone(), true)
+                            {
+                                log::warn!(
+                                    "Failed to persist updated backend config in local state: {}",
+                                    e
+                                );
+                            }
                             if let Some(state_backends) = state.get_backends(&config_path) {
                                 config_with_backend.backends = Some(state_backends);
                             }
@@ -473,6 +495,7 @@ pub async fn handle_command(
                                 &config_with_backend,
                                 &updated_cfg,
                                 from.as_deref(),
+                                json_output,
                             )
                             .await;
                         } else {
@@ -480,17 +503,28 @@ pub async fn handle_command(
                                 &config_with_backend,
                                 &named_cfg,
                                 from.as_deref(),
+                                json_output,
                             )
                             .await;
                         }
                     } else {
-                        init_local_backend_main(&config_with_backend, &named_cfg, from.as_deref())
-                            .await;
+                        init_local_backend_main(
+                            &config_with_backend,
+                            &named_cfg,
+                            from.as_deref(),
+                            json_output,
+                        )
+                        .await;
                     }
                     #[cfg(not(feature = "backend-local"))]
                     {
-                        init_local_backend_main(&config_with_backend, &named_cfg, from.as_deref())
-                            .await;
+                        init_local_backend_main(
+                            &config_with_backend,
+                            &named_cfg,
+                            from.as_deref(),
+                            json_output,
+                        )
+                        .await;
                     }
                 }
 
@@ -514,12 +548,14 @@ pub async fn handle_command(
                 if let Ok(vcs) = vcs::detect_vcs_provider(".") {
                     if let Ok(Some(detected_main)) = vcs.default_branch() {
                         config.git.main_branch = detected_main.clone();
-                        println!(
-                            "Auto-detected main branch: {} ({})",
-                            detected_main,
-                            vcs.provider_name()
-                        );
-                    } else {
+                        if !json_output {
+                            println!(
+                                "Auto-detected main branch: {} ({})",
+                                detected_main,
+                                vcs.provider_name()
+                            );
+                        }
+                    } else if !json_output {
                         println!("Could not auto-detect main branch, using default: main");
                     }
                 }
@@ -528,12 +564,20 @@ pub async fn handle_command(
                 if is_postgres_template {
                     let compose_files = docker::find_docker_compose_files();
                     if !compose_files.is_empty() {
-                        println!("Found Docker Compose files: {}", compose_files.join(", "));
+                        if !json_output {
+                            println!("Found Docker Compose files: {}", compose_files.join(", "));
+                        }
 
                         if let Some(postgres_config) =
                             docker::parse_postgres_config_from_files(&compose_files)?
                         {
-                            if docker::prompt_user_for_config_usage(&postgres_config)? {
+                            let use_postgres_config = if non_interactive || json_output {
+                                false
+                            } else {
+                                docker::prompt_user_for_config_usage(&postgres_config)?
+                            };
+
+                            if use_postgres_config {
                                 if let Some(host) = postgres_config.host {
                                     config.database.host = host;
                                 }
@@ -550,7 +594,9 @@ pub async fn handle_command(
                                     config.database.template_database = database;
                                 }
 
-                                println!("Using PostgreSQL configuration from Docker Compose");
+                                if !json_output {
+                                    println!("Using PostgreSQL configuration from Docker Compose");
+                                }
                             }
                         }
                     }
@@ -610,7 +656,9 @@ pub async fn handle_command(
                     // On Linux, offer ZFS auto-setup before creating the main branch
                     #[cfg(feature = "backend-local")]
                     if cfg!(target_os = "linux") {
-                        if let Some(data_root) = attempt_zfs_auto_setup(_non_interactive).await {
+                        if let Some(data_root) =
+                            attempt_zfs_auto_setup(non_interactive, json_output).await
+                        {
                             // Update the named backend config with the ZFS data_root
                             let mut updated_cfg = named_cfg.clone();
                             if let Some(ref mut local) = updated_cfg.local {
@@ -618,19 +666,40 @@ pub async fn handle_command(
                             }
                             // Update in state and injected config
                             if let Ok(mut state) = LocalStateManager::new() {
-                                let _ = state.set_backends(&config_path, vec![updated_cfg.clone()]);
+                                if let Err(e) =
+                                    state.set_backends(&config_path, vec![updated_cfg.clone()])
+                                {
+                                    log::warn!(
+                                        "Failed to persist updated backend config in local state: {}",
+                                        e
+                                    );
+                                }
                             }
                             config.backends = Some(vec![updated_cfg.clone()]);
-                            init_local_backend_main(&config, &updated_cfg, from.as_deref()).await;
+                            init_local_backend_main(
+                                &config,
+                                &updated_cfg,
+                                from.as_deref(),
+                                json_output,
+                            )
+                            .await;
                         } else {
-                            init_local_backend_main(&config, &named_cfg, from.as_deref()).await;
+                            init_local_backend_main(
+                                &config,
+                                &named_cfg,
+                                from.as_deref(),
+                                json_output,
+                            )
+                            .await;
                         }
                     } else {
-                        init_local_backend_main(&config, &named_cfg, from.as_deref()).await;
+                        init_local_backend_main(&config, &named_cfg, from.as_deref(), json_output)
+                            .await;
                     }
                     #[cfg(not(feature = "backend-local"))]
                     {
-                        init_local_backend_main(&config, &named_cfg, from.as_deref()).await;
+                        init_local_backend_main(&config, &named_cfg, from.as_deref(), json_output)
+                            .await;
                     }
                 }
 
@@ -712,7 +781,7 @@ pub async fn handle_command(
             }
         }
         Commands::Hook { action } => {
-            handle_hook_command(action, &config, json_output).await?;
+            handle_hook_command(action, &config, json_output, non_interactive).await?;
         }
         Commands::Plugin { action } => {
             handle_plugin_command(action, &config, json_output).await?;
@@ -739,6 +808,45 @@ pub async fn handle_command(
             } else {
                 println!("Current configuration:");
                 println!("{}", serde_yaml_ng::to_string(&config)?);
+            }
+        }
+        Commands::Capabilities => {
+            let payload = serde_json::json!({
+                "schema_version": "1.0",
+                "json_mode": {
+                    "stdout_single_json_document": true,
+                    "diagnostics_on_stderr": true,
+                },
+                "non_interactive": {
+                    "prompts_disabled": true,
+                    "requires_force_for": ["destroy", "remove"],
+                    "hook_unapproved_behavior": "error",
+                },
+                "orchestration": {
+                    "partial_failure_exit_code": "non-zero",
+                    "partial_failure_reported_in_json": true,
+                },
+                "recommended_for_agents": {
+                    "global_flags": ["--json", "--non-interactive"],
+                    "task_pattern": [
+                        "create",
+                        "connection",
+                        "seed (optional)",
+                        "work",
+                        "reset (retry)",
+                        "delete"
+                    ],
+                },
+            });
+
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("Automation capabilities:");
+                println!("- JSON mode: single JSON document on stdout (diagnostics on stderr)");
+                println!("- Non-interactive: no prompts; --force required for destroy/remove");
+                println!("- Multi-backend partial failures: command exits non-zero by default");
+                println!("- Recommended flags for agents: --json --non-interactive");
             }
         }
         Commands::ShellInit { shell } => {
@@ -798,7 +906,7 @@ pub async fn handle_command(
 /// Returns `Some(data_root)` if a pool was created or already exists,
 /// so the caller can set it on the `LocalBackendConfig`.
 #[cfg(feature = "backend-local")]
-async fn attempt_zfs_auto_setup(non_interactive: bool) -> Option<String> {
+async fn attempt_zfs_auto_setup(non_interactive: bool, quiet_output: bool) -> Option<String> {
     use crate::services::postgres::local::storage::zfs_setup::*;
 
     // Use a placeholder path — the actual projects_root hasn't been established yet
@@ -808,33 +916,45 @@ async fn attempt_zfs_auto_setup(non_interactive: bool) -> Option<String> {
     match status {
         ZfsSetupStatus::NotSupported => None,
         ZfsSetupStatus::ToolsNotInstalled => {
-            println!();
-            println!("Tip: Install ZFS for near-instant Copy-on-Write database branching:");
-            println!("  sudo apt install zfsutils-linux");
+            if !quiet_output {
+                println!();
+                println!("Tip: Install ZFS for near-instant Copy-on-Write service branching:");
+                println!("  sudo apt install zfsutils-linux");
+            }
             None
         }
         ZfsSetupStatus::AlreadyAvailable { root_dataset } => {
-            println!();
-            println!(
-                "ZFS dataset '{}' detected - will use ZFS for Copy-on-Write storage.",
-                root_dataset
-            );
+            if !quiet_output {
+                println!();
+                println!(
+                    "ZFS dataset '{}' detected - will use ZFS for Copy-on-Write storage.",
+                    root_dataset
+                );
+            }
             None
         }
         ZfsSetupStatus::DevflowPoolExists { mountpoint } => {
-            println!();
-            println!(
-                "ZFS pool 'devflow' already exists (mountpoint: {}).",
-                mountpoint
-            );
+            if !quiet_output {
+                println!();
+                println!(
+                    "ZFS pool 'devflow' already exists (mountpoint: {}).",
+                    mountpoint
+                );
+            }
             Some(mountpoint)
         }
         ZfsSetupStatus::ToolsAvailableNoPool => {
             if non_interactive {
-                println!();
-                println!(
-                    "ZFS tools detected but no pool found. Run 'devflow setup-zfs' to create one."
-                );
+                if !quiet_output {
+                    println!();
+                    println!(
+                        "ZFS tools detected but no pool found. Run 'devflow setup-zfs' to create one."
+                    );
+                }
+                return None;
+            }
+
+            if quiet_output {
                 return None;
             }
 
@@ -887,26 +1007,39 @@ async fn init_local_backend_main(
     config: &Config,
     named_cfg: &crate::config::NamedBackendConfig,
     from: Option<&str>,
+    quiet_output: bool,
 ) {
     match services::factory::create_backend_from_named_config(config, named_cfg).await {
         Ok(be) => {
             match be.create_branch("main", None).await {
                 Ok(info) => {
-                    println!("Created main branch");
+                    if !quiet_output {
+                        println!("Created main branch");
+                    }
                     if let Ok(conn) = be.get_connection_info("main").await {
                         if let Some(ref uri) = conn.connection_string {
-                            println!("  Connection: {}", uri);
+                            if !quiet_output {
+                                println!("  Connection: {}", uri);
+                            }
                         }
                     }
                     if let Some(state) = &info.state {
-                        println!("  State: {}", state);
+                        if !quiet_output {
+                            println!("  State: {}", state);
+                        }
                     }
 
                     // Seed if --from specified
                     if let Some(source) = from {
-                        println!("Seeding main branch from: {}", source);
+                        if !quiet_output {
+                            println!("Seeding main branch from: {}", source);
+                        }
                         match be.seed_from_source("main", source).await {
-                            Ok(_) => println!("Seeding completed successfully"),
+                            Ok(_) => {
+                                if !quiet_output {
+                                    println!("Seeding completed successfully");
+                                }
+                            }
                             Err(e) => eprintln!("Warning: seeding failed: {}", e),
                         }
                     }
@@ -1369,6 +1502,8 @@ async fn run_hooks(
     config: &Config,
     branch_name: &str,
     phase: HookPhase,
+    json_output: bool,
+    non_interactive: bool,
 ) -> Result<()> {
     if let Some(ref hooks_config) = config.hooks {
         let working_dir =
@@ -1377,10 +1512,19 @@ async fn run_hooks(
             .canonicalize()
             .ok()
             .map(|p| p.to_string_lossy().to_string());
-        let engine = HookEngine::new(hooks_config.clone(), working_dir, project_key);
-        engine
-            .run_phase_verbose(&phase, &build_hook_context(config, branch_name).await)
-            .await?;
+        let engine = if non_interactive || json_output {
+            HookEngine::new_non_interactive(hooks_config.clone(), working_dir, project_key)
+        } else {
+            HookEngine::new(hooks_config.clone(), working_dir, project_key)
+        }
+        .with_quiet_output(json_output);
+
+        let context = build_hook_context(config, branch_name).await;
+        if json_output {
+            engine.run_phase(&phase, &context).await?;
+        } else {
+            engine.run_phase_verbose(&phase, &context).await?;
+        }
     }
     Ok(())
 }
@@ -1390,6 +1534,7 @@ async fn handle_hook_command(
     action: HookCommands,
     config: &Config,
     json_output: bool,
+    non_interactive: bool,
 ) -> Result<()> {
     match action {
         HookCommands::Show { phase } => {
@@ -1406,6 +1551,7 @@ async fn handle_hook_command(
                 name.as_deref(),
                 branch.as_deref(),
                 json_output,
+                non_interactive,
             )
             .await?;
         }
@@ -1421,8 +1567,12 @@ fn handle_hook_show(config: &Config, phase_filter: Option<&str>, json_output: bo
     let hooks = match &config.hooks {
         Some(h) if !h.is_empty() => h,
         _ => {
-            println!("No hooks configured.");
-            println!("  Add a 'hooks' section to .devflow.yml to configure lifecycle hooks.");
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({}))?);
+            } else {
+                println!("No hooks configured.");
+                println!("  Add a 'hooks' section to .devflow.yml to configure lifecycle hooks.");
+            }
             return Ok(());
         }
     };
@@ -1446,10 +1596,14 @@ fn handle_hook_show(config: &Config, phase_filter: Option<&str>, json_output: bo
     };
 
     if json_output {
-        let filtered: std::collections::HashMap<_, _> = hooks
-            .iter()
-            .filter(|(phase, _)| phase_filter_parsed.as_ref().is_none_or(|pf| *phase == pf))
-            .collect();
+        let mut filtered = serde_json::Map::new();
+        for (phase, phase_hooks) in hooks.iter().filter(|(phase, _)| {
+            phase_filter_parsed
+                .as_ref()
+                .is_none_or(|parsed_phase| *phase == parsed_phase)
+        }) {
+            filtered.insert(phase.to_string(), serde_json::to_value(phase_hooks)?);
+        }
         println!("{}", serde_json::to_string_pretty(&filtered)?);
         return Ok(());
     }
@@ -1520,6 +1674,7 @@ async fn handle_hook_run(
     name_filter: Option<&str>,
     branch_override: Option<&str>,
     json_output: bool,
+    _non_interactive: bool,
 ) -> Result<()> {
     let hooks_config = match &config.hooks {
         Some(h) if !h.is_empty() => h.clone(),
@@ -1588,8 +1743,13 @@ async fn handle_hook_run(
         std::env::current_dir().map_err(|e| anyhow::anyhow!("Failed to get cwd: {}", e))?;
 
     // Manual runs don't require approval
-    let engine = HookEngine::new_no_approval(effective_config, working_dir);
-    let result = engine.run_phase_verbose(&phase, &context).await?;
+    let engine =
+        HookEngine::new_no_approval(effective_config, working_dir).with_quiet_output(json_output);
+    let result = if json_output {
+        engine.run_phase(&phase, &context).await?
+    } else {
+        engine.run_phase_verbose(&phase, &context).await?
+    };
 
     if json_output {
         println!(
@@ -1620,7 +1780,8 @@ fn handle_hook_approvals(action: ApprovalCommands, json_output: bool) -> Result<
     match action {
         ApprovalCommands::List => {
             let store = ApprovalStore::load().unwrap_or_default();
-            let approved = store.list_approved(&project_key);
+            let mut approved = store.list_approved(&project_key);
+            approved.sort_by(|a, b| a.command.cmp(&b.command));
 
             if json_output {
                 let items: Vec<serde_json::Value> = approved
@@ -1817,6 +1978,8 @@ async fn handle_plugin_command(
                             } else {
                                 println!("Plugin '{}': FAIL ({})", name, e);
                             }
+
+                            anyhow::bail!("Plugin '{}' is unreachable: {}", name, e);
                         }
                     }
                 }
@@ -1834,6 +1997,8 @@ async fn handle_plugin_command(
                     } else {
                         println!("Plugin '{}': FAIL (could not initialize: {})", name, e);
                     }
+
+                    anyhow::bail!("Plugin '{}' could not initialize: {}", name, e);
                 }
             }
         }
@@ -2048,7 +2213,7 @@ async fn handle_backend_command(
     // For Create/Delete: if there are multiple backends and no --database flag,
     // use orchestration to operate on all auto_branch backends atomically.
     if is_orchestratable_mutation && database_name.is_none() && has_multiple_backends {
-        return handle_orchestrated_mutation(cmd, config, json_output).await;
+        return handle_orchestrated_mutation(cmd, config, json_output, non_interactive).await;
     }
 
     let named = services::factory::resolve_backend(config, database_name).await?;
@@ -2071,6 +2236,17 @@ async fn handle_backend_command(
         Commands::Create { branch_name, from } => {
             // Single-backend path (explicit --database or single backend)
             let info = backend.create_branch(&branch_name, from.as_deref()).await?;
+
+            // Execute hooks
+            run_hooks(
+                config,
+                &branch_name,
+                HookPhase::PostServiceCreate,
+                json_output,
+                non_interactive,
+            )
+            .await?;
+
             if json_output {
                 println!("{}", serde_json::to_string_pretty(&info)?);
             } else {
@@ -2088,9 +2264,6 @@ async fn handle_backend_command(
                     }
                 }
             }
-
-            // Execute hooks
-            run_hooks(config, &branch_name, HookPhase::PostServiceCreate).await?;
         }
         Commands::Delete { branch_name } => {
             // Single-backend path (explicit --database or single backend)
@@ -2325,7 +2498,13 @@ async fn handle_backend_command(
                 }
             };
 
-            if !force && !non_interactive {
+            if !force {
+                if json_output || non_interactive {
+                    anyhow::bail!(
+                        "Use --force to confirm destroy in non-interactive or JSON output mode"
+                    );
+                }
+
                 println!("This will permanently destroy the following:");
                 println!("  Project: {}", project_name);
                 if branch_names.is_empty() {
@@ -2355,7 +2534,13 @@ async fn handle_backend_command(
             // Remove the backend entry from local state
             if let Some(ref path) = config_path {
                 if let Ok(mut state) = LocalStateManager::new() {
-                    let _ = state.remove_backend(path, &resolved_name);
+                    if let Err(e) = state.remove_backend(path, &resolved_name) {
+                        log::warn!(
+                            "Failed to remove backend '{}' from local state: {}",
+                            resolved_name,
+                            e
+                        );
+                    }
                 }
             }
 
@@ -2487,28 +2672,19 @@ async fn handle_backend_command(
                                 }
                             }
                         }
-                        if !no_verify {
-                            if config.hooks.is_some() {
-                                println!("  Would run post-switch hooks");
-                            }
+                        if !no_verify && config.hooks.is_some() {
+                            println!("  Would run post-switch hooks");
                         }
                         if let Some(ref cmd) = execute {
                             println!("  Would execute after switch: {}", cmd);
                         }
                     }
-                } else if json_output {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({
-                            "error": "dry_run_requires_branch_name",
-                            "message": "Dry run requires a branch name",
-                        }))?
-                    );
                 } else {
-                    println!("Dry run requires a branch name");
+                    anyhow::bail!("Dry run requires a branch name");
                 }
             } else if template {
-                handle_switch_to_main(config, config_path).await?;
+                handle_switch_to_main(config, config_path, json_output, no_verify, non_interactive)
+                    .await?;
             } else if let Some(branch) = branch_name {
                 handle_switch_command(
                     config,
@@ -2519,6 +2695,7 @@ async fn handle_backend_command(
                     no_services,
                     no_verify,
                     json_output,
+                    non_interactive,
                 )
                 .await?;
             } else if non_interactive {
@@ -2531,7 +2708,11 @@ async fn handle_backend_command(
 
             // Execute post-switch command if requested
             if let Some(ref cmd) = execute {
-                println!("Running post-switch command: {}", cmd);
+                if json_output {
+                    eprintln!("Running post-switch command: {}", cmd);
+                } else {
+                    println!("Running post-switch command: {}", cmd);
+                }
                 let status = tokio::process::Command::new("sh")
                     .arg("-c")
                     .arg(cmd)
@@ -2593,9 +2774,22 @@ async fn handle_backend_command(
             }
         }
         Commands::Seed { branch_name, from } => {
-            println!("Seeding branch '{}' from '{}'...", branch_name, from);
+            if !json_output {
+                println!("Seeding branch '{}' from '{}'...", branch_name, from);
+            }
             backend.seed_from_source(&branch_name, &from).await?;
-            println!("Seed complete.");
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "ok",
+                        "seeded": branch_name,
+                        "from": from,
+                    }))?
+                );
+            } else {
+                println!("Seed complete.");
+            }
         }
         _ => unreachable!(),
     }
@@ -2740,15 +2934,19 @@ async fn handle_orchestrated_mutation(
     cmd: Commands,
     config: &Config,
     json_output: bool,
+    non_interactive: bool,
 ) -> Result<()> {
     match cmd {
         Commands::Create { branch_name, from } => {
             let results =
                 services::factory::orchestrate_create(config, &branch_name, from.as_deref())
                     .await?;
+            let success_count = results.iter().filter(|r| r.success).count();
+            let fail_count = results.iter().filter(|r| !r.success).count();
+            let mut json_payload: Option<serde_json::Value> = None;
 
             if json_output {
-                let json: Vec<_> = results
+                let json_results: Vec<_> = results
                     .iter()
                     .map(|r| {
                         serde_json::json!({
@@ -2759,11 +2957,15 @@ async fn handle_orchestrated_mutation(
                         })
                     })
                     .collect();
-                println!("{}", serde_json::to_string_pretty(&json)?);
+                json_payload = Some(serde_json::json!({
+                    "operation": "create",
+                    "branch": branch_name,
+                    "ok": fail_count == 0,
+                    "succeeded": success_count,
+                    "failed": fail_count,
+                    "results": json_results,
+                }));
             } else {
-                let success_count = results.iter().filter(|r| r.success).count();
-                let fail_count = results.iter().filter(|r| !r.success).count();
-
                 for r in &results {
                     if r.success {
                         println!("[{}] {}", r.service_name, r.message);
@@ -2787,14 +2989,39 @@ async fn handle_orchestrated_mutation(
                 }
             }
 
+            if fail_count > 0 {
+                if let Some(payload) = json_payload.take() {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                }
+                anyhow::bail!(
+                    "Failed to create branch '{}' on {}/{} service(s)",
+                    branch_name,
+                    fail_count,
+                    results.len()
+                );
+            }
+
             // Run hooks after all services are created
-            run_hooks(config, &branch_name, HookPhase::PostServiceCreate).await?;
+            run_hooks(
+                config,
+                &branch_name,
+                HookPhase::PostServiceCreate,
+                json_output,
+                non_interactive,
+            )
+            .await?;
+
+            if let Some(payload) = json_payload {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            }
         }
         Commands::Delete { branch_name } => {
             let results = services::factory::orchestrate_delete(config, &branch_name).await?;
+            let success_count = results.iter().filter(|r| r.success).count();
+            let fail_count = results.iter().filter(|r| !r.success).count();
 
             if json_output {
-                let json: Vec<_> = results
+                let json_results: Vec<_> = results
                     .iter()
                     .map(|r| {
                         serde_json::json!({
@@ -2804,11 +3031,18 @@ async fn handle_orchestrated_mutation(
                         })
                     })
                     .collect();
-                println!("{}", serde_json::to_string_pretty(&json)?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "operation": "delete",
+                        "branch": branch_name,
+                        "ok": fail_count == 0,
+                        "succeeded": success_count,
+                        "failed": fail_count,
+                        "results": json_results,
+                    }))?
+                );
             } else {
-                let success_count = results.iter().filter(|r| r.success).count();
-                let fail_count = results.iter().filter(|r| !r.success).count();
-
                 for r in &results {
                     if r.success {
                         println!("[{}] {}", r.service_name, r.message);
@@ -2825,6 +3059,15 @@ async fn handle_orchestrated_mutation(
                         fail_count
                     );
                 }
+            }
+
+            if fail_count > 0 {
+                anyhow::bail!(
+                    "Failed to delete branch '{}' on {}/{} service(s)",
+                    branch_name,
+                    fail_count,
+                    results.len()
+                );
             }
         }
         _ => unreachable!(),
@@ -2993,7 +3236,7 @@ async fn handle_git_hook(
         if config.should_switch_on_branch(&current_git_branch) {
             // If switching to main git branch, use main database
             if current_git_branch == config.git.main_branch {
-                handle_switch_to_main(config, config_path).await?;
+                handle_switch_to_main(config, config_path, false, false, true).await?;
             } else {
                 // For other branches, check if we should create them and switch
                 if config.should_create_branch(&current_git_branch) {
@@ -3006,6 +3249,7 @@ async fn handle_git_hook(
                         false, // no_services
                         false, // no_verify
                         false, // json_output — git hooks are non-interactive
+                        true,  // non_interactive
                     )
                     .await?;
                 } else {
@@ -3093,10 +3337,11 @@ async fn handle_interactive_switch(
                     false, // no_services
                     false, // no_verify
                     false, // json_output
+                    false, // non_interactive
                 )
                 .await?;
             } else if selected_branch == "main" {
-                handle_switch_to_main(config, config_path).await?;
+                handle_switch_to_main(config, config_path, false, false, false).await?;
             } else {
                 handle_switch_command(
                     config,
@@ -3107,6 +3352,7 @@ async fn handle_interactive_switch(
                     false, // no_services
                     false, // no_verify
                     false, // json_output — interactive mode
+                    false, // non_interactive
                 )
                 .await?;
             }
@@ -3192,10 +3438,12 @@ async fn handle_switch_command(
     no_services: bool,
     no_verify: bool,
     json_output: bool,
+    non_interactive: bool,
 ) -> Result<()> {
     let worktree_enabled = config.worktree.as_ref().is_some_and(|wt| wt.enabled);
     let mut worktree_path: Option<String> = None;
     let mut worktree_created = false;
+    let mut json_summary: Option<serde_json::Value> = None;
 
     // ── Worktree mode ──────────────────────────────────────────────────
     if worktree_enabled {
@@ -3207,10 +3455,10 @@ async fn handle_switch_command(
         if let Some(wt_path) = existing_path {
             if !json_output {
                 println!("Switching to existing worktree: {}", wt_path.display());
+                // Print the path so shell integration can cd to it
+                println!("DEVFLOW_CD={}", wt_path.display());
             }
             worktree_path = Some(wt_path.display().to_string());
-            // Print the path so shell integration can cd to it
-            println!("DEVFLOW_CD={}", wt_path.display());
         } else {
             // Resolve worktree path from template
             let repo_name = std::env::current_dir()
@@ -3236,7 +3484,12 @@ async fn handle_switch_command(
                         base.unwrap_or("HEAD")
                     );
                 }
-                let _ = vcs_repo.create_branch(branch_name, base);
+                vcs_repo.create_branch(branch_name, base).with_context(|| {
+                    format!(
+                        "Failed to create branch '{}' before worktree creation",
+                        branch_name
+                    )
+                })?;
             }
 
             if !json_output {
@@ -3292,7 +3545,7 @@ async fn handle_switch_command(
                                     }
                                 }
                             }
-                            if count > 0 {
+                            if count > 0 && !json_output {
                                 println!("Copied {} ignored file(s) to worktree", count);
                             }
                         }
@@ -3312,7 +3565,9 @@ async fn handle_switch_command(
             }
             worktree_path = Some(wt_path.display().to_string());
             worktree_created = true;
-            println!("DEVFLOW_CD={}", wt_path.display());
+            if !json_output {
+                println!("DEVFLOW_CD={}", wt_path.display());
+            }
         }
     } else {
         // ── Classic mode (no worktrees) ────────────────────────────────
@@ -3345,7 +3600,9 @@ async fn handle_switch_command(
         // Update current branch in local state
         if let Some(ref path) = config_path {
             if let Ok(mut state) = LocalStateManager::new() {
-                let _ = state.set_current_branch(path, Some(normalized_branch.clone()));
+                if let Err(e) = state.set_current_branch(path, Some(normalized_branch.clone())) {
+                    log::warn!("Failed to persist current branch in local state: {}", e);
+                }
             }
         }
 
@@ -3367,17 +3624,14 @@ async fn handle_switch_command(
                     })
                 })
                 .collect();
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "branch": normalized_branch,
-                    "worktree_path": worktree_path,
-                    "worktree_created": worktree_created,
-                    "services_switched": success_count,
-                    "services_failed": fail_count,
-                    "service_results": service_results,
-                }))?
-            );
+            json_summary = Some(serde_json::json!({
+                "branch": normalized_branch,
+                "worktree_path": worktree_path,
+                "worktree_created": worktree_created,
+                "services_switched": success_count,
+                "services_failed": fail_count,
+                "service_results": service_results,
+            }));
         } else {
             for r in &results {
                 if r.success {
@@ -3407,23 +3661,33 @@ async fn handle_switch_command(
                 );
             }
         }
+
+        if fail_count > 0 {
+            if let Some(summary) = json_summary.take() {
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+            }
+            anyhow::bail!(
+                "Failed to switch service branches on {}/{} service(s)",
+                fail_count,
+                results.len()
+            );
+        }
     } else {
         // Still update state even if skipping services
         if let Some(ref path) = config_path {
             if let Ok(mut state) = LocalStateManager::new() {
-                let _ = state.set_current_branch(path, Some(normalized_branch.clone()));
+                if let Err(e) = state.set_current_branch(path, Some(normalized_branch.clone())) {
+                    log::warn!("Failed to persist current branch in local state: {}", e);
+                }
             }
         }
         if json_output {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "branch": normalized_branch,
-                    "worktree_path": worktree_path,
-                    "worktree_created": worktree_created,
-                    "services_skipped": true,
-                }))?
-            );
+            json_summary = Some(serde_json::json!({
+                "branch": normalized_branch,
+                "worktree_path": worktree_path,
+                "worktree_created": worktree_created,
+                "services_skipped": true,
+            }));
         } else {
             println!("Switched branch (services skipped): {}", normalized_branch);
         }
@@ -3431,7 +3695,18 @@ async fn handle_switch_command(
 
     // ── Hooks ──────────────────────────────────────────────────────────
     if !no_verify {
-        run_hooks(config, &normalized_branch, HookPhase::PostSwitch).await?;
+        run_hooks(
+            config,
+            &normalized_branch,
+            HookPhase::PostSwitch,
+            json_output,
+            non_interactive,
+        )
+        .await?;
+    }
+
+    if let Some(summary) = json_summary {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
     }
 
     Ok(())
@@ -3440,35 +3715,90 @@ async fn handle_switch_command(
 async fn handle_switch_to_main(
     config: &Config,
     config_path: &Option<std::path::PathBuf>,
+    json_output: bool,
+    no_verify: bool,
+    non_interactive: bool,
 ) -> Result<()> {
     let main_name = "_main";
 
-    println!("Switching to main database");
+    if !json_output {
+        println!("Switching to main database");
+    }
 
     // Update current branch in local state to a special main marker
     if let Some(ref path) = config_path {
         if let Ok(mut state) = LocalStateManager::new() {
-            let _ = state.set_current_branch(path, Some(main_name.to_string()));
-        }
-    }
-
-    // Switch to main on all auto-branch backends
-    let results = services::factory::orchestrate_switch(config, "main", None).await;
-    if let Ok(results) = results {
-        for r in &results {
-            if !r.success {
-                log::warn!("{}", r.message);
+            if let Err(e) = state.set_current_branch(path, Some(main_name.to_string())) {
+                log::warn!("Failed to persist current branch in local state: {}", e);
             }
         }
     }
 
-    println!(
-        "Switched to main database: {}",
-        config.database.template_database
-    );
+    // Switch to main on all auto-branch backends
+    let results = services::factory::orchestrate_switch(config, "main", None).await?;
+    let success_count = results.iter().filter(|r| r.success).count();
+    let fail_count = results.iter().filter(|r| !r.success).count();
+    let mut json_summary: Option<serde_json::Value> = None;
+
+    if json_output {
+        let service_results: Vec<serde_json::Value> = results
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "service": r.service_name,
+                    "success": r.success,
+                    "message": r.message,
+                })
+            })
+            .collect();
+        json_summary = Some(serde_json::json!({
+            "branch": main_name,
+            "database": config.database.template_database,
+            "services_switched": success_count,
+            "services_failed": fail_count,
+            "service_results": service_results,
+        }));
+    } else if fail_count == 0 {
+        println!(
+            "Switched to main database: {} ({} service(s))",
+            config.database.template_database, success_count
+        );
+    } else {
+        println!(
+            "Switched to main database: {} ({}/{} service(s), {} failed)",
+            config.database.template_database,
+            success_count,
+            results.len(),
+            fail_count
+        );
+    }
+
+    if fail_count > 0 {
+        if let Some(summary) = json_summary.take() {
+            println!("{}", serde_json::to_string_pretty(&summary)?);
+        }
+        anyhow::bail!(
+            "Failed to switch to main on {}/{} service(s)",
+            fail_count,
+            results.len()
+        );
+    }
 
     // Execute hooks
-    run_hooks(config, main_name, HookPhase::PostSwitch).await?;
+    if !no_verify {
+        run_hooks(
+            config,
+            main_name,
+            HookPhase::PostSwitch,
+            json_output,
+            non_interactive,
+        )
+        .await?;
+    }
+
+    if let Some(summary) = json_summary {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+    }
 
     Ok(())
 }
@@ -3526,7 +3856,9 @@ async fn handle_remove_command(
     let mut worktree_removed = false;
     let mut worktree_path_str: Option<String> = None;
     let mut service_results: Vec<serde_json::Value> = Vec::new();
+    let mut service_failures = 0usize;
     let mut branch_deleted = false;
+    let mut branch_delete_error: Option<String> = None;
 
     // 1. Remove worktree (if it exists)
     if let Some(wt_path) = vcs_repo.worktree_path(branch_name)? {
@@ -3559,6 +3891,9 @@ async fn handle_remove_command(
         let results = services::factory::orchestrate_delete(config, &normalized).await?;
 
         for r in &results {
+            if !r.success {
+                service_failures += 1;
+            }
             if json_output {
                 service_results.push(serde_json::json!({
                     "service": r.service_name,
@@ -3579,6 +3914,7 @@ async fn handle_remove_command(
     }
     if let Err(e) = vcs_repo.delete_branch(branch_name) {
         log::warn!("Failed to delete branch '{}': {}", branch_name, e);
+        branch_delete_error = Some(e.to_string());
         if !json_output {
             println!("Warning: Failed to delete branch: {}", e);
         }
@@ -3596,7 +3932,9 @@ async fn handle_remove_command(
                 let normalized = config.get_normalized_branch_name(branch_name);
                 if current == normalized {
                     if let Ok(mut state) = LocalStateManager::new() {
-                        let _ = state.set_current_branch(path, None);
+                        if let Err(e) = state.set_current_branch(path, None) {
+                            log::warn!("Failed to clear current branch from local state: {}", e);
+                        }
                     }
                 }
             }
@@ -3607,18 +3945,35 @@ async fn handle_remove_command(
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "status": "ok",
+                "status": if service_failures == 0 && branch_delete_error.is_none() { "ok" } else { "error" },
                 "branch": branch_name,
                 "branch_deleted": branch_deleted,
+                "branch_delete_error": branch_delete_error.clone(),
                 "worktree_removed": worktree_removed,
                 "worktree_path": worktree_path_str,
                 "services_skipped": keep_services,
+                "service_failures": service_failures,
                 "service_results": service_results,
             }))?
         );
-    } else {
+    } else if service_failures == 0 && branch_delete_error.is_none() {
         println!("Branch '{}' removed successfully.", branch_name);
+    } else {
+        println!("Branch '{}' removal completed with errors.", branch_name);
     }
+
+    if service_failures > 0 {
+        anyhow::bail!(
+            "Failed to remove service branches on {}/{} service(s)",
+            service_failures,
+            service_results.len()
+        );
+    }
+
+    if let Some(error) = branch_delete_error {
+        anyhow::bail!("Failed to delete VCS branch '{}': {}", branch_name, error);
+    }
+
     Ok(())
 }
 
@@ -3631,6 +3986,15 @@ async fn handle_merge_command(
 ) -> Result<()> {
     let vcs_repo = vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
 
+    if vcs_repo.provider_name() != "git" {
+        anyhow::bail!(
+            "Merge is currently supported for git repositories only (detected: {}).",
+            vcs_repo.provider_name()
+        );
+    }
+
+    let initial_dir = std::env::current_dir().context("Failed to get current directory")?;
+
     // Determine source branch (current branch)
     let source = vcs_repo
         .current_branch()?
@@ -3639,9 +4003,22 @@ async fn handle_merge_command(
     // Determine target branch
     let target_branch = target.unwrap_or(&config.git.main_branch);
 
+    if !vcs_repo.branch_exists(target_branch)? {
+        anyhow::bail!(
+            "Target branch '{}' does not exist. Run 'devflow list' to see available branches.",
+            target_branch
+        );
+    }
+
     if source == target_branch {
         anyhow::bail!("Source and target branch are the same: '{}'", source);
     }
+
+    // If a dedicated worktree already exists for the target branch, perform the
+    // merge there to avoid checking out a branch that may be locked elsewhere.
+    let merge_dir = vcs_repo
+        .worktree_path(target_branch)?
+        .unwrap_or_else(|| initial_dir.clone());
 
     if dry_run {
         if json_output {
@@ -3653,6 +4030,7 @@ async fn handle_merge_command(
                     "dry_run": true,
                     "source": source,
                     "target": target_branch,
+                    "merge_directory": merge_dir,
                     "cleanup": cleanup,
                     "has_worktree": has_worktree,
                     "normalized_service_branch": normalized,
@@ -3684,11 +4062,25 @@ async fn handle_merge_command(
     }
 
     // Perform the merge using git CLI (git2 merge is complex; shelling out is more reliable)
+    if merge_dir == initial_dir {
+        // Merge in the current worktree, so we must first move to target branch.
+        vcs_repo.checkout_branch(target_branch).with_context(|| {
+            format!(
+                "Failed to switch to target branch '{}' before merge",
+                target_branch
+            )
+        })?;
+    }
+
     if !json_output {
         println!("\nMerging '{}' into '{}'...", source, target_branch);
+        if merge_dir != initial_dir {
+            println!("Using target worktree: {}", merge_dir.display());
+        }
     }
     let status = tokio::process::Command::new("git")
         .args(["merge", &source, "--no-edit"])
+        .current_dir(&merge_dir)
         .status()
         .await
         .context("Failed to execute git merge")?;
@@ -3718,19 +4110,61 @@ async fn handle_merge_command(
 
         // Remove worktree if exists
         if let Ok(Some(wt_path)) = vcs_repo.worktree_path(&source) {
-            if !json_output {
-                println!("Removing worktree at: {}", wt_path.display());
-            }
-            if let Err(e) = vcs_repo.remove_worktree(&wt_path) {
-                log::warn!("Failed to remove worktree: {}", e);
-                if wt_path.exists() {
-                    std::fs::remove_dir_all(&wt_path).ok();
+            if wt_path == initial_dir {
+                log::warn!(
+                    "Skipping removal of current worktree '{}'; run cleanup from another directory/worktree",
+                    wt_path.display()
+                );
+                if !json_output {
+                    println!(
+                        "Warning: Skipping removal of current worktree: {}",
+                        wt_path.display()
+                    );
                 }
+            } else {
+                if !json_output {
+                    println!("Removing worktree at: {}", wt_path.display());
+                }
+                if let Err(e) = vcs_repo.remove_worktree(&wt_path) {
+                    log::warn!("Failed to remove worktree: {}", e);
+                    if wt_path.exists() {
+                        std::fs::remove_dir_all(&wt_path).ok();
+                    }
+                }
+                worktree_removed = true;
             }
-            worktree_removed = true;
         }
 
         // Delete VCS branch
+        // If this invocation is still on the source branch, detach first so the
+        // branch becomes deletable.
+        if let Ok(Some(current)) = vcs_repo.current_branch() {
+            if current == source {
+                let detach_status = tokio::process::Command::new("git")
+                    .args(["checkout", "--detach"])
+                    .current_dir(&initial_dir)
+                    .status()
+                    .await;
+                match detach_status {
+                    Ok(s) if s.success() => {}
+                    Ok(s) => {
+                        log::warn!(
+                            "Failed to detach HEAD before deleting branch '{}': exit code {:?}",
+                            source,
+                            s.code()
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to detach HEAD before deleting branch '{}': {}",
+                            source,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
         if let Err(e) = vcs_repo.delete_branch(&source) {
             log::warn!("Failed to delete branch '{}': {}", source, e);
             if !json_output {

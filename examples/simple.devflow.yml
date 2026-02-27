@@ -32,7 +32,7 @@ hooks:
       command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
       working_dir: "."
     notify:
-      command: "echo 'Database ready for branch {{ branch.name }}!'"
+      command: "echo 'Service environment ready for branch {{ branch }}!'"
   post-switch:
     update-env:
       command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"

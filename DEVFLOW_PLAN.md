@@ -187,7 +187,7 @@ git:
   auto_create_on_branch: true
   auto_switch_on_branch: true
   main_branch: main
-  auto_create_branch_filter: "^feature/.*"
+  branch_filter_regex: "^feature/.*"
   exclude_branches: [main, master]
 
 behavior:
@@ -251,7 +251,7 @@ hooks:
     install: "npm ci"
     env: |
       cat > .env.local << EOF
-      DATABASE_URL={{ service.app-db.url }}
+      DATABASE_URL={{ service['app-db'].url }}
       CLICKHOUSE_URL={{ service.analytics-db.url }}
       REDIS_URL={{ service.cache.url }}
       EOF

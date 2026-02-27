@@ -1,6 +1,6 @@
 # devflow
 
-Isolated services for every Git branch — automatically.
+Isolated development branch environments for every Git branch — automatically.
 
 ## What It Does
 
@@ -75,7 +75,7 @@ Neon, DBLab, and Xata backends use their respective APIs to manage branches remo
 
 ### Plugin Backend
 
-Custom backends can be built as standalone executables that communicate via JSON-over-stdio. Run `devflow plugin init <path>` for a scaffold.
+Custom backends can be built as standalone executables that communicate via JSON-over-stdio. Run `devflow plugin init <name>` to print a scaffold script.
 
 ## Configuration
 
@@ -118,7 +118,7 @@ git:
   auto_create_on_branch: true       # Create service branches on git checkout
   auto_switch_on_branch: true       # Switch services on git checkout
   main_branch: main                 # Main git branch (auto-detected on init)
-  auto_create_branch_filter: "^feature/.*"  # Only branch for matching patterns
+  branch_filter_regex: "^feature/.*"  # Only branch for matching patterns
   exclude_branches:                 # Never create branches for these
     - main
     - master
@@ -217,6 +217,7 @@ devflow status                           # Project and backend status
 devflow config                           # Current configuration
 devflow config -v                        # Config with precedence details
 devflow doctor                           # System health check
+devflow capabilities                     # Automation contract summary
 devflow connection <branch>              # Connection URI (default)
 devflow connection <branch> --format env # Environment variables
 devflow connection <branch> --format json # JSON object
@@ -242,7 +243,7 @@ devflow hook show                        # Show all configured hooks
 devflow hook show <phase>                # Show hooks for a phase
 devflow hook run <phase>                 # Run hooks manually
 devflow hook approvals                   # List approved hooks
-devflow hook approvals --clear           # Clear all approvals
+devflow hook approvals clear             # Clear all approvals
 ```
 
 ### Plugins
@@ -250,7 +251,7 @@ devflow hook approvals --clear           # Clear all approvals
 ```bash
 devflow plugin list                      # List configured plugin backends
 devflow plugin check <name>              # Verify a plugin backend
-devflow plugin init <path>               # Generate a plugin scaffold
+devflow plugin init <name>               # Print a plugin scaffold script
 ```
 
 ### Shell Integration
@@ -268,10 +269,17 @@ This creates a `devflow` shell wrapper that automatically `cd`s into worktree di
 ### Global Flags
 
 ```bash
---json                                   # JSON output for all commands
+--json                                   # JSON output for core automation commands
 --non-interactive                        # Skip prompts, use defaults
 -d <name>                                # Target a specific named backend
 ```
+
+### Agent Automation Contract
+
+- Multi-backend `create`, `delete`, and `switch` return non-zero when any backend fails.
+- `destroy` and `remove` require `--force` when using `--json` or `--non-interactive`.
+- Unapproved hooks fail in non-interactive mode (no prompts).
+- Use `devflow --json capabilities` to detect current automation guarantees.
 
 ## Hooks
 
@@ -284,12 +292,12 @@ hooks:
   post-create:
     migrate: "npm run migrate"
     env-setup:
-      command: "echo DATABASE_URL={{ service.app-db.url }} > .env.local"
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
       working_dir: "."
 
   post-switch:
     update-env:
-      command: "echo DATABASE_URL={{ service.app-db.url }} > .env.local"
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
 
   pre-merge:
     test: "npm test"
@@ -345,7 +353,7 @@ Hooks are executed in definition order (deterministic, using ordered maps).
 
 ### Hook Approval
 
-Hooks that change between runs require approval before execution. This prevents unexpected commands from running automatically via Git hooks. Manage approvals with `devflow hook approvals`.
+Hooks that change between runs require approval before execution. This prevents unexpected commands from running automatically via Git hooks. In `--non-interactive` mode, unapproved hooks fail instead of prompting. Manage approvals with `devflow hook approvals`.
 
 ## Examples
 
@@ -354,6 +362,8 @@ Example configuration files are in the [`examples/`](examples/) directory:
 - [`simple.devflow.yml`](examples/simple.devflow.yml) — Single PostgreSQL backend
 - [`multi-service.devflow.yml`](examples/multi-service.devflow.yml) — PostgreSQL + ClickHouse + Redis with lifecycle hooks and worktrees
 - [`django.devflow.yml`](examples/django.devflow.yml) — Django project with migrations and Docker Compose restart
+- [`agent-bootstrap.sh`](examples/agent-bootstrap.sh) — Idempotent repository bootstrap for agents/CI
+- [`agent-task.sh`](examples/agent-task.sh) — Task-scoped branch environment setup for agents
 
 ### Node.js / Express
 
@@ -369,12 +379,12 @@ backends:
 hooks:
   post-create:
     env:
-      command: "echo DATABASE_URL={{ service.app-db.url }} > .env.local"
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
     migrate: "npx prisma migrate deploy"
 
   post-switch:
     env:
-      command: "echo DATABASE_URL={{ service.app-db.url }} > .env.local"
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
 ```
 
 ### Seeding
@@ -397,23 +407,39 @@ devflow seed feature/auth --from postgresql://...
 ### AI Agent / CI Automation
 
 ```bash
+# One-time bootstrap (idempotent)
+./examples/agent-bootstrap.sh
+
 # Create an isolated branch for the agent
 devflow --json --non-interactive create agent-task-42
 
 # Get connection info
 CONN=$(devflow --json connection agent-task-42 | jq -r '.connection_string')
 
-# Agent works against isolated database...
+# Agent works against an isolated development branch environment...
 
 # Reset to clean state if needed
-devflow reset agent-task-42
+devflow --json --non-interactive reset agent-task-42
 
 # Check container logs on failure
 devflow logs agent-task-42
 
 # Clean up
-devflow delete agent-task-42
+devflow --json --non-interactive delete agent-task-42
 ```
+
+For a full agent-oriented workflow, see `AGENTS.md`.
+
+```bash
+# Quick setup for a new subject
+./examples/agent-bootstrap.sh
+./examples/agent-task.sh issue-123
+```
+
+### LLM-Friendly Docs
+
+- `llms.txt` — curated index of agent-relevant project resources
+- `llms-full.txt` — compact context summary for local agent ingestion
 
 ## Workflows
 
@@ -441,15 +467,16 @@ devflow delete feature/payment-refactor  # Clean up after merge
 
 ```bash
 # 1. Create isolated environment
-BRANCH=$(devflow --json create task-123 | jq -r '.name')
+BRANCH="task-123"
+devflow --json --non-interactive create "$BRANCH" >/dev/null
 CONN=$(devflow --json connection "$BRANCH" | jq -r '.connection_string')
 
 # 2. Agent works against $CONN
 # 3. Reset and retry if needed
-devflow reset "$BRANCH"
+devflow --json --non-interactive reset "$BRANCH"
 
 # 4. Clean up
-devflow delete "$BRANCH"
+devflow --json --non-interactive delete "$BRANCH"
 ```
 
 ## Use Cases
