@@ -247,6 +247,11 @@ Examples:
         )]
         from: String,
     },
+    #[command(about = "Generate shell completions", hide = true)]
+    Completions {
+        #[arg(help = "Shell to generate completions for: bash, zsh, fish, elvish, powershell")]
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Subcommand)]
@@ -895,6 +900,11 @@ pub async fn handle_command(
             dry_run,
         } => {
             handle_commit_command(message, ai, edit, dry_run, json_output).await?;
+        }
+        Commands::Completions { shell } => {
+            use clap::CommandFactory;
+            let mut cmd = crate::Cli::command();
+            clap_complete::generate(shell, &mut cmd, "devflow", &mut std::io::stdout());
         }
         _ => unreachable!(),
     }

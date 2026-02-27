@@ -24,7 +24,7 @@ run = "cargo check"
 
 [tasks.lint]
 description = "Run clippy lints"
-run = "cargo clippy -- -W clippy::all"
+run = "cargo clippy -- -D warnings"
 
 [tasks.fmt]
 description = "Format code"
@@ -43,10 +43,20 @@ raw = true
 description = "Clean build artifacts"
 run = "cargo clean"
 
+[tasks."generate-llms"]
+description = "Generate llms.txt and llms-full.txt from source"
+depends = ["build"]
+run = "./scripts/generate-llms-txt.sh"
+
+[tasks."generate-llms:check"]
+description = "Verify llms.txt files are up to date"
+depends = ["build"]
+run = "./scripts/generate-llms-txt.sh --check"
+
 [tasks.ci]
 description = "Run full CI pipeline (fmt check + clippy + test)"
 run = """
 cargo fmt -- --check
-cargo clippy -- -W clippy::all
+cargo clippy -- -D warnings
 cargo test
 """

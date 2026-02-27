@@ -1,11 +1,148 @@
+#!/usr/bin/env bash
+#
+# generate-llms-txt.sh — Generate llms.txt and llms-full.txt from the devflow source.
+#
+# Usage:
+#   ./scripts/generate-llms-txt.sh           # Generate both files
+#   ./scripts/generate-llms-txt.sh --check   # Verify files are up to date (for CI)
+#
+# Requires: a built devflow binary (cargo build) or the ability to run cargo.
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+LLMS_TXT="$ROOT_DIR/llms.txt"
+LLMS_FULL_TXT="$ROOT_DIR/llms-full.txt"
+
+CHECK_MODE=false
+if [[ "${1:-}" == "--check" ]]; then
+  CHECK_MODE=true
+fi
+
+# ---------------------------------------------------------------------------
+# Find the devflow binary — prefer release, then debug, then build it.
+# ---------------------------------------------------------------------------
+find_devflow_bin() {
+  if [[ -x "$ROOT_DIR/target/release/devflow" ]]; then
+    echo "$ROOT_DIR/target/release/devflow"
+  elif [[ -x "$ROOT_DIR/target/debug/devflow" ]]; then
+    echo "$ROOT_DIR/target/debug/devflow"
+  else
+    echo "::info:: No devflow binary found, building..." >&2
+    cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --quiet 2>/dev/null
+    echo "$ROOT_DIR/target/debug/devflow"
+  fi
+}
+
+DEVFLOW_BIN="$(find_devflow_bin)"
+
+# ---------------------------------------------------------------------------
+# Extract CLI help for all commands
+# ---------------------------------------------------------------------------
+get_help() {
+  # Run in a temp dir so devflow doesn't try to load .devflow.yml
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  (cd "$tmpdir" && "$DEVFLOW_BIN" "$@" 2>/dev/null) || true
+  rm -rf "$tmpdir"
+}
+
+get_main_help() {
+  get_help --help
+}
+
+# Extract version from Cargo.toml
+VERSION=$(grep '^version' "$ROOT_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
+# Extract hook phases from source
+extract_hook_phases() {
+  grep -oP '(?<=HookPhase::)\w+' "$ROOT_DIR/src/hooks/mod.rs" \
+    | grep -v Custom \
+    | sort -u \
+    | while read -r variant; do
+        # Convert PascalCase to kebab-case
+        echo "$variant" | sed 's/\([a-z]\)\([A-Z]\)/\1-\2/g' | tr '[:upper:]' '[:lower:]'
+      done
+}
+
+# Extract environment variables from CLAUDE.md / README.md
+extract_env_vars() {
+  grep -oP 'DEVFLOW_\w+' "$ROOT_DIR/README.md" | sort -u
+}
+
+# ---------------------------------------------------------------------------
+# Generate llms.txt (curated index, follows llms.txt convention)
+# ---------------------------------------------------------------------------
+generate_llms_txt() {
+  cat <<'HEADER'
+# devflow
+
+> Isolated development branch environments for every Git branch — databases, caches, and stateful services that sync with your Git workflow.
+
+devflow maps each Git branch to an isolated set of services. When you
+`git checkout feature-auth`, devflow automatically spins up (or switches to)
+service instances that belong to that branch. Data is cloned using
+Copy-on-Write for near-instant, space-efficient branching.
+
+## Automation defaults
+
+- Always pass `--json --non-interactive` for machine-safe execution.
+- Use `--no-verify` on `switch` in headless environments to skip hook approval prompts.
+- Use `devflow --json capabilities` to detect automation guarantees at runtime.
+- Non-zero exit code means failure; partial multi-backend failures also return non-zero.
+
+## Docs
+
+HEADER
+
+  # Links section — relative paths for local use, descriptions for context
+  cat <<'LINKS'
+- [README.md](README.md): Product overview, quickstart, configuration reference, CLI reference, and install guide.
+- [AGENTS.md](AGENTS.md): Agent-first onboarding, bootstrap flow, suggested agent loop, and automation contract.
+- [CLAUDE.md](CLAUDE.md): Project structure, config schema, development commands, and AI agent context.
+- [CHANGELOG.md](CHANGELOG.md): Version history and release notes.
+- [docs/index.html](docs/index.html): Full single-page documentation site with search, dark/light theme.
+
+## Agent workflows
+
+- [examples/agent-bootstrap.sh](examples/agent-bootstrap.sh): Idempotent repository setup for agents and CI.
+- [examples/agent-task.sh](examples/agent-task.sh): Create/switch to a task-scoped branch environment, fetch connection info.
+- [examples/simple.devflow.yml](examples/simple.devflow.yml): Minimal single-service configuration.
+- [examples/multi-service.devflow.yml](examples/multi-service.devflow.yml): Multi-service setup with hooks and worktrees.
+- [examples/django.devflow.yml](examples/django.devflow.yml): Django project config with migrations and Docker Compose.
+
+## Source (for code agents)
+
+- [src/cli.rs](src/cli.rs): Command routing, JSON/non-interactive behavior, multi-backend orchestration.
+- [src/config/mod.rs](src/config/mod.rs): Config loading, 3-tier merging, env var overrides, validation.
+- [src/services/mod.rs](src/services/mod.rs): `ServiceBackend` trait — the interface all backends implement.
+- [src/services/factory.rs](src/services/factory.rs): Backend creation, dispatch, multi-backend orchestration.
+- [src/hooks/executor.rs](src/hooks/executor.rs): Hook execution engine, approval checks, conditions.
+- [src/hooks/template.rs](src/hooks/template.rs): MiniJinja template engine with custom filters.
+- [src/vcs/mod.rs](src/vcs/mod.rs): VCS abstraction (Git + Jujutsu), auto-detection.
+- [src/services/plugin.rs](src/services/plugin.rs): Plugin backend protocol (JSON-over-stdio).
+
+## Optional
+
+- [DEVFLOW_PLAN.md](DEVFLOW_PLAN.md): Historical design notes and architecture decisions.
+- [llms-full.txt](llms-full.txt): Comprehensive agent context (all commands, config schema, hook phases).
+LINKS
+}
+
+# ---------------------------------------------------------------------------
+# Generate llms-full.txt (comprehensive context dump for LLM ingestion)
+# ---------------------------------------------------------------------------
+generate_llms_full_txt() {
+  cat <<INTRO
 # devflow — Full Agent Context
 
-> Version: 0.3.0
+> Version: $VERSION
 > Repository: https://github.com/clement-tourriere/devflow
 > License: MIT
 
 This file provides comprehensive context for AI agents and LLMs working with
-the devflow codebase. It is auto-generated by `scripts/generate-llms-txt.sh`.
+the devflow codebase. It is auto-generated by \`scripts/generate-llms-txt.sh\`.
 
 ## What devflow does
 
@@ -16,7 +153,7 @@ optional Git worktree management, and lifecycle hooks.
 
 Four backend modes:
 - **Local** — Docker containers with Copy-on-Write storage (APFS, ZFS, Btrfs, XFS)
-- **Template** — PostgreSQL `CREATE DATABASE ... WITH TEMPLATE` on existing server
+- **Template** — PostgreSQL \`CREATE DATABASE ... WITH TEMPLATE\` on existing server
 - **Cloud** — Neon, DBLab, or Xata APIs
 - **Plugin** — Custom backends via JSON-over-stdio protocol
 
@@ -24,28 +161,32 @@ Five service types: postgres, clickhouse, mysql, generic (any Docker image), plu
 
 ## Automation contract
 
-- Pass `--json --non-interactive` for all machine executions.
-- Use `--no-verify` with `switch` in headless runs unless hooks are pre-approved.
+- Pass \`--json --non-interactive\` for all machine executions.
+- Use \`--no-verify\` with \`switch\` in headless runs unless hooks are pre-approved.
 - Non-zero exit code on any failure; partial multi-backend failures also return non-zero.
-- `destroy` and `remove` require `--force` in `--json` or `--non-interactive` mode.
+- \`destroy\` and \`remove\` require \`--force\` in \`--json\` or \`--non-interactive\` mode.
 - Hook approvals are required; unapproved hooks fail in non-interactive mode.
-- `devflow --json capabilities` returns a machine-readable contract summary.
+- \`devflow --json capabilities\` returns a machine-readable contract summary.
 
 ## Minimal agent loop
 
-```bash
+\`\`\`bash
 TASK_ID="issue-123"
-BRANCH="agent/$TASK_ID"
+BRANCH="agent/\$TASK_ID"
 
-devflow --json --non-interactive switch "$BRANCH" --no-verify
-CONN=$(devflow --json connection "$BRANCH" | jq -r '.connection_string')
+devflow --json --non-interactive switch "\$BRANCH" --no-verify
+CONN=\$(devflow --json connection "\$BRANCH" | jq -r '.connection_string')
 
-# run task against $CONN ...
+# run task against \$CONN ...
 
-devflow --json --non-interactive reset "$BRANCH"    # optional retry
-devflow --json --non-interactive delete "$BRANCH"   # cleanup
-```
+devflow --json --non-interactive reset "\$BRANCH"    # optional retry
+devflow --json --non-interactive delete "\$BRANCH"   # cleanup
+\`\`\`
 
+INTRO
+
+  # ---- CLI REFERENCE ----
+  cat <<'SECTION'
 ## CLI commands
 
 ### Global flags
@@ -125,6 +266,10 @@ devflow --json --non-interactive delete "$BRANCH"   # cleanup
 | `devflow plugin check <name>` | Verify a plugin backend |
 | `devflow plugin init <name> [--lang bash\|python]` | Print plugin scaffold |
 
+SECTION
+
+  # ---- CONFIGURATION SCHEMA ----
+  cat <<'SECTION'
 ## Configuration schema (.devflow.yml)
 
 All sections are optional. An empty file is valid.
@@ -269,6 +414,10 @@ hooks:
 | `DEVFLOW_LLM_API_URL=...` | LLM endpoint URL (OpenAI-compatible) |
 | `DEVFLOW_LLM_MODEL=...` | LLM model name |
 
+SECTION
+
+  # ---- HOOK PHASES ----
+  cat <<'SECTION'
 ## Hook lifecycle phases
 
 | Phase | When it fires | Blocking? |
@@ -312,6 +461,10 @@ hooks:
 | `sanitize_db` | DB-safe: replace non-alphanumeric with `_` | `{{ branch \| sanitize_db }}` → `feature_auth` |
 | `hash_port` | Deterministic port in 10000-19999 | `{{ branch \| hash_port }}` → `14523` |
 
+SECTION
+
+  # ---- COPY-ON-WRITE STORAGE ----
+  cat <<'SECTION'
 ## Copy-on-Write storage backends
 
 | Filesystem | Platform | Method | Auto-detected? |
@@ -365,3 +518,38 @@ src/
 - `CLAUDE.md` — Developer context and project structure
 - `CHANGELOG.md` — Version history
 - `docs/index.html` — Full documentation site
+SECTION
+}
+
+# ---------------------------------------------------------------------------
+# Main logic
+# ---------------------------------------------------------------------------
+if $CHECK_MODE; then
+  # Generate to temp files and diff
+  TMPDIR="$(mktemp -d)"
+  trap 'rm -rf "$TMPDIR"' EXIT
+
+  generate_llms_txt > "$TMPDIR/llms.txt"
+  generate_llms_full_txt > "$TMPDIR/llms-full.txt"
+
+  EXIT_CODE=0
+  if ! diff -q "$LLMS_TXT" "$TMPDIR/llms.txt" >/dev/null 2>&1; then
+    echo "ERROR: llms.txt is out of date. Run: mise run generate-llms" >&2
+    diff -u "$LLMS_TXT" "$TMPDIR/llms.txt" >&2 || true
+    EXIT_CODE=1
+  fi
+  if ! diff -q "$LLMS_FULL_TXT" "$TMPDIR/llms-full.txt" >/dev/null 2>&1; then
+    echo "ERROR: llms-full.txt is out of date. Run: mise run generate-llms" >&2
+    diff -u "$LLMS_FULL_TXT" "$TMPDIR/llms-full.txt" >&2 || true
+    EXIT_CODE=1
+  fi
+  if [ $EXIT_CODE -eq 0 ]; then
+    echo "llms.txt and llms-full.txt are up to date."
+  fi
+  exit $EXIT_CODE
+else
+  generate_llms_txt > "$LLMS_TXT"
+  generate_llms_full_txt > "$LLMS_FULL_TXT"
+  echo "Generated: llms.txt ($(wc -l < "$LLMS_TXT") lines)"
+  echo "Generated: llms-full.txt ($(wc -l < "$LLMS_FULL_TXT") lines)"
+fi

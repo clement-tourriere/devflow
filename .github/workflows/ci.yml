@@ -40,6 +40,19 @@ jobs:
       - name: Test
         run: cargo test
 
+      - name: Security audit
+        run: |
+          cargo install cargo-audit --quiet
+          cargo audit
+
+  # NOTE: macOS integration tests are disabled because GitHub Actions macOS
+  # runners do not ship with Docker. The Colima-based workaround is slow and
+  # flaky (~3-5 min startup, frequent timeouts). Re-enable when GitHub offers
+  # native Docker support on macOS runners, or when a faster alternative
+  # (e.g., OrbStack in CI) becomes viable.
+  #
+  # The APFS clone storage backend is still tested manually on macOS.
+  # The macOS release binary is built without integration tests (see release job).
   integration-macos:
     name: Integration (macOS / APFS)
     needs: build-and-test
@@ -75,40 +88,8 @@ jobs:
       - name: Run integration tests
         env:
           EXPECTED_STORAGE: apfs_clone
-        run: |
-          set -euo pipefail
-          DEVFLOW_BIN=$GITHUB_WORKSPACE/target/debug/devflow
-
-          # Set up test git repo
-          mkdir -p /tmp/devflow-test && cd /tmp/devflow-test
-          git init
-          git config user.email "ci@test.com"
-          git config user.name "CI"
-          git commit --allow-empty -m "init"
-
-          # Doctor + Init
-          $DEVFLOW_BIN doctor
-          $DEVFLOW_BIN --non-interactive init ci-test
-
-          # Verify storage backend
-          STORAGE=$($DEVFLOW_BIN --json status | jq -r '.storage')
-          echo "Detected storage: $STORAGE"
-          if [ "$STORAGE" != "$EXPECTED_STORAGE" ]; then
-            echo "ERROR: Expected storage '$EXPECTED_STORAGE' but got '$STORAGE'"
-            exit 1
-          fi
-
-          # Branch lifecycle
-          $DEVFLOW_BIN --non-interactive create test-feature
-          $DEVFLOW_BIN --json list
-          $DEVFLOW_BIN --json connection test-feature
-          $DEVFLOW_BIN stop test-feature
-          $DEVFLOW_BIN start test-feature
-          $DEVFLOW_BIN delete test-feature
-          $DEVFLOW_BIN --json list
-
-          # Cleanup
-          $DEVFLOW_BIN --non-interactive destroy --force
+          DEVFLOW_BIN: ${{ github.workspace }}/target/debug/devflow
+        run: ./scripts/integration-test.sh
 
   integration-linux-zfs:
     name: Integration (Linux / ZFS)
@@ -152,50 +133,14 @@ jobs:
           EXPECTED_STORAGE: zfs
           DEVFLOW_ZFS_DATASET: devflow
         run: |
-          set -euo pipefail
           RUNNER_HOME="$HOME"
-          DEVFLOW_BIN="$GITHUB_WORKSPACE/target/debug/devflow"
-
           sudo \
             HOME="$RUNNER_HOME" \
             XDG_DATA_HOME="$RUNNER_HOME/.local/share" \
             EXPECTED_STORAGE="$EXPECTED_STORAGE" \
             DEVFLOW_ZFS_DATASET="$DEVFLOW_ZFS_DATASET" \
-            DEVFLOW_BIN="$DEVFLOW_BIN" \
-            bash <<'EOF'
-          set -euo pipefail
-
-          # Set up test git repo
-          mkdir -p /tmp/devflow-test && cd /tmp/devflow-test
-          git init
-          git config user.email "ci@test.com"
-          git config user.name "CI"
-          git commit --allow-empty -m "init"
-
-          # Doctor + Init
-          $DEVFLOW_BIN doctor
-          $DEVFLOW_BIN --non-interactive init ci-test
-
-          # Verify storage backend
-          STORAGE=$($DEVFLOW_BIN --json status | jq -r '.storage')
-          echo "Detected storage: $STORAGE"
-          if [ "$STORAGE" != "$EXPECTED_STORAGE" ]; then
-            echo "ERROR: Expected storage '$EXPECTED_STORAGE' but got '$STORAGE'"
-            exit 1
-          fi
-
-          # Branch lifecycle
-          $DEVFLOW_BIN --non-interactive create test-feature
-          $DEVFLOW_BIN --json list
-          $DEVFLOW_BIN --json connection test-feature
-          $DEVFLOW_BIN stop test-feature
-          $DEVFLOW_BIN start test-feature
-          $DEVFLOW_BIN delete test-feature
-          $DEVFLOW_BIN --json list
-
-          # Cleanup
-          $DEVFLOW_BIN --non-interactive destroy --force
-          EOF
+            DEVFLOW_BIN="$GITHUB_WORKSPACE/target/debug/devflow" \
+            bash ./scripts/integration-test.sh
 
   integration-linux-xfs:
     name: Integration (Linux / XFS reflink)
@@ -237,40 +182,8 @@ jobs:
       - name: Run integration tests
         env:
           EXPECTED_STORAGE: reflink
-        run: |
-          set -euo pipefail
-          DEVFLOW_BIN=$GITHUB_WORKSPACE/target/debug/devflow
-
-          # Set up test git repo
-          mkdir -p /tmp/devflow-test && cd /tmp/devflow-test
-          git init
-          git config user.email "ci@test.com"
-          git config user.name "CI"
-          git commit --allow-empty -m "init"
-
-          # Doctor + Init
-          $DEVFLOW_BIN doctor
-          $DEVFLOW_BIN --non-interactive init ci-test
-
-          # Verify storage backend
-          STORAGE=$($DEVFLOW_BIN --json status | jq -r '.storage')
-          echo "Detected storage: $STORAGE"
-          if [ "$STORAGE" != "$EXPECTED_STORAGE" ]; then
-            echo "ERROR: Expected storage '$EXPECTED_STORAGE' but got '$STORAGE'"
-            exit 1
-          fi
-
-          # Branch lifecycle
-          $DEVFLOW_BIN --non-interactive create test-feature
-          $DEVFLOW_BIN --json list
-          $DEVFLOW_BIN --json connection test-feature
-          $DEVFLOW_BIN stop test-feature
-          $DEVFLOW_BIN start test-feature
-          $DEVFLOW_BIN delete test-feature
-          $DEVFLOW_BIN --json list
-
-          # Cleanup
-          $DEVFLOW_BIN --non-interactive destroy --force
+          DEVFLOW_BIN: ${{ github.workspace }}/target/debug/devflow
+        run: ./scripts/integration-test.sh
 
   integration-linux-btrfs:
     name: Integration (Linux / Btrfs reflink)
@@ -312,40 +225,8 @@ jobs:
       - name: Run integration tests
         env:
           EXPECTED_STORAGE: reflink
-        run: |
-          set -euo pipefail
-          DEVFLOW_BIN=$GITHUB_WORKSPACE/target/debug/devflow
-
-          # Set up test git repo
-          mkdir -p /tmp/devflow-test && cd /tmp/devflow-test
-          git init
-          git config user.email "ci@test.com"
-          git config user.name "CI"
-          git commit --allow-empty -m "init"
-
-          # Doctor + Init
-          $DEVFLOW_BIN doctor
-          $DEVFLOW_BIN --non-interactive init ci-test
-
-          # Verify storage backend
-          STORAGE=$($DEVFLOW_BIN --json status | jq -r '.storage')
-          echo "Detected storage: $STORAGE"
-          if [ "$STORAGE" != "$EXPECTED_STORAGE" ]; then
-            echo "ERROR: Expected storage '$EXPECTED_STORAGE' but got '$STORAGE'"
-            exit 1
-          fi
-
-          # Branch lifecycle
-          $DEVFLOW_BIN --non-interactive create test-feature
-          $DEVFLOW_BIN --json list
-          $DEVFLOW_BIN --json connection test-feature
-          $DEVFLOW_BIN stop test-feature
-          $DEVFLOW_BIN start test-feature
-          $DEVFLOW_BIN delete test-feature
-          $DEVFLOW_BIN --json list
-
-          # Cleanup
-          $DEVFLOW_BIN --non-interactive destroy --force
+          DEVFLOW_BIN: ${{ github.workspace }}/target/debug/devflow
+        run: ./scripts/integration-test.sh
 
   release:
     name: Release
@@ -378,14 +259,31 @@ jobs:
         env:
           RUSTFLAGS: ${{ runner.os == 'Linux' && '-C link-arg=-fuse-ld=mold' || '' }}
 
+      - name: Smoke test release binary
+        run: |
+          ./target/release/devflow --version
+          ./target/release/devflow --help > /dev/null
+
       - name: Package binary
         run: |
           mkdir -p dist
           cp target/release/devflow dist/${{ matrix.artifact_name }}
           chmod +x dist/${{ matrix.artifact_name }}
 
+      - name: Generate SHA256 checksums
+        run: |
+          cd dist
+          if command -v sha256sum &>/dev/null; then
+            sha256sum ${{ matrix.artifact_name }} > ${{ matrix.artifact_name }}.sha256
+          else
+            shasum -a 256 ${{ matrix.artifact_name }} > ${{ matrix.artifact_name }}.sha256
+          fi
+          cat ${{ matrix.artifact_name }}.sha256
+
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/${{ matrix.artifact_name }}
+          files: |
+            dist/${{ matrix.artifact_name }}
+            dist/${{ matrix.artifact_name }}.sha256
           generate_release_notes: true
