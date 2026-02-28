@@ -261,6 +261,19 @@ pub struct WorktreeConfig {
     pub copy_ignored: bool,
 }
 
+impl WorktreeConfig {
+    /// Recommended default worktree configuration for new projects.
+    /// Enables worktrees with sensible defaults for common environment files.
+    pub fn recommended_default() -> Self {
+        WorktreeConfig {
+            enabled: true,
+            path_template: default_worktree_path_template(),
+            copy_files: vec![".env".to_string(), ".env.local".to_string()],
+            copy_ignored: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
     pub host: String,

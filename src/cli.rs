@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::config::{Config, EffectiveConfig};
+use crate::config::{Config, EffectiveConfig, WorktreeConfig};
 use crate::services::{self, ServiceProvider};
 
 use crate::docker;
@@ -544,6 +544,57 @@ pub async fn handle_command(
                 }
             }
 
+            // Propose worktree configuration
+            let enable_worktrees = if json_output || non_interactive {
+                // Default to enabled in non-interactive / JSON mode
+                true
+            } else {
+                println!();
+                inquire::Confirm::new(
+                    "Enable worktrees? (isolate each branch in its own directory)",
+                )
+                .with_default(true)
+                .with_help_message(
+                    "Recommended. Each branch gets its own working directory via git worktrees.",
+                )
+                .prompt()
+                .unwrap_or(true)
+            };
+
+            // Detect CoW filesystem capability (used for both display and JSON output)
+            let cow_cap = vcs::cow_worktree::detect_cow_capability(
+                &std::env::current_dir().unwrap_or_default(),
+            );
+            let cow_label = match cow_cap {
+                vcs::cow_worktree::CowCapability::Apfs => "apfs",
+                vcs::cow_worktree::CowCapability::Reflink => "reflink",
+                vcs::cow_worktree::CowCapability::None => "none",
+            };
+
+            if enable_worktrees {
+                config.worktree = Some(WorktreeConfig::recommended_default());
+
+                if !json_output {
+                    match cow_cap {
+                        vcs::cow_worktree::CowCapability::Apfs => {
+                            println!(
+                                "Filesystem: APFS detected — worktrees will use fast copy-on-write cloning"
+                            );
+                        }
+                        vcs::cow_worktree::CowCapability::Reflink => {
+                            println!(
+                                "Filesystem: reflink support detected — worktrees will use fast copy-on-write cloning"
+                            );
+                        }
+                        vcs::cow_worktree::CowCapability::None => {
+                            println!(
+                                "Filesystem: copy-on-write not available — worktrees will use standard file copy"
+                            );
+                        }
+                    }
+                }
+            }
+
             // Don't write services to committed config — use `devflow service add`
             config.services = None;
             config.save_to_file(&config_path)?;
@@ -556,6 +607,8 @@ pub async fn handle_command(
                         "action": "init",
                         "name": resolved_name,
                         "config_path": config_path.display().to_string(),
+                        "worktree_enabled": enable_worktrees,
+                        "cow_capability": cow_label,
                     }))?
                 );
             } else {
@@ -574,6 +627,18 @@ pub async fn handle_command(
                         );
                         println!("   echo '.devflow.local.yml' >> .gitignore");
                     }
+                }
+
+                if enable_worktrees {
+                    println!(
+                        "\nWorktrees enabled. Each branch will get its own working directory."
+                    );
+                    println!(
+                        "  Path template: ../{{repo}}.{{branch}}"
+                    );
+                    println!(
+                        "  Files copied:  .env, .env.local"
+                    );
                 }
 
                 println!("\nNext steps:");
