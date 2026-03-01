@@ -3,6 +3,7 @@ pub mod git;
 pub mod jj;
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 // Re-export for convenience
@@ -110,10 +111,20 @@ pub trait VcsProvider: Send {
 }
 
 /// Which VCS was detected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum VcsKind {
     Git,
     Jj,
+}
+
+impl std::fmt::Display for VcsKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VcsKind::Git => write!(f, "git"),
+            VcsKind::Jj => write!(f, "jj"),
+        }
+    }
 }
 
 /// Auto-detect the VCS in use and return a boxed provider.
@@ -158,6 +169,94 @@ pub fn detect_vcs_kind<P: AsRef<Path>>(path: P) -> Option<VcsKind> {
         (true, _) => Some(VcsKind::Jj),
         (false, true) => Some(VcsKind::Git),
         (false, false) => None,
+    }
+}
+
+/// Check whether a CLI tool is available on PATH.
+fn tool_available(name: &str) -> bool {
+    std::process::Command::new(name)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Initialize a new VCS repository at `path`.
+///
+/// Selection logic (in priority order):
+/// 1. If `preference` is `Some(kind)`, use that VCS.
+/// 2. Auto-detect which tools are available (`jj`, `git`).
+///    - If only one is available, use it.
+///    - If both are available and `interactive` is true, prompt the user.
+///    - If both are available and `interactive` is false, default to **git**.
+/// 3. If **neither** CLI is available, use `git2::Repository::init()` as an
+///    embedded fallback (no external binary required).
+///
+/// Returns the `VcsKind` that was initialized.
+pub fn init_vcs_repository<P: AsRef<Path>>(
+    path: P,
+    preference: Option<VcsKind>,
+    interactive: bool,
+) -> Result<VcsKind> {
+    let path = path.as_ref();
+
+    // If a preference is set, honour it directly.
+    if let Some(kind) = preference {
+        return init_specific_vcs(path, kind);
+    }
+
+    let has_jj = tool_available("jj");
+    let has_git_cli = tool_available("git");
+
+    match (has_jj, has_git_cli) {
+        (true, true) => {
+            // Both available — ask user or default to git.
+            let chosen = if interactive {
+                prompt_vcs_choice()?
+            } else {
+                VcsKind::Git
+            };
+            init_specific_vcs(path, chosen)
+        }
+        (true, false) => init_specific_vcs(path, VcsKind::Jj),
+        (false, true) => init_specific_vcs(path, VcsKind::Git),
+        (false, false) => {
+            // No CLI available — use git2 library as embedded fallback.
+            log::info!("No git or jj CLI found; using embedded git2 library to initialize");
+            GitRepository::init(path)?;
+            Ok(VcsKind::Git)
+        }
+    }
+}
+
+/// Initialize a specific VCS at `path`.
+fn init_specific_vcs(path: &Path, kind: VcsKind) -> Result<VcsKind> {
+    match kind {
+        VcsKind::Git => {
+            GitRepository::init(path)?;
+            Ok(VcsKind::Git)
+        }
+        VcsKind::Jj => {
+            // Default to colocated mode so git tooling also works.
+            JjRepository::init(path, true)?;
+            Ok(VcsKind::Jj)
+        }
+    }
+}
+
+/// Interactive prompt: ask the user which VCS to initialize.
+fn prompt_vcs_choice() -> Result<VcsKind> {
+    let options = vec!["Git", "Jujutsu (jj)"];
+    let choice = inquire::Select::new("Which VCS would you like to initialize?", options)
+        .with_help_message("Both git and jj are available on your system")
+        .prompt()
+        .unwrap_or("Git");
+    if choice.starts_with("Jujutsu") {
+        Ok(VcsKind::Jj)
+    } else {
+        Ok(VcsKind::Git)
     }
 }
 

@@ -51,7 +51,11 @@ pub struct GenericDockerProvider {
 }
 
 impl GenericDockerProvider {
-    pub fn new(project_name: &str, service_name: &str, config: &GenericDockerConfig) -> anyhow::Result<Self> {
+    pub fn new(
+        project_name: &str,
+        service_name: &str,
+        config: &GenericDockerConfig,
+    ) -> anyhow::Result<Self> {
         let client =
             Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon. Is Docker installed and running? Check with: docker info")?;
 
@@ -337,7 +341,11 @@ impl GenericDockerProvider {
 
     /// List all devflow-managed containers for this service.
     async fn list_managed_containers(&self) -> anyhow::Result<Vec<(String, String, bool)>> {
-        let prefix = format!("devflow-{}-{}-", sanitize(&self.project_name), sanitize(&self.service_name));
+        let prefix = format!(
+            "devflow-{}-{}-",
+            sanitize(&self.project_name),
+            sanitize(&self.service_name)
+        );
 
         let options = ListContainersOptions {
             all: true,

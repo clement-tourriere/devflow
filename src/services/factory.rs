@@ -238,36 +238,31 @@ pub async fn resolve_provider(config: &Config, service_name: Option<&str>) -> Re
 
     let services = config.resolve_services();
 
-    // If services list is populated, use it
-    if !services.is_empty() {
-        let named = if let Some(name) = service_name {
-            services
-                .iter()
-                .find(|b| b.name == name)
-                .ok_or_else(|| anyhow::anyhow!("Service '{}' not found in configuration", name))?
-        } else {
-            services
-                .iter()
-                .find(|b| b.default)
-                .or(services.first())
-                .ok_or_else(|| anyhow::anyhow!("No services configured"))?
-        };
-
-        let provider = create_provider_from_named_config(config, named).await?;
-        return Ok(NamedService {
-            name: named.name.clone(),
-            provider,
-        });
+    if services.is_empty() {
+        if service_name.is_some() {
+            anyhow::bail!(
+                "No services configured. Run 'devflow service add' before using --service."
+            );
+        }
+        anyhow::bail!("No services configured. Run 'devflow service add' to configure one.");
     }
 
-    // No services or service config — fall back to auto-detection
-    if service_name.is_some() {
-        anyhow::bail!("--database specified but no services configured");
-    }
+    let named = if let Some(name) = service_name {
+        services
+            .iter()
+            .find(|b| b.name == name)
+            .ok_or_else(|| anyhow::anyhow!("Service '{}' not found in configuration", name))?
+    } else {
+        services
+            .iter()
+            .find(|b| b.default)
+            .or(services.first())
+            .ok_or_else(|| anyhow::anyhow!("No services configured"))?
+    };
 
-    let provider = create_provider_default(config).await?;
+    let provider = create_provider_from_named_config(config, named).await?;
     Ok(NamedService {
-        name: "default".to_string(),
+        name: named.name.clone(),
         provider,
     })
 }
@@ -279,12 +274,7 @@ pub async fn create_all_providers(config: &Config) -> Result<Vec<NamedService>> 
     let named_configs = config.resolve_services();
 
     if named_configs.is_empty() {
-        // Fall back to default auto-detection
-        let provider = create_provider_default(config).await?;
-        return Ok(vec![NamedService {
-            name: "default".to_string(),
-            provider,
-        }]);
+        return Ok(Vec::new());
     }
 
     let mut result = Vec::with_capacity(named_configs.len());
@@ -300,6 +290,7 @@ pub async fn create_all_providers(config: &Config) -> Result<Vec<NamedService>> 
 }
 
 /// Auto-detect provider when no config section is present.
+#[allow(dead_code)]
 async fn create_provider_default(config: &Config) -> Result<Box<dyn ServiceProvider>> {
     // If database config differs from defaults,
     // use postgres_template provider
@@ -344,20 +335,15 @@ async fn create_provider_default(config: &Config) -> Result<Box<dyn ServiceProvi
 /// Instantiate only services with `auto_branch: true`.
 ///
 /// These are the services that should be automatically branched when a git
-/// branch is created/switched/deleted. Falls back to default auto-detection
-/// if no services are configured.
+/// branch is created/switched/deleted.
+/// If no services are configured, returns an empty list.
 pub async fn create_auto_branch_providers(config: &Config) -> Result<Vec<NamedService>> {
     config.validate_services()?;
 
     let named_configs = config.resolve_services();
 
     if named_configs.is_empty() {
-        // Fall back to default auto-detection (single service, implicitly auto_branch)
-        let provider = create_provider_default(config).await?;
-        return Ok(vec![NamedService {
-            name: "default".to_string(),
-            provider,
-        }]);
+        return Ok(Vec::new());
     }
 
     let auto_configs: Vec<_> = named_configs.iter().filter(|c| c.auto_branch).collect();

@@ -539,6 +539,33 @@ impl VcsProvider for JjRepository {
 }
 
 impl JjRepository {
+    /// Initialize a new jj repository at `path` by shelling out to `jj init`.
+    ///
+    /// When `colocate` is true, passes `--colocate` so the repo also has a
+    /// `.git/` directory (the most common setup for devflow).
+    ///
+    /// Requires the `jj` CLI to be installed.
+    pub fn init<P: AsRef<Path>>(path: P, colocate: bool) -> Result<Self> {
+        let path = path.as_ref();
+        let mut args = vec!["init"];
+        if colocate {
+            args.push("--colocate");
+        }
+
+        let output = Command::new("jj")
+            .args(&args)
+            .current_dir(path)
+            .output()
+            .context("Failed to run 'jj init'. Is Jujutsu installed?")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("jj init failed: {}", stderr.trim());
+        }
+
+        Self::new(path)
+    }
+
     /// Convert a branch name to a workspace-safe name.
     /// Replaces `/` with `-` (same convention as Git worktrees).
     fn workspace_name_for_branch(branch: &str) -> String {

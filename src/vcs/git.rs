@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use git2::{Repository, WorktreeAddOptions, WorktreeLockStatus, WorktreePruneOptions};
+use git2::{ErrorCode, Repository, WorktreeAddOptions, WorktreeLockStatus, WorktreePruneOptions};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -17,13 +17,121 @@ impl GitRepository {
         Ok(GitRepository { repo })
     }
 
-    pub fn get_current_branch(&self) -> Result<Option<String>> {
-        let head = self.repo.head().context("Failed to get HEAD reference")?;
+    /// Initialize a new Git repository at `path` using `git2::Repository::init()`.
+    ///
+    /// This is a pure library call — no external `git` binary needed.
+    pub fn init<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let repo =
+            Repository::init(path.as_ref()).context("Failed to initialize Git repository")?;
 
-        if let Some(branch_name) = head.shorthand() {
-            Ok(Some(branch_name.to_string()))
-        } else {
-            Ok(None)
+        // Point HEAD at refs/heads/main so the default branch is always "main",
+        // regardless of the user's `init.defaultBranch` git setting.
+        repo.set_head("refs/heads/main")
+            .or_else(|_| {
+                // set_head can fail on a truly empty repo; fall back to
+                // rewriting the symbolic reference directly.
+                repo.reference_symbolic(
+                    "HEAD",
+                    "refs/heads/main",
+                    true,
+                    "devflow: set default branch to main",
+                )
+                .map(|_| ())
+            })
+            .context("Failed to set default branch to main")?;
+
+        let git_repo = GitRepository { repo };
+
+        // Create an initial empty commit so that the "main" branch actually
+        // exists.  Without this the repo stays in "unborn HEAD" state and
+        // git reports zero branches, which breaks list/tui/switch.
+        git_repo.create_initial_commit()?;
+
+        Ok(git_repo)
+    }
+
+    /// Return the HEAD commit, or create an initial empty commit if the
+    /// repository has no commits yet (unborn HEAD).
+    ///
+    /// The auto-created commit uses an empty tree and the message
+    /// `"Initial commit (devflow)"`.  The author/committer signature is
+    /// resolved from the git configuration, falling back to a generic
+    /// `"devflow" <devflow@localhost>` identity.
+    fn head_commit_or_init(&self) -> Result<git2::Commit<'_>> {
+        match self.repo.head() {
+            Ok(head) => head
+                .peel_to_commit()
+                .context("HEAD does not point to a commit"),
+            Err(e) if e.code() == ErrorCode::UnbornBranch => {
+                log::info!("Unborn branch detected — creating initial empty commit");
+                self.create_initial_commit()
+            }
+            Err(e) => Err(e).context("Failed to get HEAD"),
+        }
+    }
+
+    /// Create an initial empty commit on the current unborn branch.
+    fn create_initial_commit(&self) -> Result<git2::Commit<'_>> {
+        let sig = self
+            .repo
+            .signature()
+            .or_else(|_| git2::Signature::now("devflow", "devflow@localhost"))
+            .context("Failed to create commit signature")?;
+
+        let empty_tree_oid = self
+            .repo
+            .treebuilder(None)
+            .context("Failed to create tree builder")?
+            .write()
+            .context("Failed to write empty tree")?;
+        let tree = self
+            .repo
+            .find_tree(empty_tree_oid)
+            .context("Failed to find empty tree")?;
+
+        let oid = self
+            .repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "Initial commit (devflow)",
+                &tree,
+                &[],
+            )
+            .context("Failed to create initial commit")?;
+
+        self.repo
+            .find_commit(oid)
+            .context("Failed to find newly created commit")
+    }
+
+    pub fn get_current_branch(&self) -> Result<Option<String>> {
+        match self.repo.head() {
+            Ok(head) => {
+                if let Some(branch_name) = head.shorthand() {
+                    Ok(Some(branch_name.to_string()))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(e) if e.code() == ErrorCode::UnbornBranch => {
+                // HEAD exists but points to a branch with no commits.
+                // Read the symbolic target of HEAD to get the branch name.
+                match self.repo.find_reference("HEAD") {
+                    Ok(head_ref) => {
+                        if let Some(target) = head_ref.symbolic_target() {
+                            // target is e.g. "refs/heads/main"
+                            let branch_name = target.strip_prefix("refs/heads/").unwrap_or(target);
+                            Ok(Some(branch_name.to_string()))
+                        } else {
+                            Ok(None)
+                        }
+                    }
+                    Err(_) => Ok(None),
+                }
+            }
+            Err(e) => Err(e).context("Failed to get HEAD reference"),
         }
     }
 
@@ -291,9 +399,8 @@ impl VcsProvider for GitRepository {
             obj.peel_to_commit()
                 .context("Base reference is not a commit")?
         } else {
-            let head = self.repo.head().context("Failed to get HEAD")?;
-            head.peel_to_commit()
-                .context("HEAD does not point to a commit")?
+            // On unborn repos this auto-creates an initial empty commit.
+            self.head_commit_or_init()?
         };
 
         self.repo
@@ -424,11 +531,9 @@ impl VcsProvider for GitRepository {
 
         // If the branch doesn't exist yet, create it from HEAD so both the CoW
         // fast path and the git2 fallback can reference it.
+        // On unborn repos this auto-creates an initial empty commit.
         if !branch_exists {
-            let head = self.repo.head().context("Failed to get HEAD")?;
-            let head_commit = head
-                .peel_to_commit()
-                .context("HEAD does not point to a commit")?;
+            let head_commit = self.head_commit_or_init()?;
             self.repo
                 .branch(branch, &head_commit, false)
                 .with_context(|| format!("Failed to create branch '{}'", branch))?;

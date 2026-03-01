@@ -14,12 +14,28 @@ pub struct LocalState {
     pub projects: HashMap<String, ProjectState>,
 }
 
+/// A devflow branch — an abstraction above git branches.
+/// Tracks parent-child relationships, worktree paths, and creation time
+/// independently of the VCS provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevflowBranch {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectState {
     pub current_branch: Option<String>,
     pub last_updated: chrono::DateTime<chrono::Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub services: Option<Vec<NamedServiceConfig>>,
+    /// Registry of devflow branches tracked for this project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branches: Option<Vec<DevflowBranch>>,
 }
 
 pub struct LocalStateManager {
@@ -116,17 +132,16 @@ impl LocalStateManager {
             )
         })?;
 
-        // Preserve existing services when updating current branch
-        let existing_services = self
-            .state
-            .projects
-            .get(&project_key)
-            .and_then(|p| p.services.clone());
+        // Preserve existing services and branches when updating current branch
+        let existing = self.state.projects.get(&project_key);
+        let existing_services = existing.and_then(|p| p.services.clone());
+        let existing_branches = existing.and_then(|p| p.branches.clone());
 
         let project_state = ProjectState {
             current_branch: branch,
             last_updated: chrono::Utc::now(),
             services: existing_services,
+            branches: existing_branches,
         };
 
         self.state.projects.insert(project_key, project_state);
@@ -160,11 +175,13 @@ impl LocalStateManager {
 
         let existing = self.state.projects.get(&project_key);
         let current_branch = existing.and_then(|p| p.current_branch.clone());
+        let existing_branches = existing.and_then(|p| p.branches.clone());
 
         let project_state = ProjectState {
             current_branch,
             last_updated: chrono::Utc::now(),
             services: Some(services),
+            branches: existing_branches,
         };
 
         self.state.projects.insert(project_key, project_state);
@@ -189,6 +206,7 @@ impl LocalStateManager {
 
         let existing = self.state.projects.get(&project_key);
         let current_branch = existing.and_then(|p| p.current_branch.clone());
+        let existing_branches = existing.and_then(|p| p.branches.clone());
         let mut services = existing
             .and_then(|p| p.services.clone())
             .unwrap_or_default();
@@ -214,6 +232,7 @@ impl LocalStateManager {
             current_branch,
             last_updated: chrono::Utc::now(),
             services: Some(services),
+            branches: existing_branches,
         };
 
         self.state.projects.insert(project_key, project_state);
@@ -234,6 +253,98 @@ impl LocalStateManager {
         if let Some(project) = self.state.projects.get_mut(&project_key) {
             if let Some(ref mut services) = project.services {
                 services.retain(|b| b.name != name);
+            }
+            project.last_updated = chrono::Utc::now();
+            self.save_state()?;
+        }
+
+        Ok(())
+    }
+
+    /// Remove an entire project from the local state (branch registry, services, current branch).
+    pub fn remove_project(&mut self, project_path: &Path) -> Result<()> {
+        self.refresh_state()?;
+
+        let project_key = self.get_project_key(project_path).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Failed to get project key for path: {}",
+                project_path.display()
+            )
+        })?;
+
+        self.state.projects.remove(&project_key);
+        self.save_state()?;
+        Ok(())
+    }
+
+    // ── Branch registry CRUD ────────────────────────────────────────
+
+    /// Get all registered devflow branches for a project.
+    pub fn get_branches(&self, project_path: &Path) -> Vec<DevflowBranch> {
+        self.get_project_key(project_path)
+            .and_then(|key| self.state.projects.get(&key))
+            .and_then(|p| p.branches.clone())
+            .unwrap_or_default()
+    }
+
+    /// Look up a single registered branch by name.
+    #[allow(dead_code)]
+    pub fn get_branch(&self, project_path: &Path, name: &str) -> Option<DevflowBranch> {
+        self.get_branches(project_path)
+            .into_iter()
+            .find(|b| b.name == name)
+    }
+
+    /// Register (upsert) a devflow branch in the registry.
+    /// If a branch with the same name exists, it is updated.
+    pub fn register_branch(&mut self, project_path: &Path, branch: DevflowBranch) -> Result<()> {
+        self.refresh_state()?;
+
+        let project_key = self.get_project_key(project_path).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Failed to get project key for path: {}",
+                project_path.display()
+            )
+        })?;
+
+        let project = self
+            .state
+            .projects
+            .entry(project_key)
+            .or_insert_with(|| ProjectState {
+                current_branch: None,
+                last_updated: chrono::Utc::now(),
+                services: None,
+                branches: None,
+            });
+
+        let branches = project.branches.get_or_insert_with(Vec::new);
+
+        if let Some(pos) = branches.iter().position(|b| b.name == branch.name) {
+            branches[pos] = branch;
+        } else {
+            branches.push(branch);
+        }
+
+        project.last_updated = chrono::Utc::now();
+        self.save_state()?;
+        Ok(())
+    }
+
+    /// Remove a branch from the registry by name.
+    pub fn unregister_branch(&mut self, project_path: &Path, name: &str) -> Result<()> {
+        self.refresh_state()?;
+
+        let project_key = self.get_project_key(project_path).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Failed to get project key for path: {}",
+                project_path.display()
+            )
+        })?;
+
+        if let Some(project) = self.state.projects.get_mut(&project_key) {
+            if let Some(ref mut branches) = project.branches {
+                branches.retain(|b| b.name != name);
             }
             project.last_updated = chrono::Utc::now();
             self.save_state()?;
@@ -285,6 +396,11 @@ impl LocalStateManager {
             .parent()
             .and_then(|dir| dir.canonicalize().ok())
             .map(|canonical_path| canonical_path.to_string_lossy().to_string())
+    }
+
+    /// Public accessor for the project key, used by `devflow destroy` to clear hook approvals.
+    pub fn get_project_key_for(&self, project_path: &Path) -> Option<String> {
+        self.get_project_key(project_path)
     }
 
     fn get_state_file_path() -> Result<PathBuf> {

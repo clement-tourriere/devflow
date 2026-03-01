@@ -42,7 +42,11 @@ pub struct ClickHouseLocalProvider {
 }
 
 impl ClickHouseLocalProvider {
-    pub fn new(project_name: &str, service_name: &str, config: &ClickHouseConfig) -> anyhow::Result<Self> {
+    pub fn new(
+        project_name: &str,
+        service_name: &str,
+        config: &ClickHouseConfig,
+    ) -> anyhow::Result<Self> {
         let client =
             Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon. Is Docker installed and running? Check with: docker info")?;
 
@@ -324,7 +328,11 @@ impl ClickHouseLocalProvider {
     }
 
     async fn list_managed_containers(&self) -> anyhow::Result<Vec<(String, String, bool)>> {
-        let prefix = format!("devflow-{}-{}-", sanitize(&self.project_name), sanitize(&self.service_name));
+        let prefix = format!(
+            "devflow-{}-{}-",
+            sanitize(&self.project_name),
+            sanitize(&self.service_name)
+        );
 
         let options = ListContainersOptions {
             all: true,

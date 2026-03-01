@@ -11,6 +11,8 @@ mod hooks;
 mod llm;
 mod services;
 mod state;
+#[cfg(feature = "tui")]
+mod tui;
 mod vcs;
 
 use cli::Commands;
@@ -57,6 +59,7 @@ VCS:
 
 Setup & Config:
   init                Initialize devflow configuration
+  destroy             Tear down the entire devflow project (inverse of init)
   config              Show current configuration (-v for precedence details)
   doctor              Run diagnostics and check system health
   install-hooks       Install Git hooks (auto branch/switch on checkout)
@@ -68,6 +71,9 @@ Setup & Config:
 Extensibility:
   hook                Manage lifecycle hooks (show, run, approvals)
   plugin              Manage plugin services (list, check, init)
+
+Interactive:
+  tui                 Launch the interactive terminal UI dashboard
 
 Options:
 {options}")]

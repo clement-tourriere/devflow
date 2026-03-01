@@ -10,6 +10,10 @@ pub struct Config {
     /// Project name (derived from `devflow init <name>` or the directory name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Preferred VCS for this project ("git" or "jj").
+    /// Overrides the global `default_vcs` when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_vcs: Option<crate::vcs::VcsKind>,
     #[serde(default, skip_serializing_if = "DatabaseConfig::is_default")]
     pub database: DatabaseConfig,
     #[serde(default)]
@@ -397,6 +401,9 @@ pub struct LocalConfig {
     pub disabled: Option<bool>,
     pub disabled_branches: Option<Vec<String>>,
     pub worktree: Option<WorktreeConfig>,
+    /// Override the project-level `default_vcs` locally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_vcs: Option<crate::vcs::VcsKind>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -452,10 +459,64 @@ pub struct EnvConfig {
     pub database_prefix: Option<String>,
 }
 
+/// Global user-level configuration, stored at `~/.config/devflow/config.yml`.
+///
+/// This is the lowest-priority layer — project and local configs override it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GlobalConfig {
+    /// Default VCS for new projects ("git" or "jj").
+    /// Used by `devflow init` when auto-initializing a VCS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_vcs: Option<crate::vcs::VcsKind>,
+}
+
+impl GlobalConfig {
+    /// Load the global config from `~/.config/devflow/config.yml`.
+    /// Returns `None` if the file does not exist.
+    pub fn load() -> Result<Option<Self>> {
+        let path = Self::path()?;
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read global config: {}", path.display()))?;
+        let global: GlobalConfig = serde_yaml_ng::from_str(&content)
+            .with_context(|| format!("Failed to parse global config: {}", path.display()))?;
+
+        log::debug!("Loaded global config from: {}", path.display());
+        Ok(Some(global))
+    }
+
+    /// Save the global config to `~/.config/devflow/config.yml`.
+    #[allow(dead_code)]
+    pub fn save(&self) -> Result<()> {
+        let path = Self::path()?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create dir: {}", parent.display()))?;
+        }
+        let content =
+            serde_yaml_ng::to_string(self).context("Failed to serialize global config")?;
+        fs::write(&path, content)
+            .with_context(|| format!("Failed to write global config: {}", path.display()))?;
+        Ok(())
+    }
+
+    /// The canonical path for the global config file.
+    pub fn path() -> Result<PathBuf> {
+        let config_dir = dirs::config_dir()
+            .context("Failed to get user config directory")?
+            .join("devflow");
+        Ok(config_dir.join("config.yml"))
+    }
+}
+
 // The effective configuration after merging all sources
 #[derive(Debug, Clone)]
 pub struct EffectiveConfig {
     pub config: Config,
+    pub global_config: Option<GlobalConfig>,
     pub local_config: Option<LocalConfig>,
     pub env_config: EnvConfig,
     pub disabled: bool,
@@ -503,6 +564,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             name: None,
+            default_vcs: None,
             database: DatabaseConfig::default(),
             git: GitConfig {
                 auto_create_on_branch: true,
@@ -821,6 +883,9 @@ impl Config {
 
     pub fn load_effective_config_with_path_info(
     ) -> Result<(EffectiveConfig, Option<std::path::PathBuf>)> {
+        // Load global user config (~/.config/devflow/config.yml)
+        let global_config = GlobalConfig::load()?;
+
         // Load main config
         let (config, config_path) = Self::load_with_path_info()?;
 
@@ -847,7 +912,8 @@ impl Config {
         let env_config = EnvConfig::load_from_env()?;
 
         // Create effective config
-        let effective_config = EffectiveConfig::new(config, local_config, env_config)?;
+        let effective_config =
+            EffectiveConfig::new(config, global_config, local_config, env_config)?;
 
         Ok((effective_config, config_path))
     }
@@ -923,6 +989,7 @@ impl EnvConfig {
 impl EffectiveConfig {
     pub fn new(
         config: Config,
+        global_config: Option<GlobalConfig>,
         local_config: Option<LocalConfig>,
         env_config: EnvConfig,
     ) -> Result<Self> {
@@ -942,6 +1009,7 @@ impl EffectiveConfig {
 
         Ok(EffectiveConfig {
             config,
+            global_config,
             local_config,
             env_config,
             disabled,
@@ -1029,6 +1097,14 @@ impl EffectiveConfig {
     pub fn get_merged_config(&self) -> Config {
         let mut merged = self.config.clone();
 
+        // Apply global config as base layer (lowest priority — only fills in
+        // fields that are still None after the project config).
+        if let Some(ref global) = self.global_config {
+            if merged.default_vcs.is_none() {
+                merged.default_vcs = global.default_vcs;
+            }
+        }
+
         // Apply local config overrides
         if let Some(ref local_config) = self.local_config {
             if let Some(ref local_db) = local_config.database {
@@ -1101,6 +1177,11 @@ impl EffectiveConfig {
 
             if let Some(ref worktree) = local_config.worktree {
                 merged.worktree = Some(worktree.clone());
+            }
+
+            // Local default_vcs overrides both project and global
+            if let Some(vcs) = local_config.default_vcs {
+                merged.default_vcs = Some(vcs);
             }
         }
 
