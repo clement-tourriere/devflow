@@ -452,6 +452,38 @@ impl DevflowContext {
         Ok(ServicesData { services })
     }
 
+    /// Fetch capability information for the current environment and all configured services.
+    pub async fn fetch_capabilities_bg(config: &Config) -> Result<CapabilitiesData> {
+        let vcs_provider = vcs::detect_vcs_provider(".")
+            .ok()
+            .map(|v| v.provider_name().to_string());
+
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let worktree_cow = match vcs::cow_worktree::detect_cow_capability(&cwd) {
+            vcs::cow_worktree::CowCapability::Apfs => "apfs",
+            vcs::cow_worktree::CowCapability::Reflink => "reflink",
+            vcs::cow_worktree::CowCapability::None => "none",
+        }
+        .to_string();
+
+        let providers = factory::create_all_providers(config).await?;
+        let mut services = Vec::with_capacity(providers.len());
+        for named in &providers {
+            services.push(ServiceCapabilityEntry {
+                service_name: named.name.clone(),
+                provider_name: named.provider.provider_name().to_string(),
+                capabilities: named.provider.capabilities(),
+            });
+        }
+        services.sort_by(|a, b| a.service_name.cmp(&b.service_name));
+
+        Ok(CapabilitiesData {
+            vcs_provider,
+            worktree_cow,
+            services,
+        })
+    }
+
     /// Run doctor checks on all services.
     pub async fn fetch_doctor_bg(config: &Config) -> Result<Vec<DoctorEntry>> {
         let providers = factory::create_all_providers(config).await?;

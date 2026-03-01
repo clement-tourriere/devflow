@@ -1,3 +1,4 @@
+pub mod capabilities;
 pub mod config_view;
 pub mod doctor;
 pub mod environments;

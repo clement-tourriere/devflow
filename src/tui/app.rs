@@ -80,6 +80,7 @@ impl App {
     fn load_initial_data(&mut self) {
         self.spawn_fetch_branches();
         self.spawn_fetch_services();
+        self.spawn_fetch_capabilities();
         self.load_sync_data();
     }
 
@@ -141,6 +142,22 @@ impl App {
                 }
                 Err(e) => {
                     let _ = tx.send(Action::Error(format!("Failed to load services: {}", e)));
+                }
+            }
+        });
+    }
+
+    /// Spawn a background task to fetch capability matrix.
+    fn spawn_fetch_capabilities(&self) {
+        let config = self.context.config.clone();
+        let tx = self.bg_tx.clone();
+        tokio::spawn(async move {
+            match DevflowContext::fetch_capabilities_bg(&config).await {
+                Ok(data) => {
+                    let _ = tx.send(Action::DataLoaded(DataPayload::Capabilities(data)));
+                }
+                Err(e) => {
+                    let _ = tx.send(Action::Error(format!("Failed to load capabilities: {}", e)));
                 }
             }
         });
@@ -606,17 +623,17 @@ impl App {
                     std::mem::replace(&mut self.modal, ModalState::None)
                 {
                     match target {
-                        InputTarget::CreateBranch => {
+                        InputTarget::CreateBranch { base } => {
                             if !text.is_empty() {
-                                let action = Action::CreateBranch {
-                                    name: text,
-                                    base: None,
-                                };
+                                let action = Action::CreateBranch { name: text, base };
                                 self.process_action(action);
                             }
                         }
                         InputTarget::FilterBranches => {
                             self.environments.set_filter(text);
+                        }
+                        InputTarget::FilterLogsPicker => {
+                            self.logs.set_filter(text);
                         }
                     }
                 }
@@ -636,11 +653,36 @@ impl App {
             Action::Error(ref msg) => {
                 self.set_status(msg.clone(), true);
             }
+            Action::StartAllServices(ref branch) => {
+                let services = self.environments.services_for_branch(branch);
+                if services.is_empty() {
+                    self.set_status(format!("No services to start on branch '{}'", branch), true);
+                } else {
+                    self.set_status(
+                        format!("Starting {} service(s) on '{}'...", services.len(), branch),
+                        false,
+                    );
+                    for service in services {
+                        self.spawn_service_op(service, branch.clone(), ServiceOp::Start);
+                    }
+                }
+            }
+            Action::StopAllServices(ref branch) => {
+                let services = self.environments.services_for_branch(branch);
+                if services.is_empty() {
+                    self.set_status(format!("No services to stop on branch '{}'", branch), true);
+                } else {
+                    self.set_status(
+                        format!("Stopping {} service(s) on '{}'...", services.len(), branch),
+                        false,
+                    );
+                    for service in services {
+                        self.spawn_service_op(service, branch.clone(), ServiceOp::Stop);
+                    }
+                }
+            }
             // Actions that are handled internally by components or unused at app level
-            Action::CollapseToggle(_)
-            | Action::StartAllServices(_)
-            | Action::StopAllServices(_)
-            | Action::SelectSubSection(_) => {
+            Action::CollapseToggle(_) | Action::SelectSubSection(_) => {
                 self.dispatch_action(&action);
             }
             Action::Tick | Action::None => {}

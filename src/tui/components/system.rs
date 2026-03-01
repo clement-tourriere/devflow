@@ -7,6 +7,7 @@ use ratatui::{
     Frame,
 };
 
+use super::capabilities::CapabilitiesComponent;
 use super::config_view::ConfigViewComponent;
 use super::doctor::DoctorComponent;
 use super::hooks::HooksComponent;
@@ -20,6 +21,7 @@ enum SubSection {
     Config = 0,
     Hooks = 1,
     Doctor = 2,
+    Capabilities = 3,
 }
 
 impl SubSection {
@@ -28,6 +30,7 @@ impl SubSection {
             0 => SubSection::Config,
             1 => SubSection::Hooks,
             2 => SubSection::Doctor,
+            3 => SubSection::Capabilities,
             _ => SubSection::Config,
         }
     }
@@ -37,11 +40,17 @@ impl SubSection {
             SubSection::Config => "Config",
             SubSection::Hooks => "Hooks",
             SubSection::Doctor => "Doctor",
+            SubSection::Capabilities => "Capabilities",
         }
     }
 }
 
-const SUB_SECTIONS: [SubSection; 3] = [SubSection::Config, SubSection::Hooks, SubSection::Doctor];
+const SUB_SECTIONS: [SubSection; 4] = [
+    SubSection::Config,
+    SubSection::Hooks,
+    SubSection::Doctor,
+    SubSection::Capabilities,
+];
 
 /// The System tab consolidates Config, Hooks, and Doctor into one view.
 /// Users switch sub-sections with 1/2/3 keys (or left/right arrows).
@@ -50,6 +59,7 @@ pub struct SystemComponent {
     config_view: ConfigViewComponent,
     hooks_view: HooksComponent,
     doctor: DoctorComponent,
+    capabilities: CapabilitiesComponent,
 }
 
 impl SystemComponent {
@@ -59,6 +69,7 @@ impl SystemComponent {
             config_view: ConfigViewComponent::new(),
             hooks_view: HooksComponent::new(),
             doctor: DoctorComponent::new(),
+            capabilities: CapabilitiesComponent::new(),
         }
     }
 
@@ -71,6 +82,7 @@ impl SystemComponent {
             SubSection::Config => self.config_view.on_blur(),
             SubSection::Hooks => self.hooks_view.on_blur(),
             SubSection::Doctor => self.doctor.on_blur(),
+            SubSection::Capabilities => self.capabilities.on_blur(),
         }
         self.active_section = section;
         // Focus new
@@ -78,6 +90,7 @@ impl SystemComponent {
             SubSection::Config => self.config_view.on_focus(),
             SubSection::Hooks => self.hooks_view.on_focus(),
             SubSection::Doctor => self.doctor.on_focus(),
+            SubSection::Capabilities => self.capabilities.on_focus(),
         }
     }
 
@@ -133,6 +146,10 @@ impl Component for SystemComponent {
                 self.switch_section(SubSection::Doctor);
                 return Action::None;
             }
+            KeyCode::Char('4') => {
+                self.switch_section(SubSection::Capabilities);
+                return Action::None;
+            }
             KeyCode::Left | KeyCode::Char('h') => {
                 let idx = self.active_section as usize;
                 if idx > 0 {
@@ -155,6 +172,7 @@ impl Component for SystemComponent {
             SubSection::Config => self.config_view.handle_key_event(key),
             SubSection::Hooks => self.hooks_view.handle_key_event(key),
             SubSection::Doctor => self.doctor.handle_key_event(key),
+            SubSection::Capabilities => self.capabilities.handle_key_event(key),
         }
     }
 
@@ -163,6 +181,7 @@ impl Component for SystemComponent {
         self.config_view.update(action);
         self.hooks_view.update(action);
         self.doctor.update(action);
+        self.capabilities.update(action);
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, spinner: &str) {
@@ -179,6 +198,7 @@ impl Component for SystemComponent {
             SubSection::Config => self.config_view.render(frame, chunks[1], spinner),
             SubSection::Hooks => self.hooks_view.render(frame, chunks[1], spinner),
             SubSection::Doctor => self.doctor.render(frame, chunks[1], spinner),
+            SubSection::Capabilities => self.capabilities.render(frame, chunks[1], spinner),
         }
     }
 
@@ -187,6 +207,7 @@ impl Component for SystemComponent {
             SubSection::Config => self.config_view.on_focus(),
             SubSection::Hooks => self.hooks_view.on_focus(),
             SubSection::Doctor => self.doctor.on_focus(),
+            SubSection::Capabilities => self.capabilities.on_focus(),
         }
     }
 
@@ -195,6 +216,7 @@ impl Component for SystemComponent {
             SubSection::Config => self.config_view.on_blur(),
             SubSection::Hooks => self.hooks_view.on_blur(),
             SubSection::Doctor => self.doctor.on_blur(),
+            SubSection::Capabilities => self.capabilities.on_blur(),
         }
     }
 }

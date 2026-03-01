@@ -30,6 +30,7 @@ use cli::Commands;
 
 Branch Management:
   list                List all branches (with service + worktree status)
+  graph               Render full environment graph (branch tree + services)
   switch              Switch to a branch (creates worktree/service branches if needed)
   remove              Remove a branch, its worktree, and associated service branches
   merge               Merge current branch into target (with optional cleanup)
@@ -40,6 +41,7 @@ Services:
   service remove      Remove a service provider configuration
   service list        List configured services
   service status      Show service status
+  service capabilities Show service capability matrix
   service create      Create a new service branch
   service delete      Delete a service branch
   service start       Start a stopped branch container (local provider)

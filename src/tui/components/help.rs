@@ -35,10 +35,12 @@ pub fn render_help(frame: &mut Frame) {
                 ("Enter", "Switch to selected branch"),
                 ("c", "Create new branch"),
                 ("d", "Delete selected branch"),
-                ("S", "Start service on branch"),
-                ("x", "Stop service on branch"),
-                ("R", "Reset service on branch"),
-                ("l", "View container logs"),
+                ("n / p", "Cycle focused service"),
+                ("S", "Start focused service"),
+                ("x", "Stop focused service"),
+                ("R", "Reset focused service"),
+                ("A / X", "Start/stop all services"),
+                ("l", "Logs for focused service"),
                 ("/", "Filter environments"),
                 ("Esc", "Clear filter"),
             ],
@@ -46,7 +48,10 @@ pub fn render_help(frame: &mut Frame) {
         (
             "System View (2)",
             vec![
-                ("1/2/3", "Switch sub-section (Config/Hooks/Doctor)"),
+                (
+                    "1/2/3/4",
+                    "Switch sub-section (Config/Hooks/Doctor/Capabilities)",
+                ),
                 ("h/l / Left/Right", "Previous/next sub-section"),
                 ("j/k / Up/Down", "Navigate/scroll content"),
                 ("g/G", "Go to top/bottom"),
@@ -59,6 +64,8 @@ pub fn render_help(frame: &mut Frame) {
             vec![
                 ("f", "Toggle picker/content focus"),
                 ("j/k / Up/Down", "Navigate picker or scroll logs"),
+                ("/", "Filter service/branch picker"),
+                ("Esc", "Clear picker filter"),
                 ("Enter", "Load logs for selected service"),
                 ("g/G", "Go to top/bottom (content)"),
                 ("PgUp/PgDn", "Page up/down (content)"),

@@ -19,6 +19,19 @@ pub enum Commands {
     #[command(about = "List all branches (with service + worktree status)")]
     List,
     #[command(
+        about = "Render full environment graph",
+        long_about = "Render the full environment graph (branch tree + service states + worktree paths).
+
+This command is designed for both humans and automation:
+  - human mode prints an ASCII tree with service branches under each branch
+  - --json mode prints a graph document suitable for tools/agents
+
+Examples:
+  devflow graph
+  devflow --json graph"
+    )]
+    Graph,
+    #[command(
         about = "Switch to a branch (creates worktree/service branches if needed)",
         long_about = "Switch to a branch (creates worktree/service branches if needed).\n\nWith no arguments, shows an interactive branch picker with fuzzy search.\nWith a branch name, switches to that branch, creating service branches and\nworktrees if they don't exist.\n\nExamples:\n  devflow switch                     # Interactive picker\n  devflow switch feature-auth        # Switch to existing branch\n  devflow switch -c feature-new      # Create new Git branch and switch\n  devflow switch --template           # Switch to main/template\n  devflow switch feature-auth -x 'npm run migrate'  # Run command after switch"
     )]
@@ -246,6 +259,8 @@ pub enum ServiceCommands {
     List,
     #[command(about = "Show service status")]
     Status,
+    #[command(about = "Show service capabilities")]
+    Capabilities,
     #[command(
         about = "Add a new service provider",
         long_about = "Add a new service provider to the project.\n\nConfigures a new service provider (local Docker, Neon, ClickHouse, etc.) and\nstores it in local state. When run without flags, an interactive wizard guides\nyou through service type, provider, and name selection.\n\nExamples:\n  devflow service add                              # Interactive wizard\n  devflow service add mydb                         # Interactive (name pre-filled)\n  devflow service add mydb --provider neon          # Add Neon cloud provider\n  devflow service add analytics --provider local --service-type clickhouse"
@@ -407,6 +422,7 @@ pub async fn handle_command(
         cmd,
         Commands::Service { .. }
             | Commands::List
+            | Commands::Graph
             | Commands::Connection { .. }
             | Commands::Status
             | Commands::Cleanup { .. }
@@ -838,6 +854,45 @@ pub async fn handle_command(
             }
         }
         Commands::Capabilities => {
+            let mut config_with_state = config.clone();
+            if let Some(ref path) = config_path {
+                if let Ok(state) = LocalStateManager::new() {
+                    if let Some(state_services) = state.get_services(path) {
+                        config_with_state.services = Some(state_services);
+                    }
+                }
+            }
+
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let cow_capability = match vcs::cow_worktree::detect_cow_capability(&cwd) {
+                vcs::cow_worktree::CowCapability::Apfs => "apfs",
+                vcs::cow_worktree::CowCapability::Reflink => "reflink",
+                vcs::cow_worktree::CowCapability::None => "none",
+            };
+
+            let vcs_provider = vcs::detect_vcs_provider(".")
+                .ok()
+                .map(|v| v.provider_name().to_string());
+
+            let mut service_capabilities = serde_json::Map::new();
+            let mut service_capabilities_error: Option<String> = None;
+            match services::factory::create_all_providers(&config_with_state).await {
+                Ok(providers) => {
+                    for named in &providers {
+                        service_capabilities.insert(
+                            named.name.clone(),
+                            serde_json::json!({
+                                "provider": named.provider.provider_name(),
+                                "capabilities": named.provider.capabilities(),
+                            }),
+                        );
+                    }
+                }
+                Err(e) => {
+                    service_capabilities_error = Some(e.to_string());
+                }
+            }
+
             let payload = serde_json::json!({
                 "schema_version": "1.0",
                 "json_mode": {
@@ -864,6 +919,12 @@ pub async fn handle_command(
                         "delete"
                     ],
                 },
+                "environment": {
+                    "vcs_provider": vcs_provider,
+                    "worktree_cow": cow_capability,
+                },
+                "service_capabilities": service_capabilities,
+                "service_capabilities_error": service_capabilities_error,
             });
 
             if json_output {
@@ -874,6 +935,32 @@ pub async fn handle_command(
                 println!("- Non-interactive: no prompts; --force required for destroy/remove");
                 println!("- Multi-service partial failures: command exits non-zero by default");
                 println!("- Recommended flags for agents: --json --non-interactive");
+                println!(
+                    "- Environment detection: vcs={}, worktree_cow={}",
+                    payload["environment"]["vcs_provider"]
+                        .as_str()
+                        .unwrap_or("none"),
+                    cow_capability
+                );
+                if !service_capabilities.is_empty() {
+                    println!("- Service capabilities:");
+                    for (name, details) in &service_capabilities {
+                        let caps = &details["capabilities"];
+                        println!(
+                            "  - {} ({}): lifecycle={} logs={} seed={} destroy={} cleanup={}",
+                            name,
+                            details["provider"].as_str().unwrap_or("unknown"),
+                            yes_no(caps["lifecycle"].as_bool()),
+                            yes_no(caps["logs"].as_bool()),
+                            yes_no(caps["seed_from_source"].as_bool()),
+                            yes_no(caps["destroy_project"].as_bool()),
+                            yes_no(caps["cleanup"].as_bool()),
+                        );
+                    }
+                }
+                if let Some(err) = service_capabilities_error {
+                    println!("- Service capability probe warning: {}", err);
+                }
             }
         }
         Commands::ShellInit { shell } => {
@@ -1346,6 +1433,375 @@ fn print_enriched_branch_list(
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct EnvGraphServiceEntry {
+    service_name: String,
+    provider_name: String,
+    state: Option<String>,
+    database_name: String,
+    parent_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct EnvGraphNode {
+    name: String,
+    parent: Option<String>,
+    is_default: bool,
+    is_cwd: bool,
+    is_active: bool,
+    worktree_path: Option<String>,
+    services: Vec<EnvGraphServiceEntry>,
+}
+
+async fn handle_environment_graph(
+    config: &Config,
+    config_path: &Option<PathBuf>,
+    json_output: bool,
+) -> Result<()> {
+    use std::collections::{HashMap, HashSet};
+
+    // VCS view
+    let vcs_provider = vcs::detect_vcs_provider(".").ok();
+    let vcs_provider_name = vcs_provider
+        .as_ref()
+        .map(|p| p.provider_name().to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let git_branches: Vec<crate::vcs::BranchInfo> = vcs_provider
+        .as_ref()
+        .and_then(|r| r.list_branches().ok())
+        .unwrap_or_default();
+    let worktrees: Vec<crate::vcs::WorktreeInfo> = vcs_provider
+        .as_ref()
+        .and_then(|r| r.list_worktrees().ok())
+        .unwrap_or_default();
+    let cwd_branch = vcs_provider
+        .as_ref()
+        .and_then(|r| r.current_branch().ok().flatten());
+
+    // Local state view
+    let mut registry: HashMap<String, Option<String>> = HashMap::new();
+    let mut active_branch: Option<String> = None;
+    if let Some(path) = config_path.as_ref() {
+        if let Ok(state) = LocalStateManager::new() {
+            active_branch = state.get_current_branch(path);
+            registry = state
+                .get_branches(path)
+                .into_iter()
+                .map(|b| (b.name, b.parent))
+                .collect();
+        }
+    }
+
+    // Service view
+    let mut service_entries_by_branch: HashMap<String, Vec<EnvGraphServiceEntry>> = HashMap::new();
+    let mut service_probe_warnings: Vec<String> = Vec::new();
+    match services::factory::create_all_providers(config).await {
+        Ok(all_providers) => {
+            for named in &all_providers {
+                let provider_name = named.provider.provider_name().to_string();
+                match named.provider.list_branches().await {
+                    Ok(branches) => {
+                        for b in branches {
+                            service_entries_by_branch
+                                .entry(b.name.clone())
+                                .or_default()
+                                .push(EnvGraphServiceEntry {
+                                    service_name: named.name.clone(),
+                                    provider_name: provider_name.clone(),
+                                    state: b.state.clone(),
+                                    database_name: b.database_name.clone(),
+                                    parent_branch: b.parent_branch.clone(),
+                                });
+                        }
+                    }
+                    Err(e) => {
+                        service_probe_warnings
+                            .push(format!("{} ({}): {}", named.name, provider_name, e));
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            service_probe_warnings.push(format!("provider initialization failed: {}", e));
+        }
+    }
+
+    let wt_lookup: HashMap<String, PathBuf> = worktrees
+        .iter()
+        .filter_map(|wt| wt.branch.as_ref().map(|b| (b.clone(), wt.path.clone())))
+        .collect();
+
+    // Union of all known branch names
+    let mut all_names: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+
+    for gb in &git_branches {
+        if seen.insert(gb.name.clone()) {
+            all_names.push(gb.name.clone());
+        }
+    }
+    for name in registry.keys() {
+        if seen.insert(name.clone()) {
+            all_names.push(name.clone());
+        }
+    }
+    for name in service_entries_by_branch.keys() {
+        if seen.insert(name.clone()) {
+            all_names.push(name.clone());
+        }
+    }
+
+    if all_names.is_empty() {
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "vcs_provider": vcs_provider_name,
+                    "nodes": [],
+                    "roots": [],
+                    "cwd_branch": cwd_branch,
+                    "active_branch": active_branch,
+                    "warnings": service_probe_warnings,
+                }))?
+            );
+        } else {
+            println!("Environment graph: (empty)");
+        }
+        return Ok(());
+    }
+
+    // Parent map with precedence: registry > service branch parent
+    let mut parent_map: HashMap<String, String> = HashMap::new();
+
+    for (name, entries) in &service_entries_by_branch {
+        if let Some(parent) = entries.iter().find_map(|e| e.parent_branch.clone()) {
+            if seen.contains(parent.as_str()) {
+                parent_map.insert(name.clone(), parent);
+            }
+        }
+    }
+
+    for (name, parent) in &registry {
+        if let Some(parent_name) = parent {
+            if seen.contains(parent_name.as_str()) {
+                parent_map.insert(name.clone(), parent_name.clone());
+            }
+        }
+    }
+
+    let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
+    for (child, parent) in &parent_map {
+        children_map
+            .entry(parent.clone())
+            .or_default()
+            .push(child.clone());
+    }
+    for kids in children_map.values_mut() {
+        kids.sort();
+    }
+
+    // Roots
+    let mut roots: Vec<String> = all_names
+        .iter()
+        .filter(|name| !parent_map.contains_key(name.as_str()))
+        .cloned()
+        .collect();
+
+    let cwd_normalized = cwd_branch
+        .as_deref()
+        .map(|b| config.get_normalized_branch_name(b));
+    let active_normalized = active_branch
+        .as_deref()
+        .map(|b| config.get_normalized_branch_name(b));
+
+    roots.sort_by(|a, b| {
+        let a_default = git_branches.iter().any(|gb| gb.name == *a && gb.is_default);
+        let b_default = git_branches.iter().any(|gb| gb.name == *b && gb.is_default);
+        if a_default != b_default {
+            return b_default.cmp(&a_default);
+        }
+
+        let a_active =
+            active_branch.as_deref() == Some(a.as_str()) || active_normalized.as_deref() == Some(a);
+        let b_active =
+            active_branch.as_deref() == Some(b.as_str()) || active_normalized.as_deref() == Some(b);
+        if a_active != b_active {
+            return b_active.cmp(&a_active);
+        }
+
+        let a_cwd =
+            cwd_branch.as_deref() == Some(a.as_str()) || cwd_normalized.as_deref() == Some(a);
+        let b_cwd =
+            cwd_branch.as_deref() == Some(b.as_str()) || cwd_normalized.as_deref() == Some(b);
+        if a_cwd != b_cwd {
+            return b_cwd.cmp(&a_cwd);
+        }
+
+        a.cmp(b)
+    });
+
+    // Build node map for JSON and human rendering
+    let mut node_map: HashMap<String, EnvGraphNode> = HashMap::new();
+    for name in &all_names {
+        let normalized = config.get_normalized_branch_name(name);
+
+        let mut services = Vec::new();
+        if let Some(entries) = service_entries_by_branch.get(name) {
+            services.extend(entries.iter().cloned());
+        }
+        if normalized != *name {
+            if let Some(entries) = service_entries_by_branch.get(&normalized) {
+                for entry in entries {
+                    if !services
+                        .iter()
+                        .any(|e| e.service_name == entry.service_name)
+                    {
+                        services.push(entry.clone());
+                    }
+                }
+            }
+        }
+        services.sort_by(|a, b| a.service_name.cmp(&b.service_name));
+
+        let is_cwd =
+            cwd_branch.as_deref() == Some(name.as_str()) || cwd_normalized.as_deref() == Some(name);
+        let is_active = active_branch.as_deref() == Some(name.as_str())
+            || active_normalized.as_deref() == Some(name);
+        let is_default = git_branches
+            .iter()
+            .any(|gb| gb.name == *name && gb.is_default);
+
+        node_map.insert(
+            name.clone(),
+            EnvGraphNode {
+                name: name.clone(),
+                parent: parent_map.get(name).cloned(),
+                is_default,
+                is_cwd,
+                is_active,
+                worktree_path: wt_lookup
+                    .get(name)
+                    .map(|p| p.display().to_string())
+                    .or_else(|| {
+                        wt_lookup
+                            .iter()
+                            .find(|(branch, _)| config.get_normalized_branch_name(branch) == *name)
+                            .map(|(_, p)| p.display().to_string())
+                    }),
+                services,
+            },
+        );
+    }
+
+    if json_output {
+        let mut nodes: Vec<EnvGraphNode> = node_map.values().cloned().collect();
+        nodes.sort_by(|a, b| a.name.cmp(&b.name));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "vcs_provider": vcs_provider_name,
+                "cwd_branch": cwd_branch,
+                "active_branch": active_branch,
+                "roots": roots,
+                "nodes": nodes,
+                "warnings": service_probe_warnings,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("Environment graph ({})", vcs_provider_name);
+    if let Some(active) = active_branch.as_deref() {
+        println!("Active branch: {}", active);
+    }
+    if let Some(cwd) = cwd_branch.as_deref() {
+        println!("CWD branch: {}", cwd);
+    }
+    if !service_probe_warnings.is_empty() {
+        println!("Warnings:");
+        for warning in &service_probe_warnings {
+            println!("  - {}", warning);
+        }
+    }
+
+    fn print_node(
+        name: &str,
+        prefix: &str,
+        connector: &str,
+        children_map: &HashMap<String, Vec<String>>,
+        node_map: &HashMap<String, EnvGraphNode>,
+    ) {
+        let Some(node) = node_map.get(name) else {
+            return;
+        };
+
+        let marker = if node.is_cwd { "* " } else { "  " };
+        let mut tags = Vec::new();
+        if node.is_default {
+            tags.push("default".to_string());
+        }
+        if node.is_active {
+            tags.push("active".to_string());
+        }
+        if let Some(path) = &node.worktree_path {
+            tags.push(format!("worktree: {}", path));
+        }
+
+        if tags.is_empty() {
+            println!("{}{}{}", marker, connector, node.name);
+        } else {
+            println!(
+                "{}{}{}  [{}]",
+                marker,
+                connector,
+                node.name,
+                tags.join(", ")
+            );
+        }
+
+        for svc in &node.services {
+            let state = svc.state.as_deref().unwrap_or("unknown");
+            let mut parts = vec![format!("{}:{}", svc.service_name, state)];
+            parts.push(format!("provider: {}", svc.provider_name));
+            parts.push(format!("db: {}", svc.database_name));
+            if let Some(parent) = &svc.parent_branch {
+                parts.push(format!("parent: {}", parent));
+            }
+            println!("{}   • {}", prefix, parts.join(", "));
+        }
+
+        if let Some(kids) = children_map.get(name) {
+            let count = kids.len();
+            for (i, child) in kids.iter().enumerate() {
+                let is_last = i == count - 1;
+                let child_connector = if is_last {
+                    format!("{}└─ ", prefix)
+                } else {
+                    format!("{}├─ ", prefix)
+                };
+                let child_prefix = if is_last {
+                    format!("{}   ", prefix)
+                } else {
+                    format!("{}│  ", prefix)
+                };
+                print_node(
+                    child,
+                    &child_prefix,
+                    &child_connector,
+                    children_map,
+                    node_map,
+                );
+            }
+        }
+    }
+
+    for root in &roots {
+        print_node(root, "", "", &children_map, &node_map);
+    }
+
+    Ok(())
+}
+
 /// Build enriched JSON for the list command, merging git + worktree + service info.
 fn enrich_branch_list_json(
     service_branches: &[services::BranchInfo],
@@ -1445,6 +1901,14 @@ fn enrich_branch_list_json(
     }
 
     serde_json::Value::Array(entries)
+}
+
+fn yes_no(value: Option<bool>) -> &'static str {
+    if value.unwrap_or(false) {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 /// Detect the current shell from the `$SHELL` environment variable.
@@ -2418,6 +2882,9 @@ async fn handle_branch_command(
                 print_enriched_branch_list(&branches, config, &config_path);
             }
         }
+        Commands::Graph => {
+            handle_environment_graph(config, config_path, json_output).await?;
+        }
         Commands::Switch {
             branch_name,
             create,
@@ -3139,6 +3606,70 @@ async fn handle_service_dispatch(
                 }
             }
         }
+        ServiceCommands::Capabilities => {
+            let has_multiple_services = config.resolve_services().len() > 1;
+            if database_name.is_none() && has_multiple_services {
+                return handle_multi_service_aggregation(
+                    ServiceAggregation::Capabilities,
+                    config,
+                    json_output,
+                    &config_path,
+                )
+                .await;
+            }
+
+            match services::factory::resolve_provider(config, database_name).await {
+                Ok(named) => {
+                    let caps = named.provider.capabilities();
+
+                    if json_output {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "service": named.name,
+                                "provider": named.provider.provider_name(),
+                                "capabilities": caps,
+                            }))?
+                        );
+                    } else {
+                        println!(
+                            "Service: {} ({})",
+                            named.name,
+                            named.provider.provider_name()
+                        );
+                        println!("  lifecycle: {}", if caps.lifecycle { "yes" } else { "no" });
+                        println!("  logs: {}", if caps.logs { "yes" } else { "no" });
+                        println!(
+                            "  seed_from_source: {}",
+                            if caps.seed_from_source { "yes" } else { "no" }
+                        );
+                        println!(
+                            "  destroy_project: {}",
+                            if caps.destroy_project { "yes" } else { "no" }
+                        );
+                        println!("  cleanup: {}", if caps.cleanup { "yes" } else { "no" });
+                        println!(
+                            "  template_from_time: {}",
+                            if caps.template_from_time { "yes" } else { "no" }
+                        );
+                        println!("  max_branch_name_length: {}", caps.max_branch_name_length);
+                    }
+                }
+                Err(e) => {
+                    if json_output {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "error": e.to_string(),
+                                "services": null,
+                            }))?
+                        );
+                    } else {
+                        println!("No service provider available: {}", e);
+                    }
+                }
+            }
+        }
         // Provider operations: delegate to handle_service_provider_command
         other => {
             return handle_service_provider_command(
@@ -3684,6 +4215,7 @@ enum ServiceAggregation {
     List,
     Status,
     Doctor,
+    Capabilities,
 }
 
 /// Handle aggregation commands (List, Status, Doctor) across all services.
@@ -3734,6 +4266,19 @@ async fn handle_multi_service_aggregation(
                     } else {
                         println!("Services:");
                         println!("  [FAIL] Could not initialize providers: {}", e);
+                    }
+                }
+                ServiceAggregation::Capabilities => {
+                    if json_output {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "error": format!("Failed to create service providers: {}", e),
+                                "services": null,
+                            }))?
+                        );
+                    } else {
+                        println!("Services: failed to initialize providers ({})", e);
                     }
                 }
             }
@@ -3855,6 +4400,37 @@ async fn handle_multi_service_aggregation(
                         let icon = if check.available { "OK" } else { "FAIL" };
                         println!("  [{}] {}: {}", icon, check.name, check.detail);
                     }
+                    println!();
+                }
+            }
+        }
+        ServiceAggregation::Capabilities => {
+            if json_output {
+                let mut map = serde_json::Map::new();
+                for named in &all_providers {
+                    map.insert(
+                        named.name.clone(),
+                        serde_json::json!({
+                            "provider": named.provider.provider_name(),
+                            "capabilities": named.provider.capabilities(),
+                        }),
+                    );
+                }
+                println!("{}", serde_json::to_string_pretty(&map)?);
+            } else {
+                for named in &all_providers {
+                    let caps = named.provider.capabilities();
+                    println!("[{}] ({})", named.name, named.provider.provider_name());
+                    println!(
+                        "  lifecycle={} logs={} seed={} destroy={} cleanup={} template_from_time={} max_branch_name_length={}",
+                        if caps.lifecycle { "yes" } else { "no" },
+                        if caps.logs { "yes" } else { "no" },
+                        if caps.seed_from_source { "yes" } else { "no" },
+                        if caps.destroy_project { "yes" } else { "no" },
+                        if caps.cleanup { "yes" } else { "no" },
+                        if caps.template_from_time { "yes" } else { "no" },
+                        caps.max_branch_name_length,
+                    );
                     println!();
                 }
             }

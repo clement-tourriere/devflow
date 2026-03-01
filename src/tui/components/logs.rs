@@ -40,9 +40,11 @@ pub struct LogsComponent {
     content_height: u16,
     loading: bool,
     // Service/branch picker
+    all_picker_entries: Vec<PickerEntry>,
     picker_entries: Vec<PickerEntry>,
     picker_state: ListState,
     picker_selected: usize,
+    picker_filter: String,
     focus: LogsFocus,
 }
 
@@ -57,9 +59,11 @@ impl LogsComponent {
             scroll_offset: 0,
             content_height: 0,
             loading: false,
+            all_picker_entries: Vec::new(),
             picker_entries: Vec::new(),
             picker_state,
             picker_selected: 0,
+            picker_filter: String::new(),
             focus: LogsFocus::Picker,
         }
     }
@@ -83,16 +87,35 @@ impl LogsComponent {
 
     /// Build picker entries from services data (all service branches across all services).
     fn update_picker(&mut self, services: &ServicesData) {
-        self.picker_entries.clear();
+        self.all_picker_entries.clear();
         for svc in &services.services {
             for branch in &svc.branches {
-                self.picker_entries.push(PickerEntry {
+                self.all_picker_entries.push(PickerEntry {
                     service_name: svc.name.clone(),
                     branch_name: branch.name.clone(),
                     state: branch.state.clone(),
                 });
             }
         }
+        self.apply_picker_filter();
+    }
+
+    fn apply_picker_filter(&mut self) {
+        if self.picker_filter.is_empty() {
+            self.picker_entries = self.all_picker_entries.clone();
+        } else {
+            let needle = self.picker_filter.to_lowercase();
+            self.picker_entries = self
+                .all_picker_entries
+                .iter()
+                .filter(|entry| {
+                    entry.service_name.to_lowercase().contains(&needle)
+                        || entry.branch_name.to_lowercase().contains(&needle)
+                })
+                .cloned()
+                .collect();
+        }
+
         // Clamp selection
         if self.picker_selected >= self.picker_entries.len() {
             self.picker_selected = self.picker_entries.len().saturating_sub(1);
@@ -134,12 +157,22 @@ impl LogsComponent {
             theme::BORDER_INACTIVE
         };
 
+        let title = if self.picker_filter.is_empty() {
+            format!(" Services ({}) ", self.picker_entries.len())
+        } else {
+            format!(
+                " Services ({}) [filter: {}] ",
+                self.picker_entries.len(),
+                self.picker_filter
+            )
+        };
+
         let list = List::new(items)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(border_color))
-                    .title(format!(" Services ({}) ", self.picker_entries.len())),
+                    .title(title),
             )
             .highlight_style(theme::highlight_style())
             .highlight_symbol(">> ");
@@ -280,6 +313,17 @@ impl Component for LogsComponent {
                     self.move_picker(1);
                     Action::None
                 }
+                KeyCode::Char('/') => Action::ShowInput {
+                    title: "Filter logs picker".to_string(),
+                    on_submit: InputTarget::FilterLogsPicker,
+                },
+                KeyCode::Esc => {
+                    if !self.picker_filter.is_empty() {
+                        self.picker_filter.clear();
+                        self.apply_picker_filter();
+                    }
+                    Action::None
+                }
                 KeyCode::Enter => {
                     if let Some(entry) = self.picker_entries.get(self.picker_selected) {
                         Action::ViewLogs {
@@ -356,5 +400,12 @@ impl Component for LogsComponent {
 
         self.render_picker(frame, chunks[0]);
         self.render_log_content(frame, chunks[1], spinner);
+    }
+}
+
+impl LogsComponent {
+    pub fn set_filter(&mut self, filter: String) {
+        self.picker_filter = filter;
+        self.apply_picker_filter();
     }
 }

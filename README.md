@@ -218,6 +218,8 @@ devflow create <branch> --from <parent>  # Create from a specific parent
 devflow delete <branch>                  # Delete a service branch
 devflow remove <branch>                  # Remove branch + worktree + all services
 devflow list                             # List all branches (tree view)
+devflow graph                            # Full environment graph (human view)
+devflow --json graph                     # Full environment graph (machine view)
 devflow switch                           # Interactive switch with fuzzy search
 devflow switch <branch>                  # Switch to a branch (creates if needed)
 devflow switch --template                # Switch to main/template
@@ -253,10 +255,23 @@ devflow config                           # Current configuration
 devflow config -v                        # Config with precedence details
 devflow doctor                           # System health check
 devflow capabilities                     # Automation contract summary
+devflow service capabilities             # Service provider capability matrix
 devflow connection <branch>              # Connection URI (default)
 devflow connection <branch> --format env # Environment variables
 devflow connection <branch> --format json # JSON object
 ```
+
+### TUI Dashboard
+
+```bash
+devflow tui
+```
+
+The TUI now includes:
+
+- **Environments**: tree view with parent/child branches, service states, focused-service actions, and start/stop-all shortcuts.
+- **System**: consolidated config, hooks, and doctor panels.
+- **Logs**: service/branch picker with filter support and keyboard-driven navigation.
 
 ### Setup
 

@@ -7,6 +7,8 @@ pub mod clickhouse;
 #[cfg(feature = "service-local")]
 pub mod generic;
 #[cfg(feature = "service-local")]
+pub mod local_docker;
+#[cfg(feature = "service-local")]
 pub mod mysql;
 
 use anyhow::Result;
@@ -39,6 +41,17 @@ pub struct ProjectInfo {
     pub name: String,
     pub storage_driver: Option<String>,
     pub image: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceCapabilities {
+    pub lifecycle: bool,
+    pub logs: bool,
+    pub destroy_project: bool,
+    pub cleanup: bool,
+    pub seed_from_source: bool,
+    pub template_from_time: bool,
+    pub max_branch_name_length: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +176,19 @@ pub trait ServiceProvider: Send + Sync {
 
     // Get provider display name
     fn provider_name(&self) -> &'static str;
+
+    // Machine-readable capability summary for UI/automation.
+    fn capabilities(&self) -> ServiceCapabilities {
+        ServiceCapabilities {
+            lifecycle: self.supports_lifecycle(),
+            logs: false,
+            destroy_project: self.supports_destroy(),
+            cleanup: self.supports_cleanup(),
+            seed_from_source: false,
+            template_from_time: self.supports_template_from_time(),
+            max_branch_name_length: self.max_branch_name_length(),
+        }
+    }
 }
 
 /// Clone a directory using platform-optimal Copy-on-Write when available.

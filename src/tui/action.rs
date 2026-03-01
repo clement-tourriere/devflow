@@ -95,8 +95,9 @@ pub enum Action {
 /// Where to send input dialog results.
 #[derive(Debug, Clone)]
 pub enum InputTarget {
-    CreateBranch,
+    CreateBranch { base: Option<String> },
     FilterBranches,
+    FilterLogsPicker,
 }
 
 /// Async data payloads that come back from background tasks.
@@ -105,6 +106,7 @@ pub enum InputTarget {
 pub enum DataPayload {
     Branches(BranchesData),
     Services(ServicesData),
+    Capabilities(CapabilitiesData),
     ConnectionInfo(Vec<ConnectionInfoEntry>),
     DoctorResults(Vec<DoctorEntry>),
     Logs { service: String, content: String },
@@ -173,6 +175,20 @@ pub struct ProjectInfoEntry {
 #[derive(Debug, Clone)]
 pub struct ServicesData {
     pub services: Vec<ServiceEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CapabilitiesData {
+    pub vcs_provider: Option<String>,
+    pub worktree_cow: String,
+    pub services: Vec<ServiceCapabilityEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceCapabilityEntry {
+    pub service_name: String,
+    pub provider_name: String,
+    pub capabilities: crate::services::ServiceCapabilities,
 }
 
 #[derive(Debug, Clone)]

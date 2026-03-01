@@ -39,6 +39,7 @@ pub struct EnvironmentsComponent {
     filter: String,
     loading: bool,
     collapsed: HashSet<String>,
+    service_focus: HashMap<String, usize>,
 }
 
 impl EnvironmentsComponent {
@@ -53,6 +54,7 @@ impl EnvironmentsComponent {
             filter: String::new(),
             loading: true,
             collapsed: HashSet::new(),
+            service_focus: HashMap::new(),
         }
     }
 
@@ -60,6 +62,7 @@ impl EnvironmentsComponent {
         self.data = Some(data);
         self.loading = false;
         self.rebuild_tree();
+        self.normalize_service_focus();
         // Try to select current branch
         if let Some(idx) = self.tree_rows.iter().position(|r| r.branch.is_current) {
             self.selected_index = idx;
@@ -161,6 +164,7 @@ impl EnvironmentsComponent {
         }
 
         self.tree_rows = tree_rows;
+        self.normalize_service_focus();
     }
 
     fn flatten_node_static(
@@ -223,6 +227,65 @@ impl EnvironmentsComponent {
 
     fn selected_row(&self) -> Option<&TreeRow> {
         self.tree_rows.get(self.selected_index)
+    }
+
+    fn normalize_service_focus(&mut self) {
+        // Drop stale entries for branches no longer present.
+        let valid_branches: HashSet<&str> = self
+            .tree_rows
+            .iter()
+            .map(|row| row.branch.name.as_str())
+            .collect();
+        self.service_focus
+            .retain(|branch, _| valid_branches.contains(branch.as_str()));
+
+        // Clamp focused service index per branch.
+        for row in &self.tree_rows {
+            let service_len = row.branch.services.len();
+            if service_len == 0 {
+                self.service_focus.remove(&row.branch.name);
+                continue;
+            }
+            let idx = self
+                .service_focus
+                .entry(row.branch.name.clone())
+                .or_insert(0);
+            if *idx >= service_len {
+                *idx = service_len - 1;
+            }
+        }
+    }
+
+    fn selected_service_for_row<'a>(&'a self, row: &'a TreeRow) -> Option<&'a BranchServiceState> {
+        if row.branch.services.is_empty() {
+            return None;
+        }
+
+        let idx = self
+            .service_focus
+            .get(&row.branch.name)
+            .copied()
+            .unwrap_or(0);
+        row.branch
+            .services
+            .get(idx)
+            .or_else(|| row.branch.services.first())
+    }
+
+    fn cycle_service_focus(&mut self, delta: i32) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+
+        let branch_name = row.branch.name.clone();
+        let len = row.branch.services.len();
+        if len <= 1 {
+            return;
+        }
+
+        let current = self.service_focus.get(&branch_name).copied().unwrap_or(0) as i32;
+        let next = (current + delta).rem_euclid(len as i32) as usize;
+        self.service_focus.insert(branch_name, next);
     }
 
     fn move_selection(&mut self, delta: i32) {
@@ -467,6 +530,37 @@ impl EnvironmentsComponent {
                             ]));
                         }
                     }
+
+                    if let Some(selected_service) = self.selected_service_for_row(row) {
+                        let focused_idx = self
+                            .service_focus
+                            .get(&branch.name)
+                            .copied()
+                            .unwrap_or(0)
+                            .saturating_add(1);
+                        lines.push(Line::raw(""));
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                "Focused service: ",
+                                Style::default().fg(theme::TEXT_SECONDARY),
+                            ),
+                            Span::styled(
+                                format!(
+                                    "{} ({}/{})",
+                                    selected_service.service_name,
+                                    focused_idx,
+                                    branch.services.len()
+                                ),
+                                Style::default().fg(theme::SERVICE_TYPE).bold(),
+                            ),
+                        ]));
+                        if branch.services.len() > 1 {
+                            lines.push(Line::styled(
+                                "  n/p: cycle focused service",
+                                Style::default().fg(theme::KEY_HINT),
+                            ));
+                        }
+                    }
                 }
 
                 lines.push(Line::raw(""));
@@ -478,9 +572,12 @@ impl EnvironmentsComponent {
                 ));
                 let mut hint_lines = vec![
                     ("Enter", "Switch to this branch"),
-                    ("S", "Start services"),
-                    ("x", "Stop services"),
-                    ("l", "View logs"),
+                    ("S", "Start focused service"),
+                    ("x", "Stop focused service"),
+                    ("R", "Reset focused service"),
+                    ("A", "Start all services"),
+                    ("X", "Stop all services"),
+                    ("l", "Logs for focused service"),
                     ("c", "Create child branch"),
                     ("d", "Delete branch"),
                 ];
@@ -542,6 +639,14 @@ impl Component for EnvironmentsComponent {
                 self.toggle_collapse();
                 Action::None
             }
+            KeyCode::Char('n') => {
+                self.cycle_service_focus(1);
+                Action::None
+            }
+            KeyCode::Char('p') => {
+                self.cycle_service_focus(-1);
+                Action::None
+            }
             KeyCode::Enter => {
                 if let Some(row) = self.selected_row() {
                     if !row.branch.is_current {
@@ -554,8 +659,13 @@ impl Component for EnvironmentsComponent {
                 }
             }
             KeyCode::Char('c') => Action::ShowInput {
-                title: "Create new branch".to_string(),
-                on_submit: InputTarget::CreateBranch,
+                title: self
+                    .selected_row()
+                    .map(|row| format!("Create new branch (base: {})", row.branch.name))
+                    .unwrap_or_else(|| "Create new branch".to_string()),
+                on_submit: InputTarget::CreateBranch {
+                    base: self.selected_row().map(|row| row.branch.name.clone()),
+                },
             },
             KeyCode::Char('d') => {
                 if let Some(row) = self.selected_row() {
@@ -577,15 +687,16 @@ impl Component for EnvironmentsComponent {
             }
             KeyCode::Char('S') => {
                 if let Some(row) = self.selected_row() {
-                    if !row.branch.services.is_empty() {
-                        // Start first service on this branch
-                        let svc = &row.branch.services[0];
+                    if let Some(svc) = self.selected_service_for_row(row) {
                         Action::StartService {
                             service: svc.service_name.clone(),
                             branch: row.branch.name.clone(),
                         }
                     } else {
-                        Action::None
+                        Action::Error(format!(
+                            "No services attached to branch '{}'",
+                            row.branch.name
+                        ))
                     }
                 } else {
                     Action::None
@@ -593,23 +704,38 @@ impl Component for EnvironmentsComponent {
             }
             KeyCode::Char('x') => {
                 if let Some(row) = self.selected_row() {
-                    if !row.branch.services.is_empty() {
-                        let svc = &row.branch.services[0];
+                    if let Some(svc) = self.selected_service_for_row(row) {
                         Action::StopService {
                             service: svc.service_name.clone(),
                             branch: row.branch.name.clone(),
                         }
                     } else {
-                        Action::None
+                        Action::Error(format!(
+                            "No services attached to branch '{}'",
+                            row.branch.name
+                        ))
                     }
+                } else {
+                    Action::None
+                }
+            }
+            KeyCode::Char('A') => {
+                if let Some(row) = self.selected_row() {
+                    Action::StartAllServices(row.branch.name.clone())
+                } else {
+                    Action::None
+                }
+            }
+            KeyCode::Char('X') => {
+                if let Some(row) = self.selected_row() {
+                    Action::StopAllServices(row.branch.name.clone())
                 } else {
                     Action::None
                 }
             }
             KeyCode::Char('R') => {
                 if let Some(row) = self.selected_row() {
-                    if !row.branch.services.is_empty() {
-                        let svc = &row.branch.services[0];
+                    if let Some(svc) = self.selected_service_for_row(row) {
                         Action::ShowConfirm {
                             title: "Reset Service".to_string(),
                             message: format!(
@@ -622,7 +748,10 @@ impl Component for EnvironmentsComponent {
                             }),
                         }
                     } else {
-                        Action::None
+                        Action::Error(format!(
+                            "No services attached to branch '{}'",
+                            row.branch.name
+                        ))
                     }
                 } else {
                     Action::None
@@ -630,14 +759,16 @@ impl Component for EnvironmentsComponent {
             }
             KeyCode::Char('l') => {
                 if let Some(row) = self.selected_row() {
-                    if !row.branch.services.is_empty() {
-                        let svc = &row.branch.services[0];
+                    if let Some(svc) = self.selected_service_for_row(row) {
                         Action::ViewLogs {
                             service: svc.service_name.clone(),
                             branch: row.branch.name.clone(),
                         }
                     } else {
-                        Action::None
+                        Action::Error(format!(
+                            "No services attached to branch '{}'",
+                            row.branch.name
+                        ))
                     }
                 } else {
                     Action::None
@@ -696,6 +827,25 @@ impl Component for EnvironmentsComponent {
 }
 
 impl EnvironmentsComponent {
+    pub fn services_for_branch(&self, branch_name: &str) -> Vec<String> {
+        let mut names = Vec::new();
+
+        let branches = match &self.data {
+            Some(data) => &data.branches,
+            None => return names,
+        };
+
+        if let Some(branch) = branches.iter().find(|b| b.name == branch_name) {
+            for svc in &branch.services {
+                if !names.iter().any(|n| n == &svc.service_name) {
+                    names.push(svc.service_name.clone());
+                }
+            }
+        }
+
+        names
+    }
+
     pub fn set_filter(&mut self, filter: String) {
         self.filter = filter;
         self.rebuild_tree();

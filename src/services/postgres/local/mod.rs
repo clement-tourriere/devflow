@@ -15,7 +15,8 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use super::super::{
-    BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceProvider,
+    BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceCapabilities,
+    ServiceProvider,
 };
 use crate::config::{Config, LocalServiceConfig};
 use docker::{DockerRuntime, ReserveBranchSpec, StartBranchSpec};
@@ -656,6 +657,18 @@ impl ServiceProvider for LocalProvider {
 
     fn provider_name(&self) -> &'static str {
         "Local (Docker + CoW)"
+    }
+
+    fn capabilities(&self) -> ServiceCapabilities {
+        ServiceCapabilities {
+            lifecycle: true,
+            logs: true,
+            destroy_project: true,
+            cleanup: true,
+            seed_from_source: true,
+            template_from_time: false,
+            max_branch_name_length: 255,
+        }
     }
 
     fn supports_cleanup(&self) -> bool {
