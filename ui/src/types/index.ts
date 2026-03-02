@@ -117,3 +117,23 @@ export interface ServiceDestroyResult {
   branches_destroyed: string[];
   error: string | null;
 }
+
+export interface OrphanProjectEntry {
+  project_name: string;
+  project_path: string | null;
+  sources: string[];
+  sqlite_project_id: string | null;
+  sqlite_branch_count: number;
+  container_names: string[];
+  local_state_service_count: number;
+  local_state_branch_count: number;
+}
+
+export interface OrphanCleanupResult {
+  project_name: string;
+  containers_removed: number;
+  sqlite_rows_deleted: boolean;
+  local_state_cleared: boolean;
+  data_dirs_removed: number;
+  errors: string[];
+}

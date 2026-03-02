@@ -12,6 +12,8 @@ import type {
   AppSettings,
   OrchestrationResult,
   DestroyResult,
+  OrphanProjectEntry,
+  OrphanCleanupResult,
 } from "../types";
 
 // Projects
@@ -134,6 +136,12 @@ export const validateConfigYaml = (content: string) =>
 // Destroy
 export const destroyProject = (projectPath: string) =>
   invoke<DestroyResult>("destroy_project", { projectPath });
+
+// Orphan detection & cleanup
+export const detectOrphanProjects = () =>
+  invoke<OrphanProjectEntry[]>("detect_orphan_projects");
+export const cleanupOrphanProject = (projectName: string) =>
+  invoke<OrphanCleanupResult>("cleanup_orphan_project", { projectName });
 
 // Settings
 export const getSettings = () => invoke<AppSettings>("get_settings");

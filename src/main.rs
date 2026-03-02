@@ -61,6 +61,7 @@ Setup & Config:
   shell-init          Print shell integration script (enables worktree cd)
   worktree-setup      Set up devflow in a Git worktree
   setup-zfs           Set up a file-backed ZFS pool for CoW storage (Linux)
+  gc                  Detect and clean up orphaned projects (leftover state)
 
 Extensibility:
   hook show             Show configured hooks (filter by phase)

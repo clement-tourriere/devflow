@@ -241,6 +241,25 @@ impl LocalStateManager {
         Ok(())
     }
 
+    /// Remove a project by its raw key (canonical path string).
+    ///
+    /// Unlike [`remove_project`] this does **not** call `canonicalize()`, so it
+    /// works even when the directory no longer exists on disk — which is exactly
+    /// the situation during orphan cleanup.
+    pub fn remove_project_by_key(&mut self, project_key: &str) -> Result<()> {
+        self.refresh_state()?;
+        self.state.projects.remove(project_key);
+        self.save_state()?;
+        Ok(())
+    }
+
+    /// Return a snapshot of **all** projects in the local state, keyed by their
+    /// canonical path.  Used by orphan detection to iterate over every known
+    /// project.
+    pub fn list_all_projects(&self) -> HashMap<String, ProjectState> {
+        self.state.projects.clone()
+    }
+
     // ── Branch registry CRUD ────────────────────────────────────────
 
     /// Get all registered devflow branches for a project.

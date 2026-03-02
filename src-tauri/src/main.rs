@@ -29,6 +29,8 @@ fn main() {
             commands::projects::get_project_detail,
             commands::projects::init_project,
             commands::projects::destroy_project,
+            commands::projects::detect_orphan_projects,
+            commands::projects::cleanup_orphan_project,
             // Branches
             commands::branches::list_branches,
             commands::branches::get_connection_info,

@@ -1,4 +1,5 @@
 pub mod factory;
+pub mod orphan;
 pub mod plugin;
 pub mod postgres;
 

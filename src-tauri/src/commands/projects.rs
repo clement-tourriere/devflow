@@ -1,5 +1,6 @@
 use crate::state::{AppState, ProjectEntry};
 use devflow_core::services;
+use devflow_core::services::orphan::{self, OrphanSource};
 use serde::Serialize;
 use tauri::State;
 
@@ -341,5 +342,83 @@ pub async fn destroy_project(project_path: String) -> Result<DestroyResult, Stri
         worktrees_removed,
         hooks_uninstalled,
         config_deleted,
+    })
+}
+
+// ── Orphan detection and cleanup ────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct OrphanProjectEntry {
+    pub project_name: String,
+    pub project_path: Option<String>,
+    pub sources: Vec<String>,
+    pub sqlite_project_id: Option<String>,
+    pub sqlite_branch_count: usize,
+    pub container_names: Vec<String>,
+    pub local_state_service_count: usize,
+    pub local_state_branch_count: usize,
+}
+
+#[derive(Serialize)]
+pub struct OrphanCleanupResult {
+    pub project_name: String,
+    pub containers_removed: usize,
+    pub sqlite_rows_deleted: bool,
+    pub local_state_cleared: bool,
+    pub data_dirs_removed: usize,
+    pub errors: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn detect_orphan_projects() -> Result<Vec<OrphanProjectEntry>, String> {
+    let orphans = orphan::detect_orphans()
+        .await
+        .map_err(|e| format!("Failed to detect orphans: {}", e))?;
+
+    Ok(orphans
+        .into_iter()
+        .map(|o| OrphanProjectEntry {
+            project_name: o.project_name,
+            project_path: o.project_path,
+            sources: o
+                .sources
+                .iter()
+                .map(|s| match s {
+                    OrphanSource::Sqlite => "sqlite".to_string(),
+                    OrphanSource::LocalState => "local_state".to_string(),
+                    OrphanSource::Docker => "docker".to_string(),
+                })
+                .collect(),
+            sqlite_project_id: o.sqlite_project_id,
+            sqlite_branch_count: o.sqlite_branch_count,
+            container_names: o.container_names,
+            local_state_service_count: o.local_state_service_count,
+            local_state_branch_count: o.local_state_branch_count,
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn cleanup_orphan_project(
+    project_name: String,
+) -> Result<OrphanCleanupResult, String> {
+    let orphans = orphan::detect_orphans()
+        .await
+        .map_err(|e| format!("Failed to detect orphans: {}", e))?;
+
+    let orphan = orphans
+        .iter()
+        .find(|o| o.project_name == project_name)
+        .ok_or_else(|| format!("Orphan project '{}' not found", project_name))?;
+
+    let result = orphan::cleanup_orphan(orphan).await;
+
+    Ok(OrphanCleanupResult {
+        project_name: result.project_name,
+        containers_removed: result.containers_removed,
+        sqlite_rows_deleted: result.sqlite_rows_deleted,
+        local_state_cleared: result.local_state_cleared,
+        data_dirs_removed: result.data_dirs_removed,
+        errors: result.errors,
     })
 }

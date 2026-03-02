@@ -14,6 +14,7 @@ import Modal from "../../components/Modal";
 
 interface ProjectRow extends ProjectEntry {
   detail?: ProjectDetail;
+  missing?: boolean;
 }
 
 /** Normalize a project name: lowercase, collapse non-alnum to dashes, max 63 chars. */
@@ -51,7 +52,7 @@ function ProjectList() {
             const detail = await getProjectDetail(p.path);
             return { ...p, detail };
           } catch {
-            return p;
+            return { ...p, missing: true };
           }
         })
       );
@@ -183,13 +184,21 @@ function ProjectList() {
                     <Link
                       to={`/projects/${encodeURIComponent(p.path)}`}
                       style={{
-                        color: "var(--accent)",
+                        color: p.missing ? "var(--text-muted)" : "var(--accent)",
                         textDecoration: "none",
                         fontWeight: 500,
                       }}
                     >
                       {p.name}
                     </Link>
+                    {p.missing && (
+                      <span
+                        className="badge badge-danger"
+                        style={{ marginLeft: 8 }}
+                      >
+                        missing
+                      </span>
+                    )}
                   </td>
                   <td
                     className="mono"
