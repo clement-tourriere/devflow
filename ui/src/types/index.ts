@@ -32,6 +32,12 @@ export interface ServiceEntry {
   auto_branch: boolean;
 }
 
+export interface ServiceBranchStatus {
+  service_name: string;
+  branch_name: string;
+  state: string | null;
+}
+
 export interface ConnectionInfo {
   host: string;
   port: number;

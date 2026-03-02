@@ -13,6 +13,7 @@ import {
   resetService,
   getServiceLogs,
   getConnectionInfo,
+  getServiceStatus,
   removeProject,
   destroyProject,
 } from "../../utils/invoke";
@@ -36,6 +37,11 @@ function ProjectDetail() {
   const [services, setServices] = useState<ServiceEntry[]>([]);
   const [currentBranch, setCurrentBranch] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Service status tracking: { "service-name": "running" | "stopped" | ... }
+  const [serviceStatuses, setServiceStatuses] = useState<
+    Record<string, string | null>
+  >({});
 
   // Modal state
   const [showCreateBranch, setShowCreateBranch] = useState(false);
@@ -71,6 +77,28 @@ function ProjectDetail() {
   // Loading state
   const [actionLoading, setActionLoading] = useState<string | null>(null);
 
+  const fetchServiceStatuses = useCallback(
+    async (svcs: ServiceEntry[], branch: string | null) => {
+      if (!branch || svcs.length === 0) {
+        setServiceStatuses({});
+        return;
+      }
+      const statuses: Record<string, string | null> = {};
+      await Promise.all(
+        svcs.map(async (s) => {
+          try {
+            const result = await getServiceStatus(projectPath, s.name, branch);
+            statuses[s.name] = result.state;
+          } catch {
+            statuses[s.name] = null;
+          }
+        })
+      );
+      setServiceStatuses(statuses);
+    },
+    [projectPath]
+  );
+
   const reload = useCallback(async () => {
     if (!projectPath) return;
     try {
@@ -81,19 +109,29 @@ function ProjectDetail() {
       setError(`Failed to load project: ${e}`);
       return;
     }
-    listBranches(projectPath)
-      .then((b) => {
-        setBranches(b.branches);
-        setCurrentBranch(b.current);
-      })
-      .catch(() => {
-        setBranches([]);
-        setCurrentBranch(null);
-      });
-    listServices(projectPath)
-      .then(setServices)
-      .catch(() => setServices([]));
-  }, [projectPath]);
+    let loadedBranch: string | null = null;
+    let loadedServices: ServiceEntry[] = [];
+    await Promise.all([
+      listBranches(projectPath)
+        .then((b) => {
+          setBranches(b.branches);
+          setCurrentBranch(b.current);
+          loadedBranch = b.current;
+        })
+        .catch(() => {
+          setBranches([]);
+          setCurrentBranch(null);
+        }),
+      listServices(projectPath)
+        .then((svcs) => {
+          setServices(svcs);
+          loadedServices = svcs;
+        })
+        .catch(() => setServices([])),
+    ]);
+    // Fetch service statuses after we know the current branch and services
+    await fetchServiceStatuses(loadedServices, loadedBranch);
+  }, [projectPath, fetchServiceStatuses]);
 
   useEffect(() => {
     reload();
@@ -145,21 +183,20 @@ function ProjectDetail() {
     }
   };
 
-  const handleConnectionInfo = async (branchName: string) => {
-    setConnInfoBranch(branchName);
+  const handleConnectionInfo = async (serviceName: string) => {
+    if (!currentBranch) return;
+    setConnInfoBranch(currentBranch);
     try {
       const infos: Record<string, ConnectionInfo> = {};
-      for (const svc of services) {
-        try {
-          const info = await getConnectionInfo(
-            projectPath,
-            branchName,
-            svc.name
-          );
-          infos[svc.name] = info as unknown as ConnectionInfo;
-        } catch {
-          // skip services without connection info
-        }
+      try {
+        const info = await getConnectionInfo(
+          projectPath,
+          currentBranch,
+          serviceName
+        );
+        infos[serviceName] = info as unknown as ConnectionInfo;
+      } catch {
+        // service may not have connection info
       }
       setConnInfo(infos);
     } catch (e) {
@@ -172,6 +209,17 @@ function ProjectDetail() {
     setActionLoading(`start:${svcName}`);
     try {
       await startService(projectPath, svcName, currentBranch);
+      // Refresh status for this service
+      try {
+        const result = await getServiceStatus(
+          projectPath,
+          svcName,
+          currentBranch
+        );
+        setServiceStatuses((prev) => ({ ...prev, [svcName]: result.state }));
+      } catch {
+        // ignore
+      }
     } catch (e) {
       alert(`Failed to start service: ${e}`);
     } finally {
@@ -184,6 +232,17 @@ function ProjectDetail() {
     setActionLoading(`stop:${svcName}`);
     try {
       await stopService(projectPath, svcName, currentBranch);
+      // Refresh status for this service
+      try {
+        const result = await getServiceStatus(
+          projectPath,
+          svcName,
+          currentBranch
+        );
+        setServiceStatuses((prev) => ({ ...prev, [svcName]: result.state }));
+      } catch {
+        // ignore
+      }
     } catch (e) {
       alert(`Failed to stop service: ${e}`);
     } finally {
@@ -196,6 +255,20 @@ function ProjectDetail() {
     setActionLoading("reset");
     try {
       await resetService(projectPath, resetTarget.name, resetTarget.branch);
+      // Refresh status for this service
+      try {
+        const result = await getServiceStatus(
+          projectPath,
+          resetTarget.name,
+          resetTarget.branch
+        );
+        setServiceStatuses((prev) => ({
+          ...prev,
+          [resetTarget.name]: result.state,
+        }));
+      } catch {
+        // ignore
+      }
       setResetTarget(null);
     } catch (e) {
       alert(`Failed to reset service: ${e}`);
@@ -442,15 +515,6 @@ function ProjectDetail() {
                             : "Switch"}
                         </button>
                       )}
-                      {detail.has_config && (
-                        <button
-                          className="btn"
-                          style={{ padding: "2px 10px", fontSize: 12 }}
-                          onClick={() => handleConnectionInfo(b.name)}
-                        >
-                          Connect
-                        </button>
-                      )}
                       {!b.is_current && !b.is_default && (
                         <button
                           className="btn btn-danger"
@@ -517,82 +581,137 @@ function ProjectDetail() {
                 <th>Name</th>
                 <th>Type</th>
                 <th>Provider</th>
+                <th>Status</th>
                 <th>Auto</th>
                 <th style={{ textAlign: "right" }}>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {services.map((s) => (
-                <tr key={s.name}>
-                  <td style={{ fontWeight: 500 }}>{s.name}</td>
-                  <td>{s.service_type}</td>
-                  <td>{s.provider_type}</td>
-                  <td>
-                    {s.auto_branch ? (
-                      <span className="badge badge-success">yes</span>
-                    ) : (
-                      <span className="badge badge-warning">no</span>
-                    )}
-                  </td>
-                  <td style={{ textAlign: "right" }}>
-                    <div
-                      className="flex gap-2"
-                      style={{ justifyContent: "flex-end" }}
-                    >
-                      {s.provider_type === "local" && (
-                        <>
-                          <button
-                            className="btn"
-                            style={{ padding: "2px 10px", fontSize: 12 }}
-                            onClick={() => handleStartService(s.name)}
-                            disabled={
-                              !currentBranch ||
-                              actionLoading === `start:${s.name}`
-                            }
-                          >
-                            {actionLoading === `start:${s.name}`
-                              ? "..."
-                              : "Start"}
-                          </button>
-                          <button
-                            className="btn"
-                            style={{ padding: "2px 10px", fontSize: 12 }}
-                            onClick={() => handleStopService(s.name)}
-                            disabled={
-                              !currentBranch ||
-                              actionLoading === `stop:${s.name}`
-                            }
-                          >
-                            {actionLoading === `stop:${s.name}` ? "..." : "Stop"}
-                          </button>
-                          <button
-                            className="btn"
-                            style={{ padding: "2px 10px", fontSize: 12 }}
-                            onClick={() =>
-                              currentBranch &&
-                              setResetTarget({
-                                name: s.name,
-                                branch: currentBranch,
-                              })
-                            }
-                            disabled={!currentBranch}
-                          >
-                            Reset
-                          </button>
-                          <button
-                            className="btn"
-                            style={{ padding: "2px 10px", fontSize: 12 }}
-                            onClick={() => handleViewLogs(s.name)}
-                            disabled={!currentBranch}
-                          >
-                            Logs
-                          </button>
-                        </>
+              {services.map((s) => {
+                const status = serviceStatuses[s.name];
+                const isRunning = status === "running";
+                const isStopped =
+                  status === "stopped" ||
+                  status === "failed" ||
+                  status === null ||
+                  status === undefined;
+                return (
+                  <tr key={s.name}>
+                    <td style={{ fontWeight: 500 }}>{s.name}</td>
+                    <td>{s.service_type}</td>
+                    <td>{s.provider_type}</td>
+                    <td>
+                      {status === "running" ? (
+                        <span className="badge badge-success">running</span>
+                      ) : status === "failed" ? (
+                        <span className="badge badge-danger">failed</span>
+                      ) : status === "provisioning" ? (
+                        <span className="badge badge-warning">
+                          provisioning
+                        </span>
+                      ) : status === "stopped" ? (
+                        <span
+                          className="badge"
+                          style={{
+                            background: "var(--bg-tertiary)",
+                            color: "var(--text-muted)",
+                          }}
+                        >
+                          stopped
+                        </span>
+                      ) : (
+                        <span
+                          className="badge"
+                          style={{
+                            background: "var(--bg-tertiary)",
+                            color: "var(--text-muted)",
+                          }}
+                        >
+                          -
+                        </span>
                       )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
+                    </td>
+                    <td>
+                      {s.auto_branch ? (
+                        <span className="badge badge-success">yes</span>
+                      ) : (
+                        <span className="badge badge-warning">no</span>
+                      )}
+                    </td>
+                    <td style={{ textAlign: "right" }}>
+                      <div
+                        className="flex gap-2"
+                        style={{ justifyContent: "flex-end" }}
+                      >
+                        <button
+                          className="btn"
+                          style={{ padding: "2px 10px", fontSize: 12 }}
+                          onClick={() => handleConnectionInfo(s.name)}
+                          disabled={!currentBranch}
+                        >
+                          Connection Info
+                        </button>
+                        {s.provider_type === "local" && (
+                          <>
+                            {isStopped && (
+                              <button
+                                className="btn"
+                                style={{ padding: "2px 10px", fontSize: 12 }}
+                                onClick={() => handleStartService(s.name)}
+                                disabled={
+                                  !currentBranch ||
+                                  actionLoading === `start:${s.name}`
+                                }
+                              >
+                                {actionLoading === `start:${s.name}`
+                                  ? "..."
+                                  : "Start"}
+                              </button>
+                            )}
+                            {isRunning && (
+                              <button
+                                className="btn"
+                                style={{ padding: "2px 10px", fontSize: 12 }}
+                                onClick={() => handleStopService(s.name)}
+                                disabled={
+                                  !currentBranch ||
+                                  actionLoading === `stop:${s.name}`
+                                }
+                              >
+                                {actionLoading === `stop:${s.name}`
+                                  ? "..."
+                                  : "Stop"}
+                              </button>
+                            )}
+                            <button
+                              className="btn"
+                              style={{ padding: "2px 10px", fontSize: 12 }}
+                              onClick={() =>
+                                currentBranch &&
+                                setResetTarget({
+                                  name: s.name,
+                                  branch: currentBranch,
+                                })
+                              }
+                              disabled={!currentBranch}
+                            >
+                              Reset
+                            </button>
+                            <button
+                              className="btn"
+                              style={{ padding: "2px 10px", fontSize: 12 }}
+                              onClick={() => handleViewLogs(s.name)}
+                              disabled={!currentBranch}
+                            >
+                              Logs
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -744,6 +863,9 @@ function ProjectDetail() {
             style={{ width: "100%" }}
             onKeyDown={(e) => e.key === "Enter" && handleCreateBranch()}
             autoFocus
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
           />
         </div>
         <div style={{ marginBottom: 16 }}>
@@ -845,10 +967,10 @@ function ProjectDetail() {
               </div>
               <table className="table" style={{ fontSize: 13 }}>
                 <tbody>
-                  <ConnRow label="Host" value={info.host} />
-                  <ConnRow label="Port" value={String(info.port)} />
-                  <ConnRow label="Database" value={info.database} />
-                  <ConnRow label="User" value={info.user} />
+                  <ConnRow label="Host" value={info.host} copyable />
+                  <ConnRow label="Port" value={String(info.port)} copyable />
+                  <ConnRow label="Database" value={info.database} copyable />
+                  <ConnRow label="User" value={info.user} copyable />
                   <ConnRow
                     label="Password"
                     value={info.password || "-"}
@@ -858,7 +980,7 @@ function ProjectDetail() {
                     <ConnRow
                       label="Connection String"
                       value={info.connection_string}
-                      copyable
+                      secret
                     />
                   )}
                 </tbody>

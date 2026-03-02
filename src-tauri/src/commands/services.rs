@@ -13,6 +13,13 @@ pub struct ServiceEntry {
     pub auto_branch: bool,
 }
 
+#[derive(Serialize)]
+pub struct ServiceBranchStatus {
+    pub service_name: String,
+    pub branch_name: String,
+    pub state: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub struct AddServiceRequest {
     pub name: String,
@@ -312,4 +319,41 @@ pub async fn reset_service(
         .reset_branch(&branch_name)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_service_status(
+    project_path: String,
+    service_name: String,
+    branch_name: String,
+) -> Result<ServiceBranchStatus, String> {
+    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
+    let config = devflow_core::config::Config::from_file(&config_path)
+        .map_err(|e| e.to_string())?;
+
+    let named_services = config.resolve_services();
+    let svc = named_services
+        .iter()
+        .find(|s| s.name == service_name)
+        .ok_or("Service not found")?;
+
+    let provider = services::factory::create_provider_from_named_config(&config, svc)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let branches = provider
+        .list_branches()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let state = branches
+        .iter()
+        .find(|b| b.name == branch_name)
+        .and_then(|b| b.state.clone());
+
+    Ok(ServiceBranchStatus {
+        service_name,
+        branch_name,
+        state,
+    })
 }

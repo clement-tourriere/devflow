@@ -45,6 +45,7 @@ fn main() {
             commands::services::run_doctor,
             commands::services::get_service_logs,
             commands::services::reset_service,
+            commands::services::get_service_status,
             // Hooks
             commands::hooks::list_hooks,
             commands::hooks::render_template,

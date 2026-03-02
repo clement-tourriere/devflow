@@ -4,6 +4,7 @@ import type {
   ProjectDetail,
   BranchesResponse,
   ServiceEntry,
+  ServiceBranchStatus,
   AddServiceRequest,
   HookPhaseEntry,
   ProxyStatus,
@@ -94,6 +95,16 @@ export const resetService = (
   branchName: string
 ) =>
   invoke<void>("reset_service", { projectPath, serviceName, branchName });
+export const getServiceStatus = (
+  projectPath: string,
+  serviceName: string,
+  branchName: string
+) =>
+  invoke<ServiceBranchStatus>("get_service_status", {
+    projectPath,
+    serviceName,
+    branchName,
+  });
 
 // Hooks
 export const listHooks = (projectPath: string) =>
