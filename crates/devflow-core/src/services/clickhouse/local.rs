@@ -200,6 +200,7 @@ impl ClickHouseLocalProvider {
         labels.insert("devflow.project".to_string(), self.project_name.clone());
         labels.insert("devflow.service".to_string(), self.service_name.clone());
         labels.insert("devflow.service-type".to_string(), "clickhouse".to_string());
+        labels.insert("devflow.branch".to_string(), branch_name.to_string());
 
         let config = ContainerCreateBody {
             image: Some(self.image.clone()),

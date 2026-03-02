@@ -304,6 +304,7 @@ impl ServiceProvider for LocalProvider {
                 pg_db: self.pg_db.clone(),
                 project_name: self.project_name.clone(),
                 service_name: self.service_name.clone(),
+                branch_name: branch_name.to_string(),
             })
             .await?;
 
@@ -408,6 +409,7 @@ impl ServiceProvider for LocalProvider {
                     pg_db: self.pg_db.clone(),
                     project_name: self.project_name.clone(),
                     service_name: self.service_name.clone(),
+                    branch_name: branch_name.to_string(),
                 })
                 .await?;
 
@@ -469,6 +471,7 @@ impl ServiceProvider for LocalProvider {
                 pg_db: self.pg_db.clone(),
                 project_name: self.project_name.clone(),
                 service_name: self.service_name.clone(),
+                branch_name: branch_name.to_string(),
             })
             .await?;
 
@@ -570,6 +573,7 @@ impl ServiceProvider for LocalProvider {
                     pg_db: self.pg_db.clone(),
                     project_name: self.project_name.clone(),
                     service_name: self.service_name.clone(),
+                    branch_name: branch_name.to_string(),
                 })
                 .await?;
 

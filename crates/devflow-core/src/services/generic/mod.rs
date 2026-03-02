@@ -178,6 +178,7 @@ impl GenericDockerProvider {
         &self,
         container_name: &str,
         port: u16,
+        branch_name: &str,
     ) -> anyhow::Result<()> {
         self.ensure_image().await?;
 
@@ -199,6 +200,7 @@ impl GenericDockerProvider {
         labels.insert("devflow.project".to_string(), self.project_name.clone());
         labels.insert("devflow.service".to_string(), self.service_name.clone());
         labels.insert("devflow.service-type".to_string(), "generic".to_string());
+        labels.insert("devflow.branch".to_string(), branch_name.to_string());
 
         let binds: Option<Vec<String>> = if self.volumes.is_empty() {
             None
@@ -374,7 +376,7 @@ impl ServiceProvider for GenericDockerProvider {
         }
 
         let port = self.pick_port_for_branch().await?;
-        self.create_and_start_container(&container_name, port)
+        self.create_and_start_container(&container_name, port, branch_name)
             .await?;
         self.wait_healthy(&container_name, Duration::from_secs(60))
             .await?;

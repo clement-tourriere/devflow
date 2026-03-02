@@ -42,8 +42,14 @@ pub fn extract_proxy_targets(
         .trim_start_matches('/')
         .to_string();
     let labels = get_labels(container);
-    let project = labels.get("com.docker.compose.project").cloned();
-    let service_name = labels.get("com.docker.compose.service").cloned();
+    let project = labels
+        .get("devflow.project")
+        .or_else(|| labels.get("com.docker.compose.project"))
+        .cloned();
+    let service_name = labels
+        .get("devflow.service")
+        .or_else(|| labels.get("com.docker.compose.service"))
+        .cloned();
     let branch = labels.get("devflow.branch").cloned();
 
     domains
@@ -264,7 +270,10 @@ mod tests {
     #[test]
     fn test_compose_domain() {
         let mut labels = HashMap::new();
-        labels.insert("com.docker.compose.project".to_string(), "myapp".to_string());
+        labels.insert(
+            "com.docker.compose.project".to_string(),
+            "myapp".to_string(),
+        );
         labels.insert("com.docker.compose.service".to_string(), "web".to_string());
 
         let container = make_container("myapp-web-1", labels);

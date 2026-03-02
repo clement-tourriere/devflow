@@ -15,6 +15,8 @@ import {
   listServiceBranches,
   removeProject,
   destroyProject,
+  listContainers,
+  getProxyStatus,
 } from "../../utils/invoke";
 import type {
   ProjectDetail as ProjectDetailType,
@@ -23,6 +25,8 @@ import type {
   ServiceBranchInfo,
   ConnectionInfo,
   AddServiceRequest,
+  ContainerEntry,
+  ProxyStatus,
 } from "../../types";
 import Modal from "../../components/Modal";
 import ConfirmDialog from "../../components/ConfirmDialog";
@@ -53,6 +57,7 @@ function ProjectDetail() {
   const [deletingBranch, setDeletingBranch] = useState<string | null>(null);
   const [connInfoBranch, setConnInfoBranch] = useState<string | null>(null);
   const [connInfo, setConnInfo] = useState<Record<string, ConnectionInfo>>({});
+  const [connInfoContainers, setConnInfoContainers] = useState<Record<string, ContainerEntry>>({});
   const [logService, setLogService] = useState<{
     name: string;
     branch: string;
@@ -76,6 +81,10 @@ function ProjectDetail() {
   // Danger zone state
   const [showDestroyConfirm, setShowDestroyConfirm] = useState(false);
   const [destroyConfirmText, setDestroyConfirmText] = useState("");
+
+  // Proxy state
+  const [proxyStatus, setProxyStatus] = useState<ProxyStatus | null>(null);
+  const [containers, setContainers] = useState<ContainerEntry[]>([]);
 
   // Loading state
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -128,6 +137,12 @@ function ProjectDetail() {
           loadedServices = svcs;
         })
         .catch(() => setServices([])),
+      getProxyStatus()
+        .then(setProxyStatus)
+        .catch(() => setProxyStatus(null)),
+      listContainers()
+        .then(setContainers)
+        .catch(() => setContainers([])),
     ]);
     // Fetch service branches after we know the services
     await fetchServiceBranches(loadedServices);
@@ -189,6 +204,36 @@ function ProjectDetail() {
         // service may not have connection info
       }
       setConnInfo(infos);
+
+      // Look up matching proxy containers for this service/branch
+      if (proxyStatus?.running && detail) {
+        try {
+          const allContainers = await listContainers();
+          const matched: Record<string, ContainerEntry> = {};
+          // Helper: sanitize name the same way Rust does (lowercase, non-alnum -> dash)
+          const sanitize = (s: string) =>
+            s.toLowerCase().replace(/[^a-z0-9]/g, "-").replace(/-{2,}/g, "-");
+          for (const c of allContainers) {
+            if (c.project === detail.name && c.service === serviceName) {
+              // Prefer exact branch match, but also accept if branch is null (legacy containers)
+              if (c.branch === branchName || !c.branch) {
+                matched[serviceName] = c;
+              }
+            } else {
+              // Fallback: match by container name pattern devflow-{sanitized_project}-{service}-{branch}
+              const expectedName = `devflow-${sanitize(detail.name)}-${sanitize(serviceName)}-${sanitize(branchName)}`;
+              if (c.container_name === expectedName || c.container_name === `/${expectedName}`) {
+                matched[serviceName] = c;
+              }
+            }
+          }
+          setConnInfoContainers(matched);
+        } catch {
+          setConnInfoContainers({});
+        }
+      } else {
+        setConnInfoContainers({});
+      }
     } catch (e) {
       console.error(e);
     }
@@ -878,6 +923,56 @@ function ProjectDetail() {
         )}
       </div>
 
+      {/* Proxy Domains card */}
+      {proxyStatus?.running && (() => {
+        const sanitize = (s: string) =>
+          s.toLowerCase().replace(/[^a-z0-9]/g, "-").replace(/-{2,}/g, "-");
+        const sanitizedName = sanitize(detail.name);
+        const projectContainers = containers.filter(
+          (c) =>
+            c.project === detail.name ||
+            c.container_name.startsWith(`devflow-${sanitizedName}-`)
+        );
+        if (projectContainers.length === 0) return null;
+        return (
+          <div className="card">
+            <span className="card-title" style={{ marginBottom: 12 }}>
+              Proxy Domains
+            </span>
+            <table className="table" style={{ fontSize: 13 }}>
+              <thead>
+                <tr>
+                  <th>Domain</th>
+                  <th>Service</th>
+                  <th>Branch</th>
+                </tr>
+              </thead>
+              <tbody>
+                {projectContainers.map((c) => (
+                  <tr key={c.domain}>
+                    <td>
+                      <a
+                        href={c.https_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{
+                          color: "var(--accent)",
+                          textDecoration: "none",
+                        }}
+                      >
+                        {c.domain}
+                      </a>
+                    </td>
+                    <td>{c.service || "-"}</td>
+                    <td>{c.branch || "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        );
+      })()}
+
       {/* Danger Zone */}
       <div
         className="card"
@@ -1108,6 +1203,7 @@ function ProjectDetail() {
         onClose={() => {
           setConnInfoBranch(null);
           setConnInfo({});
+          setConnInfoContainers({});
         }}
         title={`Connection Info — ${connInfoBranch}`}
         width={560}
@@ -1142,6 +1238,23 @@ function ProjectDetail() {
                       label="Connection String"
                       value={info.connection_string}
                       secret
+                    />
+                  )}
+                  {info.connection_string && connInfoContainers[svcName] && (
+                    <ConnRow
+                      label="Proxy Connection"
+                      value={info.connection_string.replace(
+                        `${info.host}:${info.port}`,
+                        `${connInfoContainers[svcName].domain}:${info.port}`
+                      )}
+                      secret
+                    />
+                  )}
+                  {connInfoContainers[svcName] && (
+                    <ConnRow
+                      label="Proxy Domain"
+                      value={connInfoContainers[svcName].domain}
+                      copyable
                     />
                   )}
                 </tbody>
