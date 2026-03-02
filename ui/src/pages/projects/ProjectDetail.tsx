@@ -409,6 +409,14 @@ function ProjectDetail() {
             ) : (
               <span className="badge badge-warning">no config</span>
             )}
+            {detail.vcs_type && (
+              <span className="badge">{detail.vcs_type}</span>
+            )}
+            {detail.worktree_enabled ? (
+              <span className="badge badge-info">worktrees</span>
+            ) : (
+              <span className="badge">checkout mode</span>
+            )}
           </div>
         </div>
         <div className="flex gap-2">

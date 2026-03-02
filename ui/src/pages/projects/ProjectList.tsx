@@ -173,7 +173,8 @@ function ProjectList() {
                 <th>Path</th>
                 <th>Branch</th>
                 <th>Services</th>
-                <th>Config</th>
+                <th>VCS</th>
+                <th>Mode</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -217,10 +218,19 @@ function ProjectList() {
                     {p.detail?.service_count ?? "-"}
                   </td>
                   <td>
-                    {p.detail?.has_config ? (
-                      <span className="badge badge-success">configured</span>
+                    {p.detail?.vcs_type ? (
+                      <span className="badge">{p.detail.vcs_type}</span>
                     ) : (
-                      <span className="badge badge-warning">no config</span>
+                      <span style={{ color: "var(--text-muted)" }}>-</span>
+                    )}
+                  </td>
+                  <td>
+                    {p.detail?.worktree_enabled ? (
+                      <span className="badge badge-info">worktrees</span>
+                    ) : p.detail?.has_config ? (
+                      <span className="badge">checkout</span>
+                    ) : (
+                      <span style={{ color: "var(--text-muted)" }}>-</span>
                     )}
                   </td>
                   <td>

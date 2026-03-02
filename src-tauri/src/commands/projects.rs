@@ -13,6 +13,7 @@ pub struct ProjectDetail {
     pub service_count: usize,
     pub branch_count: usize,
     pub worktree_enabled: bool,
+    pub vcs_type: Option<String>,
 }
 
 #[tauri::command]
@@ -113,6 +114,8 @@ pub async fn init_project(
     if !config_path.exists() {
         let mut config = devflow_core::config::Config::default();
         config.name = Some(project_name.clone());
+        // Enable worktrees by default, matching CLI behavior
+        config.worktree = Some(devflow_core::config::WorktreeConfig::recommended_default());
         config
             .save_to_file(&config_path)
             .map_err(|e| format!("Failed to create config: {}", e))?;
@@ -146,6 +149,7 @@ pub async fn get_project_detail(project_path: String) -> Result<ProjectDetail, S
         .unwrap_or_else(|| "unknown".to_string());
 
     let vcs = devflow_core::vcs::detect_vcs_provider(&project_path).ok();
+    let vcs_type = vcs.as_ref().map(|v| v.provider_name().to_string());
 
     let current_branch = vcs
         .as_ref()
@@ -182,6 +186,7 @@ pub async fn get_project_detail(project_path: String) -> Result<ProjectDetail, S
         service_count,
         branch_count,
         worktree_enabled,
+        vcs_type,
     })
 }
 

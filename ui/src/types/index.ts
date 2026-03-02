@@ -11,6 +11,7 @@ export interface ProjectDetail {
   service_count: number;
   branch_count: number;
   worktree_enabled: boolean;
+  vcs_type: string | null;
 }
 
 export interface BranchEntry {
@@ -51,6 +52,11 @@ export interface OrchestrationResult {
   service_name: string;
   success: boolean;
   message: string;
+}
+
+export interface CreateBranchResult {
+  services: OrchestrationResult[];
+  worktree_path: string | null;
 }
 
 export interface HookPhaseEntry {

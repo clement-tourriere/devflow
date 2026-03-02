@@ -12,6 +12,7 @@ import type {
   CertificateStatus,
   AppSettings,
   OrchestrationResult,
+  CreateBranchResult,
   DestroyResult,
   OrphanProjectEntry,
   OrphanCleanupResult,
@@ -46,15 +47,10 @@ export const createBranch = (
   branchName: string,
   fromBranch?: string
 ) =>
-  invoke<OrchestrationResult[]>("create_branch", {
+  invoke<CreateBranchResult>("create_branch", {
     projectPath,
     branchName,
     fromBranch,
-  });
-export const switchBranch = (projectPath: string, branchName: string) =>
-  invoke<OrchestrationResult[]>("switch_branch", {
-    projectPath,
-    branchName,
   });
 export const deleteBranch = (projectPath: string, branchName: string) =>
   invoke<OrchestrationResult[]>("delete_branch", {
