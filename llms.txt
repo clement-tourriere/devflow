@@ -20,7 +20,7 @@ cloned using Copy-on-Write for near-instant, space-efficient branching.
 - [AGENTS.md](AGENTS.md): Agent-first onboarding, bootstrap flow, suggested agent loop, and automation contract.
 - [CLAUDE.md](CLAUDE.md): Project structure, config schema, development commands, and AI agent context.
 - [CHANGELOG.md](CHANGELOG.md): Version history and release notes.
-- [docs/index.html](docs/index.html): Full single-page documentation site with dark/light theme.
+- [docs/index.html](docs/index.html): Full single-page documentation site with search, dark/light theme.
 
 ## Agent workflows
 
@@ -33,6 +33,7 @@ cloned using Copy-on-Write for near-instant, space-efficient branching.
 ## Source (for code agents)
 
 - [src/cli.rs](src/cli.rs): Command routing, JSON/non-interactive behavior, multi-provider orchestration.
+- [src/agent.rs](src/agent.rs): AI agent integration (skill generation, context, rules).
 - [src/config/mod.rs](src/config/mod.rs): Config loading, 3-tier merging, env var overrides, validation.
 - [src/services/mod.rs](src/services/mod.rs): `ServiceProvider` trait — the interface all providers implement.
 - [src/services/factory.rs](src/services/factory.rs): Provider creation, dispatch, multi-provider orchestration.

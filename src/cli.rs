@@ -6,7 +6,7 @@ use crate::services::{self, ServiceProvider};
 use crate::docker;
 use crate::hooks::{
     approval::ApprovalStore, HookContext, HookEngine, HookEntry, HookPhase, IndexMap,
-    ServiceContext,
+    ServiceContext, TemplateEngine,
 };
 use crate::state::{DevflowBranch, LocalStateManager};
 use crate::vcs;
@@ -94,7 +94,10 @@ Examples:
         #[arg(long, help = "Keep service branches (only remove worktree)")]
         keep_services: bool,
     },
-    #[command(about = "Merge current branch into target (with optional cleanup)")]
+    #[command(
+        about = "Merge current branch into target (with optional cleanup)",
+        long_about = "Merge current branch into target (with optional cleanup).\n\nPerforms a git merge of the current branch into the target branch (defaults to main).\nWith --cleanup, also removes the source branch, its worktree, and associated service branches.\n\nExamples:\n  devflow merge                        # Merge into main\n  devflow merge develop                # Merge into develop\n  devflow merge --cleanup              # Merge and delete source branch + services\n  devflow merge --dry-run              # Preview without merging"
+    )]
     Merge {
         #[arg(help = "Target branch to merge into (default: main branch)")]
         target: Option<String>,
@@ -103,7 +106,10 @@ Examples:
         #[arg(long, help = "Simulate merge without actual operations")]
         dry_run: bool,
     },
-    #[command(about = "Clean up old service branches (alias for 'service cleanup')")]
+    #[command(
+        about = "Clean up old service branches (alias for 'service cleanup')",
+        long_about = "Clean up old service branches.\n\nRemoves stale service branches that no longer have a corresponding VCS branch.\nOptionally limit the number of branches to retain.\n\nExamples:\n  devflow cleanup                  # Remove orphaned service branches\n  devflow cleanup --max-count 10   # Keep at most 10 service branches"
+    )]
     Cleanup {
         #[arg(long, help = "Maximum number of branches to keep")]
         max_count: Option<usize>,
@@ -130,11 +136,17 @@ Examples:
         #[arg(long, help = "Output format: uri, env, or json")]
         format: Option<String>,
     },
-    #[command(about = "Show current project and service status")]
+    #[command(
+        about = "Show current project and service status",
+        long_about = "Show current project and service status.\n\nDisplays the current branch, configured services, their states,\nand connection info. Useful for quick orientation.\n\nExamples:\n  devflow status\n  devflow --json status"
+    )]
     Status,
 
     // ── VCS ──
-    #[command(about = "Commit staged changes with optional AI-generated message")]
+    #[command(
+        about = "Commit staged changes with optional AI-generated message",
+        long_about = "Commit staged changes with optional AI-generated message.\n\nWith no flags, opens your editor for a manual commit message.\nWith --ai, generates a commit message using the configured LLM\n(external CLI command preferred, API as fallback).\n\nExamples:\n  devflow commit                      # Open editor\n  devflow commit -m 'fix: typo'       # Direct message\n  devflow commit --ai                 # AI-generated message\n  devflow commit --ai --edit          # AI-generated, then edit\n  devflow commit --ai --dry-run       # Preview AI message only"
+    )]
     Commit {
         #[arg(short, long, help = "Commit message (skips AI generation)")]
         message: Option<String>,
@@ -170,7 +182,10 @@ Examples:
         #[arg(long, help = "Skip confirmation prompt")]
         force: bool,
     },
-    #[command(about = "Show current configuration")]
+    #[command(
+        about = "Show current configuration",
+        long_about = "Show current configuration.\n\nDisplays the merged configuration from .devflow.yml, .devflow.local.yml,\nand environment variable overrides. Use -v for detailed precedence info.\n\nExamples:\n  devflow config              # Show merged config YAML\n  devflow config -v           # Show precedence details + env overrides"
+    )]
     Config {
         #[arg(
             short,
@@ -179,11 +194,20 @@ Examples:
         )]
         verbose: bool,
     },
-    #[command(about = "Run diagnostics and check system health")]
+    #[command(
+        about = "Run diagnostics and check system health",
+        long_about = "Run diagnostics and check system health.\n\nVerifies that required tools (docker, git/jj) are available, configuration is valid,\nand services are reachable. Reports any issues with suggested fixes.\n\nExamples:\n  devflow doctor\n  devflow --json doctor"
+    )]
     Doctor,
-    #[command(about = "Install Git hooks")]
+    #[command(
+        about = "Install Git hooks",
+        long_about = "Install Git hooks.\n\nSets up post-checkout and post-commit Git hooks so devflow\nautomatically creates service branches and switches environments\non checkout. Safe to re-run.\n\nExamples:\n  devflow install-hooks"
+    )]
     InstallHooks,
-    #[command(about = "Uninstall Git hooks")]
+    #[command(
+        about = "Uninstall Git hooks",
+        long_about = "Uninstall Git hooks.\n\nRemoves the devflow Git hooks (post-checkout, post-commit).\nYour existing service branches and worktrees are not affected.\n\nExamples:\n  devflow uninstall-hooks"
+    )]
     UninstallHooks,
     #[command(about = "Handle Git hook execution", hide = true)]
     GitHook {
@@ -203,7 +227,8 @@ Examples:
     },
     #[command(
         name = "worktree-setup",
-        about = "Set up devflow in a Git worktree (copy files, create DB branch)"
+        about = "Set up devflow in a Git worktree (copy files, create DB branch)",
+        long_about = "Set up devflow in a Git worktree.\n\nCopies configuration files and creates service branches for the current\nworktree. Normally called automatically by Git hooks, but can be run\nmanually if hooks are not installed.\n\nExamples:\n  devflow worktree-setup"
     )]
     WorktreeSetup,
     #[command(
@@ -246,6 +271,16 @@ Examples:
     Plugin {
         #[command(subcommand)]
         action: PluginCommands,
+    },
+
+    // ── AI Agent ──
+    #[command(
+        about = "AI agent integration (start, status, context, skill)",
+        long_about = "AI agent integration.\n\nManage AI coding agents that work in isolated branch environments.\nLaunch agents into worktrees, track their status, and generate\nproject-specific skills/rules for different AI tools.\n\nExamples:\n  devflow agent start fix-login -- 'Fix the login timeout bug'\n  devflow agent status\n  devflow agent context\n  devflow agent skill\n  devflow agent docs"
+    )]
+    Agent {
+        #[command(subcommand)]
+        action: AgentCommands,
     },
 
     // ── Hidden ──
@@ -361,6 +396,7 @@ pub enum ServiceCommands {
         long_about = "Show container logs for a branch.\n\nDisplays stdout/stderr from the Docker container backing a service branch.\nUseful for debugging startup failures, query errors, or crash loops.\n\nExamples:\n  devflow service logs main                    # Last 100 lines from main\n  devflow service logs feature/auth --tail 50  # Last 50 lines\n  devflow service logs main -s analytics       # Logs from a specific service"
     )]
     Logs {
+        #[arg(help = "Name of the branch to show logs for")]
         branch_name: String,
         #[arg(long, help = "Number of lines to show (default: 100)")]
         tail: Option<usize>,
@@ -370,6 +406,7 @@ pub enum ServiceCommands {
         long_about = "Seed a branch database from an external source.\n\nLoads data into an existing branch from a PostgreSQL URL, local dump file,\nor S3 URL. The branch must already exist.\n\nExamples:\n  devflow service seed main --from dump.sql                    # Seed from local file\n  devflow service seed feature/auth --from postgresql://...     # Seed from live database\n  devflow service seed main --from s3://bucket/path/dump.sql   # Seed from S3"
     )]
     Seed {
+        #[arg(help = "Name of the branch to seed")]
         branch_name: String,
         #[arg(
             long,
@@ -399,6 +436,32 @@ pub enum HookCommands {
     Approvals {
         #[command(subcommand)]
         action: ApprovalCommands,
+    },
+    #[command(
+        about = "Explain hook phases and template variables",
+        long_about = "Explain hook phases and template variables.\n\nWith no arguments, lists all hook phases with descriptions.\nWith a phase name, shows detailed info and an example.\n\nExamples:\n  devflow hook explain              # List all phases\n  devflow hook explain post-create  # Detailed info for post-create"
+    )]
+    Explain {
+        #[arg(help = "Phase name to explain (e.g. post-create, post-switch)")]
+        phase: Option<String>,
+    },
+    #[command(
+        about = "Show available template variables with current values",
+        long_about = "Show all template variables available in hook templates.\n\nDisplays the current branch, repo, services, and all filters\nwith their actual resolved values.\n\nExamples:\n  devflow hook vars\n  devflow hook vars --branch feature/auth"
+    )]
+    Vars {
+        #[arg(long, help = "Branch name to use for context (defaults to current)")]
+        branch: Option<String>,
+    },
+    #[command(
+        about = "Render a template string with current context",
+        long_about = "Render a MiniJinja template string using the current project context.\n\nUseful for testing templates before adding them to .devflow.yml.\n\nExamples:\n  devflow hook render '{{ service[\"db\"].url }}'\n  devflow hook render 'DATABASE_URL={{ service[\"db\"].url }}'\n  devflow hook render '{{ branch | sanitize_db }}'"
+    )]
+    Render {
+        #[arg(help = "Template string to render")]
+        template: String,
+        #[arg(long, help = "Branch name to use for context (defaults to current)")]
+        branch: Option<String>,
     },
 }
 
@@ -435,6 +498,58 @@ pub enum PluginCommands {
         )]
         lang: String,
     },
+}
+
+/// Subcommands for `devflow agent`.
+#[derive(Subcommand)]
+pub enum AgentCommands {
+    #[command(
+        about = "Start an AI agent in a new branch",
+        long_about = "Start an AI agent in a new isolated branch.\n\nCreates a worktree branch and launches the configured agent tool.\n\nExamples:\n  devflow agent start fix-login -- 'Fix the login timeout'\n  devflow agent start fix-login --command claude\n  devflow agent start fix-login --dry-run"
+    )]
+    Start {
+        #[arg(help = "Branch name (will be prefixed with agent/ by default)")]
+        branch: String,
+        #[arg(long, help = "Agent command to launch (overrides config)")]
+        command: Option<String>,
+        #[arg(last = true, help = "Prompt to pass to the agent")]
+        prompt: Vec<String>,
+        #[arg(long, help = "Show what would be done without executing")]
+        dry_run: bool,
+    },
+    #[command(about = "Show agent status across all branches")]
+    Status,
+    #[command(
+        about = "Output project context for the current branch",
+        long_about = "Output structured context for AI agents.\n\nIncludes branch info, service connections, and project config.\n\nExamples:\n  devflow agent context\n  devflow agent context --format json\n  devflow agent context --branch feature/auth"
+    )]
+    Context {
+        #[arg(
+            long,
+            default_value = "markdown",
+            help = "Output format: json or markdown"
+        )]
+        format: String,
+        #[arg(long, help = "Branch to generate context for")]
+        branch: Option<String>,
+    },
+    #[command(
+        about = "Generate AI tool skills/rules for this project",
+        long_about = "Generate project-specific configuration files for AI tools.\n\nGenerates skills, rules, or configuration for Claude Code, OpenCode,\nCursor, or all tools at once.\n\nExamples:\n  devflow agent skill                   # Generate for all tools\n  devflow agent skill --target claude    # Claude Code only\n  devflow agent skill --target cursor    # Cursor only"
+    )]
+    Skill {
+        #[arg(
+            long,
+            default_value = "all",
+            help = "Target: claude, opencode, cursor, or all"
+        )]
+        target: String,
+    },
+    #[command(
+        about = "Generate AGENTS.md for this project",
+        long_about = "Generate a comprehensive AGENTS.md tailored to this project.\n\nIncludes actual service names, connection patterns, hook phases,\nand project-specific agent workflow examples."
+    )]
+    Docs,
 }
 
 pub async fn handle_command(
@@ -856,6 +971,10 @@ pub async fn handle_command(
         Commands::Plugin { action } => {
             handle_plugin_command(action, &config, json_output).await?;
         }
+        Commands::Agent { action } => {
+            handle_agent_command(action, &config, json_output, non_interactive, &config_path)
+                .await?;
+        }
         Commands::Config { verbose } => {
             if json_output {
                 if verbose {
@@ -1035,7 +1154,7 @@ pub async fn handle_command(
             edit,
             dry_run,
         } => {
-            handle_commit_command(message, ai, edit, dry_run, json_output).await?;
+            handle_commit_command(message, ai, edit, dry_run, json_output, &config).await?;
         }
         Commands::Completions { shell } => {
             use clap::CommandFactory;
@@ -1195,7 +1314,7 @@ async fn init_local_service_main(
                         "Warning: could not create main branch for '{}': {}",
                         named_cfg.name, e
                     );
-                    eprintln!("  You can create it later with: devflow create main");
+                    eprintln!("  You can create it later with: devflow service create main");
                 }
             }
         }
@@ -1204,7 +1323,7 @@ async fn init_local_service_main(
                 "Warning: could not initialize service '{}': {}",
                 named_cfg.name, e
             );
-            eprintln!("  You can create the main branch later with: devflow create main");
+            eprintln!("  You can create the main branch later with: devflow service create main");
         }
     }
 }
@@ -1320,6 +1439,9 @@ fn register_branch_in_state(
             parent: final_parent,
             worktree_path: final_worktree,
             created_at,
+            agent_tool: None,
+            agent_status: None,
+            agent_started_at: None,
         },
     )?;
 
@@ -2349,6 +2471,15 @@ async fn handle_hook_command(
         HookCommands::Approvals { action } => {
             handle_hook_approvals(action, json_output)?;
         }
+        HookCommands::Explain { phase } => {
+            handle_hook_explain(phase.as_deref(), json_output)?;
+        }
+        HookCommands::Vars { branch } => {
+            handle_hook_vars(config, branch.as_deref(), json_output).await?;
+        }
+        HookCommands::Render { template, branch } => {
+            handle_hook_render(config, &template, branch.as_deref(), json_output).await?;
+        }
     }
     Ok(())
 }
@@ -2456,6 +2587,310 @@ fn handle_hook_show(config: &Config, phase_filter: Option<&str>, json_output: bo
     }
 
     Ok(())
+}
+
+/// `devflow hook explain [phase]` — show documentation about hook phases.
+fn handle_hook_explain(phase: Option<&str>, json_output: bool) -> Result<()> {
+    // Static phase documentation: (name, summary, blocking, category, detail)
+    let phases: Vec<(&str, &str, bool, &str, &str)> = vec![
+        ("pre-switch",           "Before switching branches/worktrees",           true,  "VCS",     "Runs before any branch/worktree switch. Use for saving state or running checks."),
+        ("post-create",          "After creating a new branch/worktree",          true,  "VCS",     "Runs after a new branch is created (via `switch -c`). Use for one-time setup: install dependencies, run migrations, write .env files."),
+        ("post-start",           "After starting a stopped service container",    false, "VCS",     "Runs after `devflow service start`. Use for warming caches or re-applying state."),
+        ("post-switch",          "After switching to a branch/worktree",          false, "VCS",     "Runs every time you switch branches. Use for updating .env files, restarting dev servers."),
+        ("pre-remove",           "Before removing a branch",                      true,  "VCS",     "Runs before `devflow remove`. Use for cleanup tasks or archival."),
+        ("post-remove",          "After removing a branch",                       false, "VCS",     "Runs after branch removal. Use for notifying external systems."),
+        ("pre-commit",           "Before committing",                             true,  "Merge",   "Runs before `devflow commit`. Use for linting, formatting, or test checks."),
+        ("pre-merge",            "Before merging branches",                       true,  "Merge",   "Runs before `devflow merge`. Use for running tests or CI checks."),
+        ("post-merge",           "After merging branches",                        false, "Merge",   "Runs after a successful merge. Use for cleanup or deployment triggers."),
+        ("post-rewrite",         "After rewriting history (rebase, amend)",       false, "Merge",   "Runs after Git history rewrite. Use for re-applying migrations."),
+        ("pre-service-create",   "Before creating a service branch",              true,  "Service", "Runs before service provisioning. Use for pre-flight checks."),
+        ("post-service-create",  "After creating a service branch",               true,  "Service", "Runs after service provisioning. THE most common hook — use for npm ci, migrations, writing .env files."),
+        ("pre-service-delete",   "Before deleting a service branch",              true,  "Service", "Runs before service teardown. Use for data export or backups."),
+        ("post-service-delete",  "After deleting a service branch",               false, "Service", "Runs after service teardown. Use for cleanup."),
+        ("post-service-switch",  "After services switch to a branch",             false, "Service", "Runs after services switch (not VCS). Use for service-specific reconnection."),
+    ];
+
+    if json_output {
+        let items: Vec<serde_json::Value> = phases
+            .iter()
+            .map(|(name, summary, blocking, category, detail)| {
+                serde_json::json!({
+                    "phase": name,
+                    "summary": summary,
+                    "blocking": blocking,
+                    "category": category,
+                    "detail": detail,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&items)?);
+        return Ok(());
+    }
+
+    if let Some(phase_name) = phase {
+        // Show detailed info for one phase
+        if let Some((name, summary, blocking, category, detail)) =
+            phases.iter().find(|(n, ..)| *n == phase_name)
+        {
+            println!("{}", name);
+            println!("{}", "=".repeat(name.len()));
+            println!();
+            println!("Category:  {}", category);
+            println!(
+                "Blocking:  {}",
+                if *blocking {
+                    "Yes (waits for completion)"
+                } else {
+                    "No (runs in background)"
+                }
+            );
+            println!("Summary:   {}", summary);
+            println!();
+            println!("{}", detail);
+            println!();
+            println!("Example YAML:");
+            println!();
+            // Show a contextual example based on the phase
+            match *name {
+                "post-create" | "post-service-create" => {
+                    println!("  hooks:");
+                    println!("    {}:", name);
+                    println!("      install: \"npm ci\"");
+                    println!("      env: |");
+                    println!("        cat > .env.local << EOF");
+                    println!("        DATABASE_URL={{{{ service['db'].url }}}}");
+                    println!("        EOF");
+                    println!("      migrate: \"npx prisma migrate deploy\"");
+                }
+                "post-switch" | "post-service-switch" => {
+                    println!("  hooks:");
+                    println!("    {}:", name);
+                    println!("      env: |");
+                    println!("        cat > .env.local << EOF");
+                    println!("        DATABASE_URL={{{{ service['db'].url }}}}");
+                    println!("        EOF");
+                }
+                "pre-merge" | "pre-commit" => {
+                    println!("  hooks:");
+                    println!("    {}:", name);
+                    println!("      lint: \"npm run lint\"");
+                    println!("      test: \"npm test\"");
+                }
+                _ => {
+                    println!("  hooks:");
+                    println!("    {}:", name);
+                    println!(
+                        "      example: \"echo Running {} for {{{{ branch }}}}\"",
+                        name
+                    );
+                }
+            }
+            println!();
+            println!("Available template variables:");
+            println!("  {{{{ branch }}}}              Current branch name");
+            println!("  {{{{ repo }}}}                Repository name");
+            println!("  {{{{ default_branch }}}}      Main branch (e.g. main)");
+            println!("  {{{{ worktree_path }}}}       Worktree directory path");
+            println!("  {{{{ service['name'].url }}}} Full connection URL for a service");
+            println!(
+                "  {{{{ service['name'].host/port/database/user/password }}}}"
+            );
+            println!();
+            println!("Available filters:");
+            println!("  {{{{ branch | sanitize }}}}     Path-safe (/ -> -)");
+            println!("  {{{{ branch | sanitize_db }}}}  DB-safe (lowercase, _, max 63 chars)");
+            println!("  {{{{ branch | hash_port }}}}    Deterministic port 10000-19999");
+        } else {
+            println!("Unknown phase: '{}'", phase_name);
+            println!();
+            println!("Built-in phases:");
+            for (name, summary, blocking, ..) in &phases {
+                println!(
+                    "  {:<24} {} {}",
+                    name,
+                    if *blocking {
+                        "[blocking]  "
+                    } else {
+                        "[background]"
+                    },
+                    summary
+                );
+            }
+        }
+    } else {
+        // List all phases
+        println!("Hook Phases");
+        println!("===========");
+        println!();
+        println!("Which hook should I use?");
+        println!("  Setting up a new branch?     -> post-create or post-service-create");
+        println!("  Updating env on switch?      -> post-switch");
+        println!("  Running tests before merge?  -> pre-merge");
+        println!("  Custom setup per service?    -> post-service-create");
+        println!();
+
+        let mut current_category = "";
+        for (name, summary, blocking, category, _) in &phases {
+            if *category != current_category {
+                println!();
+                println!("{} Lifecycle:", category);
+                current_category = category;
+            }
+            println!(
+                "  {:<24} {} {}",
+                name,
+                if *blocking {
+                    "[blocking]  "
+                } else {
+                    "[background]"
+                },
+                summary
+            );
+        }
+        println!();
+        println!("Use 'devflow hook explain <phase>' for detailed info and examples.");
+    }
+
+    Ok(())
+}
+
+/// `devflow hook vars` — show available template variables with current values.
+async fn handle_hook_vars(
+    config: &Config,
+    branch_override: Option<&str>,
+    json_output: bool,
+) -> Result<()> {
+    let branch_name = if let Some(b) = branch_override {
+        b.to_string()
+    } else {
+        match vcs::detect_vcs_provider(".") {
+            Ok(vcs_repo) => vcs_repo
+                .current_branch()
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "unknown".to_string()),
+            Err(_) => "unknown".to_string(),
+        }
+    };
+
+    let context = build_hook_context(config, &branch_name).await;
+    let engine = TemplateEngine::new();
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&context)?);
+        return Ok(());
+    }
+
+    println!("Template Variables (current context):");
+    println!();
+    println!("  {{{{ branch }}}}              = {}", context.branch);
+    println!("  {{{{ repo }}}}                = {}", context.repo);
+    println!(
+        "  {{{{ default_branch }}}}      = {}",
+        context.default_branch
+    );
+    if let Some(ref wt) = context.worktree_path {
+        println!("  {{{{ worktree_path }}}}       = {}", wt);
+    }
+    if let Some(ref commit) = context.commit {
+        println!("  {{{{ commit }}}}              = {}", commit);
+    }
+
+    if !context.service.is_empty() {
+        println!();
+        println!("  Services:");
+        for (name, svc) in &context.service {
+            println!();
+            println!(
+                "    {{{{ service['{}'].host }}}}     = {}",
+                name, svc.host
+            );
+            println!(
+                "    {{{{ service['{}'].port }}}}     = {}",
+                name, svc.port
+            );
+            println!(
+                "    {{{{ service['{}'].database }}}} = {}",
+                name, svc.database
+            );
+            println!(
+                "    {{{{ service['{}'].user }}}}     = {}",
+                name, svc.user
+            );
+            if let Some(ref pw) = svc.password {
+                println!(
+                    "    {{{{ service['{}'].password }}}} = {}",
+                    name, pw
+                );
+            }
+            println!(
+                "    {{{{ service['{}'].url }}}}      = {}",
+                name, svc.url
+            );
+        }
+    }
+
+    // Show filter examples
+    println!();
+    println!("  Filters:");
+    let sanitized = engine
+        .render("{{ branch | sanitize }}", &context)
+        .unwrap_or_default();
+    let sanitized_db = engine
+        .render("{{ branch | sanitize_db }}", &context)
+        .unwrap_or_default();
+    let hash_port = engine
+        .render("{{ branch | hash_port }}", &context)
+        .unwrap_or_default();
+    println!("    {{{{ branch | sanitize }}}}      = {}", sanitized);
+    println!("    {{{{ branch | sanitize_db }}}}   = {}", sanitized_db);
+    println!("    {{{{ branch | hash_port }}}}     = {}", hash_port);
+
+    Ok(())
+}
+
+/// `devflow hook render <template>` — render a template string.
+async fn handle_hook_render(
+    config: &Config,
+    template: &str,
+    branch_override: Option<&str>,
+    json_output: bool,
+) -> Result<()> {
+    let branch_name = if let Some(b) = branch_override {
+        b.to_string()
+    } else {
+        match vcs::detect_vcs_provider(".") {
+            Ok(vcs_repo) => vcs_repo
+                .current_branch()
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "unknown".to_string()),
+            Err(_) => "unknown".to_string(),
+        }
+    };
+
+    let context = build_hook_context(config, &branch_name).await;
+    let engine = TemplateEngine::new();
+    let rendered = engine.render(template, &context)?;
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "template": template,
+                "rendered": rendered,
+            }))?
+        );
+    } else {
+        println!("{}", rendered);
+    }
+
+    Ok(())
+}
+
+/// Public wrapper for agents to build hook context.
+pub async fn build_hook_context_public(config: &Config, branch_name: &str) -> HookContext {
+    build_hook_context(config, branch_name).await
 }
 
 /// `devflow hook run <phase> [name]` — manually execute hooks.
@@ -7051,6 +7486,7 @@ async fn handle_commit_command(
     edit: bool,
     dry_run: bool,
     json_output: bool,
+    config: &Config,
 ) -> Result<()> {
     let vcs = vcs::detect_vcs_provider(".")?;
 
@@ -7074,7 +7510,7 @@ async fn handle_commit_command(
         msg
     } else if ai {
         // AI-generated message
-        generate_ai_commit_message(vcs.as_ref(), json_output).await?
+        generate_ai_commit_message(vcs.as_ref(), config, json_output).await?
     } else {
         // No --ai, no --message: open editor for manual message
         let initial = String::new();
@@ -7124,37 +7560,51 @@ async fn handle_commit_command(
 }
 
 /// Generate a commit message using the configured LLM.
+///
+/// Prefers external CLI command (e.g., `claude -p`, `llm`, `aichat`) if configured,
+/// falling back to the OpenAI-compatible API.
 #[cfg(feature = "llm")]
 async fn generate_ai_commit_message(
     vcs: &dyn vcs::VcsProvider,
+    config: &Config,
     _json_output: bool,
 ) -> Result<String> {
     use crate::llm;
 
-    let config = llm::LlmConfig::from_env();
-    if !config.is_configured() {
+    let commit_gen_config = config.commit.as_ref().and_then(|c| c.generation.as_ref());
+    let llm_config = llm::LlmConfig::from_config_and_env(commit_gen_config);
+
+    // Prefer external CLI command
+    if let Some(ref cmd) = llm_config.cli_command {
+        let diff = vcs.staged_diff()?;
+        let summary = vcs.staged_summary()?;
+        eprintln!("Generating commit message via: {}...", cmd);
+        return llm::generate_commit_message_via_cli(cmd, &diff, &summary).await;
+    }
+
+    // Fallback to API
+    if !llm_config.is_configured() {
         anyhow::bail!(
-            "LLM not configured. Set DEVFLOW_LLM_API_KEY or point DEVFLOW_LLM_API_URL to a local endpoint.\n\
-             Example: export DEVFLOW_LLM_API_KEY=sk-...\n\
-             For Ollama: export DEVFLOW_LLM_API_URL=http://localhost:11434/v1"
+            "LLM not configured. Either:\n\
+             1. Set 'commit.generation.command' in .devflow.yml (e.g., \"claude -p --model=haiku\")\n\
+             2. Set DEVFLOW_COMMIT_COMMAND env var\n\
+             3. Set DEVFLOW_LLM_API_KEY for OpenAI-compatible API"
         );
     }
 
     let diff = vcs.staged_diff()?;
     let summary = vcs.staged_summary()?;
-
     eprintln!(
         "Generating commit message with {} ({})...",
-        config.model, config.api_url
+        llm_config.model, llm_config.api_url
     );
-    let message = llm::generate_commit_message(&diff, &summary).await?;
-
-    Ok(message)
+    llm::generate_commit_message(&diff, &summary).await
 }
 
 #[cfg(not(feature = "llm"))]
 async fn generate_ai_commit_message(
     _vcs: &dyn vcs::VcsProvider,
+    _config: &Config,
     _json_output: bool,
 ) -> Result<String> {
     anyhow::bail!("LLM support not compiled in. Rebuild with the `llm` feature enabled.");
@@ -7205,6 +7655,339 @@ fn open_editor_for_message(initial_content: &str) -> Result<String> {
         .to_string();
 
     Ok(message)
+}
+
+/// Handle `devflow agent` subcommands.
+async fn handle_agent_command(
+    action: AgentCommands,
+    config: &Config,
+    json_output: bool,
+    _non_interactive: bool,
+    config_path: &Option<PathBuf>,
+) -> Result<()> {
+    match action {
+        AgentCommands::Start {
+            branch,
+            command,
+            prompt,
+            dry_run,
+        } => {
+            let agent_config = config.agent.as_ref();
+            let prefix = agent_config
+                .map(|a| a.branch_prefix.as_str())
+                .unwrap_or("agent/");
+
+            let branch_name = if branch.starts_with(prefix) {
+                branch.clone()
+            } else {
+                format!("{}{}", prefix, branch)
+            };
+
+            let agent_cmd = command
+                .or_else(|| agent_config.and_then(|a| a.command.clone()))
+                .or_else(|| std::env::var("DEVFLOW_AGENT_COMMAND").ok())
+                .unwrap_or_else(|| "claude".to_string());
+
+            let prompt_str = prompt.join(" ");
+
+            if dry_run {
+                if json_output {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "branch": branch_name,
+                            "agent_command": agent_cmd,
+                            "prompt": prompt_str,
+                        }))?
+                    );
+                } else {
+                    println!("Would create branch: {}", branch_name);
+                    println!("Would launch agent:  {}", agent_cmd);
+                    if !prompt_str.is_empty() {
+                        println!("With prompt:         {}", prompt_str);
+                    }
+                }
+                return Ok(());
+            }
+
+            // 1. Create the isolated branch + worktree via the switch handler
+            if !json_output {
+                println!("Creating isolated branch: {}", branch_name);
+            }
+            handle_switch_command(
+                config,
+                &branch_name,
+                config_path,
+                true,  // create
+                None,  // from (defaults to current)
+                false, // no_services
+                true,  // no_verify (agent branches skip hooks)
+                json_output,
+                true,  // non_interactive
+            )
+            .await?;
+
+            // 2. Record agent metadata in state
+            if let Some(ref path) = config_path {
+                if let Ok(mut state) = LocalStateManager::new() {
+                    let normalized = config.get_normalized_branch_name(&branch_name);
+                    if let Some(mut branch_state) = state.get_branch(path, &normalized) {
+                        branch_state.agent_tool = Some(agent_cmd.clone());
+                        branch_state.agent_status = Some("running".to_string());
+                        branch_state.agent_started_at = Some(chrono::Utc::now());
+                        if let Err(e) = state.register_branch(path, branch_state) {
+                            log::warn!("Failed to record agent state: {}", e);
+                        }
+                    }
+                }
+            }
+
+            // 3. Resolve the worktree path for the agent to work in
+            let work_dir = vcs::detect_vcs_provider(".")
+                .ok()
+                .and_then(|repo| repo.worktree_path(&branch_name).ok().flatten())
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+            // 4. Build the launch command with proper shell escaping
+            let escaped_prompt = prompt_str.replace('\'', "'\\''");
+            let launch_cmd = if prompt_str.is_empty() {
+                agent_cmd.clone()
+            } else {
+                match agent_cmd.as_str() {
+                    "claude" => {
+                        format!("claude --dangerously-skip-permissions '{}'", escaped_prompt)
+                    }
+                    "codex" => format!("codex '{}'", escaped_prompt),
+                    _ => format!("{} '{}'", agent_cmd, escaped_prompt),
+                }
+            };
+
+            // 5. Launch in tmux if available, otherwise direct
+            let has_tmux = std::process::Command::new("which")
+                .arg("tmux")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+
+            if has_tmux {
+                let session_name = branch_name.replace('/', "-");
+                if !json_output {
+                    println!("Launching agent in tmux session: {}", session_name);
+                }
+                let tmux_status = std::process::Command::new("tmux")
+                    .args([
+                        "new-session",
+                        "-d",
+                        "-s",
+                        &session_name,
+                        "-c",
+                        &work_dir.display().to_string(),
+                        "sh",
+                        "-c",
+                        &launch_cmd,
+                    ])
+                    .status()
+                    .context("Failed to launch tmux session")?;
+                if !tmux_status.success() {
+                    anyhow::bail!(
+                        "tmux exited with code {}. Is session '{}' already running? Check: tmux ls",
+                        tmux_status.code().unwrap_or(-1),
+                        session_name
+                    );
+                }
+                if json_output {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "branch": branch_name,
+                            "agent_command": agent_cmd,
+                            "tmux_session": session_name,
+                            "worktree": work_dir.display().to_string(),
+                        }))?
+                    );
+                } else {
+                    println!(
+                        "Agent running in tmux session '{}'. Attach with: tmux attach -t {}",
+                        session_name, session_name
+                    );
+                }
+            } else {
+                if !json_output {
+                    println!("Launching agent in: {}", work_dir.display());
+                }
+                let agent_status = std::process::Command::new("sh")
+                    .args(["-c", &launch_cmd])
+                    .current_dir(&work_dir)
+                    .status()
+                    .context("Failed to launch agent")?;
+                if json_output {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "branch": branch_name,
+                            "agent_command": agent_cmd,
+                            "exit_code": agent_status.code(),
+                            "worktree": work_dir.display().to_string(),
+                        }))?
+                    );
+                }
+            }
+
+            Ok(())
+        }
+
+        AgentCommands::Status => {
+            let state_manager = LocalStateManager::new()?;
+            if let Some(ref path) = config_path {
+                let branches = state_manager.get_branches(path);
+                let agent_prefix = config
+                    .agent
+                    .as_ref()
+                    .map(|a| a.branch_prefix.as_str())
+                    .unwrap_or("agent/");
+
+                let agent_branches: Vec<_> = branches
+                    .iter()
+                    .filter(|b| b.name.starts_with(agent_prefix))
+                    .collect();
+
+                if json_output {
+                    let items: Vec<serde_json::Value> = agent_branches
+                        .iter()
+                        .map(|b| {
+                            serde_json::json!({
+                                "branch": b.name,
+                                "created_at": b.created_at.to_rfc3339(),
+                                "worktree_path": b.worktree_path,
+                                "agent_tool": b.agent_tool,
+                                "agent_status": b.agent_status,
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&items)?);
+                } else if agent_branches.is_empty() {
+                    println!("No active agent branches.");
+                } else {
+                    println!("Agent Branches:");
+                    for b in agent_branches {
+                        let tool = b
+                            .agent_tool
+                            .as_deref()
+                            .unwrap_or("unknown");
+                        let status = b
+                            .agent_status
+                            .as_deref()
+                            .unwrap_or("unknown");
+                        println!(
+                            "  {} ({}, {}) — created {}",
+                            b.name,
+                            tool,
+                            status,
+                            b.created_at.format("%Y-%m-%d %H:%M")
+                        );
+                    }
+                }
+            } else {
+                println!("No project configuration found.");
+            }
+            Ok(())
+        }
+
+        AgentCommands::Context { format, branch } => {
+            let branch_name = if let Some(b) = branch {
+                b
+            } else {
+                match vcs::detect_vcs_provider(".") {
+                    Ok(vcs_repo) => vcs_repo
+                        .current_branch()
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    Err(_) => "unknown".to_string(),
+                }
+            };
+
+            let fmt = if json_output { "json" } else { format.as_str() };
+            let output = crate::agent::generate_agent_context(config, &branch_name, fmt).await?;
+            println!("{}", output);
+            Ok(())
+        }
+
+        AgentCommands::Skill { target } => {
+            let project_dir = std::env::current_dir()?;
+            let targets: Vec<&str> = if target == "all" {
+                vec!["claude", "opencode", "cursor"]
+            } else {
+                vec![target.as_str()]
+            };
+
+            for t in targets {
+                match t {
+                    "claude" => {
+                        let skill = crate::agent::generate_claude_skill(config, &project_dir)?;
+                        let skill_dir =
+                            project_dir.join(".claude").join("skills").join("devflow");
+                        std::fs::create_dir_all(&skill_dir)?;
+                        let skill_path = skill_dir.join("SKILL.md");
+                        std::fs::write(&skill_path, &skill)?;
+                        if !json_output {
+                            println!("Generated: {}", skill_path.display());
+                        }
+                    }
+                    "opencode" => {
+                        let content =
+                            crate::agent::generate_opencode_config(config, &project_dir)?;
+                        let path = project_dir.join("AGENTS.md");
+                        std::fs::write(&path, &content)?;
+                        if !json_output {
+                            println!("Generated: {}", path.display());
+                        }
+                    }
+                    "cursor" => {
+                        let rules =
+                            crate::agent::generate_cursor_rules(config, &project_dir)?;
+                        let rules_dir = project_dir.join(".cursor").join("rules");
+                        std::fs::create_dir_all(&rules_dir)?;
+                        let rules_path = rules_dir.join("devflow.md");
+                        std::fs::write(&rules_path, &rules)?;
+                        if !json_output {
+                            println!("Generated: {}", rules_path.display());
+                        }
+                    }
+                    _ => {
+                        eprintln!(
+                            "Unknown target: {}. Use: claude, opencode, cursor, or all",
+                            t
+                        );
+                    }
+                }
+            }
+
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({"generated": true}))?
+                );
+            }
+            Ok(())
+        }
+
+        AgentCommands::Docs => {
+            let project_dir = std::env::current_dir()?;
+            let content = crate::agent::generate_opencode_config(config, &project_dir)?;
+            let path = project_dir.join("AGENTS.md");
+            std::fs::write(&path, &content)?;
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({"path": path.display().to_string()}))?
+                );
+            } else {
+                println!("Generated: {}", path.display());
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Return the first line of a message (for display).

@@ -37,15 +37,60 @@ Equivalent manual flow:
 
 ```bash
 BRANCH="agent/$TASK_ID"
-devflow --json --non-interactive switch "$BRANCH" --no-verify
+devflow --json --non-interactive switch -c "$BRANCH" --no-verify
 devflow --json service connection "$BRANCH"
+```
+
+## Agent Commands
+
+devflow includes built-in agent management commands:
+
+```bash
+# Start an AI agent in an isolated branch (launches in tmux if available)
+devflow agent start fix-login -- 'Fix the login timeout bug'
+devflow agent start fix-login --command codex
+devflow agent start fix-login --dry-run          # Preview without executing
+
+# Check agent branches
+devflow agent status
+devflow --json agent status
+
+# Get project context (branch info, services, connections)
+devflow agent context
+devflow agent context --format json
+devflow agent context --branch feature/auth
+
+# Generate AI tool skills/rules
+devflow agent skill                               # All tools
+devflow agent skill --target claude               # .claude/skills/devflow/SKILL.md
+devflow agent skill --target cursor               # .cursor/rules/devflow.md
+devflow agent skill --target opencode             # AGENTS.md
+
+# Generate AGENTS.md
+devflow agent docs
+```
+
+## Hook Inspection
+
+Agents can inspect hooks and template variables without running them:
+
+```bash
+# Show all template variables for the current branch
+devflow hook vars
+devflow --json hook vars
+
+# Render a template string
+devflow hook render "DATABASE_URL={{ service['app-db'].url }}"
+
+# Explain what a hook phase does
+devflow hook explain post-create
 ```
 
 ## Suggested Agent Loop
 
 ```bash
 # 1) Create/switch isolated environment for this task
-devflow --json --non-interactive switch "agent/$TASK_ID" --no-verify
+devflow --json --non-interactive switch -c "agent/$TASK_ID" --no-verify
 
 # 2) Read connection info and run the task
 CONN=$(devflow --json service connection "agent/$TASK_ID" | jq -r '.connection_string')
@@ -55,6 +100,22 @@ devflow --json --non-interactive service reset "agent/$TASK_ID"
 
 # 4) Cleanup when done
 devflow --json --non-interactive service delete "agent/$TASK_ID"
+```
+
+## AI Commit Messages
+
+```bash
+# Generate commit message via external CLI tool (preferred)
+devflow commit --ai
+
+# Configure in .devflow.yml:
+# commit:
+#   generation:
+#     command: "claude -p --model haiku"
+#
+# Or via environment:
+# DEVFLOW_COMMIT_COMMAND="claude -p --model haiku"
+# DEVFLOW_LLM_API_KEY=sk-...  (OpenAI-compatible API fallback)
 ```
 
 ## Automation Contract

@@ -9,6 +9,8 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::config::CommitGenerationConfig;
+
 /// Maximum diff size (in bytes) to send to the LLM. Larger diffs get truncated.
 const MAX_DIFF_SIZE: usize = 32_000;
 
@@ -21,16 +23,18 @@ const ENV_MODEL: &str = "DEVFLOW_LLM_MODEL";
 const DEFAULT_API_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MODEL: &str = "gpt-4o-mini";
 
-/// LLM configuration resolved from environment variables.
+/// LLM configuration resolved from environment variables and config file.
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
     pub api_key: Option<String>,
     pub api_url: String,
     pub model: String,
+    /// External CLI command for commit generation (takes precedence over API).
+    pub cli_command: Option<String>,
 }
 
 impl LlmConfig {
-    /// Load configuration from environment variables.
+    /// Load configuration from environment variables only.
     pub fn from_env() -> Self {
         Self {
             api_key: std::env::var(ENV_API_KEY).ok().filter(|s| !s.is_empty()),
@@ -44,6 +48,31 @@ impl LlmConfig {
                 .ok()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+            cli_command: std::env::var("DEVFLOW_COMMIT_COMMAND")
+                .ok()
+                .filter(|s| !s.is_empty()),
+        }
+    }
+
+    /// Load configuration from config file settings + environment variables.
+    /// Config file values can be overridden by env vars.
+    pub fn from_config_and_env(commit_config: Option<&CommitGenerationConfig>) -> Self {
+        let base = Self::from_env();
+
+        if let Some(cfg) = commit_config {
+            Self {
+                api_key: base.api_key.or_else(|| cfg.api_key.clone()),
+                api_url: cfg
+                    .api_url
+                    .clone()
+                    .unwrap_or(base.api_url)
+                    .trim_end_matches('/')
+                    .to_string(),
+                model: cfg.model.clone().unwrap_or(base.model),
+                cli_command: base.cli_command.or_else(|| cfg.command.clone()),
+            }
+        } else {
+            base
         }
     }
 
@@ -125,6 +154,58 @@ pub async fn generate_commit_message(diff: &str, summary: &str) -> Result<String
     let user_prompt = build_user_prompt(&truncated_diff, summary);
 
     call_chat_api(&config, &system_prompt, &user_prompt).await
+}
+
+/// Generate a commit message using an external CLI tool.
+///
+/// Pipes the prompt to the command's stdin and reads the response from stdout.
+#[cfg(feature = "llm")]
+pub async fn generate_commit_message_via_cli(
+    command: &str,
+    diff: &str,
+    summary: &str,
+) -> Result<String> {
+    use tokio::io::AsyncWriteExt;
+
+    let truncated_diff = truncate_diff(diff);
+    let prompt = build_user_prompt(&truncated_diff, summary);
+    let system = build_system_prompt();
+    let full_prompt = format!("{}\n\n{}", system, prompt);
+
+    let mut child = tokio::process::Command::new("sh")
+        .args(["-c", command])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to spawn LLM CLI command")?;
+
+    // Write prompt to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(full_prompt.as_bytes()).await?;
+        stdin.shutdown().await?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .context("Failed to read LLM CLI output")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "LLM CLI command failed (exit {}): {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+
+    let message = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if message.is_empty() {
+        anyhow::bail!("LLM CLI returned an empty commit message");
+    }
+
+    Ok(message)
 }
 
 /// Call the OpenAI-compatible chat completions API.

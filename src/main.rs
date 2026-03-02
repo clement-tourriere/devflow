@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
 
+mod agent;
 mod cli;
 mod config;
 #[cfg(feature = "service-postgres-template")]
@@ -73,8 +74,20 @@ Setup & Config:
   setup-zfs           Set up a file-backed ZFS pool for CoW storage (Linux)
 
 Extensibility:
-  hook                Manage lifecycle hooks (show, run, approvals)
-  plugin              Manage plugin services (list, check, init)
+  hook show             Show configured hooks (filter by phase)
+  hook run              Run hooks for a phase manually
+  hook approvals        Manage hook approvals (list, add, clear)
+  hook explain          Explain hook phases and template variables
+  hook vars             Show available template variables with current values
+  hook render           Render a template string with current context
+  plugin                Manage plugin services (list, check, init)
+
+AI Agents:
+  agent start         Start an AI agent in a new isolated branch
+  agent status        Show agent status across all branches
+  agent context       Output project context for current branch
+  agent skill         Generate AI tool skills/rules for this project
+  agent docs          Generate AGENTS.md for this project
 
 Interactive:
   tui                 Launch the interactive terminal UI dashboard

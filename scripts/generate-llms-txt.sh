@@ -115,6 +115,7 @@ HEADER
 ## Source (for code agents)
 
 - [src/cli.rs](src/cli.rs): Command routing, JSON/non-interactive behavior, multi-provider orchestration.
+- [src/agent.rs](src/agent.rs): AI agent integration (skill generation, context, rules).
 - [src/config/mod.rs](src/config/mod.rs): Config loading, 3-tier merging, env var overrides, validation.
 - [src/services/mod.rs](src/services/mod.rs): `ServiceProvider` trait — the interface all providers implement.
 - [src/services/factory.rs](src/services/factory.rs): Provider creation, dispatch, multi-provider orchestration.
@@ -174,7 +175,7 @@ Five service types: postgres, clickhouse, mysql, generic (any Docker image), plu
 TASK_ID="issue-123"
 BRANCH="agent/\$TASK_ID"
 
-devflow --json --non-interactive switch "\$BRANCH" --no-verify
+devflow --json --non-interactive switch -c "\$BRANCH" --no-verify
 CONN=\$(devflow --json service connection "\$BRANCH" | jq -r '.connection_string')
 
 # run task against \$CONN ...
@@ -202,6 +203,8 @@ INTRO
 | Command | Description |
 |---|---|
 | `devflow list` | List all branches with service + worktree status |
+| `devflow graph` | Render full environment graph (branch tree + services) |
+| `devflow link <branch>` | Link an existing VCS branch into devflow |
 | `devflow switch [<branch>] [-c] [--base <b>] [-x <cmd>] [--no-services] [--no-verify] [--template] [--dry-run]` | Switch to a branch (interactive picker if no arg) |
 | `devflow remove <branch> [--force] [--keep-services]` | Remove branch + worktree + all service branches |
 | `devflow cleanup [--max-count N]` | Remove old branches, keep most recent N |
@@ -220,6 +223,8 @@ INTRO
 | `devflow service seed <branch> --from <source>` | Seed from PostgreSQL URL, file, or s3:// |
 | `devflow service logs <branch> [--tail N]` | Show container logs |
 | `devflow service connection <branch> [--format uri\|env\|json]` | Connection info |
+| `devflow service capabilities` | Service provider capability matrix |
+| `devflow service cleanup` | Clean up old branches for a service |
 
 ### VCS
 
@@ -247,6 +252,7 @@ INTRO
 | `devflow uninstall-hooks` | Remove Git hooks |
 | `devflow setup-zfs [--pool-name <n>] [--size <s>]` | Create file-backed ZFS pool |
 | `devflow shell-init [bash\|zsh\|fish]` | Print shell integration script |
+| `devflow tui` | Launch interactive terminal UI dashboard |
 | `devflow worktree-setup` | Set up devflow in a Git worktree |
 
 ### Hooks
@@ -255,9 +261,22 @@ INTRO
 |---|---|
 | `devflow hook show [<phase>]` | Show configured hooks |
 | `devflow hook run <phase> [<name>] [--branch <b>]` | Run hooks manually |
+| `devflow hook explain <phase>` | Explain what a hook phase does |
+| `devflow hook vars` | Show all template variables for current branch |
+| `devflow hook render <template>` | Render a MiniJinja template string |
 | `devflow hook approvals list` | List approved hooks |
 | `devflow hook approvals add <cmd>` | Approve a hook command |
 | `devflow hook approvals clear` | Clear all approvals |
+
+### AI Agents
+
+| Command | Description |
+|---|---|
+| `devflow agent start <task> [--command <cmd>] [--dry-run] [-- <prompt>]` | Start AI agent in isolated branch |
+| `devflow agent status` | Show agent status across all branches |
+| `devflow agent context [--format json] [--branch <b>]` | Output project context for agents |
+| `devflow agent skill [--target claude\|cursor\|opencode\|all]` | Generate AI tool skills/rules |
+| `devflow agent docs` | Generate AGENTS.md for this project |
 
 ### Plugins
 
@@ -386,6 +405,18 @@ hooks:
       command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
   pre-merge:
     test: "npm test"
+
+agent:
+  command: claude                      # Default agent command (claude, codex, etc.)
+  branch_prefix: "agent/"             # Prefix for agent-created branches
+  auto_context: true                  # Provide context on launch
+
+commit:
+  generation:
+    command: "claude -p --model haiku" # External CLI for commit messages (preferred)
+    # api_url: "http://localhost:11434/v1"   # OpenAI-compatible API (fallback)
+    # model: "llama3"
+    # api_key: "..."
 ```
 
 ### Configuration hierarchy (highest to lowest precedence)
@@ -414,6 +445,8 @@ hooks:
 | `DEVFLOW_LLM_API_KEY=...` | API key for AI commit messages |
 | `DEVFLOW_LLM_API_URL=...` | LLM endpoint URL (OpenAI-compatible) |
 | `DEVFLOW_LLM_MODEL=...` | LLM model name |
+| `DEVFLOW_COMMIT_COMMAND=...` | External CLI for commit messages (e.g., "claude -p") |
+| `DEVFLOW_AGENT_COMMAND=...` | Default agent command (e.g., "claude", "codex") |
 
 SECTION
 
@@ -447,6 +480,9 @@ SECTION
 | `{{ repo }}` | Repository directory name |
 | `{{ worktree_path }}` | Worktree path (if enabled) |
 | `{{ default_branch }}` | Default branch (main/master) |
+| `{{ commit }}` | Current commit hash (when available) |
+| `{{ target }}` | Target branch (merge/rebase operations) |
+| `{{ base }}` | Base branch (merge/rebase operations) |
 | `{{ service.<name>.host }}` | Service host |
 | `{{ service.<name>.port }}` | Service port |
 | `{{ service.<name>.database }}` | Database name |
@@ -458,9 +494,13 @@ SECTION
 
 | Filter | Description | Example |
 |---|---|---|
-| `sanitize` | Replace `/` with `-` | `{{ branch \| sanitize }}` → `feature-auth` |
-| `sanitize_db` | DB-safe: replace non-alphanumeric with `_` | `{{ branch \| sanitize_db }}` → `feature_auth` |
-| `hash_port` | Deterministic port in 10000-19999 | `{{ branch \| hash_port }}` → `14523` |
+| `sanitize` | Replace `/` with `-` | `{{ branch \| sanitize }}` -> `feature-auth` |
+| `sanitize_db` | DB-safe: replace non-alphanumeric with `_` | `{{ branch \| sanitize_db }}` -> `feature_auth` |
+| `hash_port` | Deterministic port in 10000-19999 | `{{ branch \| hash_port }}` -> `14523` |
+| `lower` | Lowercase | `{{ branch \| lower }}` -> `feature/auth` |
+| `upper` | Uppercase | `{{ branch \| upper }}` -> `FEATURE/AUTH` |
+| `replace(from, to)` | String replacement | `{{ branch \| replace("/", "-") }}` -> `feature-auth` |
+| `truncate(len)` | Truncate to length | `{{ branch \| truncate(20) }}` -> `feature/very-long...` |
 
 SECTION
 
@@ -481,7 +521,8 @@ SECTION
 ```
 src/
   main.rs               CLI entry point (clap derive)
-  cli.rs                All command implementations (~4500 lines)
+  cli.rs                All command implementations (~7800 lines)
+  agent.rs              AI agent integration (skill generation, context, rules)
   config/mod.rs         Config types, 3-tier merging, validation
   services/
     mod.rs              ServiceProvider trait
@@ -509,7 +550,7 @@ src/
   state/local_state.rs  User-level state (SQLite)
   docker/compose.rs     Docker Compose file parsing
   database.rs           PostgreSQL template provider DB operations
-  llm.rs                LLM integration for AI commit messages
+  llm.rs                LLM integration for AI commit messages (CLI-first + API fallback)
 ```
 
 ## Primary references

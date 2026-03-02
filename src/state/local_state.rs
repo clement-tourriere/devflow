@@ -25,6 +25,15 @@ pub struct DevflowBranch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// AI agent tool used for this branch (e.g., "claude", "codex").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_tool: Option<String>,
+    /// Agent status marker (e.g., "running", "idle", "done").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_status: Option<String>,
+    /// When the agent was started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_started_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

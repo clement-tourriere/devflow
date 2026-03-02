@@ -210,6 +210,31 @@ worktree:
   copy_ignored: true                # Copy files even if gitignored
 ```
 
+#### AI Agents
+
+```yaml
+agent:
+  command: claude                    # Default agent command (claude, codex, etc.)
+  branch_prefix: "agent/"           # Prefix for agent-created branches
+  auto_context: true                # Provide project context on launch
+```
+
+#### AI Commit Messages
+
+```yaml
+commit:
+  generation:
+    command: "claude -p --model haiku"  # External CLI for commit messages
+    # Or use an OpenAI-compatible API:
+    # api_url: "http://localhost:11434/v1"
+    # model: "llama3"
+    # api_key: "..."
+```
+
+The commit message generator tries these in order:
+1. `commit.generation.command` in `.devflow.yml` (or `DEVFLOW_COMMIT_COMMAND` env var)
+2. OpenAI-compatible API via `DEVFLOW_LLM_API_KEY` / `DEVFLOW_LLM_API_URL`
+
 ### Config Hierarchy
 
 Highest to lowest precedence:
@@ -237,6 +262,8 @@ DEVFLOW_ZFS_DATASET=...              # Force a specific ZFS dataset
 DEVFLOW_LLM_API_KEY=...              # API key for AI commit messages
 DEVFLOW_LLM_API_URL=...              # LLM endpoint URL
 DEVFLOW_LLM_MODEL=...               # LLM model name
+DEVFLOW_COMMIT_COMMAND=...           # External CLI for commit messages (e.g., "claude -p")
+DEVFLOW_AGENT_COMMAND=...            # Default agent command (e.g., "claude", "codex")
 ```
 
 ## CLI Reference
@@ -279,6 +306,25 @@ devflow service logs <branch> --tail 50  # Show last 50 lines
 devflow merge <target>                   # Merge current branch into target
 devflow commit                           # Commit staged changes
 devflow commit --ai                      # AI-generated commit message
+devflow commit --ai --edit               # AI-generated, then edit in $EDITOR
+```
+
+### AI Agents
+
+```bash
+devflow agent start <task> [--command <cmd>] [--dry-run] [-- <prompt>...]
+                                         # Start an AI agent in a new branch
+devflow agent start fix-login -- 'Fix the login timeout bug'
+devflow agent start fix-login --command codex
+devflow agent status                     # Show agent status across all branches
+devflow agent context                    # Output project context for current branch
+devflow agent context --format json      # JSON format
+devflow agent context --branch feature/x # Specific branch
+devflow agent skill                      # Generate skills/rules for all AI tools
+devflow agent skill --target claude      # Claude Code only (.claude/skills/)
+devflow agent skill --target cursor      # Cursor only (.cursor/rules/)
+devflow agent skill --target opencode    # OpenCode only (AGENTS.md)
+devflow agent docs                       # Generate AGENTS.md for this project
 ```
 
 ### Info & Diagnostics
@@ -341,6 +387,9 @@ newly initialized directory.
 devflow hook show                        # Show all configured hooks
 devflow hook show <phase>                # Show hooks for a phase
 devflow hook run <phase>                 # Run hooks manually
+devflow hook explain <phase>             # Explain what a hook phase does
+devflow hook vars                        # Show all template variables for current branch
+devflow hook render <template>           # Render a MiniJinja template string
 devflow hook approvals                   # List approved hooks
 devflow hook approvals clear             # Clear all approvals
 ```
@@ -510,7 +559,12 @@ devflow service seed feature/auth --from postgresql://...
 # One-time bootstrap (idempotent)
 ./examples/agent-bootstrap.sh
 
-# Create an isolated branch for the agent
+# Option A: Use devflow agent commands (recommended)
+devflow agent start task-42 -- 'Fix the login timeout bug'
+devflow agent status                     # Check agent branches
+devflow agent context                    # Get project context
+
+# Option B: Manual workflow
 devflow --json --non-interactive switch -c agent-task-42 --no-verify
 
 # Get connection info
@@ -526,6 +580,15 @@ devflow service logs agent-task-42
 
 # Clean up
 devflow --json --non-interactive remove agent-task-42 --force
+```
+
+Generate project-specific skills/rules for AI tools:
+
+```bash
+devflow agent skill                      # All tools (Claude, Cursor, OpenCode)
+devflow agent skill --target claude      # .claude/skills/devflow/SKILL.md
+devflow agent skill --target cursor      # .cursor/rules/devflow.md
+devflow agent docs                       # AGENTS.md
 ```
 
 For a full agent-oriented workflow, see `AGENTS.md`.

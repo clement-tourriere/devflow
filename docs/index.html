@@ -576,7 +576,7 @@ hr {
 <aside class="sidebar">
   <div class="sidebar-header">
     <h2>devflow</h2>
-    <div class="version">v0.3.0 &middot; MIT License</div>
+    <div class="version">v0.4.0 &middot; MIT License</div>
   </div>
   <nav>
     <a href="#hero">Home</a>
@@ -1303,7 +1303,25 @@ hooks:
   pre-merge:
     test:
       command: "npm test"
-      continue_on_error: false</code></pre>
+      continue_on_error: false
+
+# ============================================
+# AI Commit Messages
+# ============================================
+commit:
+  generation:
+    command: "claude -p --model haiku"  # External CLI (preferred)
+    # Falls back to OpenAI-compatible API if no command set:
+    # api_key: ${DEVFLOW_LLM_API_KEY}
+    # api_url: https://api.openai.com/v1
+    # model: gpt-4o-mini
+
+# ============================================
+# AI Agent Integration
+# ============================================
+agent:
+  command: claude                       # Default agent tool
+  branch_prefix: "agent/"              # Prefix for agent branches</code></pre>
 
   <div class="callout callout-warning">
     <span class="callout-icon">&#9888;</span>
@@ -1350,6 +1368,9 @@ hooks:
       <tr><td><code>DEVFLOW_LLM_API_KEY</code></td><td>API key for AI commit messages</td><td>&mdash;</td></tr>
       <tr><td><code>DEVFLOW_LLM_API_URL</code></td><td>LLM endpoint URL</td><td>OpenAI</td></tr>
       <tr><td><code>DEVFLOW_LLM_MODEL</code></td><td>LLM model name</td><td><code>gpt-4o-mini</code></td></tr>
+      <tr><td><code>DEVFLOW_COMMIT_COMMAND</code></td><td>External CLI for commit messages (e.g., <code>claude -p</code>)</td><td>&mdash;</td></tr>
+      <tr><td><code>DEVFLOW_AGENT_COMMAND</code></td><td>Default agent command (e.g., <code>claude</code>, <code>codex</code>)</td><td><code>claude</code></td></tr>
+      <tr><td><code>DEVFLOW_CONTEXT_BRANCH</code></td><td>Override current branch context (for CI)</td><td>auto-detected</td></tr>
     </tbody>
   </table>
 </section>
@@ -2492,6 +2513,9 @@ eval "$(devflow shell-init bash)"        # Bash
 eval "$(devflow shell-init zsh)"         # Zsh
 devflow shell-init fish | source         # Fish</code></pre>
 
+  <h4><code>devflow tui</code></h4>
+  <p>Launch the interactive terminal UI dashboard. Provides a rich overview of branches, services, and worktrees with keyboard-driven navigation.</p>
+
   <h4><code>devflow setup-zfs</code></h4>
   <p>Create a file-backed ZFS pool for Copy-on-Write storage (Linux only).</p>
 <pre><code class="language-bash">devflow setup-zfs                        # 10G pool named "devflow"
@@ -2539,6 +2563,11 @@ devflow remove feature/auth --keep-services  # Keep service branches</code></pre
 
   <h4><code>devflow list</code></h4>
   <p>List all branches with enriched status (Git branch + worktree + service status across all providers).</p>
+
+  <h4><code>devflow graph</code></h4>
+  <p>Render the full environment graph: branch tree with service status, worktree paths, and provider info.</p>
+<pre><code class="language-bash">devflow graph
+devflow --json graph</code></pre>
 
   <h4><code>devflow merge [target]</code></h4>
   <p>Merge the current branch into the target (defaults to main).</p>
@@ -2599,6 +2628,11 @@ devflow service logs feature/auth --tail 50      # Last 50 lines</code></pre>
 <pre><code class="language-bash">devflow capabilities
 devflow --json capabilities</code></pre>
 
+  <h4><code>devflow service capabilities</code></h4>
+  <p>Show the service provider capability matrix (which operations each configured provider supports).</p>
+<pre><code class="language-bash">devflow service capabilities
+devflow --json service capabilities</code></pre>
+
   <h4><code>devflow connection &lt;branch&gt;</code></h4>
   <p>Show connection info for a branch.</p>
 <pre><code class="language-bash">devflow connection feature/auth              # URI (default)
@@ -2620,6 +2654,35 @@ devflow commit --ai --dry-run            # Preview AI message</code></pre>
 
   <hr>
 
+  <h3>AI Agents</h3>
+
+  <h4><code>devflow agent start &lt;task&gt;</code></h4>
+  <p>Start an AI agent in a new isolated branch.</p>
+<pre><code class="language-bash">devflow agent start fix-login -- 'Fix the login timeout bug'
+devflow agent start fix-login --command codex
+devflow agent start fix-login --dry-run  # Preview without executing</code></pre>
+
+  <h4><code>devflow agent status</code></h4>
+  <p>Show agent status across all branches.</p>
+
+  <h4><code>devflow agent context</code></h4>
+  <p>Output project context (branch info, services, connections) for AI agents.</p>
+<pre><code class="language-bash">devflow agent context                    # Markdown format
+devflow agent context --format json      # JSON format
+devflow agent context --branch feat/x    # Specific branch</code></pre>
+
+  <h4><code>devflow agent skill</code></h4>
+  <p>Generate project-specific skills/rules for AI tools.</p>
+<pre><code class="language-bash">devflow agent skill                      # All tools (Claude, Cursor, OpenCode)
+devflow agent skill --target claude      # .claude/skills/devflow/SKILL.md
+devflow agent skill --target cursor      # .cursor/rules/devflow.md
+devflow agent skill --target opencode    # AGENTS.md</code></pre>
+
+  <h4><code>devflow agent docs</code></h4>
+  <p>Generate an AGENTS.md tailored to this project.</p>
+
+  <hr>
+
   <h3>Hooks</h3>
 
   <h4><code>devflow hook show [phase]</code></h4>
@@ -2630,6 +2693,16 @@ devflow commit --ai --dry-run            # Preview AI message</code></pre>
 <pre><code class="language-bash">devflow hook run post-create              # All post-create hooks
 devflow hook run post-create migrate      # Just the "migrate" hook
 devflow hook run post-create --branch feat/x  # For a different branch</code></pre>
+
+  <h4><code>devflow hook explain &lt;phase&gt;</code></h4>
+  <p>Explain what a hook phase does and show configured hooks for it.</p>
+
+  <h4><code>devflow hook vars</code></h4>
+  <p>Show all template variables available for the current branch.</p>
+
+  <h4><code>devflow hook render &lt;template&gt;</code></h4>
+  <p>Render a MiniJinja template string against the current branch context.</p>
+<pre><code class="language-bash">devflow hook render "DATABASE_URL={{ service['app-db'].url }}"</code></pre>
 
   <h4><code>devflow hook approvals</code></h4>
   <p>Manage the hook approval store.</p>

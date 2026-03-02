@@ -168,6 +168,9 @@ impl DevflowContext {
                     parent,
                     worktree_path,
                     created_at,
+                    agent_tool: None,
+                    agent_status: None,
+                    agent_started_at: None,
                 };
 
                 if let Err(e) = state.register_branch(config_path, branch) {

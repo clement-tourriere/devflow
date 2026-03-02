@@ -19,7 +19,8 @@ devflow is a Rust-based tool that provides branching support for development ser
 - **Seed support**: Seed databases from PostgreSQL URLs, local dump files, or S3
 - **Shell integration**: `eval "$(devflow shell-init)"` for automatic `cd` into worktrees
 - **JSON output + non-interactive mode**: For CI/CD and AI agent workflows
-- **AI commit messages**: `devflow commit --ai` generates commit messages via LLM
+- **AI commit messages**: `devflow commit --ai` generates commit messages via LLM (CLI-first, API fallback)
+- **AI agent integration**: `devflow agent start/status/context/skill/docs` for managing AI coding agents in isolated branches
 
 ## Configuration
 
@@ -47,6 +48,8 @@ The tool is configured via `.devflow.yml` in your Git repository root (created b
 - `DEVFLOW_LLM_API_KEY=...` — API key for AI commit messages
 - `DEVFLOW_LLM_API_URL=...` — LLM endpoint URL
 - `DEVFLOW_LLM_MODEL=...` — LLM model name
+- `DEVFLOW_COMMIT_COMMAND=...` — External CLI for commit messages (e.g., "claude -p")
+- `DEVFLOW_AGENT_COMMAND=...` — Default agent command (e.g., "claude", "codex")
 
 ### Config File Schema (`.devflow.yml`):
 ```yaml
@@ -98,6 +101,20 @@ hooks:
       command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
   pre-merge:
     test: "npm test"
+
+# AI agent configuration
+agent:
+  command: claude                    # Default agent command
+  branch_prefix: "agent/"           # Prefix for agent branches
+  auto_context: true                # Provide context on launch
+
+# AI commit message generation
+commit:
+  generation:
+    command: "claude -p --model haiku"  # External CLI (preferred)
+    # api_url: "http://localhost:11434/v1"   # OpenAI-compatible API (fallback)
+    # model: "llama3"
+    # api_key: "..."
 ```
 
 ## Development Commands
@@ -128,7 +145,8 @@ cargo check
 
 ## Project Structure
 - `src/main.rs` — CLI entry point with custom help template
-- `src/cli.rs` — All command implementations (~4000 lines)
+- `src/cli.rs` — All command implementations (~7800 lines)
+- `src/agent.rs` — AI agent integration (skill generation, context, rules)
 - `src/config/mod.rs` — Config parsing, validation, env var overrides, local config merging
 - `src/services/mod.rs` — `ServiceBackend` trait definition
 - `src/services/factory.rs` — Backend creation, dispatch, orchestration
@@ -144,7 +162,7 @@ cargo check
 - `src/hooks/` — Hook engine (executor, approval, templates)
 - `src/state/` — Local state persistence (`~/.local/share/devflow/`)
 - `src/docker.rs` — Docker helper utilities
-- `src/llm.rs` — LLM integration for AI commit messages
+- `src/llm.rs` — LLM integration for AI commit messages (CLI-first + API fallback)
 
 ## References
 - PostgreSQL TEMPLATE documentation for template backend

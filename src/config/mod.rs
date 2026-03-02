@@ -28,6 +28,12 @@ pub struct Config {
     /// Maps hook phase names to named hook entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hooks: Option<crate::hooks::HooksConfig>,
+    /// AI agent integration configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentConfig>,
+    /// Commit message generation configuration (LLM).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<CommitConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,6 +250,57 @@ pub struct GenericDockerConfig {
     /// Health check command
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub healthcheck: Option<String>,
+}
+
+/// Configuration for AI agent integration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentConfig {
+    /// Command to launch the agent (e.g., "claude", "codex").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Branch prefix for agent-created branches (default: "agent/").
+    #[serde(
+        default = "default_agent_branch_prefix",
+        skip_serializing_if = "is_default_agent_branch_prefix"
+    )]
+    pub branch_prefix: String,
+    /// Automatically provide project context to the agent on launch.
+    #[serde(default = "default_true")]
+    pub auto_context: bool,
+}
+
+fn default_agent_branch_prefix() -> String {
+    "agent/".to_string()
+}
+
+fn is_default_agent_branch_prefix(s: &String) -> bool {
+    s == "agent/"
+}
+
+/// Configuration for commit message generation.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CommitConfig {
+    /// Commit generation settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<CommitGenerationConfig>,
+}
+
+/// LLM configuration for generating commit messages.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CommitGenerationConfig {
+    /// External CLI command to pipe prompts to (e.g., "claude -p --model=haiku").
+    /// Takes precedence over the built-in API approach.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// OpenAI-compatible API key (fallback when no command is set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// OpenAI-compatible API URL (fallback when no command is set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_url: Option<String>,
+    /// Model name (fallback when no command is set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -582,6 +639,8 @@ impl Default for Config {
             services: None,
             worktree: None,
             hooks: None,
+            agent: None,
+            commit: None,
         }
     }
 }
