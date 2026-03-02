@@ -48,6 +48,9 @@ function ProjectList() {
   const [vcsInfo, setVcsInfo] = useState<VcsInfo | null>(null);
   const [selectedVcs, setSelectedVcs] = useState<string>("git");
 
+  // Branching mode (init mode only)
+  const [branchingMode, setBranchingMode] = useState<"worktree" | "branch">("worktree");
+
   const loadProjects = async () => {
     try {
       const list = await listProjects();
@@ -110,6 +113,7 @@ function ProjectList() {
     setModalLoading(false);
     setVcsInfo(null);
     setSelectedVcs("git");
+    setBranchingMode("worktree");
   };
 
   const handleModalSubmit = async () => {
@@ -125,7 +129,7 @@ function ProjectList() {
       if (modalMode === "init") {
         // Pass VCS preference only when no VCS already exists
         const vcsPref = vcsInfo?.existing_vcs ? undefined : selectedVcs;
-        await initProject(selectedPath, normalized, vcsPref);
+        await initProject(selectedPath, normalized, vcsPref, branchingMode === "worktree");
       } else {
         await addProject(selectedPath, normalized);
       }
@@ -416,6 +420,54 @@ function ProjectList() {
                 <span className="badge">{vcsInfo.available_tools[0] || "git"}</span>
               </div>
             )}
+          </div>
+        )}
+
+        {/* Branching mode (init mode only) */}
+        {modalMode === "init" && (
+          <div style={{ marginBottom: 16 }}>
+            <label
+              style={{
+                display: "block",
+                marginBottom: 6,
+                fontSize: 13,
+                color: "var(--text-secondary)",
+                fontWeight: 500,
+              }}
+            >
+              Branching Mode
+            </label>
+            <div className="flex gap-2">
+              <button
+                className={`btn${branchingMode === "worktree" ? " btn-primary" : ""}`}
+                style={{ padding: "4px 16px", fontSize: 13 }}
+                onClick={() => setBranchingMode("worktree")}
+                type="button"
+              >
+                worktree
+              </button>
+              <button
+                className={`btn${branchingMode === "branch" ? " btn-primary" : ""}`}
+                style={{ padding: "4px 16px", fontSize: 13 }}
+                onClick={() => setBranchingMode("branch")}
+                type="button"
+              >
+                checkout
+              </button>
+            </div>
+            <div
+              style={{
+                marginTop: 6,
+                fontSize: 12,
+                color: "var(--text-muted)",
+              }}
+            >
+              {branchingMode === "worktree"
+                ? "Each branch gets its own directory — parallel work without stashing."
+                : `Branches share a single directory — switches in place like ${
+                    (vcsInfo?.existing_vcs || selectedVcs) === "jj" ? "jj edit" : "git checkout"
+                  }.`}
+            </div>
           </div>
         )}
 

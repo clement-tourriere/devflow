@@ -104,6 +104,7 @@ pub async fn init_project(
     path: String,
     name: Option<String>,
     vcs_preference: Option<String>,
+    worktree_enabled: Option<bool>,
 ) -> Result<ProjectEntry, String> {
     let dir = std::path::Path::new(&path);
     if !dir.is_dir() {
@@ -144,8 +145,10 @@ pub async fn init_project(
     if !config_path.exists() {
         let mut config = devflow_core::config::Config::default();
         config.name = Some(project_name.clone());
-        // Enable worktrees by default, matching CLI behavior
-        config.worktree = Some(devflow_core::config::WorktreeConfig::recommended_default());
+        // Enable worktrees based on user selection (defaults to enabled)
+        if worktree_enabled.unwrap_or(true) {
+            config.worktree = Some(devflow_core::config::WorktreeConfig::recommended_default());
+        }
         config
             .save_to_file(&config_path)
             .map_err(|e| format!("Failed to create config: {}", e))?;

@@ -28,8 +28,8 @@ export const removeProject = (path: string) =>
   invoke<void>("remove_project", { path });
 export const getProjectDetail = (projectPath: string) =>
   invoke<ProjectDetail>("get_project_detail", { projectPath });
-export const initProject = (path: string, name?: string, vcsPreference?: string) =>
-  invoke<ProjectEntry>("init_project", { path, name, vcsPreference });
+export const initProject = (path: string, name?: string, vcsPreference?: string, worktreeEnabled?: boolean) =>
+  invoke<ProjectEntry>("init_project", { path, name, vcsPreference, worktreeEnabled });
 
 // VCS
 export const detectVcsInfo = (path: string) =>
