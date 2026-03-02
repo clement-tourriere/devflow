@@ -6,7 +6,6 @@ import {
   listServices,
   addService,
   createBranch,
-  switchBranch,
   deleteBranch,
   startService,
   stopService,
@@ -152,18 +151,6 @@ function ProjectDetail() {
       await reload();
     } catch (e) {
       alert(`Failed to create branch: ${e}`);
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleSwitchBranch = async (name: string) => {
-    setActionLoading(`switch:${name}`);
-    try {
-      await switchBranch(projectPath, name);
-      await reload();
-    } catch (e) {
-      alert(`Failed to switch branch: ${e}`);
     } finally {
       setActionLoading(null);
     }
@@ -503,18 +490,17 @@ function ProjectDetail() {
                   </td>
                   <td style={{ textAlign: "right" }}>
                     <div className="flex gap-2" style={{ justifyContent: "flex-end" }}>
-                      {!b.is_current && (
-                        <button
-                          className="btn"
-                          style={{ padding: "2px 10px", fontSize: 12 }}
-                          onClick={() => handleSwitchBranch(b.name)}
-                          disabled={actionLoading === `switch:${b.name}`}
-                        >
-                          {actionLoading === `switch:${b.name}`
-                            ? "..."
-                            : "Switch"}
-                        </button>
-                      )}
+                      <button
+                        className="btn"
+                        style={{ padding: "2px 10px", fontSize: 12 }}
+                        onClick={() => {
+                          setFromBranch(b.name);
+                          setNewBranchName("");
+                          setShowCreateBranch(true);
+                        }}
+                      >
+                        Branch from
+                      </button>
                       {!b.is_current && !b.is_default && (
                         <button
                           className="btn btn-danger"
