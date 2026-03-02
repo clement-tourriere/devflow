@@ -41,6 +41,7 @@ fn main() {
             // Services
             commands::services::add_service,
             commands::services::list_services,
+            commands::services::list_service_branches,
             commands::services::start_service,
             commands::services::stop_service,
             commands::services::run_doctor,

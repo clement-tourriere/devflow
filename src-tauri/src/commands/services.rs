@@ -321,6 +321,51 @@ pub async fn reset_service(
         .map_err(|e| e.to_string())
 }
 
+#[derive(Serialize)]
+pub struct ServiceBranchInfo {
+    pub name: String,
+    pub created_at: Option<String>,
+    pub parent_branch: Option<String>,
+    pub database_name: String,
+    pub state: Option<String>,
+}
+
+#[tauri::command]
+pub async fn list_service_branches(
+    project_path: String,
+    service_name: String,
+) -> Result<Vec<ServiceBranchInfo>, String> {
+    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
+    let config = devflow_core::config::Config::from_file(&config_path)
+        .map_err(|e| e.to_string())?;
+
+    let named_services = config.resolve_services();
+    let svc = named_services
+        .iter()
+        .find(|s| s.name == service_name)
+        .ok_or("Service not found")?;
+
+    let provider = services::factory::create_provider_from_named_config(&config, svc)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let branches = provider
+        .list_branches()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(branches
+        .into_iter()
+        .map(|b| ServiceBranchInfo {
+            name: b.name,
+            created_at: b.created_at.map(|dt| dt.to_rfc3339()),
+            parent_branch: b.parent_branch,
+            database_name: b.database_name,
+            state: b.state,
+        })
+        .collect())
+}
+
 #[tauri::command]
 pub async fn get_service_status(
     project_path: String,

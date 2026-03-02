@@ -12,7 +12,7 @@ import {
   resetService,
   getServiceLogs,
   getConnectionInfo,
-  getServiceStatus,
+  listServiceBranches,
   removeProject,
   destroyProject,
 } from "../../utils/invoke";
@@ -20,6 +20,7 @@ import type {
   ProjectDetail as ProjectDetailType,
   BranchEntry,
   ServiceEntry,
+  ServiceBranchInfo,
   ConnectionInfo,
   AddServiceRequest,
 } from "../../types";
@@ -37,10 +38,13 @@ function ProjectDetail() {
   const [currentBranch, setCurrentBranch] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Service status tracking: { "service-name": "running" | "stopped" | ... }
-  const [serviceStatuses, setServiceStatuses] = useState<
-    Record<string, string | null>
+  // Service branch tracking: { "service-name": ServiceBranchInfo[] }
+  const [serviceBranches, setServiceBranches] = useState<
+    Record<string, ServiceBranchInfo[]>
   >({});
+  const [expandedServices, setExpandedServices] = useState<Set<string>>(
+    new Set()
+  );
 
   // Modal state
   const [showCreateBranch, setShowCreateBranch] = useState(false);
@@ -76,24 +80,23 @@ function ProjectDetail() {
   // Loading state
   const [actionLoading, setActionLoading] = useState<string | null>(null);
 
-  const fetchServiceStatuses = useCallback(
-    async (svcs: ServiceEntry[], branch: string | null) => {
-      if (!branch || svcs.length === 0) {
-        setServiceStatuses({});
+  const fetchServiceBranches = useCallback(
+    async (svcs: ServiceEntry[]) => {
+      if (svcs.length === 0) {
+        setServiceBranches({});
         return;
       }
-      const statuses: Record<string, string | null> = {};
+      const result: Record<string, ServiceBranchInfo[]> = {};
       await Promise.all(
         svcs.map(async (s) => {
           try {
-            const result = await getServiceStatus(projectPath, s.name, branch);
-            statuses[s.name] = result.state;
+            result[s.name] = await listServiceBranches(projectPath, s.name);
           } catch {
-            statuses[s.name] = null;
+            result[s.name] = [];
           }
         })
       );
-      setServiceStatuses(statuses);
+      setServiceBranches(result);
     },
     [projectPath]
   );
@@ -108,14 +111,12 @@ function ProjectDetail() {
       setError(`Failed to load project: ${e}`);
       return;
     }
-    let loadedBranch: string | null = null;
     let loadedServices: ServiceEntry[] = [];
     await Promise.all([
       listBranches(projectPath)
         .then((b) => {
           setBranches(b.branches);
           setCurrentBranch(b.current);
-          loadedBranch = b.current;
         })
         .catch(() => {
           setBranches([]);
@@ -128,9 +129,9 @@ function ProjectDetail() {
         })
         .catch(() => setServices([])),
     ]);
-    // Fetch service statuses after we know the current branch and services
-    await fetchServiceStatuses(loadedServices, loadedBranch);
-  }, [projectPath, fetchServiceStatuses]);
+    // Fetch service branches after we know the services
+    await fetchServiceBranches(loadedServices);
+  }, [projectPath, fetchServiceBranches]);
 
   useEffect(() => {
     reload();
@@ -170,15 +171,17 @@ function ProjectDetail() {
     }
   };
 
-  const handleConnectionInfo = async (serviceName: string) => {
-    if (!currentBranch) return;
-    setConnInfoBranch(currentBranch);
+  const handleConnectionInfo = async (
+    serviceName: string,
+    branchName: string
+  ) => {
+    setConnInfoBranch(branchName);
     try {
       const infos: Record<string, ConnectionInfo> = {};
       try {
         const info = await getConnectionInfo(
           projectPath,
-          currentBranch,
+          branchName,
           serviceName
         );
         infos[serviceName] = info as unknown as ConnectionInfo;
@@ -191,19 +194,14 @@ function ProjectDetail() {
     }
   };
 
-  const handleStartService = async (svcName: string) => {
-    if (!currentBranch) return;
-    setActionLoading(`start:${svcName}`);
+  const handleStartService = async (svcName: string, branchName: string) => {
+    setActionLoading(`start:${svcName}:${branchName}`);
     try {
-      await startService(projectPath, svcName, currentBranch);
-      // Refresh status for this service
+      await startService(projectPath, svcName, branchName);
+      // Refresh branches for this service
       try {
-        const result = await getServiceStatus(
-          projectPath,
-          svcName,
-          currentBranch
-        );
-        setServiceStatuses((prev) => ({ ...prev, [svcName]: result.state }));
+        const branches = await listServiceBranches(projectPath, svcName);
+        setServiceBranches((prev) => ({ ...prev, [svcName]: branches }));
       } catch {
         // ignore
       }
@@ -214,19 +212,14 @@ function ProjectDetail() {
     }
   };
 
-  const handleStopService = async (svcName: string) => {
-    if (!currentBranch) return;
-    setActionLoading(`stop:${svcName}`);
+  const handleStopService = async (svcName: string, branchName: string) => {
+    setActionLoading(`stop:${svcName}:${branchName}`);
     try {
-      await stopService(projectPath, svcName, currentBranch);
-      // Refresh status for this service
+      await stopService(projectPath, svcName, branchName);
+      // Refresh branches for this service
       try {
-        const result = await getServiceStatus(
-          projectPath,
-          svcName,
-          currentBranch
-        );
-        setServiceStatuses((prev) => ({ ...prev, [svcName]: result.state }));
+        const branches = await listServiceBranches(projectPath, svcName);
+        setServiceBranches((prev) => ({ ...prev, [svcName]: branches }));
       } catch {
         // ignore
       }
@@ -242,16 +235,15 @@ function ProjectDetail() {
     setActionLoading("reset");
     try {
       await resetService(projectPath, resetTarget.name, resetTarget.branch);
-      // Refresh status for this service
+      // Refresh branches for this service
       try {
-        const result = await getServiceStatus(
+        const branches = await listServiceBranches(
           projectPath,
-          resetTarget.name,
-          resetTarget.branch
+          resetTarget.name
         );
-        setServiceStatuses((prev) => ({
+        setServiceBranches((prev) => ({
           ...prev,
-          [resetTarget.name]: result.state,
+          [resetTarget.name]: branches,
         }));
       } catch {
         // ignore
@@ -264,16 +256,27 @@ function ProjectDetail() {
     }
   };
 
-  const handleViewLogs = async (svcName: string) => {
-    if (!currentBranch) return;
-    setLogService({ name: svcName, branch: currentBranch });
+  const handleViewLogs = async (svcName: string, branchName: string) => {
+    setLogService({ name: svcName, branch: branchName });
     setLogContent("Loading...");
     try {
-      const logs = await getServiceLogs(projectPath, svcName, currentBranch);
+      const logs = await getServiceLogs(projectPath, svcName, branchName);
       setLogContent(logs || "(no log output)");
     } catch (e) {
       setLogContent(`Error: ${e}`);
     }
+  };
+
+  const toggleServiceExpanded = (name: string) => {
+    setExpandedServices((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) {
+        next.delete(name);
+      } else {
+        next.add(name);
+      }
+      return next;
+    });
   };
 
   const handleRemoveProject = async () => {
@@ -569,145 +572,309 @@ function ProjectDetail() {
             )}
           </div>
         ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Type</th>
-                <th>Provider</th>
-                <th>Status</th>
-                <th>Auto</th>
-                <th style={{ textAlign: "right" }}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {services.map((s) => {
-                const status = serviceStatuses[s.name];
-                const isRunning = status === "running";
-                const isStopped =
-                  status === "stopped" ||
-                  status === "failed" ||
-                  status === null ||
-                  status === undefined;
-                return (
-                  <tr key={s.name}>
-                    <td style={{ fontWeight: 500 }}>{s.name}</td>
-                    <td>{s.service_type}</td>
-                    <td>{s.provider_type}</td>
-                    <td>
-                      {status === "running" ? (
-                        <span className="badge badge-success">running</span>
-                      ) : status === "failed" ? (
-                        <span className="badge badge-danger">failed</span>
-                      ) : status === "provisioning" ? (
-                        <span className="badge badge-warning">
-                          provisioning
-                        </span>
-                      ) : status === "stopped" ? (
-                        <span
-                          className="badge"
-                          style={{
-                            background: "var(--bg-tertiary)",
-                            color: "var(--text-muted)",
-                          }}
-                        >
-                          stopped
-                        </span>
-                      ) : (
-                        <span
-                          className="badge"
-                          style={{
-                            background: "var(--bg-tertiary)",
-                            color: "var(--text-muted)",
-                          }}
-                        >
-                          -
-                        </span>
-                      )}
-                    </td>
-                    <td>
-                      {s.auto_branch ? (
-                        <span className="badge badge-success">yes</span>
-                      ) : (
-                        <span className="badge badge-warning">no</span>
-                      )}
-                    </td>
-                    <td style={{ textAlign: "right" }}>
-                      <div
-                        className="flex gap-2"
-                        style={{ justifyContent: "flex-end" }}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {services.map((s) => {
+              const isExpanded = expandedServices.has(s.name);
+              const branchList = serviceBranches[s.name] || [];
+              const runningCount = branchList.filter(
+                (b) => b.state === "running"
+              ).length;
+              return (
+                <div
+                  key={s.name}
+                  style={{
+                    border: "1px solid var(--border)",
+                    borderRadius: 8,
+                    overflow: "hidden",
+                  }}
+                >
+                  {/* Service header — clickable to toggle */}
+                  <div
+                    onClick={() => toggleServiceExpanded(s.name)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "10px 14px",
+                      cursor: "pointer",
+                      background: isExpanded
+                        ? "var(--bg-tertiary)"
+                        : "var(--bg-primary)",
+                      transition: "background 0.15s",
+                    }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span
+                        style={{
+                          display: "inline-block",
+                          width: 16,
+                          textAlign: "center",
+                          color: "var(--text-muted)",
+                          fontSize: 12,
+                          transition: "transform 0.15s",
+                          transform: isExpanded
+                            ? "rotate(90deg)"
+                            : "rotate(0deg)",
+                        }}
                       >
-                        <button
-                          className="btn"
-                          style={{ padding: "2px 10px", fontSize: 12 }}
-                          onClick={() => handleConnectionInfo(s.name)}
-                          disabled={!currentBranch}
+                        &#9654;
+                      </span>
+                      <span style={{ fontWeight: 600, fontSize: 14 }}>
+                        {s.name}
+                      </span>
+                      <span
+                        className="badge"
+                        style={{
+                          background: "var(--bg-tertiary)",
+                          color: "var(--text-muted)",
+                          fontSize: 11,
+                        }}
+                      >
+                        {s.service_type}
+                      </span>
+                      <span
+                        className="badge"
+                        style={{
+                          background: "var(--bg-tertiary)",
+                          color: "var(--text-muted)",
+                          fontSize: 11,
+                        }}
+                      >
+                        {s.provider_type}
+                      </span>
+                      {s.auto_branch && (
+                        <span className="badge badge-info" style={{ fontSize: 11 }}>
+                          auto-branch
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span
+                        style={{
+                          color: "var(--text-muted)",
+                          fontSize: 12,
+                        }}
+                      >
+                        {branchList.length} branch
+                        {branchList.length !== 1 ? "es" : ""}
+                      </span>
+                      {runningCount > 0 && (
+                        <span className="badge badge-success" style={{ fontSize: 11 }}>
+                          {runningCount} running
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Expanded body — branch table */}
+                  {isExpanded && (
+                    <div style={{ borderTop: "1px solid var(--border)" }}>
+                      {branchList.length === 0 ? (
+                        <div
+                          style={{
+                            padding: "12px 14px",
+                            color: "var(--text-muted)",
+                            fontSize: 13,
+                          }}
                         >
-                          Connection Info
-                        </button>
-                        {s.provider_type === "local" && (
-                          <>
-                            {isStopped && (
-                              <button
-                                className="btn"
-                                style={{ padding: "2px 10px", fontSize: 12 }}
-                                onClick={() => handleStartService(s.name)}
-                                disabled={
-                                  !currentBranch ||
-                                  actionLoading === `start:${s.name}`
-                                }
-                              >
-                                {actionLoading === `start:${s.name}`
-                                  ? "..."
-                                  : "Start"}
-                              </button>
-                            )}
-                            {isRunning && (
-                              <button
-                                className="btn"
-                                style={{ padding: "2px 10px", fontSize: 12 }}
-                                onClick={() => handleStopService(s.name)}
-                                disabled={
-                                  !currentBranch ||
-                                  actionLoading === `stop:${s.name}`
-                                }
-                              >
-                                {actionLoading === `stop:${s.name}`
-                                  ? "..."
-                                  : "Stop"}
-                              </button>
-                            )}
-                            <button
-                              className="btn"
-                              style={{ padding: "2px 10px", fontSize: 12 }}
-                              onClick={() =>
-                                currentBranch &&
-                                setResetTarget({
-                                  name: s.name,
-                                  branch: currentBranch,
-                                })
-                              }
-                              disabled={!currentBranch}
-                            >
-                              Reset
-                            </button>
-                            <button
-                              className="btn"
-                              style={{ padding: "2px 10px", fontSize: 12 }}
-                              onClick={() => handleViewLogs(s.name)}
-                              disabled={!currentBranch}
-                            >
-                              Logs
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                          No branches yet. Create a branch above to provision
+                          this service.
+                        </div>
+                      ) : (
+                        <table className="table" style={{ marginBottom: 0 }}>
+                          <thead>
+                            <tr>
+                              <th>Branch</th>
+                              <th>Status</th>
+                              <th>Parent</th>
+                              <th>Database</th>
+                              <th style={{ textAlign: "right" }}>Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {branchList.map((b) => {
+                              const isRunning = b.state === "running";
+                              const isStopped =
+                                b.state === "stopped" ||
+                                b.state === "failed" ||
+                                b.state === null ||
+                                b.state === undefined;
+                              const isCurrent = b.name === currentBranch;
+                              return (
+                                <tr
+                                  key={b.name}
+                                  style={
+                                    isCurrent
+                                      ? {
+                                          background:
+                                            "rgba(88, 166, 255, 0.06)",
+                                        }
+                                      : undefined
+                                  }
+                                >
+                                  <td>
+                                    <span
+                                      style={{
+                                        fontWeight: isCurrent ? 600 : 400,
+                                      }}
+                                    >
+                                      {b.name}
+                                    </span>
+                                    {isCurrent && (
+                                      <span
+                                        className="badge badge-info"
+                                        style={{
+                                          marginLeft: 6,
+                                          fontSize: 10,
+                                        }}
+                                      >
+                                        current
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td>
+                                    <StatusBadge state={b.state} />
+                                  </td>
+                                  <td
+                                    style={{
+                                      color: "var(--text-muted)",
+                                      fontSize: 13,
+                                    }}
+                                  >
+                                    {b.parent_branch || "-"}
+                                  </td>
+                                  <td
+                                    className="mono"
+                                    style={{
+                                      color: "var(--text-secondary)",
+                                      fontSize: 12,
+                                    }}
+                                  >
+                                    {b.database_name}
+                                  </td>
+                                  <td style={{ textAlign: "right" }}>
+                                    <div
+                                      className="flex gap-2"
+                                      style={{
+                                        justifyContent: "flex-end",
+                                      }}
+                                    >
+                                      <button
+                                        className="btn"
+                                        style={{
+                                          padding: "2px 10px",
+                                          fontSize: 12,
+                                        }}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleConnectionInfo(
+                                            s.name,
+                                            b.name
+                                          );
+                                        }}
+                                      >
+                                        Connect
+                                      </button>
+                                      {s.provider_type === "local" && (
+                                        <>
+                                          {isStopped && (
+                                            <button
+                                              className="btn"
+                                              style={{
+                                                padding: "2px 10px",
+                                                fontSize: 12,
+                                              }}
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleStartService(
+                                                  s.name,
+                                                  b.name
+                                                );
+                                              }}
+                                              disabled={
+                                                actionLoading ===
+                                                `start:${s.name}:${b.name}`
+                                              }
+                                            >
+                                              {actionLoading ===
+                                              `start:${s.name}:${b.name}`
+                                                ? "..."
+                                                : "Start"}
+                                            </button>
+                                          )}
+                                          {isRunning && (
+                                            <button
+                                              className="btn"
+                                              style={{
+                                                padding: "2px 10px",
+                                                fontSize: 12,
+                                              }}
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleStopService(
+                                                  s.name,
+                                                  b.name
+                                                );
+                                              }}
+                                              disabled={
+                                                actionLoading ===
+                                                `stop:${s.name}:${b.name}`
+                                              }
+                                            >
+                                              {actionLoading ===
+                                              `stop:${s.name}:${b.name}`
+                                                ? "..."
+                                                : "Stop"}
+                                            </button>
+                                          )}
+                                          <button
+                                            className="btn"
+                                            style={{
+                                              padding: "2px 10px",
+                                              fontSize: 12,
+                                            }}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              setResetTarget({
+                                                name: s.name,
+                                                branch: b.name,
+                                              });
+                                            }}
+                                          >
+                                            Reset
+                                          </button>
+                                          <button
+                                            className="btn"
+                                            style={{
+                                              padding: "2px 10px",
+                                              fontSize: 12,
+                                            }}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              handleViewLogs(
+                                                s.name,
+                                                b.name
+                                              );
+                                            }}
+                                          >
+                                            Logs
+                                          </button>
+                                        </>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
 
@@ -1152,6 +1319,36 @@ function ProjectDetail() {
         </div>
       </Modal>
     </div>
+  );
+}
+
+function StatusBadge({ state }: { state: string | null }) {
+  if (state === "running") {
+    return <span className="badge badge-success">running</span>;
+  }
+  if (state === "failed") {
+    return <span className="badge badge-danger">failed</span>;
+  }
+  if (state === "provisioning") {
+    return <span className="badge badge-warning">provisioning</span>;
+  }
+  if (state === "stopped") {
+    return (
+      <span
+        className="badge"
+        style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}
+      >
+        stopped
+      </span>
+    );
+  }
+  return (
+    <span
+      className="badge"
+      style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}
+    >
+      -
+    </span>
   );
 }
 

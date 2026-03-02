@@ -39,6 +39,14 @@ export interface ServiceBranchStatus {
   state: string | null;
 }
 
+export interface ServiceBranchInfo {
+  name: string;
+  created_at: string | null;
+  parent_branch: string | null;
+  database_name: string;
+  state: string | null;
+}
+
 export interface ConnectionInfo {
   host: string;
   port: number;

@@ -5,6 +5,7 @@ import type {
   BranchesResponse,
   ServiceEntry,
   ServiceBranchStatus,
+  ServiceBranchInfo,
   AddServiceRequest,
   HookPhaseEntry,
   ProxyStatus,
@@ -105,6 +106,14 @@ export const getServiceStatus = (
     projectPath,
     serviceName,
     branchName,
+  });
+export const listServiceBranches = (
+  projectPath: string,
+  serviceName: string
+) =>
+  invoke<ServiceBranchInfo[]>("list_service_branches", {
+    projectPath,
+    serviceName,
   });
 
 // Hooks
