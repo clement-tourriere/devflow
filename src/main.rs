@@ -31,10 +31,11 @@ use cli::Commands;
 Branch Management:
   list                List all branches (with service + worktree status)
   graph               Render full environment graph (branch tree + services)
-  switch              Switch to a branch (creates worktree/service branches if needed)
+  link                Link an existing VCS branch into devflow
+  switch              Switch to an existing branch/worktree (use -c to create)
   remove              Remove a branch, its worktree, and associated service branches
   merge               Merge current branch into target (with optional cleanup)
-  cleanup             Clean up old service branches
+  cleanup             Clean up old service branches (alias for service cleanup)
 
 Services:
   service add         Add a new service provider
@@ -44,6 +45,7 @@ Services:
   service capabilities Show service capability matrix
   service create      Create a new service branch
   service delete      Delete a service branch
+  service cleanup     Clean up old branches for a service
   service start       Start a stopped branch container (local provider)
   service stop        Stop a running branch container (local provider)
   service reset       Reset a branch to its parent state (local provider)

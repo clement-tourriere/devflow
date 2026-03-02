@@ -20,7 +20,7 @@ pub fn render_help(frame: &mut Frame) {
             "Global",
             vec![
                 ("q / Ctrl+c", "Quit"),
-                ("1/2/3", "Switch to view"),
+                ("1/2/3", "Go to view"),
                 ("Tab / Shift+Tab", "Next / Previous view"),
                 ("[ / ]", "Previous / Next view"),
                 ("?", "Toggle this help"),
@@ -32,7 +32,8 @@ pub fn render_help(frame: &mut Frame) {
             vec![
                 ("j/k / Up/Down", "Navigate tree"),
                 ("Space", "Collapse/expand node"),
-                ("Enter", "Switch to selected branch"),
+                ("Enter", "Align services to selected branch"),
+                ("o", "Open selected branch/worktree (exit TUI)"),
                 ("c", "Create new branch"),
                 ("d", "Delete selected branch"),
                 ("n / p", "Cycle focused service"),
@@ -54,6 +55,8 @@ pub fn render_help(frame: &mut Frame) {
                 ),
                 ("h/l / Left/Right", "Previous/next sub-section"),
                 ("j/k / Up/Down", "Navigate/scroll content"),
+                ("v", "Hooks: toggle template reference"),
+                ("s", "Hooks: next scaffold example"),
                 ("g/G", "Go to top/bottom"),
                 ("PgUp/PgDn", "Page up/down"),
                 ("D", "Run doctor checks (Doctor section)"),

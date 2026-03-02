@@ -570,8 +570,21 @@ impl EnvironmentsComponent {
                     "Actions:",
                     Style::default().fg(theme::TEXT_SECONDARY),
                 ));
+                let has_any_service = self
+                    .data
+                    .as_ref()
+                    .map(|d| d.branches.iter().any(|b| !b.services.is_empty()))
+                    .unwrap_or(false);
+                let enter_action = if branch.is_current {
+                    "Already on this branch"
+                } else if has_any_service {
+                    "Align services to this branch"
+                } else {
+                    "Align services (no services configured)"
+                };
                 let mut hint_lines = vec![
-                    ("Enter", "Switch to this branch"),
+                    ("Enter", enter_action),
+                    ("o", "Open branch/worktree (exit TUI)"),
                     ("S", "Start focused service"),
                     ("x", "Stop focused service"),
                     ("R", "Reset focused service"),
@@ -650,7 +663,7 @@ impl Component for EnvironmentsComponent {
             KeyCode::Enter => {
                 if let Some(row) = self.selected_row() {
                     if !row.branch.is_current {
-                        Action::SwitchBranch(row.branch.name.clone())
+                        Action::SwitchServices(row.branch.name.clone())
                     } else {
                         Action::None
                     }
@@ -658,13 +671,20 @@ impl Component for EnvironmentsComponent {
                     Action::None
                 }
             }
+            KeyCode::Char('o') => {
+                if let Some(row) = self.selected_row() {
+                    Action::OpenBranchAndExit(row.branch.name.clone())
+                } else {
+                    Action::None
+                }
+            }
             KeyCode::Char('c') => Action::ShowInput {
                 title: self
                     .selected_row()
-                    .map(|row| format!("Create new branch (base: {})", row.branch.name))
+                    .map(|row| format!("Create new branch (from: {})", row.branch.name))
                     .unwrap_or_else(|| "Create new branch".to_string()),
                 on_submit: InputTarget::CreateBranch {
-                    base: self.selected_row().map(|row| row.branch.name.clone()),
+                    from: self.selected_row().map(|row| row.branch.name.clone()),
                 },
             },
             KeyCode::Char('d') => {

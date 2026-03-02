@@ -32,8 +32,30 @@ Examples:
     )]
     Graph,
     #[command(
-        about = "Switch to a branch (creates worktree/service branches if needed)",
-        long_about = "Switch to a branch (creates worktree/service branches if needed).\n\nWith no arguments, shows an interactive branch picker with fuzzy search.\nWith a branch name, switches to that branch, creating service branches and\nworktrees if they don't exist.\n\nExamples:\n  devflow switch                     # Interactive picker\n  devflow switch feature-auth        # Switch to existing branch\n  devflow switch -c feature-new      # Create new Git branch and switch\n  devflow switch --template           # Switch to main/template\n  devflow switch feature-auth -x 'npm run migrate'  # Run command after switch"
+        about = "Link an existing VCS branch into devflow",
+        long_about = "Link an existing VCS branch into devflow.
+
+This command records the branch in the devflow registry and materializes
+service branches when auto-branch services are configured.
+
+Examples:
+  devflow link feature/auth
+  devflow link feature/auth --from main"
+    )]
+    Link {
+        #[arg(help = "Branch name to link")]
+        branch_name: String,
+        #[arg(
+            short = 'b',
+            long = "from",
+            visible_alias = "base",
+            help = "Parent branch for lineage/service creation"
+        )]
+        from: Option<String>,
+    },
+    #[command(
+        about = "Switch to an existing branch/worktree (use -c to create)",
+        long_about = "Switch to an existing branch/worktree.\n\nWith no arguments, shows an interactive branch picker with fuzzy search.\nWith a branch name, switches to that branch and aligns services/worktrees.\nIf the branch does not exist, use -c/--create to create it first.\n\nExamples:\n  devflow switch                     # Interactive picker\n  devflow switch feature-auth        # Switch to existing branch\n  devflow switch -c feature-new      # Create new branch from current context\n  devflow switch -c feature-new --from release_1_0  # Create from explicit parent\n  devflow switch --template           # Switch to main/template\n  devflow switch feature-auth -x 'npm run migrate'  # Run command after switch"
     )]
     Switch {
         #[arg(
@@ -42,8 +64,13 @@ Examples:
         branch_name: Option<String>,
         #[arg(short = 'c', long, help = "Create a new branch before switching")]
         create: bool,
-        #[arg(short, long, help = "Base branch for new branch creation")]
-        base: Option<String>,
+        #[arg(
+            short = 'b',
+            long = "from",
+            visible_alias = "base",
+            help = "Parent branch for new branch creation (defaults to current context branch)"
+        )]
+        from: Option<String>,
         #[arg(short = 'x', long, help = "Run a command after switching")]
         execute: Option<String>,
         #[arg(long, help = "Skip service branching (only VCS switch)")]
@@ -76,7 +103,7 @@ Examples:
         #[arg(long, help = "Simulate merge without actual operations")]
         dry_run: bool,
     },
-    #[command(about = "Clean up old service branches")]
+    #[command(about = "Clean up old service branches (alias for 'service cleanup')")]
     Cleanup {
         #[arg(long, help = "Maximum number of branches to keep")]
         max_count: Option<usize>,
@@ -85,7 +112,7 @@ Examples:
     // ── Services ──
     #[command(
         about = "Manage services (create, delete, start, stop, reset, ...)",
-        long_about = "Manage service providers and their branches.\n\nService commands operate on the configured service providers (local Docker,\nNeon, DBLab, etc.) to create, delete, and manage branch-isolated environments.\n\nExamples:\n  devflow service add                       # Interactive wizard\n  devflow service add mydb --provider local # Add with explicit options\n  devflow service create feature-auth       # Create service branch\n  devflow service delete feature-auth       # Delete service branch\n  devflow service start feature-auth        # Start a stopped container\n  devflow service stop feature-auth         # Stop a running container\n  devflow service reset feature-auth        # Reset to parent state\n  devflow service connection feature-auth   # Show connection info\n  devflow service status                    # Show service status\n  devflow service list                      # List configured services\n  devflow service remove mydb               # Remove a service config\n  devflow service logs feature-auth         # Show container logs\n  devflow service seed main --from dump.sql # Seed from external source\n  devflow service destroy                   # Destroy all data"
+        long_about = "Manage service providers and their branches.\n\nService commands operate on the configured service providers (local Docker,\nNeon, DBLab, etc.) to create, delete, and manage branch-isolated environments.\n\nExamples:\n  devflow service add                       # Interactive wizard\n  devflow service add mydb --provider local # Add with explicit options\n  devflow service create feature-auth       # Create service branch\n  devflow service delete feature-auth       # Delete service branch\n  devflow service cleanup --max-count 10    # Cleanup old service branches\n  devflow service start feature-auth        # Start a stopped container\n  devflow service stop feature-auth         # Stop a running container\n  devflow service reset feature-auth        # Reset to parent state\n  devflow service connection feature-auth   # Show connection info\n  devflow service status                    # Show service status\n  devflow service list                      # List configured services\n  devflow service remove mydb               # Remove a service config\n  devflow service logs feature-auth         # Show container logs\n  devflow service seed main --from dump.sql # Seed from external source\n  devflow service destroy                   # Destroy all data"
     )]
     Service {
         #[command(subcommand)]
@@ -168,7 +195,7 @@ Examples:
     #[command(
         name = "shell-init",
         about = "Print shell integration script (eval \"$(devflow shell-init)\")",
-        long_about = "Print shell integration script.\n\nThe shell wrapper enables automatic 'cd' into worktree directories after\n'devflow switch'. Without it, switch works but you must cd manually.\n\nAdd to your shell profile:\n  eval \"$(devflow shell-init)\"        # auto-detects shell\n  eval \"$(devflow shell-init bash)\"   # ~/.bashrc\n  eval \"$(devflow shell-init zsh)\"    # ~/.zshrc\n  devflow shell-init fish | source    # ~/.config/fish/config.fish\n\nThis creates a 'devflow' shell wrapper function."
+        long_about = "Print shell integration script.\n\nThe shell wrapper enables automatic 'cd' whenever devflow emits DEVFLOW_CD\n(for example: switch to worktrees, open from TUI, init into a new directory).\nWithout it, devflow cannot change your parent shell directory and you must\ncd manually.\n\nAdd to your shell profile:\n  eval \"$(devflow shell-init)\"        # auto-detects shell\n  eval \"$(devflow shell-init bash)\"   # ~/.bashrc\n  eval \"$(devflow shell-init zsh)\"    # ~/.zshrc\n  devflow shell-init fish | source    # ~/.config/fish/config.fish\n\nThis creates a 'devflow' shell wrapper function."
     )]
     ShellInit {
         #[arg(help = "Shell type: bash, zsh, or fish (auto-detected from $SHELL if omitted)")]
@@ -254,6 +281,11 @@ pub enum ServiceCommands {
     Delete {
         #[arg(help = "Name of the branch to delete")]
         branch_name: String,
+    },
+    #[command(about = "Clean up old branches for this service")]
+    Cleanup {
+        #[arg(long, help = "Maximum number of branches to keep")]
+        max_count: Option<usize>,
     },
     #[command(about = "List configured services")]
     List,
@@ -423,6 +455,7 @@ pub async fn handle_command(
         Commands::Service { .. }
             | Commands::List
             | Commands::Graph
+            | Commands::Link { .. }
             | Commands::Connection { .. }
             | Commands::Status
             | Commands::Cleanup { .. }
@@ -545,6 +578,8 @@ pub async fn handle_command(
 
     match cmd {
         Commands::Init { path, name, force } => {
+            let mut init_target_dir: Option<std::path::PathBuf> = None;
+
             // If a path is given, create the directory and work inside it.
             if let Some(ref dir) = path {
                 let target = std::path::PathBuf::from(dir);
@@ -563,6 +598,7 @@ pub async fn handle_command(
                 std::env::set_current_dir(&target).with_context(|| {
                     format!("Failed to change into directory '{}'", target.display())
                 })?;
+                init_target_dir = Some(std::env::current_dir()?);
             }
 
             let config_path = std::env::current_dir()?.join(".devflow.yml");
@@ -692,27 +728,9 @@ pub async fn handle_command(
             config.services = None;
             config.save_to_file(&config_path)?;
 
-            // Register the main branch in the devflow branch registry.
-            // `get_project_key` expects a *file* path (it calls `.parent()`),
-            // so we pass `config_path` (e.g. `/project/.devflow.yml`), not
-            // the directory itself.
-            if let Ok(mut state_mgr) = LocalStateManager::new() {
-                let main_branch = config.git.main_branch.clone();
-                if state_mgr.get_branch(&config_path, &main_branch).is_none() {
-                    let _ = state_mgr.register_branch(
-                        &config_path,
-                        DevflowBranch {
-                            name: main_branch.clone(),
-                            parent: None,
-                            worktree_path: None,
-                            created_at: chrono::Utc::now(),
-                        },
-                    );
-                    log::debug!(
-                        "Registered main branch '{}' in branch registry",
-                        main_branch
-                    );
-                }
+            // Register the VCS default branch as devflow root.
+            if let Err(e) = ensure_default_branch_registered(&config, &Some(config_path.clone())) {
+                log::warn!("Failed to register default branch in local state: {}", e);
             }
 
             // Derive vcs_initialized label for JSON output
@@ -726,6 +744,7 @@ pub async fn handle_command(
                         "action": "init",
                         "name": resolved_name,
                         "config_path": config_path.display().to_string(),
+                        "cd_path": init_target_dir.as_ref().map(|p| p.display().to_string()),
                         "worktree_enabled": enable_worktrees,
                         "cow_capability": cow_label,
                         "vcs_initialized": vcs_init_label,
@@ -768,6 +787,14 @@ pub async fn handle_command(
                     "  devflow install-hooks        Install Git hooks for automatic branching"
                 );
                 println!("  devflow doctor               Check system health and configuration");
+
+                if let Some(target_dir) = init_target_dir.as_ref() {
+                    if shell_integration_enabled() {
+                        println!("DEVFLOW_CD={}", target_dir.display());
+                    } else {
+                        print_manual_cd_hint(target_dir);
+                    }
+                }
             }
         }
         Commands::Destroy { force } => {
@@ -1182,6 +1209,131 @@ async fn init_local_service_main(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BranchContextSource {
+    EnvOverride,
+    Cwd,
+    None,
+}
+
+#[derive(Debug, Clone)]
+struct BranchContext {
+    /// Raw branch used as context (env override or cwd branch).
+    context_branch_raw: Option<String>,
+    /// Normalized devflow context branch name.
+    context_branch: Option<String>,
+    /// Raw VCS branch currently checked out in this directory.
+    cwd_branch: Option<String>,
+    source: BranchContextSource,
+}
+
+fn resolve_branch_context(config: &Config) -> BranchContext {
+    let cwd_branch = vcs::detect_vcs_provider(".")
+        .ok()
+        .and_then(|repo| repo.current_branch().ok().flatten());
+
+    if let Ok(env_branch) = std::env::var("DEVFLOW_CONTEXT_BRANCH") {
+        let trimmed = env_branch.trim();
+        if !trimmed.is_empty() {
+            return BranchContext {
+                context_branch_raw: Some(trimmed.to_string()),
+                context_branch: Some(config.get_normalized_branch_name(trimmed)),
+                cwd_branch,
+                source: BranchContextSource::EnvOverride,
+            };
+        }
+    }
+
+    if let Some(cwd) = cwd_branch.as_deref() {
+        return BranchContext {
+            context_branch_raw: Some(cwd.to_string()),
+            context_branch: Some(config.get_normalized_branch_name(cwd)),
+            cwd_branch,
+            source: BranchContextSource::Cwd,
+        };
+    }
+
+    BranchContext {
+        context_branch_raw: None,
+        context_branch: None,
+        cwd_branch: None,
+        source: BranchContextSource::None,
+    }
+}
+
+fn context_matches_branch(
+    config: &Config,
+    context_branch: Option<&str>,
+    branch_name: &str,
+) -> bool {
+    let Some(context) = context_branch else {
+        return false;
+    };
+    context == branch_name || context == config.get_normalized_branch_name(branch_name)
+}
+
+fn linked_branch_exists(config: &Config, config_path: &Option<PathBuf>, branch_name: &str) -> bool {
+    let Some(path) = config_path.as_ref() else {
+        return false;
+    };
+
+    let normalized = config.get_normalized_branch_name(branch_name);
+    LocalStateManager::new()
+        .ok()
+        .and_then(|state| state.get_branch(path, &normalized))
+        .is_some()
+}
+
+fn register_branch_in_state(
+    config: &Config,
+    config_path: &Option<PathBuf>,
+    branch_name: &str,
+    parent_branch: Option<&str>,
+    worktree_path: Option<String>,
+) -> Result<()> {
+    let Some(path) = config_path.as_ref() else {
+        return Ok(());
+    };
+
+    let mut state = LocalStateManager::new()?;
+    let normalized_branch = config.get_normalized_branch_name(branch_name);
+    let normalized_parent = parent_branch.map(|p| config.get_normalized_branch_name(p));
+
+    let existing = state.get_branch(path, &normalized_branch);
+    let created_at = existing
+        .as_ref()
+        .map(|b| b.created_at)
+        .unwrap_or_else(chrono::Utc::now);
+
+    let final_parent =
+        normalized_parent.or_else(|| existing.as_ref().and_then(|b| b.parent.clone()));
+    let final_worktree = worktree_path.or_else(|| {
+        existing
+            .as_ref()
+            .and_then(|b| b.worktree_path.as_ref().cloned())
+    });
+
+    state.register_branch(
+        path,
+        DevflowBranch {
+            name: normalized_branch,
+            parent: final_parent,
+            worktree_path: final_worktree,
+            created_at,
+        },
+    )?;
+
+    Ok(())
+}
+
+fn ensure_default_branch_registered(config: &Config, config_path: &Option<PathBuf>) -> Result<()> {
+    let main = config.git.main_branch.clone();
+    if !linked_branch_exists(config, config_path, &main) {
+        register_branch_in_state(config, config_path, &main, None, None)?;
+    }
+    Ok(())
+}
+
 /// Print an enriched branch list as a tree, showing git branches, worktree paths, and service status.
 ///
 /// Unifies information from the VCS provider, the service provider, and the
@@ -1216,12 +1368,10 @@ fn print_enriched_branch_list(
         .filter_map(|wt| wt.branch.as_ref().map(|b| (b.clone(), wt.path.clone())))
         .collect();
 
-    // Load branch registry + active branch from local state
+    // Load branch registry from local state
     let mut registry: HashMap<String, Option<String>> = HashMap::new();
-    let mut active_branch: Option<String> = None;
     if let Some(path) = config_path.as_ref() {
         if let Ok(state) = LocalStateManager::new() {
-            active_branch = state.get_current_branch(path);
             registry = state
                 .get_branches(path)
                 .into_iter()
@@ -1229,6 +1379,8 @@ fn print_enriched_branch_list(
                 .collect();
         }
     }
+
+    let context = resolve_branch_context(config);
 
     // Collect all branch names (union of git branches + service branches)
     let mut all_names: Vec<String> = Vec::new();
@@ -1287,12 +1439,17 @@ fn print_enriched_branch_list(
         .map(|s| s.as_str())
         .collect();
 
-    // Sort roots: default branch first, then current, then alphabetical
+    // Sort roots: default branch first, then context branch, then cwd, then alphabetical
     roots.sort_by(|a, b| {
         let a_default = git_branches.iter().any(|gb| gb.name == *a && gb.is_default);
         let b_default = git_branches.iter().any(|gb| gb.name == *b && gb.is_default);
         if a_default != b_default {
             return b_default.cmp(&a_default);
+        }
+        let a_context = context_matches_branch(config, context.context_branch.as_deref(), a);
+        let b_context = context_matches_branch(config, context.context_branch.as_deref(), b);
+        if a_context != b_context {
+            return b_context.cmp(&a_context);
         }
         let a_current = current_git.as_deref() == Some(*a);
         let b_current = current_git.as_deref() == Some(*b);
@@ -1302,38 +1459,12 @@ fn print_enriched_branch_list(
         a.cmp(b)
     });
 
-    if let Some(active) = active_branch.as_deref() {
-        let cwd = current_git.as_deref().unwrap_or("unknown");
-        let cwd_normalized = current_git
-            .as_deref()
-            .map(|b| config.get_normalized_branch_name(b));
-        let matches_active =
-            current_git.as_deref() == Some(active) || cwd_normalized.as_deref() == Some(active);
-
-        if !matches_active {
-            let active_path = wt_lookup.get(active).or_else(|| {
-                wt_lookup
-                    .iter()
-                    .find(|(name, _)| config.get_normalized_branch_name(name) == active)
-                    .map(|(_, path)| path)
-            });
-
-            if let Some(path) = active_path {
-                println!(
-                    "Context: cwd branch='{}', devflow active branch='{}' ({})",
-                    cwd,
-                    active,
-                    path.display()
-                );
-            } else {
-                println!(
-                    "Context: cwd branch='{}', devflow active branch='{}'",
-                    cwd, active
-                );
-            }
+    if context.source == BranchContextSource::EnvOverride {
+        if let Some(context_branch) = context.context_branch.as_deref() {
+            let cwd = context.cwd_branch.as_deref().unwrap_or("unknown");
             println!(
-                "Tip: run `devflow switch {}` here, or `cd` into its worktree.",
-                active
+                "Context override: '{}' (from DEVFLOW_CONTEXT_BRANCH), cwd branch='{}'",
+                context_branch, cwd
             );
         }
     }
@@ -1345,6 +1476,7 @@ fn print_enriched_branch_list(
         connector: &str,
         children_map: &HashMap<&str, Vec<&str>>,
         current_git: &Option<String>,
+        context_branch: Option<&str>,
         service_branches: &[services::BranchInfo],
         service_names: &HashSet<&str>,
         wt_lookup: &HashMap<String, PathBuf>,
@@ -1353,6 +1485,7 @@ fn print_enriched_branch_list(
     ) {
         let is_current = current_git.as_deref() == Some(name);
         let marker = if is_current { "* " } else { "  " };
+        let is_context = context_matches_branch(config, context_branch, name);
 
         let normalized = config.get_normalized_branch_name(name);
         let has_service =
@@ -1373,6 +1506,9 @@ fn print_enriched_branch_list(
         }
         if let Some(path) = wt_path {
             parts.push(format!("worktree: {}", path.display()));
+        }
+        if is_context {
+            parts.push("context".to_string());
         }
 
         let suffix = if parts.is_empty() {
@@ -1407,6 +1543,7 @@ fn print_enriched_branch_list(
                     &child_connector,
                     children_map,
                     current_git,
+                    context_branch,
                     service_branches,
                     service_names,
                     wt_lookup,
@@ -1424,6 +1561,7 @@ fn print_enriched_branch_list(
             "",
             &children_map,
             &current_git,
+            context.context_branch.as_deref(),
             service_branches,
             &service_names,
             &wt_lookup,
@@ -1448,7 +1586,7 @@ struct EnvGraphNode {
     parent: Option<String>,
     is_default: bool,
     is_cwd: bool,
-    is_active: bool,
+    is_context: bool,
     worktree_path: Option<String>,
     services: Vec<EnvGraphServiceEntry>,
 }
@@ -1478,12 +1616,10 @@ async fn handle_environment_graph(
         .as_ref()
         .and_then(|r| r.current_branch().ok().flatten());
 
-    // Local state view
+    // Local state view (branch registry only)
     let mut registry: HashMap<String, Option<String>> = HashMap::new();
-    let mut active_branch: Option<String> = None;
     if let Some(path) = config_path.as_ref() {
         if let Ok(state) = LocalStateManager::new() {
-            active_branch = state.get_current_branch(path);
             registry = state
                 .get_branches(path)
                 .into_iter()
@@ -1491,6 +1627,8 @@ async fn handle_environment_graph(
                 .collect();
         }
     }
+
+    let context = resolve_branch_context(config);
 
     // Service view
     let mut service_entries_by_branch: HashMap<String, Vec<EnvGraphServiceEntry>> = HashMap::new();
@@ -1560,7 +1698,12 @@ async fn handle_environment_graph(
                     "nodes": [],
                     "roots": [],
                     "cwd_branch": cwd_branch,
-                    "active_branch": active_branch,
+                    "context_branch": context.context_branch.clone(),
+                    "context_source": match context.source {
+                        BranchContextSource::EnvOverride => "env",
+                        BranchContextSource::Cwd => "cwd",
+                        BranchContextSource::None => "none",
+                    },
                     "warnings": service_probe_warnings,
                 }))?
             );
@@ -1610,9 +1753,6 @@ async fn handle_environment_graph(
     let cwd_normalized = cwd_branch
         .as_deref()
         .map(|b| config.get_normalized_branch_name(b));
-    let active_normalized = active_branch
-        .as_deref()
-        .map(|b| config.get_normalized_branch_name(b));
 
     roots.sort_by(|a, b| {
         let a_default = git_branches.iter().any(|gb| gb.name == *a && gb.is_default);
@@ -1621,12 +1761,10 @@ async fn handle_environment_graph(
             return b_default.cmp(&a_default);
         }
 
-        let a_active =
-            active_branch.as_deref() == Some(a.as_str()) || active_normalized.as_deref() == Some(a);
-        let b_active =
-            active_branch.as_deref() == Some(b.as_str()) || active_normalized.as_deref() == Some(b);
-        if a_active != b_active {
-            return b_active.cmp(&a_active);
+        let a_context = context_matches_branch(config, context.context_branch.as_deref(), a);
+        let b_context = context_matches_branch(config, context.context_branch.as_deref(), b);
+        if a_context != b_context {
+            return b_context.cmp(&a_context);
         }
 
         let a_cwd =
@@ -1665,8 +1803,7 @@ async fn handle_environment_graph(
 
         let is_cwd =
             cwd_branch.as_deref() == Some(name.as_str()) || cwd_normalized.as_deref() == Some(name);
-        let is_active = active_branch.as_deref() == Some(name.as_str())
-            || active_normalized.as_deref() == Some(name);
+        let is_context = context_matches_branch(config, context.context_branch.as_deref(), name);
         let is_default = git_branches
             .iter()
             .any(|gb| gb.name == *name && gb.is_default);
@@ -1678,7 +1815,7 @@ async fn handle_environment_graph(
                 parent: parent_map.get(name).cloned(),
                 is_default,
                 is_cwd,
-                is_active,
+                is_context,
                 worktree_path: wt_lookup
                     .get(name)
                     .map(|p| p.display().to_string())
@@ -1701,7 +1838,12 @@ async fn handle_environment_graph(
             serde_json::to_string_pretty(&serde_json::json!({
                 "vcs_provider": vcs_provider_name,
                 "cwd_branch": cwd_branch,
-                "active_branch": active_branch,
+                "context_branch": context.context_branch.clone(),
+                "context_source": match context.source {
+                    BranchContextSource::EnvOverride => "env",
+                    BranchContextSource::Cwd => "cwd",
+                    BranchContextSource::None => "none",
+                },
                 "roots": roots,
                 "nodes": nodes,
                 "warnings": service_probe_warnings,
@@ -1711,8 +1853,8 @@ async fn handle_environment_graph(
     }
 
     println!("Environment graph ({})", vcs_provider_name);
-    if let Some(active) = active_branch.as_deref() {
-        println!("Active branch: {}", active);
+    if let Some(context_branch) = context.context_branch.as_deref() {
+        println!("Context branch: {}", context_branch);
     }
     if let Some(cwd) = cwd_branch.as_deref() {
         println!("CWD branch: {}", cwd);
@@ -1740,8 +1882,8 @@ async fn handle_environment_graph(
         if node.is_default {
             tags.push("default".to_string());
         }
-        if node.is_active {
-            tags.push("active".to_string());
+        if node.is_context {
+            tags.push("context".to_string());
         }
         if let Some(path) = &node.worktree_path {
             tags.push(format!("worktree: {}", path));
@@ -1828,13 +1970,11 @@ fn enrich_branch_list_json(
         .map(|b| (b.name.as_str(), b))
         .collect();
 
-    // Load branch registry + active branch from local state
+    // Load branch registry from local state
     let mut registry: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
-    let mut active_branch: Option<String> = None;
     if let Some(path) = config_path.as_ref() {
         if let Ok(state) = LocalStateManager::new() {
-            active_branch = state.get_current_branch(path);
             registry = state
                 .get_branches(path)
                 .into_iter()
@@ -1842,6 +1982,8 @@ fn enrich_branch_list_json(
                 .collect();
         }
     }
+
+    let context = resolve_branch_context(config);
 
     let mut entries = Vec::new();
 
@@ -1866,14 +2008,13 @@ fn enrich_branch_list_json(
             .get(normalized.as_str())
             .or_else(|| service_map.get(name.as_str()));
         let wt = wt_lookup.get(name);
-        let is_active = active_branch.as_deref() == Some(name.as_str())
-            || active_branch.as_deref() == Some(normalized.as_str());
+        let is_context = context_matches_branch(config, context.context_branch.as_deref(), name);
 
         let mut entry = serde_json::json!({
             "name": name,
             "is_current": gb.map(|b| b.is_current).unwrap_or(false),
             "is_default": gb.map(|b| b.is_default).unwrap_or(false),
-            "is_active": is_active,
+            "is_context": is_context,
         });
 
         if let Some(svc) = sb {
@@ -1941,7 +2082,15 @@ fn print_manual_cd_hint(target: &std::path::Path) {
         "Shell integration not detected. Run: cd \"{}\"",
         target.display()
     );
+    println!("Note: devflow cannot change your parent shell directory without shell integration.");
     println!("Tip: add `eval \"$(devflow shell-init)\"` to your shell profile for auto-cd.");
+}
+
+fn resolve_cd_target(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Ok(std::env::current_dir()?.join(path))
 }
 
 /// Print shell integration script for the given shell type.
@@ -1949,14 +2098,14 @@ fn print_manual_cd_hint(target: &std::path::Path) {
 /// Users should add `eval "$(devflow shell-init bash)"` (or zsh/fish) to their
 /// shell profile. This defines a `devflow` wrapper function that:
 /// 1. Runs `devflow` normally, preserving stderr
-/// 2. Parses `DEVFLOW_CD=<path>` output from `switch` commands
+/// 2. Parses `DEVFLOW_CD=<path>` output from commands that request directory changes
 /// 3. Automatically `cd`s into the target worktree directory
 fn print_shell_init(shell: &str) -> Result<()> {
     let script = match shell {
         "bash" => {
             r#"
 # devflow shell integration (bash)
-# Wrapper function that adds auto-cd into worktree directories after switch
+# Wrapper function that auto-cds when devflow emits DEVFLOW_CD
 devflow() {
     local output
     output="$(DEVFLOW_SHELL_INTEGRATION=1 command devflow "$@")"
@@ -1985,7 +2134,7 @@ devflow() {
         "zsh" => {
             r#"
 # devflow shell integration (zsh)
-# Wrapper function that adds auto-cd into worktree directories after switch
+# Wrapper function that auto-cds when devflow emits DEVFLOW_CD
 devflow() {
     local output
     output="$(DEVFLOW_SHELL_INTEGRATION=1 command devflow "$@")"
@@ -2014,7 +2163,7 @@ devflow() {
         "fish" => {
             r#"
 # devflow shell integration (fish)
-# Wrapper function that adds auto-cd into worktree directories after switch
+# Wrapper function that auto-cds when devflow emits DEVFLOW_CD
 function devflow --wraps devflow --description "devflow with auto-cd"
     set -l output (env DEVFLOW_SHELL_INTEGRATION=1 command devflow $argv)
     set -l exit_code $status
@@ -2885,10 +3034,21 @@ async fn handle_branch_command(
         Commands::Graph => {
             handle_environment_graph(config, config_path, json_output).await?;
         }
+        Commands::Link { branch_name, from } => {
+            handle_link_command(
+                config,
+                config_path,
+                &branch_name,
+                from.as_deref(),
+                json_output,
+                non_interactive,
+            )
+            .await?;
+        }
         Commands::Switch {
             branch_name,
             create,
-            base,
+            from,
             execute,
             no_services,
             no_verify,
@@ -2899,6 +3059,15 @@ async fn handle_branch_command(
                 if let Some(branch) = branch_name {
                     let normalized_branch = config.get_normalized_branch_name(&branch);
                     let worktree_enabled = config.worktree.as_ref().is_some_and(|wt| wt.enabled);
+                    let context = resolve_branch_context(config);
+                    let default_parent = if create {
+                        from.clone().or_else(|| context.context_branch_raw.clone())
+                    } else {
+                        None
+                    };
+                    let branch_exists = vcs::detect_vcs_provider(".")
+                        .ok()
+                        .and_then(|repo| repo.branch_exists(&branch).ok());
 
                     if json_output {
                         let mut wt_path_value = serde_json::Value::Null;
@@ -2914,10 +3083,13 @@ async fn handle_branch_command(
                                 .as_ref()
                                 .map(|wt| wt.path_template.as_str())
                                 .unwrap_or("../{repo}.{branch}");
-                            let wt_path = path_template
-                                .replace("{repo}", &repo_name)
-                                .replace("{branch}", &branch);
-                            wt_path_value = serde_json::Value::String(wt_path);
+                            let wt_path = resolve_cd_target(&PathBuf::from(
+                                path_template
+                                    .replace("{repo}", &repo_name)
+                                    .replace("{branch}", &branch),
+                            ))?;
+                            wt_path_value =
+                                serde_json::Value::String(wt_path.display().to_string());
                         }
                         let auto_providers: Vec<serde_json::Value> = if !no_services {
                             config
@@ -2941,14 +3113,25 @@ async fn handle_branch_command(
                                 "branch": normalized_branch,
                                 "worktree_enabled": worktree_enabled,
                                 "worktree_path": wt_path_value,
+                                "parent": default_parent,
+                                "branch_exists": branch_exists,
                                 "services_skipped": no_services,
                                 "auto_branch_services": auto_providers,
                                 "hooks_skipped": no_verify,
                                 "execute": execute,
+                                "would_fail_without_create": branch_exists == Some(false) && !create,
                             }))?
                         );
                     } else {
                         println!("Dry run: would switch to branch: {}", normalized_branch);
+                        if let Some(ref parent) = default_parent {
+                            println!("  Parent branch: {}", parent);
+                        }
+                        if branch_exists == Some(false) && !create {
+                            println!(
+                                "  Note: branch does not exist; this would fail (use -c to create it)"
+                            );
+                        }
                         if worktree_enabled {
                             println!("  Worktree mode: enabled");
                             let repo_name = std::env::current_dir()
@@ -2962,10 +3145,12 @@ async fn handle_branch_command(
                                 .as_ref()
                                 .map(|wt| wt.path_template.as_str())
                                 .unwrap_or("../{repo}.{branch}");
-                            let wt_path = path_template
-                                .replace("{repo}", &repo_name)
-                                .replace("{branch}", &branch);
-                            println!("  Worktree path: {}", wt_path);
+                            let wt_path = resolve_cd_target(&PathBuf::from(
+                                path_template
+                                    .replace("{repo}", &repo_name)
+                                    .replace("{branch}", &branch),
+                            ))?;
+                            println!("  Worktree path: {}", wt_path.display());
                         }
                         if !no_services {
                             let auto_providers = config
@@ -3024,7 +3209,7 @@ async fn handle_branch_command(
                         &branch,
                         config_path,
                         create,
-                        base.as_deref(),
+                        from.as_deref(),
                         no_services,
                         no_verify,
                         json_output,
@@ -3085,20 +3270,16 @@ async fn handle_branch_command(
             handle_merge_command(config, target.as_deref(), cleanup, dry_run, json_output).await?;
         }
         Commands::Cleanup { max_count } => {
-            let named = services::factory::resolve_provider(config, database_name).await?;
-            let max = max_count.unwrap_or(config.behavior.max_branches.unwrap_or(10));
-            let deleted = named.provider.cleanup_old_branches(max).await?;
-            if json_output {
-                println!("{}", serde_json::to_string_pretty(&deleted)?);
-            } else if deleted.is_empty() {
-                println!("No branches to clean up");
-            } else {
-                println!(
-                    "Cleaned up {} branches: {}",
-                    deleted.len(),
-                    deleted.join(", ")
-                );
-            }
+            // Top-level alias for `devflow service cleanup`
+            return handle_service_provider_command(
+                ServiceCommands::Cleanup { max_count },
+                config,
+                json_output,
+                non_interactive,
+                database_name,
+                config_path,
+            )
+            .await;
         }
         Commands::Doctor => {
             // Run pre-checks (VCS, config, hooks) unconditionally — they never fail
@@ -3696,9 +3877,25 @@ async fn handle_service_provider_command(
     database_name: Option<&str>,
     config_path: &Option<std::path::PathBuf>,
 ) -> Result<()> {
+    if matches!(&cmd, ServiceCommands::Cleanup { .. }) && config.resolve_services().is_empty() {
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "ok",
+                    "services": "none_configured",
+                    "deleted": [],
+                }))?
+            );
+        } else {
+            println!("No services configured. Nothing to clean up.");
+        }
+        return Ok(());
+    }
+
     // Orchestratable mutation commands: Create and Delete operate on all auto_branch services
     let is_orchestratable_mutation = matches!(
-        cmd,
+        &cmd,
         ServiceCommands::Create { .. } | ServiceCommands::Delete { .. }
     );
     let has_multiple_services = config.resolve_services().len() > 1;
@@ -3769,6 +3966,38 @@ async fn handle_service_provider_command(
                 );
             } else {
                 println!("Deleted service branch: {}", branch_name);
+            }
+        }
+        ServiceCommands::Cleanup { max_count } => {
+            if !provider.supports_cleanup() {
+                anyhow::bail!(
+                    "Service '{}' does not support cleanup",
+                    provider.provider_name()
+                );
+            }
+
+            let max = max_count.unwrap_or(config.behavior.max_branches.unwrap_or(10));
+            let deleted = provider.cleanup_old_branches(max).await?;
+
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "ok",
+                        "service": resolved_name,
+                        "max_count": max,
+                        "deleted": deleted,
+                    }))?
+                );
+            } else if deleted.is_empty() {
+                println!("No branches to clean up on service '{}'", resolved_name);
+            } else {
+                println!(
+                    "Cleaned up {} branches on '{}': {}",
+                    deleted.len(),
+                    resolved_name,
+                    deleted.join(", ")
+                );
             }
         }
         ServiceCommands::Start { branch_name } => {
@@ -4017,7 +4246,7 @@ async fn handle_top_level_status(
     json_output: bool,
     _non_interactive: bool,
     database_name: Option<&str>,
-    config_path: &Option<std::path::PathBuf>,
+    _config_path: &Option<std::path::PathBuf>,
 ) -> Result<()> {
     // Show VCS info
     let vcs_info = vcs::detect_vcs_provider(".").ok().and_then(|vcs| {
@@ -4028,18 +4257,15 @@ async fn handle_top_level_status(
         }))
     });
 
-    let active_branch = config_path.as_ref().and_then(|path| {
-        LocalStateManager::new()
-            .ok()
-            .and_then(|state| state.get_current_branch(path))
-    });
-    let active_differs_from_cwd = |cwd: &str| {
-        if let Some(active) = active_branch.as_deref() {
-            let normalized_cwd = config.get_normalized_branch_name(cwd);
-            active != cwd && active != normalized_cwd
-        } else {
-            false
-        }
+    let context = resolve_branch_context(config);
+    let context_differs_from_cwd = |cwd: &str| {
+        let Some(context_branch) = context.context_branch.as_deref() else {
+            return false;
+        };
+        let normalized_cwd = config.get_normalized_branch_name(cwd);
+        context.source == BranchContextSource::EnvOverride
+            && context_branch != cwd
+            && context_branch != normalized_cwd
     };
 
     // Show service info — services are optional; show VCS/project info even without them
@@ -4072,7 +4298,12 @@ async fn handle_top_level_status(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "vcs": vcs_info,
-                    "devflow_active_branch": active_branch,
+                    "devflow_context_branch": context.context_branch.clone(),
+                    "context_source": match context.source {
+                        BranchContextSource::EnvOverride => "env",
+                        BranchContextSource::Cwd => "cwd",
+                        BranchContextSource::None => "none",
+                    },
                     "services": services_map,
                 }))?
             );
@@ -4083,10 +4314,10 @@ async fn handle_top_level_status(
                     info["provider"].as_str().unwrap_or("unknown"),
                     info["branch"].as_str().unwrap_or("unknown")
                 );
-                if let Some(active) = active_branch.as_deref() {
+                if let Some(context_branch) = context.context_branch.as_deref() {
                     let cwd = info["branch"].as_str().unwrap_or("unknown");
-                    if active_differs_from_cwd(cwd) {
-                        println!("Devflow active branch: {}", active);
+                    if context_differs_from_cwd(cwd) {
+                        println!("Devflow context branch: {}", context_branch);
                     }
                 }
                 println!();
@@ -4129,7 +4360,12 @@ async fn handle_top_level_status(
                         "{}",
                         serde_json::to_string_pretty(&serde_json::json!({
                             "vcs": vcs_info,
-                            "devflow_active_branch": active_branch,
+                            "devflow_context_branch": context.context_branch.clone(),
+                            "context_source": match context.source {
+                                BranchContextSource::EnvOverride => "env",
+                                BranchContextSource::Cwd => "cwd",
+                                BranchContextSource::None => "none",
+                            },
                             "service": {
                                 "name": named.name,
                                 "provider": named.provider.provider_name(),
@@ -4146,16 +4382,18 @@ async fn handle_top_level_status(
                             info["provider"].as_str().unwrap_or("unknown"),
                             info["branch"].as_str().unwrap_or("unknown")
                         );
-                        if let Some(active) = active_branch.as_deref() {
+                        if let Some(context_branch) = context.context_branch.as_deref() {
                             let cwd = info["branch"].as_str().unwrap_or("unknown");
-                            if active_differs_from_cwd(cwd) {
-                                println!("Devflow active branch: {}", active);
+                            if context_differs_from_cwd(cwd) {
+                                println!("Devflow context branch: {}", context_branch);
                             }
                         }
                         println!();
-                    } else if let Some(active) = active_branch.as_deref() {
-                        println!("Devflow active branch: {}", active);
-                        println!();
+                    } else if let Some(context_branch) = context.context_branch.as_deref() {
+                        if context.source == BranchContextSource::EnvOverride {
+                            println!("Devflow context branch: {}", context_branch);
+                            println!();
+                        }
                     }
                     println!(
                         "Service: {} ({})",
@@ -4177,7 +4415,12 @@ async fn handle_top_level_status(
                         "{}",
                         serde_json::to_string_pretty(&serde_json::json!({
                             "vcs": vcs_info,
-                            "devflow_active_branch": active_branch,
+                            "devflow_context_branch": context.context_branch.clone(),
+                            "context_source": match context.source {
+                                BranchContextSource::EnvOverride => "env",
+                                BranchContextSource::Cwd => "cwd",
+                                BranchContextSource::None => "none",
+                            },
                             "services": null,
                         }))?
                     );
@@ -4188,16 +4431,18 @@ async fn handle_top_level_status(
                             info["provider"].as_str().unwrap_or("unknown"),
                             info["branch"].as_str().unwrap_or("unknown")
                         );
-                        if let Some(active) = active_branch.as_deref() {
+                        if let Some(context_branch) = context.context_branch.as_deref() {
                             let cwd = info["branch"].as_str().unwrap_or("unknown");
-                            if active_differs_from_cwd(cwd) {
-                                println!("Devflow active branch: {}", active);
+                            if context_differs_from_cwd(cwd) {
+                                println!("Devflow context branch: {}", context_branch);
                             }
                         }
                         println!();
-                    } else if let Some(active) = active_branch.as_deref() {
-                        println!("Devflow active branch: {}", active);
-                        println!();
+                    } else if let Some(context_branch) = context.context_branch.as_deref() {
+                        if context.source == BranchContextSource::EnvOverride {
+                            println!("Devflow context branch: {}", context_branch);
+                            println!();
+                        }
                     }
                     println!(
                         "Services: none configured (run 'devflow service add' to configure one)"
@@ -4756,7 +5001,7 @@ async fn handle_git_hook(
                         &current_git_branch,
                         config_path,
                         false, // create — branch already exists from git
-                        None,  // base
+                        None,  // from
                         false, // no_services
                         false, // no_verify
                         false, // json_output — git hooks are non-interactive
@@ -4786,23 +5031,25 @@ async fn handle_interactive_switch(
     config_path: &Option<std::path::PathBuf>,
 ) -> Result<()> {
     let mut branch_names = std::collections::BTreeSet::new();
+    let mut vcs_branch_names = std::collections::HashSet::new();
 
     // 1) VCS branches (authoritative source)
     if let Ok(vcs_repo) = vcs::detect_vcs_provider(".") {
         if let Ok(vcs_branches) = vcs_repo.list_branches() {
             for branch in vcs_branches {
+                vcs_branch_names.insert(branch.name.clone());
                 branch_names.insert(branch.name);
             }
         }
     }
 
-    // 2) Devflow branch registry + active branch from local state
-    let mut active_branch: Option<String> = None;
+    // 2) Devflow branch registry
     if let Some(path) = config_path.as_ref() {
         if let Ok(state) = LocalStateManager::new() {
-            active_branch = state.get_current_branch(path);
             for branch in state.get_branches(path) {
-                branch_names.insert(branch.name);
+                if vcs_branch_names.is_empty() || vcs_branch_names.contains(&branch.name) {
+                    branch_names.insert(branch.name);
+                }
             }
         }
     }
@@ -4813,33 +5060,36 @@ async fn handle_interactive_switch(
             for named in providers {
                 if let Ok(service_branches) = named.provider.list_branches().await {
                     for branch in service_branches {
-                        branch_names.insert(branch.name);
+                        if vcs_branch_names.is_empty() || vcs_branch_names.contains(&branch.name) {
+                            branch_names.insert(branch.name);
+                        }
                     }
                 }
             }
         }
     }
 
-    // Always include configured main branch
-    branch_names.insert(config.git.main_branch.clone());
+    // Include configured main branch when visible in VCS (or if VCS probing failed).
+    if vcs_branch_names.is_empty() || vcs_branch_names.contains(&config.git.main_branch) {
+        branch_names.insert(config.git.main_branch.clone());
+    }
 
-    // Detect current cwd branch from VCS
-    let current_git = vcs::detect_vcs_provider(".")
-        .ok()
-        .and_then(|r| r.current_branch().ok().flatten());
+    let context = resolve_branch_context(config);
+    let current_git = context.cwd_branch.clone();
 
     // Create branch items with display info
     let mut branch_items: Vec<BranchItem> = branch_names
         .iter()
         .map(|branch| {
             let is_cwd = current_git.as_deref() == Some(branch.as_str());
-            let is_active = active_branch.as_deref() == Some(branch.as_str());
+            let is_context =
+                context_matches_branch(config, context.context_branch.as_deref(), branch);
 
             BranchItem {
                 name: branch.clone(),
                 display_name: branch.clone(),
                 is_cwd,
-                is_active,
+                is_context,
             }
         })
         .collect();
@@ -4849,7 +5099,7 @@ async fn handle_interactive_switch(
         name: "__create_new__".to_string(),
         display_name: "+ Create new branch".to_string(),
         is_cwd: false,
-        is_active: false,
+        is_context: false,
     });
 
     // Run interactive selector
@@ -4870,7 +5120,7 @@ async fn handle_interactive_switch(
                     &new_name,
                     config_path,
                     true,  // create
-                    None,  // base
+                    None,  // from
                     false, // no_services
                     false, // no_verify
                     false, // json_output
@@ -4885,7 +5135,7 @@ async fn handle_interactive_switch(
                     &selected_branch,
                     config_path,
                     false, // create
-                    None,  // base
+                    None,  // from
                     false, // no_services
                     false, // no_verify
                     false, // json_output — interactive mode
@@ -4916,7 +5166,7 @@ struct BranchItem {
     name: String,
     display_name: String,
     is_cwd: bool,
-    is_active: bool,
+    is_context: bool,
 }
 
 fn run_interactive_selector(items: Vec<BranchItem>) -> Result<String, inquire::InquireError> {
@@ -4928,15 +5178,14 @@ fn run_interactive_selector(items: Vec<BranchItem>) -> Result<String, inquire::I
         ));
     }
 
-    // Create display options with active/cwd markers.
-    // active = devflow's persisted target branch, cwd = branch in current directory.
+    // Create display options with context/cwd markers.
     let options: Vec<String> = items
         .iter()
         .map(|item| {
-            if item.is_active && item.is_cwd {
+            if item.is_context && item.is_cwd {
                 format!("{} *", item.display_name)
-            } else if item.is_active {
-                format!("{} (active)", item.display_name)
+            } else if item.is_context {
+                format!("{} (context)", item.display_name)
             } else if item.is_cwd {
                 format!("{} (cwd)", item.display_name)
             } else {
@@ -4945,15 +5194,15 @@ fn run_interactive_selector(items: Vec<BranchItem>) -> Result<String, inquire::I
         })
         .collect();
 
-    // Prefer active branch as default; fall back to cwd branch.
+    // Prefer context branch as default; fall back to cwd branch.
     let default = items
         .iter()
-        .position(|item| item.is_active)
+        .position(|item| item.is_context)
         .or_else(|| items.iter().position(|item| item.is_cwd));
 
     let mut select = Select::new("Select a branch to switch to:", options.clone())
         .with_help_message(
-        "Use arrow keys to navigate, type to filter, Enter to select, Esc to cancel (*=active+cwd)",
+        "Use arrow keys to navigate, type to filter, Enter to select, Esc to cancel (*=context+cwd)",
     );
 
     if let Some(default_index) = default {
@@ -4974,30 +5223,316 @@ fn run_interactive_selector(items: Vec<BranchItem>) -> Result<String, inquire::I
     Ok(items[selected_index].name.clone())
 }
 
+#[derive(Debug, Clone)]
+struct LinkServiceResult {
+    service_name: String,
+    success: bool,
+    message: String,
+}
+
+#[derive(Debug, Clone)]
+struct LinkBranchResult {
+    branch: String,
+    parent: Option<String>,
+    worktree_path: Option<String>,
+    service_results: Vec<LinkServiceResult>,
+    services_failed: usize,
+}
+
+async fn link_branch_internal(
+    config: &Config,
+    config_path: &Option<PathBuf>,
+    branch_name: &str,
+    from: Option<&str>,
+    non_interactive: bool,
+) -> Result<LinkBranchResult> {
+    let _ = non_interactive;
+    ensure_default_branch_registered(config, config_path)?;
+
+    let normalized_branch = config.get_normalized_branch_name(branch_name);
+    let normalized_main = config.get_normalized_branch_name(&config.git.main_branch);
+
+    let vcs_repo = vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
+    if !vcs_repo.branch_exists(branch_name)? {
+        anyhow::bail!(
+            "Branch '{}' does not exist in {}. Create/switch it first, then run `devflow link {}`.",
+            branch_name,
+            vcs_repo.provider_name(),
+            branch_name
+        );
+    }
+
+    let existing_parent = config_path
+        .as_ref()
+        .and_then(|path| {
+            LocalStateManager::new()
+                .ok()
+                .and_then(|state| state.get_branch(path, &normalized_branch))
+        })
+        .and_then(|b| b.parent);
+
+    let mut parent = from
+        .map(|p| config.get_normalized_branch_name(p))
+        .or(existing_parent);
+
+    if parent.is_none() && normalized_branch != normalized_main {
+        parent = Some(normalized_main.clone());
+    }
+
+    if let Some(ref parent_branch) = parent {
+        if parent_branch != &normalized_main
+            && !linked_branch_exists(config, config_path, parent_branch)
+        {
+            anyhow::bail!(
+                "Parent '{}' is not linked in devflow. Run `devflow link {}` first.",
+                parent_branch,
+                parent_branch
+            );
+        }
+        if parent_branch == &normalized_main {
+            ensure_default_branch_registered(config, config_path)?;
+        }
+    }
+
+    let worktree_path = vcs_repo
+        .worktree_path(branch_name)?
+        .map(|p| p.display().to_string())
+        .or_else(|| {
+            if normalized_branch == normalized_main {
+                vcs_repo
+                    .main_worktree_dir()
+                    .map(|p| p.display().to_string())
+            } else {
+                None
+            }
+        });
+
+    register_branch_in_state(
+        config,
+        config_path,
+        branch_name,
+        parent.as_deref(),
+        worktree_path.clone(),
+    )?;
+
+    let mut service_results = Vec::new();
+    let mut services_failed = 0usize;
+
+    if !config.resolve_services().is_empty() {
+        let orchestration =
+            services::factory::orchestrate_switch(config, &normalized_branch, parent.as_deref())
+                .await?;
+        for result in orchestration {
+            if !result.success {
+                services_failed += 1;
+            }
+            service_results.push(LinkServiceResult {
+                service_name: result.service_name,
+                success: result.success,
+                message: result.message,
+            });
+        }
+    }
+
+    Ok(LinkBranchResult {
+        branch: normalized_branch,
+        parent,
+        worktree_path,
+        service_results,
+        services_failed,
+    })
+}
+
+async fn handle_link_command(
+    config: &Config,
+    config_path: &Option<PathBuf>,
+    branch_name: &str,
+    from: Option<&str>,
+    json_output: bool,
+    non_interactive: bool,
+) -> Result<()> {
+    let linked =
+        link_branch_internal(config, config_path, branch_name, from, non_interactive).await?;
+
+    if json_output {
+        let service_results: Vec<serde_json::Value> = linked
+            .service_results
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "service": r.service_name,
+                    "success": r.success,
+                    "message": r.message,
+                })
+            })
+            .collect();
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": if linked.services_failed == 0 { "ok" } else { "error" },
+                "branch": linked.branch,
+                "parent": linked.parent,
+                "worktree_path": linked.worktree_path,
+                "services_failed": linked.services_failed,
+                "service_results": service_results,
+            }))?
+        );
+    } else {
+        println!("Linked devflow branch: {}", linked.branch);
+        if let Some(parent) = linked.parent.as_deref() {
+            println!("  Parent: {}", parent);
+        }
+        if let Some(path) = linked.worktree_path.as_deref() {
+            println!("  Worktree: {}", path);
+        }
+
+        if linked.service_results.is_empty() {
+            println!("  Services: none configured");
+        } else {
+            for r in &linked.service_results {
+                if r.success {
+                    println!("  [{}] {}", r.service_name, r.message);
+                } else {
+                    println!("  [{}] Warning: {}", r.service_name, r.message);
+                }
+            }
+        }
+    }
+
+    if linked.services_failed > 0 {
+        anyhow::bail!(
+            "Linked branch '{}' but failed on {}/{} service(s)",
+            linked.branch,
+            linked.services_failed,
+            linked.service_results.len()
+        );
+    }
+
+    Ok(())
+}
+
+async fn resolve_parent_for_branch_creation(
+    config: &Config,
+    config_path: &Option<PathBuf>,
+    target_branch: &str,
+    requested_parent: Option<&str>,
+    context: &BranchContext,
+    json_output: bool,
+    non_interactive: bool,
+) -> Result<Option<String>> {
+    let mut parent = requested_parent
+        .map(|p| p.to_string())
+        .or_else(|| context.context_branch_raw.clone());
+
+    let Some(parent_name) = parent.as_deref() else {
+        return Ok(None);
+    };
+
+    let target_normalized = config.get_normalized_branch_name(target_branch);
+    let parent_normalized = config.get_normalized_branch_name(parent_name);
+    if parent_normalized == target_normalized {
+        anyhow::bail!(
+            "Parent branch '{}' resolves to the target branch '{}'. Choose a different --from value.",
+            parent_name,
+            target_branch
+        );
+    }
+
+    // If we have no project config path, we cannot enforce branch-link checks.
+    if config_path.is_none() {
+        return Ok(parent);
+    }
+
+    if linked_branch_exists(config, config_path, parent_name) {
+        return Ok(parent);
+    }
+
+    if json_output || non_interactive {
+        anyhow::bail!(
+            "Parent branch '{}' is not linked in devflow. Run `devflow link {}` first.",
+            parent_name,
+            parent_name
+        );
+    }
+
+    let default_branch = config.git.main_branch.clone();
+    let options = vec![
+        format!("Link '{}' now (recommended)", parent_name),
+        format!("Use default branch '{}' as parent", default_branch),
+        "Cancel".to_string(),
+    ];
+
+    let choice = inquire::Select::new(
+        "Parent branch is not linked in devflow. Choose how to proceed:",
+        options,
+    )
+    .with_starting_cursor(0)
+    .prompt()?;
+
+    if choice.starts_with("Link '") {
+        let linked = link_branch_internal(config, config_path, parent_name, None, false).await?;
+        if linked.services_failed > 0 {
+            anyhow::bail!(
+                "Linked parent '{}' but failed on {}/{} service(s)",
+                parent_name,
+                linked.services_failed,
+                linked.service_results.len()
+            );
+        }
+        return Ok(parent);
+    }
+
+    if choice.starts_with("Use default branch") {
+        if !linked_branch_exists(config, config_path, &default_branch) {
+            match link_branch_internal(config, config_path, &default_branch, None, false).await {
+                Ok(linked) if linked.services_failed == 0 => {}
+                Ok(linked) => {
+                    anyhow::bail!(
+                        "Linked default branch '{}' but failed on {}/{} service(s)",
+                        default_branch,
+                        linked.services_failed,
+                        linked.service_results.len()
+                    );
+                }
+                Err(_) => {
+                    // Fallback for repos where the default branch is not materialized yet.
+                    ensure_default_branch_registered(config, config_path)?;
+                }
+            }
+        }
+        parent = Some(default_branch);
+        return Ok(parent);
+    }
+
+    anyhow::bail!("Cancelled")
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_switch_command(
     config: &Config,
     branch_name: &str,
     config_path: &Option<std::path::PathBuf>,
     create: bool,
-    base: Option<&str>,
+    from: Option<&str>,
     no_services: bool,
     no_verify: bool,
     json_output: bool,
     non_interactive: bool,
 ) -> Result<()> {
+    if let Err(e) = ensure_default_branch_registered(config, config_path) {
+        log::warn!("Failed to ensure default branch registration: {}", e);
+    }
+
     let worktree_enabled = config.worktree.as_ref().is_some_and(|wt| wt.enabled);
     let shell_integration = shell_integration_enabled();
     let mut worktree_path: Option<String> = None;
     let mut worktree_created = false;
     let mut branch_created = false;
+    let mut parent_for_new_branch: Option<String> = None;
     let mut json_summary: Option<serde_json::Value> = None;
 
-    // Capture current branch BEFORE any branch creation/checkout so we can
-    // use it as the default parent when --base is not specified.
-    let current_branch_before_switch: Option<String> = vcs::detect_vcs_provider(".")
-        .ok()
-        .and_then(|repo| repo.current_branch().ok().flatten());
+    let context = resolve_branch_context(config);
 
     // ── Worktree mode ──────────────────────────────────────────────────
     if worktree_enabled {
@@ -5007,6 +5542,8 @@ async fn handle_switch_command(
         let existing_path = vcs_repo.worktree_path(branch_name)?;
 
         if let Some(wt_path) = existing_path {
+            let wt_path = resolve_cd_target(&wt_path)?;
+            let wt_path = std::fs::canonicalize(&wt_path).unwrap_or(wt_path);
             if !json_output {
                 println!("Switching to existing worktree: {}", wt_path.display());
                 // Print the path so shell integration can cd to it
@@ -5030,25 +5567,49 @@ async fn handle_switch_command(
             let wt_path_str = path_template
                 .replace("{repo}", &repo_name)
                 .replace("{branch}", branch_name);
-            let wt_path = PathBuf::from(&wt_path_str);
+            let wt_path = resolve_cd_target(&PathBuf::from(&wt_path_str))?;
 
-            // Create branch if --create or branch doesn't exist
+            // Create branch only when explicitly requested
             let branch_exists = vcs_repo.branch_exists(branch_name)?;
-            if create || !branch_exists {
-                if !json_output {
-                    println!(
-                        "Creating branch '{}' (base: {})",
+            if !branch_exists {
+                if !create {
+                    anyhow::bail!(
+                        "Branch '{}' does not exist. Use `devflow switch -c {}` to create it.",
                         branch_name,
-                        base.unwrap_or("HEAD")
+                        branch_name
                     );
                 }
-                vcs_repo.create_branch(branch_name, base).with_context(|| {
-                    format!(
-                        "Failed to create branch '{}' before worktree creation",
-                        branch_name
-                    )
-                })?;
-                branch_created = !branch_exists;
+
+                let parent = resolve_parent_for_branch_creation(
+                    config,
+                    config_path,
+                    branch_name,
+                    from,
+                    &context,
+                    json_output,
+                    non_interactive,
+                )
+                .await?;
+
+                if !json_output {
+                    println!(
+                        "Creating branch '{}' (parent: {})",
+                        branch_name,
+                        parent.as_deref().unwrap_or("HEAD")
+                    );
+                }
+                vcs_repo
+                    .create_branch(branch_name, parent.as_deref())
+                    .with_context(|| {
+                        format!(
+                            "Failed to create branch '{}' before worktree creation",
+                            branch_name
+                        )
+                    })?;
+                branch_created = true;
+                parent_for_new_branch = parent;
+            } else if create && !json_output {
+                println!("Branch '{}' already exists; switching to it", branch_name);
             }
 
             if !json_output {
@@ -5115,19 +5676,21 @@ async fn handle_switch_command(
                 }
             }
 
+            let wt_path_for_output = std::fs::canonicalize(&wt_path).unwrap_or(wt_path.clone());
+
             if !json_output {
                 println!(
                     "Created worktree for '{}' at {}",
                     branch_name,
-                    wt_path.display()
+                    wt_path_for_output.display()
                 );
             }
-            worktree_path = Some(wt_path.display().to_string());
+            worktree_path = Some(wt_path_for_output.display().to_string());
             worktree_created = true;
             if !json_output {
-                println!("DEVFLOW_CD={}", wt_path.display());
+                println!("DEVFLOW_CD={}", wt_path_for_output.display());
                 if !shell_integration {
-                    print_manual_cd_hint(&wt_path);
+                    print_manual_cd_hint(&wt_path_for_output);
                 }
             }
         }
@@ -5135,16 +5698,38 @@ async fn handle_switch_command(
         // ── Classic mode (no worktrees) ────────────────────────────────
         let vcs_repo = vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
         let branch_exists = vcs_repo.branch_exists(branch_name)?;
-        if create || !branch_exists {
-            if !json_output {
-                println!(
-                    "Creating branch '{}' (base: {})",
+        if !branch_exists {
+            if !create {
+                anyhow::bail!(
+                    "Branch '{}' does not exist. Use `devflow switch -c {}` to create it.",
                     branch_name,
-                    base.unwrap_or("HEAD")
+                    branch_name
                 );
             }
-            vcs_repo.create_branch(branch_name, base)?;
-            branch_created = !branch_exists;
+
+            let parent = resolve_parent_for_branch_creation(
+                config,
+                config_path,
+                branch_name,
+                from,
+                &context,
+                json_output,
+                non_interactive,
+            )
+            .await?;
+
+            if !json_output {
+                println!(
+                    "Creating branch '{}' (parent: {})",
+                    branch_name,
+                    parent.as_deref().unwrap_or("HEAD")
+                );
+            }
+            vcs_repo.create_branch(branch_name, parent.as_deref())?;
+            branch_created = true;
+            parent_for_new_branch = parent;
+        } else if create && !json_output {
+            println!("Branch '{}' already exists; switching to it", branch_name);
         }
         // Switch the working directory to the target branch
         if !json_output {
@@ -5155,52 +5740,19 @@ async fn handle_switch_command(
 
     // ── Branch registration (unconditional — independent of services) ──
     let normalized_branch = config.get_normalized_branch_name(branch_name);
-
-    if let Some(ref path) = config_path {
-        if let Ok(mut state) = LocalStateManager::new() {
-            if let Err(e) = state.set_current_branch(path, Some(normalized_branch.clone())) {
-                log::warn!("Failed to persist current branch in local state: {}", e);
-            }
-
-            let existing = state.get_branch(path, &normalized_branch);
-
-            let parent_branch = existing
-                .as_ref()
-                .and_then(|b| b.parent.clone())
-                .or_else(|| {
-                    if branch_created {
-                        base.map(|b| config.get_normalized_branch_name(b))
-                            .or_else(|| {
-                                current_branch_before_switch
-                                    .as_deref()
-                                    .map(|b| config.get_normalized_branch_name(b))
-                            })
-                    } else {
-                        None
-                    }
-                });
-
-            let recorded_worktree_path = worktree_path.clone().or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|b| b.worktree_path.as_ref().cloned())
-            });
-
-            let created_at = existing
-                .as_ref()
-                .map(|b| b.created_at)
-                .unwrap_or_else(chrono::Utc::now);
-
-            let devflow_branch = DevflowBranch {
-                name: normalized_branch.clone(),
-                parent: parent_branch,
-                worktree_path: recorded_worktree_path,
-                created_at,
-            };
-            if let Err(e) = state.register_branch(path, devflow_branch) {
-                log::warn!("Failed to register branch in devflow registry: {}", e);
-            }
-        }
+    let parent_for_registry = if branch_created {
+        parent_for_new_branch.as_deref()
+    } else {
+        None
+    };
+    if let Err(e) = register_branch_in_state(
+        config,
+        config_path,
+        branch_name,
+        parent_for_registry,
+        worktree_path.clone(),
+    ) {
+        log::warn!("Failed to register branch in devflow registry: {}", e);
     }
 
     // ── Service branching (orchestrated across all auto_branch services) ──
@@ -5214,8 +5766,24 @@ async fn handle_switch_command(
             }
 
             // Orchestrate switch across all auto-branch services
-            let results =
-                services::factory::orchestrate_switch(config, &normalized_branch, None).await?;
+            let service_parent = if branch_created {
+                parent_for_new_branch
+                    .as_deref()
+                    .map(|p| config.get_normalized_branch_name(p))
+            } else {
+                config_path.as_ref().and_then(|path| {
+                    LocalStateManager::new()
+                        .ok()
+                        .and_then(|state| state.get_branch(path, &normalized_branch))
+                        .and_then(|b| b.parent)
+                })
+            };
+            let results = services::factory::orchestrate_switch(
+                config,
+                &normalized_branch,
+                service_parent.as_deref(),
+            )
+            .await?;
 
             let success_count = results.iter().filter(|r| r.success).count();
             let fail_count = results.iter().filter(|r| !r.success).count();
@@ -5233,6 +5801,13 @@ async fn handle_switch_command(
                     .collect();
                 json_summary = Some(serde_json::json!({
                     "branch": normalized_branch,
+                    "parent": if branch_created {
+                        parent_for_new_branch
+                            .as_deref()
+                            .map(|p| config.get_normalized_branch_name(p))
+                    } else {
+                        None
+                    },
                     "worktree_path": worktree_path,
                     "worktree_created": worktree_created,
                     "services_switched": success_count,
@@ -5284,12 +5859,23 @@ async fn handle_switch_command(
             if json_output {
                 json_summary = Some(serde_json::json!({
                     "branch": normalized_branch,
+                    "parent": if branch_created {
+                        parent_for_new_branch
+                            .as_deref()
+                            .map(|p| config.get_normalized_branch_name(p))
+                    } else {
+                        None
+                    },
                     "worktree_path": worktree_path,
                     "worktree_created": worktree_created,
                     "services": "none_configured",
                 }));
             } else {
-                println!("Switched branch: {}", normalized_branch);
+                if worktree_enabled {
+                    println!("Selected branch/worktree: {}", normalized_branch);
+                } else {
+                    println!("Switched git branch: {}", normalized_branch);
+                }
                 println!("  (no services configured — use 'devflow service add' to add one)");
             }
         }
@@ -5298,12 +5884,29 @@ async fn handle_switch_command(
         if json_output {
             json_summary = Some(serde_json::json!({
                 "branch": normalized_branch,
+                "parent": if branch_created {
+                    parent_for_new_branch
+                        .as_deref()
+                        .map(|p| config.get_normalized_branch_name(p))
+                } else {
+                    None
+                },
                 "worktree_path": worktree_path,
                 "worktree_created": worktree_created,
                 "services_skipped": true,
             }));
         } else {
-            println!("Switched branch (services skipped): {}", normalized_branch);
+            if worktree_enabled {
+                println!(
+                    "Selected branch/worktree (services skipped): {}",
+                    normalized_branch
+                );
+            } else {
+                println!(
+                    "Switched git branch (services skipped): {}",
+                    normalized_branch
+                );
+            }
         }
     }
 
@@ -5336,6 +5939,10 @@ async fn handle_switch_to_main(
 ) -> Result<()> {
     let main_branch = &config.git.main_branch;
     let shell_integration = shell_integration_enabled();
+
+    if let Err(e) = ensure_default_branch_registered(config, config_path) {
+        log::warn!("Failed to ensure default branch registration: {}", e);
+    }
 
     if !json_output {
         println!("Switching to main branch: {}", main_branch);
@@ -5374,32 +5981,14 @@ async fn handle_switch_to_main(
         vcs_repo.checkout_branch(main_branch)?;
     }
 
-    // Update current branch in local state
-    if let Some(ref path) = config_path {
-        if let Ok(mut state) = LocalStateManager::new() {
-            if let Err(e) = state.set_current_branch(path, Some(main_branch.to_string())) {
-                log::warn!("Failed to persist current branch in local state: {}", e);
-            }
-
-            let existing_main = state.get_branch(path, main_branch);
-
-            let main_record = DevflowBranch {
-                name: main_branch.to_string(),
-                parent: None,
-                worktree_path: worktree_path.clone().or_else(|| {
-                    existing_main
-                        .as_ref()
-                        .and_then(|b| b.worktree_path.as_ref().cloned())
-                }),
-                created_at: existing_main
-                    .as_ref()
-                    .map(|b| b.created_at)
-                    .unwrap_or_else(chrono::Utc::now),
-            };
-            if let Err(e) = state.register_branch(path, main_record) {
-                log::warn!("Failed to register main branch in devflow registry: {}", e);
-            }
-        }
+    if let Err(e) = register_branch_in_state(
+        config,
+        config_path,
+        main_branch,
+        None,
+        worktree_path.clone(),
+    ) {
+        log::warn!("Failed to register main branch in devflow registry: {}", e);
     }
 
     // ── Switch services to main ────────────────────────────────────────
@@ -5635,21 +6224,8 @@ async fn handle_remove_command(
         }
     }
 
-    // 4. Clear local state if this was the current branch + unregister from branch registry
+    // 4. Unregister the branch from local devflow registry
     if let Some(ref path) = config_path {
-        if let Ok(state) = LocalStateManager::new() {
-            if let Some(current) = state.get_current_branch(path) {
-                let normalized = config.get_normalized_branch_name(branch_name);
-                if current == normalized {
-                    if let Ok(mut state) = LocalStateManager::new() {
-                        if let Err(e) = state.set_current_branch(path, None) {
-                            log::warn!("Failed to clear current branch from local state: {}", e);
-                        }
-                    }
-                }
-            }
-        }
-        // Unregister the branch from the devflow registry
         if let Ok(mut state) = LocalStateManager::new() {
             let normalized = config.get_normalized_branch_name(branch_name);
             if let Err(e) = state.unregister_branch(path, &normalized) {

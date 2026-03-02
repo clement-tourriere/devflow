@@ -49,6 +49,7 @@ pub struct App {
     modal: ModalState,
     status_message: Option<(String, bool, Instant)>, // (msg, is_error, when)
     running: bool,
+    open_branch_on_exit: Option<String>,
     tab_names: Vec<&'static str>,
     spinner_tick: usize,
     // Background task channel
@@ -69,11 +70,16 @@ impl App {
             modal: ModalState::None,
             status_message: None,
             running: true,
+            open_branch_on_exit: None,
             tab_names,
             spinner_tick: 0,
             bg_tx,
             bg_rx,
         }
+    }
+
+    pub fn take_open_branch_on_exit(&mut self) -> Option<String> {
+        self.open_branch_on_exit.take()
     }
 
     /// Kick off initial data loads on background tasks.
@@ -110,14 +116,14 @@ impl App {
         let config = self.context.config.clone();
         let vcs_data = self.context.snapshot_vcs_data();
         let branch_registry = self.context.snapshot_branch_registry();
-        let active_branch = self.context.snapshot_active_branch();
+        let context_branch = self.context.snapshot_context_branch();
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
             match DevflowContext::fetch_branches_bg(
                 &config,
                 vcs_data,
                 branch_registry,
-                active_branch,
+                context_branch,
             )
             .await
             {
@@ -199,12 +205,12 @@ impl App {
         });
     }
 
-    /// Spawn a background task for switch branch (service orchestration).
-    fn spawn_switch_branch(&self, branch_name: String) {
+    /// Spawn a background task to align services to a branch.
+    fn spawn_switch_services(&self, branch_name: String) {
         let config = self.context.config.clone();
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
-            match DevflowContext::switch_branch_bg(&config, &branch_name).await {
+            match DevflowContext::switch_services_bg(&config, &branch_name).await {
                 Ok(msg) => {
                     let _ = tx.send(Action::OperationComplete {
                         success: true,
@@ -214,18 +220,18 @@ impl App {
                     let _ = tx.send(Action::Refresh);
                 }
                 Err(e) => {
-                    let _ = tx.send(Action::Error(format!("Switch failed: {}", e)));
+                    let _ = tx.send(Action::Error(format!("Service switch failed: {}", e)));
                 }
             }
         });
     }
 
     /// Spawn a background task for creating a branch (service orchestration).
-    fn spawn_create_branch(&self, name: String, base: Option<String>) {
+    fn spawn_create_branch(&self, name: String, from: Option<String>) {
         let config = self.context.config.clone();
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
-            match DevflowContext::create_branch_bg(&config, &name, base.as_deref()).await {
+            match DevflowContext::create_branch_bg(&config, &name, from.as_deref()).await {
                 Ok(msg) => {
                     let _ = tx.send(Action::OperationComplete {
                         success: true,
@@ -508,28 +514,35 @@ impl App {
                 self.context.refresh_vcs_snapshot();
                 self.load_initial_data();
             }
-            Action::SwitchBranch(ref name) => {
-                self.set_status(format!("Switching to '{}'...", name), false);
-                // VCS checkout is fast + local
-                if let Err(e) = self.context.checkout_branch(name) {
-                    self.set_status(format!("Switch failed: {}", e), true);
+            Action::SwitchServices(ref name) => {
+                if self.context.service_configs().is_empty() {
+                    self.set_status(
+                        "No services configured. Press 'o' to open the branch/worktree."
+                            .to_string(),
+                        true,
+                    );
                     return;
                 }
-                // Spawn async service orchestration
-                self.spawn_switch_branch(name.clone());
+
+                self.set_status(format!("Aligning services to '{}'...", name), false);
+                self.spawn_switch_services(name.clone());
             }
-            Action::CreateBranch { ref name, ref base } => {
+            Action::OpenBranchAndExit(ref name) => {
+                self.open_branch_on_exit = Some(name.clone());
+                self.running = false;
+            }
+            Action::CreateBranch { ref name, ref from } => {
                 self.set_status(format!("Creating branch '{}'...", name), false);
                 // VCS create + checkout is fast + local
                 if let Err(e) = self
                     .context
-                    .create_and_checkout_branch(name, base.as_deref())
+                    .create_and_checkout_branch(name, from.as_deref())
                 {
                     self.set_status(format!("Create failed: {}", e), true);
                     return;
                 }
                 // Spawn async service orchestration
-                self.spawn_create_branch(name.clone(), base.clone());
+                self.spawn_create_branch(name.clone(), from.clone());
             }
             Action::DeleteBranch(ref name) => {
                 self.set_status(format!("Deleting branch '{}'...", name), false);
@@ -623,9 +636,9 @@ impl App {
                     std::mem::replace(&mut self.modal, ModalState::None)
                 {
                     match target {
-                        InputTarget::CreateBranch { base } => {
+                        InputTarget::CreateBranch { from } => {
                             if !text.is_empty() {
-                                let action = Action::CreateBranch { name: text, base };
+                                let action = Action::CreateBranch { name: text, from };
                                 self.process_action(action);
                             }
                         }
@@ -785,7 +798,7 @@ impl App {
     fn render_status(&self, frame: &mut Frame, area: Rect) {
         // Build the status line: left = hints, right = status message (or nothing)
         let tab_hints = theme::tab_hints(self.active_tab);
-        let global_hints = "q:Quit  ?:Help  Tab/Shift+Tab:Views  1-3:Switch";
+        let global_hints = "q:Quit  ?:Help  Tab/Shift+Tab:Views  1-3:View";
 
         match &self.status_message {
             Some((msg, is_error, _)) => {

@@ -45,12 +45,30 @@ pub async fn run() -> Result<()> {
 
     // ── Run the application ─────────────────────────────────────────
     let mut app = App::new(ctx);
-    let result = app.run(&mut terminal).await;
+    let run_result = app.run(&mut terminal).await;
 
     // ── Restore terminal ────────────────────────────────────────────
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    result
+    run_result?;
+
+    if let Some(branch_name) = app.take_open_branch_on_exit() {
+        let exe = std::env::current_exe()?;
+        let status = tokio::process::Command::new(exe)
+            .arg("switch")
+            .arg(&branch_name)
+            .status()
+            .await?;
+        if !status.success() {
+            anyhow::bail!(
+                "Failed to open branch '{}' from TUI (switch exited with code {})",
+                branch_name,
+                status.code().unwrap_or(-1)
+            );
+        }
+    }
+
+    Ok(())
 }

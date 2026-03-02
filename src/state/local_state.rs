@@ -29,7 +29,6 @@ pub struct DevflowBranch {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectState {
-    pub current_branch: Option<String>,
     pub last_updated: chrono::DateTime<chrono::Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub services: Option<Vec<NamedServiceConfig>>,
@@ -110,46 +109,6 @@ impl LocalStateManager {
         Ok(())
     }
 
-    pub fn get_current_branch(&self, project_path: &Path) -> Option<String> {
-        let project_key = self.get_project_key(project_path)?;
-        self.state
-            .projects
-            .get(&project_key)
-            .and_then(|project| project.current_branch.clone())
-    }
-
-    pub fn set_current_branch(
-        &mut self,
-        project_path: &Path,
-        branch: Option<String>,
-    ) -> Result<()> {
-        self.refresh_state()?;
-
-        let project_key = self.get_project_key(project_path).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Failed to get project key for path: {}",
-                project_path.display()
-            )
-        })?;
-
-        // Preserve existing services and branches when updating current branch
-        let existing = self.state.projects.get(&project_key);
-        let existing_services = existing.and_then(|p| p.services.clone());
-        let existing_branches = existing.and_then(|p| p.branches.clone());
-
-        let project_state = ProjectState {
-            current_branch: branch,
-            last_updated: chrono::Utc::now(),
-            services: existing_services,
-            branches: existing_branches,
-        };
-
-        self.state.projects.insert(project_key, project_state);
-        self.save_state()?;
-
-        Ok(())
-    }
-
     pub fn get_services(&self, project_path: &Path) -> Option<Vec<NamedServiceConfig>> {
         let project_key = self.get_project_key(project_path)?;
         self.state
@@ -174,11 +133,9 @@ impl LocalStateManager {
         })?;
 
         let existing = self.state.projects.get(&project_key);
-        let current_branch = existing.and_then(|p| p.current_branch.clone());
         let existing_branches = existing.and_then(|p| p.branches.clone());
 
         let project_state = ProjectState {
-            current_branch,
             last_updated: chrono::Utc::now(),
             services: Some(services),
             branches: existing_branches,
@@ -205,7 +162,6 @@ impl LocalStateManager {
         })?;
 
         let existing = self.state.projects.get(&project_key);
-        let current_branch = existing.and_then(|p| p.current_branch.clone());
         let existing_branches = existing.and_then(|p| p.branches.clone());
         let mut services = existing
             .and_then(|p| p.services.clone())
@@ -229,7 +185,6 @@ impl LocalStateManager {
         }
 
         let project_state = ProjectState {
-            current_branch,
             last_updated: chrono::Utc::now(),
             services: Some(services),
             branches: existing_branches,
@@ -261,7 +216,7 @@ impl LocalStateManager {
         Ok(())
     }
 
-    /// Remove an entire project from the local state (branch registry, services, current branch).
+    /// Remove an entire project from the local state (branch registry + services).
     pub fn remove_project(&mut self, project_path: &Path) -> Result<()> {
         self.refresh_state()?;
 
@@ -312,7 +267,6 @@ impl LocalStateManager {
             .projects
             .entry(project_key)
             .or_insert_with(|| ProjectState {
-                current_branch: None,
                 last_updated: chrono::Utc::now(),
                 services: None,
                 branches: None,
@@ -492,38 +446,5 @@ mod tests {
         assert!(project_key
             .unwrap()
             .contains(temp_dir.path().to_str().unwrap()));
-    }
-
-    #[test]
-    fn test_current_branch_operations() {
-        let temp_dir = TempDir::new().unwrap();
-        let config_path = temp_dir.path().join(".devflow.yml");
-
-        let mut manager = LocalStateManager::new().unwrap();
-
-        // Initially no current branch
-        assert_eq!(manager.get_current_branch(&config_path), None);
-
-        // Set a branch
-        manager
-            .set_current_branch(&config_path, Some("feature_test".to_string()))
-            .unwrap();
-        assert_eq!(
-            manager.get_current_branch(&config_path),
-            Some("feature_test".to_string())
-        );
-
-        // Update branch
-        manager
-            .set_current_branch(&config_path, Some("main".to_string()))
-            .unwrap();
-        assert_eq!(
-            manager.get_current_branch(&config_path),
-            Some("main".to_string())
-        );
-
-        // Clear branch
-        manager.set_current_branch(&config_path, None).unwrap();
-        assert_eq!(manager.get_current_branch(&config_path), None);
     }
 }

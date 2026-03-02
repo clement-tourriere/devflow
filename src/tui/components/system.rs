@@ -52,8 +52,8 @@ const SUB_SECTIONS: [SubSection; 4] = [
     SubSection::Capabilities,
 ];
 
-/// The System tab consolidates Config, Hooks, and Doctor into one view.
-/// Users switch sub-sections with 1/2/3 keys (or left/right arrows).
+/// The System tab consolidates Config, Hooks, Doctor, and Capabilities views.
+/// Users switch sub-sections with 1/2/3/4 keys (or left/right arrows).
 pub struct SystemComponent {
     active_section: SubSection,
     config_view: ConfigViewComponent,

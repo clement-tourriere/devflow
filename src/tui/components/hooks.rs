@@ -14,11 +14,68 @@ use super::Component;
 use crate::tui::action::*;
 use crate::tui::theme;
 
+const TEMPLATE_VARIABLES: &[(&str, &str)] = &[
+    ("{{ branch }}", "Current branch name"),
+    ("{{ repo }}", "Repository directory name"),
+    (
+        "{{ worktree_path }}",
+        "Current worktree path (if available)",
+    ),
+    ("{{ default_branch }}", "Default branch (main/master)"),
+    ("{{ commit }}", "Current commit SHA when available"),
+    ("{{ target }}", "Merge target branch for merge hooks"),
+    ("{{ base }}", "Parent/base branch for create hooks"),
+    ("{{ service['db'].url }}", "Service connection URL"),
+    ("{{ service['db'].host }}", "Service host"),
+    ("{{ service['db'].port }}", "Service port"),
+    ("{{ service['db'].database }}", "Service database name"),
+    ("{{ service['db'].user }}", "Service username"),
+    ("{{ service['db'].password }}", "Service password (if set)"),
+];
+
+const TEMPLATE_FILTERS: &[(&str, &str)] = &[
+    ("sanitize", "Make path/shell-safe branch slugs"),
+    ("sanitize_db", "Make DB-safe identifiers"),
+    ("hash_port", "Stable pseudo-random port (10000-19999)"),
+    ("lower", "Lowercase text"),
+    ("upper", "Uppercase text"),
+    ("replace", "Substring replacement"),
+    ("truncate", "Trim to max length"),
+];
+
+const HOOK_SCAFFOLDS: &[(&str, &str)] = &[
+    (
+        "post-switch env file",
+        r#"hooks:
+  post-switch:
+    env:
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local""#,
+    ),
+    (
+        "post-create migrate",
+        r#"hooks:
+  post-create:
+    migrate:
+      command: "cargo sqlx migrate run"
+      continue_on_error: false"#,
+    ),
+    (
+        "service-aware restart",
+        r#"hooks:
+  post-switch:
+    restart-app:
+      command: "docker compose up -d app"
+      condition: "file_exists:docker-compose.yml""#,
+    ),
+];
+
 pub struct HooksComponent {
     data: Option<HooksData>,
     list_state: ListState,
     selected_phase: usize,
     loading: bool,
+    show_reference: bool,
+    scaffold_index: usize,
 }
 
 impl HooksComponent {
@@ -30,6 +87,8 @@ impl HooksComponent {
             list_state,
             selected_phase: 0,
             loading: true,
+            show_reference: false,
+            scaffold_index: 0,
         }
     }
 
@@ -53,6 +112,14 @@ impl HooksComponent {
             self.selected_phase = ((self.selected_phase as i32 + delta).rem_euclid(len)) as usize;
             self.list_state.select(Some(self.selected_phase));
         }
+    }
+
+    fn next_scaffold(&mut self) {
+        if HOOK_SCAFFOLDS.is_empty() {
+            self.scaffold_index = 0;
+            return;
+        }
+        self.scaffold_index = (self.scaffold_index + 1) % HOOK_SCAFFOLDS.len();
     }
 
     fn render_phase_list(&self, frame: &mut Frame, area: Rect) {
@@ -159,12 +226,93 @@ impl HooksComponent {
             ));
         }
 
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::styled("  v", Style::default().fg(theme::KEY_HINT)),
+            Span::raw("  Toggle template reference"),
+        ]));
+
         let paragraph = Paragraph::new(lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme::BORDER_ACTIVE))
                     .title(" Hook Details "),
+            )
+            .wrap(Wrap { trim: false });
+
+        frame.render_widget(paragraph, area);
+    }
+
+    fn render_template_reference(&self, frame: &mut Frame, area: Rect) {
+        let mut lines = Vec::new();
+
+        lines.push(Line::styled(
+            "Template Variables",
+            Style::default().fg(theme::TEXT_PRIMARY).bold(),
+        ));
+        for (name, desc) in TEMPLATE_VARIABLES {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {:30}", name),
+                    Style::default().fg(theme::HOOK_COMMAND),
+                ),
+                Span::styled(*desc, Style::default().fg(theme::TEXT_SECONDARY)),
+            ]));
+        }
+
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            "Filters",
+            Style::default().fg(theme::TEXT_PRIMARY).bold(),
+        ));
+        for (name, desc) in TEMPLATE_FILTERS {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {:20}", format!("| {}", name)),
+                    Style::default().fg(theme::HOOK_CONDITION),
+                ),
+                Span::styled(*desc, Style::default().fg(theme::TEXT_SECONDARY)),
+            ]));
+        }
+
+        lines.push(Line::raw(""));
+        let (scaffold_name, scaffold_text) = HOOK_SCAFFOLDS
+            .get(self.scaffold_index)
+            .copied()
+            .unwrap_or(("example", "hooks:\n  post-switch: {}"));
+        lines.push(Line::styled(
+            format!(
+                "Scaffold {} / {}: {}",
+                self.scaffold_index.saturating_add(1),
+                HOOK_SCAFFOLDS.len().max(1),
+                scaffold_name
+            ),
+            Style::default().fg(theme::TEXT_PRIMARY).bold(),
+        ));
+        for line in scaffold_text.lines() {
+            lines.push(Line::styled(
+                format!("  {}", line),
+                Style::default().fg(theme::YAML_VALUE),
+            ));
+        }
+
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::styled("  v", Style::default().fg(theme::KEY_HINT)),
+            Span::raw("  Back to hook details"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  s", Style::default().fg(theme::KEY_HINT)),
+            Span::raw("  Next scaffold example"),
+        ]));
+
+        let paragraph = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme::BORDER_ACTIVE))
+                    .title(" Hook Templates "),
             )
             .wrap(Wrap { trim: false });
 
@@ -185,6 +333,16 @@ impl Component for HooksComponent {
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.move_selection(1);
+                Action::None
+            }
+            KeyCode::Char('v') => {
+                self.show_reference = !self.show_reference;
+                Action::None
+            }
+            KeyCode::Char('s') => {
+                if self.show_reference {
+                    self.next_scaffold();
+                }
                 Action::None
             }
             KeyCode::Char('r') => Action::Refresh,
@@ -218,6 +376,10 @@ impl Component for HooksComponent {
             .split(area);
 
         self.render_phase_list(frame, chunks[0]);
-        self.render_hook_detail(frame, chunks[1]);
+        if self.show_reference {
+            self.render_template_reference(frame, chunks[1]);
+        } else {
+            self.render_hook_detail(frame, chunks[1]);
+        }
     }
 }

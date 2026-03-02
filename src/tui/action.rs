@@ -25,10 +25,11 @@ pub enum Action {
     Error(String),
 
     // ── Branch actions ──
-    SwitchBranch(String),
+    SwitchServices(String),
+    OpenBranchAndExit(String),
     CreateBranch {
         name: String,
-        base: Option<String>,
+        from: Option<String>,
     },
     DeleteBranch(String),
     /// Internal: delete the VCS branch after service branches are cleaned up.
@@ -67,7 +68,7 @@ pub enum Action {
     StopAllServices(String),
 
     // ── System tab actions ──
-    /// Switch sub-section within the System tab (0=Config, 1=Hooks, 2=Doctor)
+    /// Switch sub-section within the System tab (0=Config, 1=Hooks, 2=Doctor, 3=Capabilities)
     SelectSubSection(usize),
 
     // ── Confirmation dialog ──
@@ -95,7 +96,7 @@ pub enum Action {
 /// Where to send input dialog results.
 #[derive(Debug, Clone)]
 pub enum InputTarget {
-    CreateBranch { base: Option<String> },
+    CreateBranch { from: Option<String> },
     FilterBranches,
     FilterLogsPicker,
 }

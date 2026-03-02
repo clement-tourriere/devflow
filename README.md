@@ -8,7 +8,7 @@ Isolated dev environments for every Git branch — automatically.
 
 devflow gives each Git branch its own isolated development environment: worktrees, databases, caches, and any stateful service. When you `git checkout feature-auth`, devflow automatically creates (or switches to) a dedicated worktree and spins up PostgreSQL, ClickHouse, MySQL, or Redis instances that belong to that branch. Data is cloned from the parent branch using Copy-on-Write, so branching is near-instant and uses almost no extra disk space.
 
-It works in four modes:
+It works in five modes:
 - **Local** — Docker containers with CoW storage (APFS, ZFS, Btrfs, XFS)
 - **Template** — PostgreSQL's `CREATE DATABASE ... WITH TEMPLATE` on an existing server
 - **Cloud** — Neon, DBLab, or Xata APIs
@@ -31,44 +31,75 @@ Requires [mise](https://mise.jdx.dev) (or Rust 1.70+ installed manually) and Doc
 ## Quick Start
 
 ```bash
-# 1. Initialize (creates .devflow.yml and a "main" service branch)
+# 1. Initialize project config
 devflow init myapp
 
-# 2. Install Git hooks (auto-create/switch on checkout)
+# 2. Add at least one service
+devflow service add app-db --provider local --service-type postgres
+
+# 3. Install Git hooks (auto-create/switch on checkout)
 devflow install-hooks
 
-# 3. Create a feature branch — devflow branches services automatically
-git checkout -b feature/auth
+# 4. Create and switch to a feature environment
+devflow switch -c feature/auth
 
-# 4. Check what's running
+# 5. Check what's running
 devflow status
 
-# 5. Get connection info
+# 6. Get connection info
 devflow connection feature/auth
 devflow connection feature/auth --format env    # DATABASE_URL=...
 ```
 
 That's it. Your feature branch now has its own database. Schema changes, test data, and migrations are completely isolated from main.
 
-### Adding devflow to an Existing Project
+### Common Getting Started Scenarios
 
-Already have a database with data you want to keep? Seed it during init:
+#### 1) New project (default)
 
 ```bash
-# Seed from a running PostgreSQL instance
-devflow init myapp --from postgresql://user:pass@localhost:5432/myapp
+cd ~/workspace
+devflow init myapp
+cd myapp
 
-# Or from a SQL dump file
-devflow init myapp --from ./backup.sql
-
-# Install hooks
+devflow service add app-db --provider local --service-type postgres
 devflow install-hooks
-
-# Update your app's DATABASE_URL to use devflow
-devflow connection main --format env    # DATABASE_URL=postgresql://...
 ```
 
-Every branch created from main inherits the seeded data via Copy-on-Write. See the [full documentation](docs/index.html#existing-project) for a detailed walkthrough including local overrides with `.devflow.local.yml`.
+#### 2) Existing project
+
+```bash
+cd ~/workspace/my-existing-project
+devflow init
+
+devflow service add app-db --provider local --service-type postgres
+devflow install-hooks
+```
+
+#### 3) Add a service with or without seed data
+
+```bash
+# No seed (fresh main data)
+devflow service add app-db --provider local --service-type postgres
+
+# Seed main branch from a dump
+devflow service add app-db --provider local --service-type postgres --from ./backup.sql
+
+# Seed main branch from a running PostgreSQL instance
+devflow service add app-db --provider local --service-type postgres --from postgresql://user:pass@localhost:5432/myapp
+
+# Seed main branch from S3
+devflow service add app-db --provider local --service-type postgres --from s3://my-bucket/backups/latest.dump
+
+# Get connection info for your app
+devflow connection main --format env
+```
+
+With shell integration enabled (`eval "$(devflow shell-init)"`), commands that
+emit `DEVFLOW_CD=...` auto-`cd` your shell (for example `init`, `switch`, and
+TUI open with `o`).
+
+Every branch created from main inherits seeded data via Copy-on-Write. See the [full documentation](docs/index.html#existing-project) for a detailed walkthrough including local overrides with `.devflow.local.yml`.
 
 ### Using mise
 
@@ -85,10 +116,10 @@ mise run docs         # Serve documentation locally at localhost:8787
 
 ### Local Backend
 
-1. `devflow init` pulls a Docker image and starts a container for the "main" branch, with data bind-mounted to the host filesystem
-2. `devflow create feature-auth` pauses the parent container, clones the data directory using Copy-on-Write, then starts a new container pointing at the clone
-3. Each branch container gets a unique port, so multiple branches can run simultaneously
-4. `devflow delete feature-auth` stops the container and removes its data directory
+1. `devflow init` creates `.devflow.yml` and configures branch/worktree behavior
+2. `devflow service add app-db ...` registers a service and provisions main-branch service state
+3. `devflow switch -c feature-auth` creates the branch environment (and worktree when enabled)
+4. `devflow service delete feature-auth` removes service data for that branch (`devflow remove` removes git branch + worktree + services)
 
 **Copy-on-Write storage** makes step 2 near-instant regardless of database size. Only changed blocks are duplicated:
 
@@ -118,15 +149,15 @@ Custom backends can be built as standalone executables that communicate via JSON
 
 Created by `devflow init`. All sections are optional.
 
-#### Backends
+#### Services
 
 ```yaml
-backends:
+services:
   - name: app-db
     type: local
     service_type: postgres
     auto_branch: true               # Branch this service with git
-    default: true                   # Default target for -d flag
+    default: true                   # Default target for -s flag
     local:
       image: postgres:17
 
@@ -213,30 +244,33 @@ DEVFLOW_LLM_MODEL=...               # LLM model name
 ### Branch Management
 
 ```bash
-devflow create <branch>                  # Create a service branch
-devflow create <branch> --from <parent>  # Create from a specific parent
-devflow delete <branch>                  # Delete a service branch
+devflow switch -c <branch>               # Create + switch (parent = context branch)
+devflow switch -c <branch> --from <p>    # Create from explicit parent
+devflow link <branch>                    # Link an existing VCS branch into devflow
+devflow service create <branch>          # Create service branch only
+devflow service delete <branch>          # Delete service branch only
+devflow service cleanup --max-count 5    # Cleanup old branches for a service
 devflow remove <branch>                  # Remove branch + worktree + all services
 devflow list                             # List all branches (tree view)
 devflow graph                            # Full environment graph (human view)
 devflow --json graph                     # Full environment graph (machine view)
 devflow switch                           # Interactive switch with fuzzy search
-devflow switch <branch>                  # Switch to a branch (creates if needed)
+devflow switch <branch>                  # Switch to an existing branch/worktree
 devflow switch --template                # Switch to main/template
-devflow cleanup --max-count 5            # Remove old branches, keep most recent N
+devflow cleanup --max-count 5            # Alias for `devflow service cleanup`
 ```
 
 ### Lifecycle (Local Backend)
 
 ```bash
-devflow start <branch>                   # Start a stopped container
-devflow stop <branch>                    # Stop a running container
-devflow reset <branch>                   # Reset branch data to parent state
-devflow destroy                          # Remove all containers and data
-devflow destroy --force                  # Skip confirmation
-devflow seed <branch> --from <source>    # Seed from PostgreSQL URL, file, or s3://
-devflow logs <branch>                    # Show container logs (last 100 lines)
-devflow logs <branch> --tail 50          # Show last 50 lines
+devflow service start <branch>           # Start a stopped container
+devflow service stop <branch>            # Stop a running container
+devflow service reset <branch>           # Reset branch data to parent state
+devflow service destroy                  # Remove all data for a service
+devflow service destroy --force          # Skip confirmation
+devflow service seed <branch> --from <source>  # Seed from PostgreSQL URL, file, or s3://
+devflow service logs <branch>            # Show container logs (last 100 lines)
+devflow service logs <branch> --tail 50  # Show last 50 lines
 ```
 
 ### VCS
@@ -250,7 +284,7 @@ devflow commit --ai                      # AI-generated commit message
 ### Info & Diagnostics
 
 ```bash
-devflow status                           # Project and backend status
+devflow status                           # Project and service status
 devflow config                           # Current configuration
 devflow config -v                        # Config with precedence details
 devflow doctor                           # System health check
@@ -261,6 +295,15 @@ devflow connection <branch> --format env # Environment variables
 devflow connection <branch> --format json # JSON object
 ```
 
+### Context Override
+
+```bash
+DEVFLOW_CONTEXT_BRANCH=release_1_0 devflow switch -c hotfix_patch
+```
+
+When set, `DEVFLOW_CONTEXT_BRANCH` defines the devflow context branch used as
+the default parent for branch creation.
+
 ### TUI Dashboard
 
 ```bash
@@ -269,22 +312,28 @@ devflow tui
 
 The TUI now includes:
 
-- **Environments**: tree view with parent/child branches, service states, focused-service actions, and start/stop-all shortcuts.
-- **System**: consolidated config, hooks, and doctor panels.
+- **Environments**: tree view with parent/child branches, service states, focused-service actions, start/stop-all shortcuts, and `o` to open a branch/worktree and exit.
+- **System**: consolidated config, hooks (with template variable/filter reference + scaffold snippets), and doctor panels.
 - **Logs**: service/branch picker with filter support and keyboard-driven navigation.
 
 ### Setup
 
 ```bash
-devflow init [name]                      # Initialize configuration
-devflow init [name] --backend <type>     # Specify backend type
-devflow init [name] --from <source>      # Seed main branch from source
+devflow init [path]                      # Initialize current dir or create/init path
+devflow init [path] --name <project>     # Explicit project name
+devflow init [path] --force              # Overwrite existing config
+devflow service add <name> --provider <type> --service-type <kind>
+devflow service add <name> --provider local --service-type postgres --from <source>
 devflow install-hooks                    # Install Git hooks
 devflow uninstall-hooks                  # Remove Git hooks
 devflow setup-zfs                        # Create file-backed ZFS pool (Linux)
 devflow setup-zfs --size 20G             # Custom pool size
 devflow worktree-setup                   # Set up devflow in a Git worktree
 ```
+
+With shell integration enabled, `devflow init <directory>` also emits
+`DEVFLOW_CD=...`, so your shell wrapper can automatically `cd` into the
+newly initialized directory.
 
 ### Hooks
 
@@ -314,19 +363,21 @@ eval "$(devflow shell-init zsh)"         # Zsh (~/.zshrc)
 devflow shell-init fish | source         # Fish (~/.config/fish/config.fish)
 ```
 
-This creates a `devflow` shell wrapper that automatically `cd`s into worktree directories after `devflow switch`.
+This creates a `devflow` shell wrapper that automatically `cd`s when devflow
+emits `DEVFLOW_CD=...` (for example after `devflow switch`, `devflow init <dir>`,
+or opening a branch/worktree from the TUI with `o`).
 
 ### Global Flags
 
 ```bash
 --json                                   # JSON output for core automation commands
 --non-interactive                        # Skip prompts, use defaults
--d <name>                                # Target a specific named backend
+-s <name>                                # Target a specific named service
 ```
 
 ### Agent Automation Contract
 
-- Multi-backend `create`, `delete`, and `switch` return non-zero when any backend fails.
+- Multi-provider `service create`, `service delete`, and `switch` return non-zero when any provider fails.
 - `destroy` and `remove` require `--force` when using `--json` or `--non-interactive`.
 - Unapproved hooks fail in non-interactive mode (no prompts).
 - Use `devflow --json capabilities` to detect current automation guarantees.
@@ -392,14 +443,17 @@ Hooks are executed in definition order (deterministic, using ordered maps).
 | `{{ repo }}` | Repository directory name |
 | `{{ worktree_path }}` | Worktree path (if enabled) |
 | `{{ default_branch }}` | Default branch (main/master) |
-| `{{ service.<name>.host }}` | Service host |
-| `{{ service.<name>.port }}` | Service port |
-| `{{ service.<name>.database }}` | Database name |
-| `{{ service.<name>.user }}` | Service user |
-| `{{ service.<name>.password }}` | Service password |
-| `{{ service.<name>.url }}` | Full connection URL |
+| `{{ commit }}` | HEAD commit SHA (when available) |
+| `{{ target }}` | Merge target branch (merge hooks) |
+| `{{ base }}` | Parent/base branch (create hooks) |
+| `{{ service['<name>'].host }}` | Service host |
+| `{{ service['<name>'].port }}` | Service port |
+| `{{ service['<name>'].database }}` | Database name |
+| `{{ service['<name>'].user }}` | Service user |
+| `{{ service['<name>'].password }}` | Service password |
+| `{{ service['<name>'].url }}` | Full connection URL |
 
-**Filters:** `sanitize` (replace `/` with `-`), `sanitize_db` (DB-safe identifier), `hash_port` (deterministic port in 10000-19999).
+**Filters:** `sanitize`, `sanitize_db`, `hash_port`, `lower`, `upper`, `replace`, `truncate`.
 
 ### Hook Approval
 
@@ -409,8 +463,8 @@ Hooks that change between runs require approval before execution. This prevents 
 
 Example configuration files are in the [`examples/`](examples/) directory:
 
-- [`simple.devflow.yml`](examples/simple.devflow.yml) — Single PostgreSQL backend
-- [`multi-service.devflow.yml`](examples/multi-service.devflow.yml) — PostgreSQL + ClickHouse + Redis with lifecycle hooks and worktrees
+- [`simple.devflow.yml`](examples/simple.devflow.yml) — Single PostgreSQL service
+- [`multi-service.devflow.yml`](examples/multi-service.devflow.yml) — PostgreSQL + ClickHouse + Redis services with lifecycle hooks and worktrees
 - [`django.devflow.yml`](examples/django.devflow.yml) — Django project with migrations and Docker Compose restart
 - [`agent-bootstrap.sh`](examples/agent-bootstrap.sh) — Idempotent repository bootstrap for agents/CI
 - [`agent-task.sh`](examples/agent-task.sh) — Task-scoped branch environment setup for agents
@@ -418,7 +472,7 @@ Example configuration files are in the [`examples/`](examples/) directory:
 ### Node.js / Express
 
 ```yaml
-backends:
+services:
   - name: app-db
     type: local
     service_type: postgres
@@ -440,18 +494,14 @@ hooks:
 ### Seeding
 
 ```bash
-# Seed main from a production dump
-devflow init myapp --from /path/to/dump.sql
-
-# Seed from a live database
-devflow init myapp --from postgresql://readonly:pass@replica:5432/mydb
-
-# Seed from S3
-devflow init myapp --from s3://my-bucket/backups/latest.dump
+# Seed while adding a service
+devflow service add app-db --provider local --service-type postgres --from /path/to/dump.sql
+devflow service add app-db --provider local --service-type postgres --from postgresql://readonly:pass@replica:5432/mydb
+devflow service add app-db --provider local --service-type postgres --from s3://my-bucket/backups/latest.dump
 
 # Re-seed an existing branch
-devflow seed main --from dump.sql
-devflow seed feature/auth --from postgresql://...
+devflow service seed main --from dump.sql
+devflow service seed feature/auth --from postgresql://...
 ```
 
 ### AI Agent / CI Automation
@@ -461,7 +511,7 @@ devflow seed feature/auth --from postgresql://...
 ./examples/agent-bootstrap.sh
 
 # Create an isolated branch for the agent
-devflow --json --non-interactive create agent-task-42
+devflow --json --non-interactive switch -c agent-task-42 --no-verify
 
 # Get connection info
 CONN=$(devflow --json connection agent-task-42 | jq -r '.connection_string')
@@ -469,13 +519,13 @@ CONN=$(devflow --json connection agent-task-42 | jq -r '.connection_string')
 # Agent works against an isolated development branch environment...
 
 # Reset to clean state if needed
-devflow --json --non-interactive reset agent-task-42
+devflow --json --non-interactive service reset agent-task-42
 
 # Check container logs on failure
-devflow logs agent-task-42
+devflow service logs agent-task-42
 
 # Clean up
-devflow --json --non-interactive delete agent-task-42
+devflow --json --non-interactive remove agent-task-42 --force
 ```
 
 For a full agent-oriented workflow, see `AGENTS.md`.
@@ -508,9 +558,9 @@ For a full agent-oriented workflow, see `AGENTS.md`.
 git fetch origin
 git checkout feature/payment-refactor    # Services created automatically
 # Review, test, check logs if needed
-devflow logs feature/payment-refactor
+devflow service logs feature/payment-refactor
 git checkout main                        # Switch back, services switch too
-devflow delete feature/payment-refactor  # Clean up after merge
+devflow remove feature/payment-refactor --force  # Clean up after merge
 ```
 
 ### AI Agent Workflow
@@ -518,15 +568,15 @@ devflow delete feature/payment-refactor  # Clean up after merge
 ```bash
 # 1. Create isolated environment
 BRANCH="task-123"
-devflow --json --non-interactive create "$BRANCH" >/dev/null
+devflow --json --non-interactive switch -c "$BRANCH" --no-verify >/dev/null
 CONN=$(devflow --json connection "$BRANCH" | jq -r '.connection_string')
 
 # 2. Agent works against $CONN
 # 3. Reset and retry if needed
-devflow --json --non-interactive reset "$BRANCH"
+devflow --json --non-interactive service reset "$BRANCH"
 
 # 4. Clean up
-devflow --json --non-interactive delete "$BRANCH"
+devflow --json --non-interactive remove "$BRANCH" --force
 ```
 
 ## Use Cases

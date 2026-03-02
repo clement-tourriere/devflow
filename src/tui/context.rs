@@ -105,38 +105,28 @@ impl DevflowContext {
         map
     }
 
-    /// Snapshot the currently active devflow branch from local state.
-    pub fn snapshot_active_branch(&self) -> Option<String> {
-        if let Ok(state_manager) = LocalStateManager::new() {
-            if let Some(ref path) = self.config_path {
-                return state_manager.get_current_branch(path);
+    /// Snapshot the current devflow context branch.
+    ///
+    /// Resolution order:
+    /// 1) DEVFLOW_CONTEXT_BRANCH env override
+    /// 2) current VCS branch in this cwd
+    pub fn snapshot_context_branch(&self) -> Option<String> {
+        if let Ok(override_branch) = std::env::var("DEVFLOW_CONTEXT_BRANCH") {
+            let trimmed = override_branch.trim();
+            if !trimmed.is_empty() {
+                return Some(self.config.get_normalized_branch_name(trimmed));
             }
         }
-        None
+
+        self.vcs_snapshot
+            .current_branch
+            .as_deref()
+            .map(|b| self.config.get_normalized_branch_name(b))
     }
 
     /// Re-capture VCS state after a branch switch/create/delete.
     pub fn refresh_vcs_snapshot(&mut self) {
         self.vcs_snapshot = Self::take_vcs_snapshot(&*self.vcs);
-    }
-
-    fn persist_current_branch_state(&self, branch_name: &str) {
-        let Some(config_path) = self.config_path.as_ref() else {
-            return;
-        };
-
-        let normalized = self.config.get_normalized_branch_name(branch_name);
-
-        match LocalStateManager::new() {
-            Ok(mut state) => {
-                if let Err(e) = state.set_current_branch(config_path, Some(normalized)) {
-                    log::warn!("Failed to persist current branch in local state: {}", e);
-                }
-            }
-            Err(e) => {
-                log::warn!("Failed to open local state manager: {}", e);
-            }
-        }
     }
 
     fn upsert_branch_state(&self, branch_name: &str, parent: Option<&str>) {
@@ -202,12 +192,6 @@ impl DevflowContext {
                 if let Err(e) = state.unregister_branch(config_path, &normalized) {
                     log::warn!("Failed to unregister branch from local state: {}", e);
                 }
-
-                if state.get_current_branch(config_path).as_deref() == Some(normalized.as_str()) {
-                    if let Err(e) = state.set_current_branch(config_path, None) {
-                        log::warn!("Failed to clear current branch in local state: {}", e);
-                    }
-                }
             }
             Err(e) => {
                 log::warn!("Failed to open local state manager: {}", e);
@@ -217,28 +201,17 @@ impl DevflowContext {
 
     // ── Synchronous VCS operations (fast, run on main thread) ───────
 
-    /// Checkout/switch to an existing branch.
-    pub fn checkout_branch(&mut self, name: &str) -> Result<()> {
-        self.vcs.checkout_branch(name)?;
-        self.persist_current_branch_state(name);
-        self.upsert_branch_state(name, None);
-        self.vcs_snapshot = Self::take_vcs_snapshot(&*self.vcs);
-        Ok(())
-    }
-
     /// Create a new branch and check it out.
-    pub fn create_and_checkout_branch(&mut self, name: &str, base: Option<&str>) -> Result<()> {
+    pub fn create_and_checkout_branch(&mut self, name: &str, from: Option<&str>) -> Result<()> {
         let previous_branch = self
             .vcs
             .current_branch()?
             .map(|b| self.config.get_normalized_branch_name(&b));
 
-        self.vcs.create_branch(name, base)?;
+        self.vcs.create_branch(name, from)?;
         self.vcs.checkout_branch(name)?;
 
-        self.persist_current_branch_state(name);
-
-        let parent = base
+        let parent = from
             .map(|b| self.config.get_normalized_branch_name(b))
             .or(previous_branch);
         self.upsert_branch_state(name, parent.as_deref());
@@ -313,7 +286,7 @@ impl DevflowContext {
         config: &Config,
         vcs: VcsSnapshot,
         branch_registry: HashMap<String, Option<String>>,
-        active_branch: Option<String>,
+        context_branch: Option<String>,
     ) -> Result<BranchesData> {
         // Get all providers and their branches (network calls)
         let providers = factory::create_all_providers(config).await.ok();
@@ -352,7 +325,7 @@ impl DevflowContext {
             let parent = branch_registry.get(&branch.name).cloned().flatten();
 
             let normalized = config.get_normalized_branch_name(&branch.name);
-            let is_current = active_branch
+            let is_current = context_branch
                 .as_deref()
                 .map(|active| active == branch.name || active == normalized)
                 .unwrap_or(branch.is_current);
@@ -379,7 +352,7 @@ impl DevflowContext {
             }
 
             let normalized = config.get_normalized_branch_name(reg_name);
-            let is_current = active_branch
+            let is_current = context_branch
                 .as_deref()
                 .map(|active| active == reg_name || active == normalized)
                 .unwrap_or(false);
@@ -396,7 +369,7 @@ impl DevflowContext {
 
         Ok(BranchesData {
             branches: enriched,
-            current_branch: active_branch.or(vcs.current_branch),
+            current_branch: context_branch.or(vcs.current_branch),
             default_branch: vcs.default_branch,
         })
     }
@@ -519,17 +492,20 @@ impl DevflowContext {
         named.provider.logs(branch_name, Some(200)).await
     }
 
-    /// Switch services to a branch (service orchestration only — VCS
-    /// checkout is done synchronously on the main thread before this).
-    pub async fn switch_branch_bg(config: &Config, branch_name: &str) -> Result<String> {
+    /// Switch/align services to a branch without changing VCS checkout.
+    pub async fn switch_services_bg(config: &Config, branch_name: &str) -> Result<String> {
+        if config.resolve_services().is_empty() {
+            return Ok("No services configured".to_string());
+        }
+
         let results = factory::orchestrate_switch(config, branch_name, None).await?;
         let failures: Vec<_> = results.iter().filter(|r| !r.success).collect();
         if failures.is_empty() {
-            Ok(format!("Switched to branch '{}'", branch_name))
+            Ok(format!("Aligned services to branch '{}'", branch_name))
         } else {
             let msgs: Vec<_> = failures.iter().map(|f| f.message.as_str()).collect();
             Ok(format!(
-                "Switched to '{}' (some services failed: {})",
+                "Aligned services to '{}' (some services failed: {})",
                 branch_name,
                 msgs.join(", ")
             ))
@@ -540,9 +516,9 @@ impl DevflowContext {
     pub async fn create_branch_bg(
         config: &Config,
         name: &str,
-        base: Option<&str>,
+        from: Option<&str>,
     ) -> Result<String> {
-        let results = factory::orchestrate_create(config, name, base).await?;
+        let results = factory::orchestrate_create(config, name, from).await?;
         let failures: Vec<_> = results.iter().filter(|r| !r.success).collect();
         if failures.is_empty() {
             Ok(format!("Created and switched to branch '{}'", name))
