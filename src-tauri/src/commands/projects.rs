@@ -91,6 +91,12 @@ pub async fn init_project(
     if devflow_core::vcs::detect_vcs_kind(&abs_path).is_none() {
         devflow_core::vcs::init_vcs_repository(&abs_path, None, false)
             .map_err(|e| format!("Failed to init VCS: {}", e))?;
+    } else {
+        // VCS already exists — ensure it has at least one commit so the
+        // default branch is materialised and `list_branches` returns it.
+        if let Ok(vcs) = devflow_core::vcs::detect_vcs_provider(&abs_path) {
+            let _ = vcs.ensure_initial_commit();
+        }
     }
 
     // Derive project name first so we can embed it in config

@@ -133,6 +133,9 @@ pub struct BranchServiceState {
     pub state: Option<String>,
     pub database_name: Option<String>,
     pub parent_branch: Option<String>,
+    /// Whether this service supports lifecycle operations (start/stop/reset/logs).
+    /// Only true for local Docker-based providers.
+    pub supports_lifecycle: bool,
 }
 
 #[derive(Debug, Clone)]

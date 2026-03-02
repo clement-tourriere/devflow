@@ -575,6 +575,10 @@ impl EnvironmentsComponent {
                     .as_ref()
                     .map(|d| d.branches.iter().any(|b| !b.services.is_empty()))
                     .unwrap_or(false);
+                let has_lifecycle = self
+                    .selected_service_for_row(row)
+                    .map(|svc| svc.supports_lifecycle)
+                    .unwrap_or(false);
                 let enter_action = if branch.is_current {
                     "Already on this branch"
                 } else if has_any_service {
@@ -585,15 +589,18 @@ impl EnvironmentsComponent {
                 let mut hint_lines = vec![
                     ("Enter", enter_action),
                     ("o", "Open branch/worktree (exit TUI)"),
-                    ("S", "Start focused service"),
-                    ("x", "Stop focused service"),
-                    ("R", "Reset focused service"),
-                    ("A", "Start all services"),
-                    ("X", "Stop all services"),
-                    ("l", "Logs for focused service"),
-                    ("c", "Create child branch"),
-                    ("d", "Delete branch"),
                 ];
+                if has_lifecycle {
+                    hint_lines.extend([
+                        ("S", "Start focused service"),
+                        ("x", "Stop focused service"),
+                        ("R", "Reset focused service"),
+                        ("A", "Start all services"),
+                        ("X", "Stop all services"),
+                        ("l", "Logs for focused service"),
+                    ]);
+                }
+                hint_lines.extend([("c", "Create child branch"), ("d", "Delete branch")]);
                 if row.has_children {
                     hint_lines.push(("Space", "Collapse/expand"));
                 }
@@ -708,9 +715,16 @@ impl Component for EnvironmentsComponent {
             KeyCode::Char('S') => {
                 if let Some(row) = self.selected_row() {
                     if let Some(svc) = self.selected_service_for_row(row) {
-                        Action::StartService {
-                            service: svc.service_name.clone(),
-                            branch: row.branch.name.clone(),
+                        if svc.supports_lifecycle {
+                            Action::StartService {
+                                service: svc.service_name.clone(),
+                                branch: row.branch.name.clone(),
+                            }
+                        } else {
+                            Action::Error(format!(
+                                "Service '{}' does not support lifecycle operations",
+                                svc.service_name
+                            ))
                         }
                     } else {
                         Action::Error(format!(
@@ -725,9 +739,16 @@ impl Component for EnvironmentsComponent {
             KeyCode::Char('x') => {
                 if let Some(row) = self.selected_row() {
                     if let Some(svc) = self.selected_service_for_row(row) {
-                        Action::StopService {
-                            service: svc.service_name.clone(),
-                            branch: row.branch.name.clone(),
+                        if svc.supports_lifecycle {
+                            Action::StopService {
+                                service: svc.service_name.clone(),
+                                branch: row.branch.name.clone(),
+                            }
+                        } else {
+                            Action::Error(format!(
+                                "Service '{}' does not support lifecycle operations",
+                                svc.service_name
+                            ))
                         }
                     } else {
                         Action::Error(format!(
@@ -756,16 +777,23 @@ impl Component for EnvironmentsComponent {
             KeyCode::Char('R') => {
                 if let Some(row) = self.selected_row() {
                     if let Some(svc) = self.selected_service_for_row(row) {
-                        Action::ShowConfirm {
-                            title: "Reset Service".to_string(),
-                            message: format!(
-                                "Reset '{}' on {}? This will restore it to its parent state.",
-                                row.branch.name, svc.service_name
-                            ),
-                            on_confirm: Box::new(Action::ResetService {
-                                service: svc.service_name.clone(),
-                                branch: row.branch.name.clone(),
-                            }),
+                        if svc.supports_lifecycle {
+                            Action::ShowConfirm {
+                                title: "Reset Service".to_string(),
+                                message: format!(
+                                    "Reset '{}' on {}? This will restore it to its parent state.",
+                                    row.branch.name, svc.service_name
+                                ),
+                                on_confirm: Box::new(Action::ResetService {
+                                    service: svc.service_name.clone(),
+                                    branch: row.branch.name.clone(),
+                                }),
+                            }
+                        } else {
+                            Action::Error(format!(
+                                "Service '{}' does not support lifecycle operations",
+                                svc.service_name
+                            ))
                         }
                     } else {
                         Action::Error(format!(
@@ -780,9 +808,16 @@ impl Component for EnvironmentsComponent {
             KeyCode::Char('l') => {
                 if let Some(row) = self.selected_row() {
                     if let Some(svc) = self.selected_service_for_row(row) {
-                        Action::ViewLogs {
-                            service: svc.service_name.clone(),
-                            branch: row.branch.name.clone(),
+                        if svc.supports_lifecycle {
+                            Action::ViewLogs {
+                                service: svc.service_name.clone(),
+                                branch: row.branch.name.clone(),
+                            }
+                        } else {
+                            Action::Error(format!(
+                                "Service '{}' does not support logs",
+                                svc.service_name
+                            ))
                         }
                     } else {
                         Action::Error(format!(

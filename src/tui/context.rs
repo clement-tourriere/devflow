@@ -318,6 +318,7 @@ impl DevflowContext {
                                 state: svc_branch.state.clone(),
                                 database_name: Some(svc_branch.database_name.clone()),
                                 parent_branch: svc_branch.parent_branch.clone(),
+                                supports_lifecycle: named.provider.supports_lifecycle(),
                             });
                         }
                     }

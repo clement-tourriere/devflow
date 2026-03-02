@@ -824,6 +824,11 @@ pub async fn handle_command(
                     }
                 }
             } else {
+                // VCS already exists — ensure it has at least one commit so the
+                // default branch is materialised and `list_branches` works.
+                if let Ok(vcs_provider) = vcs::detect_vcs_provider(".") {
+                    let _ = vcs_provider.ensure_initial_commit();
+                }
                 None
             };
 

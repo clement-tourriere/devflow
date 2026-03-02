@@ -539,52 +539,56 @@ function ProjectDetail() {
                       className="flex gap-2"
                       style={{ justifyContent: "flex-end" }}
                     >
-                      <button
-                        className="btn"
-                        style={{ padding: "2px 10px", fontSize: 12 }}
-                        onClick={() => handleStartService(s.name)}
-                        disabled={
-                          !currentBranch ||
-                          actionLoading === `start:${s.name}`
-                        }
-                      >
-                        {actionLoading === `start:${s.name}`
-                          ? "..."
-                          : "Start"}
-                      </button>
-                      <button
-                        className="btn"
-                        style={{ padding: "2px 10px", fontSize: 12 }}
-                        onClick={() => handleStopService(s.name)}
-                        disabled={
-                          !currentBranch ||
-                          actionLoading === `stop:${s.name}`
-                        }
-                      >
-                        {actionLoading === `stop:${s.name}` ? "..." : "Stop"}
-                      </button>
-                      <button
-                        className="btn"
-                        style={{ padding: "2px 10px", fontSize: 12 }}
-                        onClick={() =>
-                          currentBranch &&
-                          setResetTarget({
-                            name: s.name,
-                            branch: currentBranch,
-                          })
-                        }
-                        disabled={!currentBranch}
-                      >
-                        Reset
-                      </button>
-                      <button
-                        className="btn"
-                        style={{ padding: "2px 10px", fontSize: 12 }}
-                        onClick={() => handleViewLogs(s.name)}
-                        disabled={!currentBranch}
-                      >
-                        Logs
-                      </button>
+                      {s.provider_type === "local" && (
+                        <>
+                          <button
+                            className="btn"
+                            style={{ padding: "2px 10px", fontSize: 12 }}
+                            onClick={() => handleStartService(s.name)}
+                            disabled={
+                              !currentBranch ||
+                              actionLoading === `start:${s.name}`
+                            }
+                          >
+                            {actionLoading === `start:${s.name}`
+                              ? "..."
+                              : "Start"}
+                          </button>
+                          <button
+                            className="btn"
+                            style={{ padding: "2px 10px", fontSize: 12 }}
+                            onClick={() => handleStopService(s.name)}
+                            disabled={
+                              !currentBranch ||
+                              actionLoading === `stop:${s.name}`
+                            }
+                          >
+                            {actionLoading === `stop:${s.name}` ? "..." : "Stop"}
+                          </button>
+                          <button
+                            className="btn"
+                            style={{ padding: "2px 10px", fontSize: 12 }}
+                            onClick={() =>
+                              currentBranch &&
+                              setResetTarget({
+                                name: s.name,
+                                branch: currentBranch,
+                              })
+                            }
+                            disabled={!currentBranch}
+                          >
+                            Reset
+                          </button>
+                          <button
+                            className="btn"
+                            style={{ padding: "2px 10px", fontSize: 12 }}
+                            onClick={() => handleViewLogs(s.name)}
+                            disabled={!currentBranch}
+                          >
+                            Logs
+                          </button>
+                        </>
+                      )}
                     </div>
                   </td>
                 </tr>

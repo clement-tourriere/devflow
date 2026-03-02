@@ -108,6 +108,15 @@ pub trait VcsProvider: Send {
             self.provider_name()
         )
     }
+
+    /// Ensure the repository has at least one commit so the default branch
+    /// is materialised and `list_branches` returns it.
+    ///
+    /// This is a no-op when the repo already has commits.  For git it
+    /// creates an empty "Initial commit (devflow)" on an unborn HEAD.
+    fn ensure_initial_commit(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Which VCS was detected.

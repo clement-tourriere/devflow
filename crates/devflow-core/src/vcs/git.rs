@@ -846,6 +846,16 @@ impl VcsProvider for GitRepository {
         Ok(false)
     }
 
+    fn ensure_initial_commit(&self) -> Result<()> {
+        // If we can resolve HEAD, the repo already has commits.
+        if self.repo.head().is_ok() {
+            return Ok(());
+        }
+        // Unborn HEAD — create the initial empty commit.
+        self.create_initial_commit()?;
+        Ok(())
+    }
+
     fn commit(&self, message: &str) -> Result<()> {
         // Use git CLI for commit — handles hooks, GPG signing, etc.
         let root = self.get_repo_root();
