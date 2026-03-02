@@ -16,6 +16,7 @@ import type {
   DestroyResult,
   OrphanProjectEntry,
   OrphanCleanupResult,
+  VcsInfo,
 } from "../types";
 
 // Projects
@@ -26,8 +27,12 @@ export const removeProject = (path: string) =>
   invoke<void>("remove_project", { path });
 export const getProjectDetail = (projectPath: string) =>
   invoke<ProjectDetail>("get_project_detail", { projectPath });
-export const initProject = (path: string, name?: string) =>
-  invoke<ProjectEntry>("init_project", { path, name });
+export const initProject = (path: string, name?: string, vcsPreference?: string) =>
+  invoke<ProjectEntry>("init_project", { path, name, vcsPreference });
+
+// VCS
+export const detectVcsInfo = (path: string) =>
+  invoke<VcsInfo>("detect_vcs_info", { path });
 
 // Branches
 export const listBranches = (projectPath: string) =>

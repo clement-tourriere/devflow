@@ -192,6 +192,20 @@ fn tool_available(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Return which VCS tools are available on the system.
+///
+/// Returns a vec of `VcsKind` values — always includes `Git` (since
+/// git2 is embedded as a fallback even without the CLI).
+pub fn available_vcs_tools() -> Vec<VcsKind> {
+    let mut tools = Vec::new();
+    // Git is always available via the embedded git2 library
+    tools.push(VcsKind::Git);
+    if tool_available("jj") {
+        tools.push(VcsKind::Jj);
+    }
+    tools
+}
+
 /// Initialize a new VCS repository at `path`.
 ///
 /// Selection logic (in priority order):

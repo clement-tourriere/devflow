@@ -31,6 +31,7 @@ fn main() {
             commands::projects::destroy_project,
             commands::projects::detect_orphan_projects,
             commands::projects::cleanup_orphan_project,
+            commands::projects::detect_vcs_info,
             // Branches
             commands::branches::list_branches,
             commands::branches::get_connection_info,

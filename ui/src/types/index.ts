@@ -149,3 +149,8 @@ export interface OrphanCleanupResult {
   data_dirs_removed: number;
   errors: string[];
 }
+
+export interface VcsInfo {
+  existing_vcs: string | null;
+  available_tools: string[];
+}

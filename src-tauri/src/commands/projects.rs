@@ -73,12 +73,37 @@ pub async fn remove_project(
     Ok(())
 }
 
+/// Information about VCS availability for a directory.
+#[derive(Serialize)]
+pub struct VcsInfo {
+    /// VCS already present in the directory (e.g. "git", "jj"), or null.
+    pub existing_vcs: Option<String>,
+    /// VCS tools available on the system.
+    pub available_tools: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn detect_vcs_info(path: String) -> Result<VcsInfo, String> {
+    let dir = std::path::Path::new(&path);
+    let existing_vcs = devflow_core::vcs::detect_vcs_kind(dir)
+        .map(|k| k.to_string());
+    let available_tools = devflow_core::vcs::available_vcs_tools()
+        .into_iter()
+        .map(|k| k.to_string())
+        .collect();
+    Ok(VcsInfo {
+        existing_vcs,
+        available_tools,
+    })
+}
+
 #[tauri::command]
 pub async fn init_project(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     path: String,
     name: Option<String>,
+    vcs_preference: Option<String>,
 ) -> Result<ProjectEntry, String> {
     let dir = std::path::Path::new(&path);
     if !dir.is_dir() {
@@ -91,7 +116,12 @@ pub async fn init_project(
 
     // Initialize VCS if not already a repo
     if devflow_core::vcs::detect_vcs_kind(&abs_path).is_none() {
-        devflow_core::vcs::init_vcs_repository(&abs_path, None, false)
+        let preference = vcs_preference.as_deref().and_then(|s| match s {
+            "git" => Some(devflow_core::vcs::VcsKind::Git),
+            "jj" => Some(devflow_core::vcs::VcsKind::Jj),
+            _ => None,
+        });
+        devflow_core::vcs::init_vcs_repository(&abs_path, preference, false)
             .map_err(|e| format!("Failed to init VCS: {}", e))?;
     } else {
         // VCS already exists — ensure it has at least one commit so the

@@ -7,8 +7,9 @@ import {
   removeProject,
   initProject,
   getProjectDetail,
+  detectVcsInfo,
 } from "../../utils/invoke";
-import type { ProjectEntry, ProjectDetail } from "../../types";
+import type { ProjectEntry, ProjectDetail, VcsInfo } from "../../types";
 import ConfirmDialog from "../../components/ConfirmDialog";
 import Modal from "../../components/Modal";
 
@@ -43,6 +44,10 @@ function ProjectList() {
   const [modalError, setModalError] = useState("");
   const [modalLoading, setModalLoading] = useState(false);
 
+  // VCS selection state (init mode only)
+  const [vcsInfo, setVcsInfo] = useState<VcsInfo | null>(null);
+  const [selectedVcs, setSelectedVcs] = useState<string>("git");
+
   const loadProjects = async () => {
     try {
       const list = await listProjects();
@@ -75,6 +80,22 @@ function ProjectList() {
       setSelectedPath(dirPath);
       setProjectName(defaultName);
       setModalError("");
+
+      // Detect VCS for init mode
+      if (mode === "init") {
+        try {
+          const info = await detectVcsInfo(dirPath);
+          setVcsInfo(info);
+          // Default to existing VCS, or first available tool
+          setSelectedVcs(info.existing_vcs || info.available_tools[0] || "git");
+        } catch {
+          setVcsInfo(null);
+          setSelectedVcs("git");
+        }
+      } else {
+        setVcsInfo(null);
+      }
+
       setModalMode(mode);
     } catch (e) {
       console.error("Failed to open directory picker:", e);
@@ -87,6 +108,8 @@ function ProjectList() {
     setProjectName("");
     setModalError("");
     setModalLoading(false);
+    setVcsInfo(null);
+    setSelectedVcs("git");
   };
 
   const handleModalSubmit = async () => {
@@ -100,7 +123,9 @@ function ProjectList() {
     setModalError("");
     try {
       if (modalMode === "init") {
-        await initProject(selectedPath, normalized);
+        // Pass VCS preference only when no VCS already exists
+        const vcsPref = vcsInfo?.existing_vcs ? undefined : selectedVcs;
+        await initProject(selectedPath, normalized, vcsPref);
       } else {
         await addProject(selectedPath, normalized);
       }
@@ -341,6 +366,58 @@ function ProjectList() {
             </span>
           )}
         </div>
+
+        {/* VCS selection (init mode only) */}
+        {modalMode === "init" && vcsInfo && (
+          <div style={{ marginBottom: 16 }}>
+            <label
+              style={{
+                display: "block",
+                marginBottom: 6,
+                fontSize: 13,
+                color: "var(--text-secondary)",
+                fontWeight: 500,
+              }}
+            >
+              Version Control
+            </label>
+            {vcsInfo.existing_vcs ? (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  fontSize: 13,
+                }}
+              >
+                <span className="badge badge-info">
+                  {vcsInfo.existing_vcs}
+                </span>
+                <span style={{ color: "var(--text-muted)" }}>
+                  already initialized
+                </span>
+              </div>
+            ) : vcsInfo.available_tools.length > 1 ? (
+              <div className="flex gap-2">
+                {vcsInfo.available_tools.map((tool) => (
+                  <button
+                    key={tool}
+                    className={`btn${selectedVcs === tool ? " btn-primary" : ""}`}
+                    style={{ padding: "4px 16px", fontSize: 13 }}
+                    onClick={() => setSelectedVcs(tool)}
+                    type="button"
+                  >
+                    {tool}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+                <span className="badge">{vcsInfo.available_tools[0] || "git"}</span>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Error */}
         {modalError && (
