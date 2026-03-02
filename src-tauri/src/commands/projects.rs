@@ -25,15 +25,18 @@ pub async fn add_project(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     path: String,
+    name: Option<String>,
 ) -> Result<ProjectEntry, String> {
     let abs_path = std::path::Path::new(&path)
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
 
-    let name = abs_path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    let name = name.unwrap_or_else(|| {
+        abs_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    });
 
     let entry = ProjectEntry {
         path: abs_path.display().to_string(),

@@ -16,8 +16,8 @@ import type {
 
 // Projects
 export const listProjects = () => invoke<ProjectEntry[]>("list_projects");
-export const addProject = (path: string) =>
-  invoke<ProjectEntry>("add_project", { path });
+export const addProject = (path: string, name?: string) =>
+  invoke<ProjectEntry>("add_project", { path, name });
 export const removeProject = (path: string) =>
   invoke<void>("remove_project", { path });
 export const getProjectDetail = (projectPath: string) =>
