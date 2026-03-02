@@ -1,7 +1,7 @@
 # devflow — Universal Development Environment Branching Tool
 
 ## Overview
-devflow is a Rust-based tool that provides branching support for development services (PostgreSQL, ClickHouse, MySQL, Redis, and more) that automatically synchronize with Git branches. It manages Git worktrees, Docker containers with Copy-on-Write storage, cloud database branches, and lifecycle hooks — all from a single CLI.
+devflow is a Rust-based tool that provides branching support for development services (PostgreSQL, ClickHouse, MySQL, Redis, and more) that automatically synchronize with Git branches. It manages Git worktrees, Docker containers with Copy-on-Write storage, cloud database branches, and lifecycle hooks — from a CLI, TUI, or desktop GUI. It also includes a native reverse proxy that auto-discovers Docker containers and provides HTTPS access via `*.localhost` domains.
 
 ## Core Concepts
 - **Service branching**: Each Git branch gets its own isolated set of services (databases, caches, etc.)
@@ -21,6 +21,8 @@ devflow is a Rust-based tool that provides branching support for development ser
 - **JSON output + non-interactive mode**: For CI/CD and AI agent workflows
 - **AI commit messages**: `devflow commit --ai` generates commit messages via LLM (CLI-first, API fallback)
 - **AI agent integration**: `devflow agent start/status/context/skill/docs` for managing AI coding agents in isolated branches
+- **Native reverse proxy**: Auto-discovers Docker containers and serves them via HTTPS `*.localhost` domains with auto-generated certificates
+- **Desktop GUI**: Tauri 2 desktop app with React frontend for managing projects, branches, services, hooks, proxy, and configuration
 
 ## Configuration
 
@@ -121,34 +123,36 @@ commit:
 When working on this project, use these commands:
 
 ```bash
-# Build the project
-cargo build
+# Build / check / test (entire workspace)
+cargo build                       # or: mise run build
+cargo check --workspace           # or: mise run check
+cargo test --workspace            # or: mise run test
+cargo clippy --workspace          # or: mise run lint
+cargo fmt                         # or: mise run fmt
 
-# Run tests
-cargo test
+# Build only a specific crate
+cargo build -p devflow            # CLI only
+cargo build -p devflow-proxy      # Proxy only
+cargo build -p devflow-app        # GUI backend only
 
-# Run with development profile
-cargo run
-
-# Build release version
-cargo build --release
-
-# Run linting
-cargo clippy
-
-# Format code
-cargo fmt
-
-# Check for issues
-cargo check
+# Desktop GUI (requires bun + Tauri CLI)
+mise run gui                      # Dev mode with hot-reload
+mise run gui:build                # Production bundle
+mise run gui:install              # Install frontend deps only
 ```
 
 ## Project Structure
+
+The project is organized as a Cargo workspace with four crates:
+
+### Root crate (`devflow`) — CLI binary
 - `src/main.rs` — CLI entry point with custom help template
-- `src/cli.rs` — All command implementations (~7800 lines)
-- `src/agent.rs` — AI agent integration (skill generation, context, rules)
+- `src/cli.rs` — All command implementations (~7800 lines), including proxy subcommands
+- `src/tui/` — Terminal UI (ratatui-based dashboard)
+
+### `crates/devflow-core/` — Shared library
 - `src/config/mod.rs` — Config parsing, validation, env var overrides, local config merging
-- `src/services/mod.rs` — `ServiceBackend` trait definition
+- `src/services/mod.rs` — `ServiceProvider` trait definition
 - `src/services/factory.rs` — Backend creation, dispatch, orchestration
 - `src/services/plugin.rs` — Plugin backend (JSON-over-stdio protocol)
 - `src/services/postgres/local/` — Local Docker PostgreSQL backend with CoW storage
@@ -162,7 +166,31 @@ cargo check
 - `src/hooks/` — Hook engine (executor, approval, templates)
 - `src/state/` — Local state persistence (`~/.local/share/devflow/`)
 - `src/docker.rs` — Docker helper utilities
+- `src/agent.rs` — AI agent integration (skill generation, context, rules)
 - `src/llm.rs` — LLM integration for AI commit messages (CLI-first + API fallback)
+
+### `crates/devflow-proxy/` — Native reverse proxy
+- `src/lib.rs` — `ProxyConfig`, `ProxyHandle`, `run_proxy()` entry point
+- `src/ca.rs` — Certificate Authority generation, cert signing, cache (rcgen)
+- `src/platform.rs` — System trust installation (macOS keychain, Linux cert stores)
+- `src/monitor.rs` — Docker event streaming via bollard
+- `src/discovery.rs` — Container-to-domain/IP/port extraction
+- `src/router.rs` — Dynamic routing table (Host header → upstream)
+- `src/tls.rs` — rustls ServerConfig with SNI-based cert resolution
+- `src/server.rs` — hyper reverse proxy (TLS termination + HTTP forwarding)
+- `src/api.rs` — JSON API endpoints (/api/status, /api/targets, /api/ca)
+
+### `src-tauri/` — Tauri 2 desktop GUI (Rust backend)
+- `src/main.rs` — Tauri app setup, system tray, window management
+- `src/state.rs` — `AppState`, `AppSettings`, project registry
+- `src/commands/` — Tauri IPC commands (projects, branches, services, hooks, proxy, config, settings)
+
+### `ui/` — React frontend (for the desktop GUI)
+- `src/App.tsx` — Routes and global layout
+- `src/components/Layout.tsx` — Sidebar navigation + content area
+- `src/pages/` — Home, ProjectList, ProjectDetail, ProxyDashboard, HookManager, ConfigEditor, Settings
+- `src/utils/invoke.ts` — Typed wrappers around Tauri IPC
+- `src/types/index.ts` — TypeScript interfaces matching Rust DTOs
 
 ## References
 - PostgreSQL TEMPLATE documentation for template backend

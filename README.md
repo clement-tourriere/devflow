@@ -15,6 +15,8 @@ It works in five modes:
 - **Plugin** — custom backends via JSON-over-stdio protocol
 - **AI-Ready** — `--json` output, `llms.txt`, `AGENTS.md`, and agent scripts for autonomous coding agents
 
+It also includes a **native reverse proxy** that auto-discovers Docker containers and serves them via HTTPS `*.localhost` domains with auto-generated certificates, and a **desktop GUI** (Tauri 2 + React) for managing everything graphically.
+
 Copy-on-Write storage (APFS, ZFS, Btrfs, XFS) is also applied to worktree directories, making branch switching fast and space-efficient.
 
 ## Install
@@ -107,9 +109,11 @@ devflow ships with a [`mise.toml`](mise.toml) for [mise](https://mise.jdx.dev) u
 
 ```bash
 mise install          # Install Rust toolchain
-mise run build        # Build devflow
+mise run build        # Build devflow (CLI)
 mise run test         # Run all tests
 mise run docs         # Serve documentation locally at localhost:8787
+mise run gui          # Run the desktop GUI (dev mode, hot-reload)
+mise run gui:build    # Build production GUI bundle
 ```
 
 ## How It Works
@@ -361,6 +365,52 @@ The TUI now includes:
 - **Environments**: tree view with parent/child branches, service states, focused-service actions, start/stop-all shortcuts, and `o` to open a branch/worktree and exit.
 - **System**: consolidated config, hooks (with template variable/filter reference + scaffold snippets), and doctor panels.
 - **Logs**: service/branch picker with filter support and keyboard-driven navigation.
+
+### Reverse Proxy
+
+```bash
+devflow proxy start [--daemon]           # Start the HTTPS reverse proxy
+devflow proxy start --https-port 8443    # Custom port
+devflow proxy stop                       # Stop the proxy
+devflow proxy status                     # Show proxy status
+devflow proxy list                       # List proxied containers with HTTPS URLs
+devflow proxy trust install              # Install CA certificate to system trust
+devflow proxy trust verify               # Check if CA is trusted
+devflow proxy trust remove               # Remove CA from system trust
+devflow proxy trust info                 # Show platform-specific trust instructions
+```
+
+The proxy auto-discovers running Docker containers and serves them over HTTPS via `*.localhost` domains:
+
+| Container Type | Domain Pattern |
+|---|---|
+| Standalone | `container_name.localhost` |
+| Compose service | `service.project.localhost` |
+| devflow service | `service.branch.project.localhost` |
+| Custom label | value of `devproxy.domain` label |
+
+Certificates are auto-generated using a local CA. Run `devflow proxy trust install` once to trust the CA system-wide (no more `-k` flag with curl).
+
+### Desktop GUI
+
+```bash
+mise run gui                             # Run the GUI in development mode (hot-reload)
+mise run gui:build                       # Build production GUI bundle
+mise run gui:install                     # Install frontend dependencies only
+```
+
+The desktop GUI provides a graphical interface for managing projects, branches, services, hooks, proxy, and configuration. It runs as a native Tauri 2 app with a React frontend.
+
+**Requirements:** [bun](https://bun.sh) (or Node.js 18+) and the [Tauri CLI](https://v2.tauri.app/start/prerequisites/) (`cargo install tauri-cli`).
+
+**Features:**
+- Dashboard with project overview and proxy status
+- Branch management with worktree info
+- Service start/stop and diagnostics
+- Hook inspector with MiniJinja template live preview
+- Proxy start/stop, container table with HTTPS links, one-click CA install
+- YAML configuration editor with validation
+- System tray with hide-to-tray on close
 
 ### Setup
 

@@ -2,11 +2,11 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::config::{Config, NamedServiceConfig};
-use crate::hooks::HookEntry;
-use crate::services::factory;
-use crate::state::{DevflowBranch, LocalStateManager};
-use crate::vcs::{self, BranchInfo, VcsProvider, WorktreeInfo};
+use devflow_core::config::{Config, NamedServiceConfig};
+use devflow_core::hooks::HookEntry;
+use devflow_core::services::factory;
+use devflow_core::state::{DevflowBranch, LocalStateManager};
+use devflow_core::vcs::{self, BranchInfo, VcsProvider, WorktreeInfo};
 
 use super::action::*;
 

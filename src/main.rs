@@ -1,20 +1,9 @@
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
 
-mod agent;
 mod cli;
-mod config;
-#[cfg(feature = "service-postgres-template")]
-mod database;
-mod docker;
-mod hooks;
-#[cfg(feature = "llm")]
-mod llm;
-mod services;
-mod state;
 #[cfg(feature = "tui")]
 mod tui;
-mod vcs;
 
 use cli::Commands;
 
@@ -88,6 +77,13 @@ AI Agents:
   agent context       Output project context for current branch
   agent skill         Generate AI tool skills/rules for this project
   agent docs          Generate AGENTS.md for this project
+
+Proxy:
+  proxy start         Start the local reverse proxy (auto-HTTPS)
+  proxy stop          Stop the proxy
+  proxy status        Show proxy status
+  proxy list          List proxied containers with HTTPS URLs
+  proxy trust         Manage CA certificate trust (install/verify/remove)
 
 Interactive:
   tui                 Launch the interactive terminal UI dashboard

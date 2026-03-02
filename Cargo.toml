@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/devflow-core", "crates/devflow-proxy", "src-tauri"]
+resolver = "2"
+
 [package]
 name = "devflow"
 version = "0.4.0"
@@ -13,15 +17,19 @@ path = "src/main.rs"
 
 [features]
 default = ["service-local", "service-postgres-template", "service-neon", "service-dblab", "service-xata", "llm", "tui"]
-tui = ["dep:ratatui", "dep:crossterm"]
-service-local = ["dep:bollard", "dep:rusqlite", "dep:rust-s3", "dep:tar", "dep:bytes", "dep:futures-util", "dep:tempfile", "dep:uuid", "dep:url"]
-service-postgres-template = ["dep:tokio-postgres"]
-service-neon = ["dep:reqwest"]
-service-dblab = ["dep:reqwest"]
-service-xata = ["dep:reqwest"]
-llm = ["dep:reqwest"]
+tui = ["dep:ratatui", "dep:crossterm", "devflow-core/service-local"]
+service-local = ["devflow-core/service-local"]
+service-postgres-template = ["devflow-core/service-postgres-template"]
+service-neon = ["devflow-core/service-neon"]
+service-dblab = ["devflow-core/service-dblab"]
+service-xata = ["devflow-core/service-xata"]
+llm = ["devflow-core/llm"]
 
 [dependencies]
+# Core library
+devflow-core = { path = "crates/devflow-core" }
+devflow-proxy = { path = "crates/devflow-proxy" }
+
 # CLI and argument parsing
 clap = { version = "4.5", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
 clap_complete = "4.5"
@@ -34,26 +42,14 @@ serde_json = "1.0"
 # Async runtime
 tokio = { version = "1.46", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "macros", "process", "fs"] }
 
-# Database (for postgres_template backend)
-tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"], optional = true }
-
 # Error handling
 anyhow = "1.0"
 
 # Async trait support
 async-trait = "0.1"
 
-# Git operations
-git2 = { version = "0.20", default-features = false }
-
 # Text matching
 regex = { version = "1.11", default-features = false, features = ["std", "perf-cache"] }
-
-# Template engine for hooks
-minijinja = { version = "2", default-features = false, features = ["builtins", "serde"] }
-
-# File system
-dirs = { version = "6.0", default-features = false }
 
 # Logging
 log = { version = "0.4", default-features = false, features = ["release_max_level_off"] }
@@ -68,32 +64,8 @@ inquire = { version = "0.9", default-features = false, features = ["crossterm"] 
 # Date/time handling
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 
-# SQLite for local backend state
-rusqlite = { version = "0.38", default-features = false, features = ["bundled"], optional = true }
-
-# UUID generation
-uuid = { version = "1.15", features = ["v4", "serde"], optional = true }
-
-# HTTP client for cloud backends
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
-
-# URL parsing
-url = { version = "2.5", optional = true }
-
-# S3 support for data seeding
-rust-s3 = { version = "0.37", default-features = false, features = ["tokio-rustls-tls"], optional = true }
-
-# Temp files
-tempfile = { version = "3.20", optional = true }
-
-# Docker Engine API client
-bollard = { version = "0.20", default-features = false, features = ["ssl", "pipe"], optional = true }
-bytes = { version = "1", optional = true }
-futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
-
-# Tar archive creation (for bollard upload_to_container)
-tar = { version = "0.4", default-features = false, optional = true }
-which = "8.0.0"
+# HTTP client (for proxy status queries)
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 
 # Ordered maps for deterministic hook execution
 indexmap = { version = "2", default-features = false, features = ["serde"] }

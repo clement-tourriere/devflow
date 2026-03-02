@@ -16,15 +16,15 @@ run = "cargo build --release"
 
 [tasks.test]
 description = "Run all tests"
-run = "cargo test"
+run = "cargo test --workspace"
 
 [tasks.check]
 description = "Run cargo check (fast compile check)"
-run = "cargo check"
+run = "cargo check --workspace"
 
 [tasks.lint]
 description = "Run clippy lints"
-run = "cargo clippy -- -D warnings"
+run = "cargo clippy --workspace -- -D warnings"
 
 [tasks.fmt]
 description = "Format code"
@@ -53,10 +53,28 @@ description = "Verify llms.txt files are up to date"
 depends = ["build"]
 run = "./scripts/generate-llms-txt.sh --check"
 
+[tasks."gui"]
+description = "Run the desktop GUI in development mode (hot-reload)"
+run = """
+(cd ui && bun install --frozen-lockfile 2>/dev/null || bun install)
+cargo tauri dev
+"""
+
+[tasks."gui:build"]
+description = "Build the desktop GUI for production"
+run = """
+(cd ui && bun install --frozen-lockfile 2>/dev/null || bun install)
+cargo tauri build
+"""
+
+[tasks."gui:install"]
+description = "Install frontend dependencies for the desktop GUI"
+run = "cd ui && bun install"
+
 [tasks.ci]
 description = "Run full CI pipeline (fmt check + clippy + test)"
 run = """
 cargo fmt -- --check
-cargo clippy -- -D warnings
-cargo test
+cargo clippy --workspace -- -D warnings
+cargo test --workspace
 """

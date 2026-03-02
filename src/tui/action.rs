@@ -189,7 +189,7 @@ pub struct CapabilitiesData {
 pub struct ServiceCapabilityEntry {
     pub service_name: String,
     pub provider_name: String,
-    pub capabilities: crate::services::ServiceCapabilities,
+    pub capabilities: devflow_core::services::ServiceCapabilities,
 }
 
 #[derive(Debug, Clone)]

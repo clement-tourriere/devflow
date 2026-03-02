@@ -1,15 +1,15 @@
 use std::path::PathBuf;
 
-use crate::config::{Config, EffectiveConfig, GlobalConfig, WorktreeConfig};
-use crate::services::{self, ServiceProvider};
+use devflow_core::config::{Config, EffectiveConfig, GlobalConfig, WorktreeConfig};
+use devflow_core::services::{self, ServiceProvider};
 
-use crate::docker;
-use crate::hooks::{
+use devflow_core::docker;
+use devflow_core::hooks::{
     approval::ApprovalStore, HookContext, HookEngine, HookEntry, HookPhase, IndexMap,
-    ServiceContext, TemplateEngine,
+    TemplateEngine,
 };
-use crate::state::{DevflowBranch, LocalStateManager};
-use crate::vcs;
+use devflow_core::state::{DevflowBranch, LocalStateManager};
+use devflow_core::vcs;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 
@@ -283,6 +283,16 @@ Examples:
         action: AgentCommands,
     },
 
+    // ── Proxy ──
+    #[command(
+        about = "Local reverse proxy (auto-HTTPS for Docker containers)",
+        long_about = "Local reverse proxy for Docker containers.\n\nAuto-discovers Docker containers and provides HTTPS access via\n*.localhost domains. Uses a local CA for certificate generation.\n\nExamples:\n  devflow proxy start                # Start the proxy\n  devflow proxy start --daemon       # Start in background\n  devflow proxy stop                 # Stop the proxy\n  devflow proxy status               # Show proxy status\n  devflow proxy list                 # List proxied containers\n  devflow proxy trust install        # Install CA certificate\n  devflow proxy trust verify         # Check if CA is trusted\n  devflow proxy trust remove         # Remove CA from trust store\n  devflow proxy trust info           # Show trust instructions"
+    )]
+    Proxy {
+        #[command(subcommand)]
+        action: ProxyCommands,
+    },
+
     // ── Hidden ──
     #[command(about = "Generate shell completions", hide = true)]
     Completions {
@@ -552,6 +562,46 @@ pub enum AgentCommands {
     Docs,
 }
 
+/// Subcommands for `devflow proxy`.
+#[derive(Subcommand)]
+pub enum ProxyCommands {
+    #[command(about = "Start the reverse proxy")]
+    Start {
+        #[arg(long, help = "Run as a background daemon")]
+        daemon: bool,
+        #[arg(long, default_value = "443", help = "HTTPS listen port")]
+        https_port: u16,
+        #[arg(long, default_value = "80", help = "HTTP listen port")]
+        http_port: u16,
+        #[arg(long, default_value = "2019", help = "API listen port")]
+        api_port: u16,
+    },
+    #[command(about = "Stop the reverse proxy")]
+    Stop,
+    #[command(about = "Show proxy status")]
+    Status,
+    #[command(about = "List proxied containers")]
+    List,
+    #[command(about = "Manage CA certificate trust")]
+    Trust {
+        #[command(subcommand)]
+        action: TrustCommands,
+    },
+}
+
+/// Subcommands for `devflow proxy trust`.
+#[derive(Subcommand)]
+pub enum TrustCommands {
+    #[command(about = "Install CA certificate to system trust store")]
+    Install,
+    #[command(about = "Verify CA certificate is trusted")]
+    Verify,
+    #[command(about = "Remove CA certificate from system trust store")]
+    Remove,
+    #[command(about = "Show trust installation instructions")]
+    Info,
+}
+
 pub async fn handle_command(
     cmd: Commands,
     json_output: bool,
@@ -561,7 +611,12 @@ pub async fn handle_command(
     // TUI command — launch immediately without loading service infrastructure
     #[cfg(feature = "tui")]
     if matches!(cmd, Commands::Tui) {
-        return crate::tui::run().await;
+        return super::tui::run().await;
+    }
+
+    // Proxy commands — no config needed
+    if let Commands::Proxy { action } = cmd {
+        return handle_proxy_command(action, json_output).await;
     }
 
     // Commands that need service infrastructure (config loading, state injection)
@@ -935,7 +990,7 @@ pub async fn handle_command(
 
             #[cfg(feature = "service-local")]
             {
-                use crate::services::postgres::local::storage::zfs_setup::*;
+                use devflow_core::services::postgres::local::storage::zfs_setup::*;
 
                 let pool = pool_name.unwrap_or_else(|| "devflow".to_string());
                 let img_size = size.unwrap_or_else(|| "10G".to_string());
@@ -1172,7 +1227,7 @@ pub async fn handle_command(
 /// so the caller can set it on the `LocalServiceConfig`.
 #[cfg(feature = "service-local")]
 async fn attempt_zfs_auto_setup(non_interactive: bool, quiet_output: bool) -> Option<String> {
-    use crate::services::postgres::local::storage::zfs_setup::*;
+    use devflow_core::services::postgres::local::storage::zfs_setup::*;
 
     // Use a placeholder path — the actual projects_root hasn't been established yet
     let placeholder = std::path::PathBuf::from("/var/lib/devflow/data/projects");
@@ -1270,7 +1325,7 @@ async fn attempt_zfs_auto_setup(non_interactive: bool, quiet_output: bool) -> Op
 
 async fn init_local_service_main(
     config: &Config,
-    named_cfg: &crate::config::NamedServiceConfig,
+    named_cfg: &devflow_core::config::NamedServiceConfig,
     from: Option<&str>,
     quiet_output: bool,
 ) {
@@ -1469,11 +1524,11 @@ fn print_enriched_branch_list(
 
     // Gather VCS + worktree info
     let vcs_provider = vcs::detect_vcs_provider(".").ok();
-    let git_branches: Vec<crate::vcs::BranchInfo> = vcs_provider
+    let git_branches: Vec<devflow_core::vcs::BranchInfo> = vcs_provider
         .as_ref()
         .and_then(|r| r.list_branches().ok())
         .unwrap_or_default();
-    let worktrees: Vec<crate::vcs::WorktreeInfo> = vcs_provider
+    let worktrees: Vec<devflow_core::vcs::WorktreeInfo> = vcs_provider
         .as_ref()
         .and_then(|r| r.list_worktrees().ok())
         .unwrap_or_default();
@@ -1603,7 +1658,7 @@ fn print_enriched_branch_list(
         service_names: &HashSet<&str>,
         wt_lookup: &HashMap<String, PathBuf>,
         config: &Config,
-        #[allow(unused_variables)] git_branches: &[crate::vcs::BranchInfo],
+        #[allow(unused_variables)] git_branches: &[devflow_core::vcs::BranchInfo],
     ) {
         let is_current = current_git.as_deref() == Some(name);
         let marker = if is_current { "* " } else { "  " };
@@ -1726,11 +1781,11 @@ async fn handle_environment_graph(
         .as_ref()
         .map(|p| p.provider_name().to_string())
         .unwrap_or_else(|| "none".to_string());
-    let git_branches: Vec<crate::vcs::BranchInfo> = vcs_provider
+    let git_branches: Vec<devflow_core::vcs::BranchInfo> = vcs_provider
         .as_ref()
         .and_then(|r| r.list_branches().ok())
         .unwrap_or_default();
-    let worktrees: Vec<crate::vcs::WorktreeInfo> = vcs_provider
+    let worktrees: Vec<devflow_core::vcs::WorktreeInfo> = vcs_provider
         .as_ref()
         .and_then(|r| r.list_worktrees().ok())
         .unwrap_or_default();
@@ -2073,11 +2128,11 @@ fn enrich_branch_list_json(
     config_path: &Option<PathBuf>,
 ) -> serde_json::Value {
     let vcs_provider = vcs::detect_vcs_provider(".").ok();
-    let git_branches: Vec<crate::vcs::BranchInfo> = vcs_provider
+    let git_branches: Vec<devflow_core::vcs::BranchInfo> = vcs_provider
         .as_ref()
         .and_then(|r| r.list_branches().ok())
         .unwrap_or_default();
-    let worktrees: Vec<crate::vcs::WorktreeInfo> = vcs_provider
+    let worktrees: Vec<devflow_core::vcs::WorktreeInfo> = vcs_provider
         .as_ref()
         .and_then(|r| r.list_worktrees().ok())
         .unwrap_or_default();
@@ -2323,91 +2378,7 @@ end
 /// Populates legacy template variables (branch_name, db_name, etc.) so that
 /// both new MiniJinja templates and old `{branch_name}` style work.
 async fn build_hook_context(config: &Config, branch_name: &str) -> HookContext {
-    let db_name = config.get_database_name(branch_name);
-    let repo = std::env::current_dir()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-        .unwrap_or_default();
-
-    // Detect worktree path if we're inside a VCS worktree
-    let worktree_path = vcs::detect_vcs_provider(".").ok().and_then(|vcs_repo| {
-        if vcs_repo.is_worktree() {
-            std::env::current_dir()
-                .ok()
-                .map(|p| p.to_string_lossy().to_string())
-        } else {
-            // Not in a worktree — check if there's a worktree for this branch elsewhere
-            vcs_repo
-                .worktree_path(branch_name)
-                .ok()
-                .flatten()
-                .map(|p| p.to_string_lossy().to_string())
-        }
-    });
-
-    // Build service map from all configured services
-    let mut service = std::collections::HashMap::new();
-
-    if let Ok(conn_infos) = services::factory::get_all_connection_info(config, branch_name).await {
-        for (name, info) in conn_infos {
-            let url = info.connection_string.clone().unwrap_or_else(|| {
-                // No connection string provided by the provider — build a generic
-                // host:port reference so templates have *something* useful.
-                format!("{}:{}", info.host, info.port)
-            });
-            service.insert(
-                name,
-                ServiceContext {
-                    host: info.host,
-                    port: info.port,
-                    database: info.database,
-                    user: info.user,
-                    password: info.password,
-                    url,
-                },
-            );
-        }
-    }
-
-    // Fallback: if no services populated the service map, use legacy config.database
-    // as a service named "db" for backward compatibility
-    if service.is_empty() {
-        let url = format!(
-            "postgresql://{}{}@{}:{}/{}",
-            config.database.user,
-            config
-                .database
-                .password
-                .as_ref()
-                .map(|p| format!(":{}", p))
-                .unwrap_or_default(),
-            config.database.host,
-            config.database.port,
-            db_name,
-        );
-        service.insert(
-            "db".to_string(),
-            ServiceContext {
-                host: config.database.host.clone(),
-                port: config.database.port,
-                database: db_name.clone(),
-                user: config.database.user.clone(),
-                password: config.database.password.clone(),
-                url,
-            },
-        );
-    }
-
-    HookContext {
-        branch: branch_name.to_string(),
-        repo,
-        worktree_path,
-        default_branch: config.git.main_branch.clone(),
-        commit: None,
-        target: None,
-        base: None,
-        service,
-    }
+    devflow_core::hooks::build_hook_context(config, branch_name).await
 }
 
 /// Run hooks for the given phase.
@@ -2888,10 +2859,6 @@ async fn handle_hook_render(
     Ok(())
 }
 
-/// Public wrapper for agents to build hook context.
-pub async fn build_hook_context_public(config: &Config, branch_name: &str) -> HookContext {
-    build_hook_context(config, branch_name).await
-}
 
 /// `devflow hook run <phase> [name]` — manually execute hooks.
 async fn handle_hook_run(
@@ -3172,7 +3139,7 @@ async fn handle_plugin_command(
             })?;
 
             // Try to create the provider and invoke provider_name
-            match crate::services::plugin::PluginProvider::new(&name, plugin_cfg) {
+            match devflow_core::services::plugin::PluginProvider::new(&name, plugin_cfg) {
                 Ok(provider) => {
                     // Try test_connection as a health check
                     match provider.test_connection().await {
@@ -3814,7 +3781,7 @@ async fn handle_service_dispatch(
             let service_type = if let Some(st) = service_type {
                 st
             } else if non_interactive || json_output {
-                crate::config::default_service_type()
+                devflow_core::config::default_service_type()
             } else {
                 use inquire::Select;
                 let service_types = vec![
@@ -3980,14 +3947,14 @@ async fn handle_service_dispatch(
             }
 
             // Build named service config
-            let named_cfg = crate::config::NamedServiceConfig {
+            let named_cfg = devflow_core::config::NamedServiceConfig {
                 name: name.clone(),
                 provider_type: provider_type.clone(),
                 service_type: service_type.clone(),
-                auto_branch: crate::config::default_auto_branch(),
+                auto_branch: devflow_core::config::default_auto_branch(),
                 default: false,
                 local: if is_local {
-                    Some(crate::config::LocalServiceConfig {
+                    Some(devflow_core::config::LocalServiceConfig {
                         image: None,
                         data_root: None,
                         storage: None,
@@ -4003,7 +3970,7 @@ async fn handle_service_dispatch(
                 dblab: None,
                 xata: None,
                 clickhouse: if service_type == "clickhouse" {
-                    Some(crate::config::ClickHouseConfig {
+                    Some(devflow_core::config::ClickHouseConfig {
                         image: "clickhouse/clickhouse-server:latest".to_string(),
                         port_range_start: None,
                         data_root: None,
@@ -4014,7 +3981,7 @@ async fn handle_service_dispatch(
                     None
                 },
                 mysql: if service_type == "mysql" {
-                    Some(crate::config::MySQLConfig {
+                    Some(devflow_core::config::MySQLConfig {
                         image: "mysql:8".to_string(),
                         port_range_start: None,
                         data_root: None,
@@ -7569,7 +7536,7 @@ async fn generate_ai_commit_message(
     config: &Config,
     _json_output: bool,
 ) -> Result<String> {
-    use crate::llm;
+    use devflow_core::llm;
 
     let commit_gen_config = config.commit.as_ref().and_then(|c| c.generation.as_ref());
     let llm_config = llm::LlmConfig::from_config_and_env(commit_gen_config);
@@ -7908,7 +7875,7 @@ async fn handle_agent_command(
             };
 
             let fmt = if json_output { "json" } else { format.as_str() };
-            let output = crate::agent::generate_agent_context(config, &branch_name, fmt).await?;
+            let output = devflow_core::agent::generate_agent_context(config, &branch_name, fmt).await?;
             println!("{}", output);
             Ok(())
         }
@@ -7924,7 +7891,7 @@ async fn handle_agent_command(
             for t in targets {
                 match t {
                     "claude" => {
-                        let skill = crate::agent::generate_claude_skill(config, &project_dir)?;
+                        let skill = devflow_core::agent::generate_claude_skill(config, &project_dir)?;
                         let skill_dir =
                             project_dir.join(".claude").join("skills").join("devflow");
                         std::fs::create_dir_all(&skill_dir)?;
@@ -7936,7 +7903,7 @@ async fn handle_agent_command(
                     }
                     "opencode" => {
                         let content =
-                            crate::agent::generate_opencode_config(config, &project_dir)?;
+                            devflow_core::agent::generate_opencode_config(config, &project_dir)?;
                         let path = project_dir.join("AGENTS.md");
                         std::fs::write(&path, &content)?;
                         if !json_output {
@@ -7945,7 +7912,7 @@ async fn handle_agent_command(
                     }
                     "cursor" => {
                         let rules =
-                            crate::agent::generate_cursor_rules(config, &project_dir)?;
+                            devflow_core::agent::generate_cursor_rules(config, &project_dir)?;
                         let rules_dir = project_dir.join(".cursor").join("rules");
                         std::fs::create_dir_all(&rules_dir)?;
                         let rules_path = rules_dir.join("devflow.md");
@@ -7974,7 +7941,7 @@ async fn handle_agent_command(
 
         AgentCommands::Docs => {
             let project_dir = std::env::current_dir()?;
-            let content = crate::agent::generate_opencode_config(config, &project_dir)?;
+            let content = devflow_core::agent::generate_opencode_config(config, &project_dir)?;
             let path = project_dir.join("AGENTS.md");
             std::fs::write(&path, &content)?;
             if json_output {
@@ -7993,4 +7960,223 @@ async fn handle_agent_command(
 /// Return the first line of a message (for display).
 fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or(s)
+}
+
+/// Handle `devflow proxy` subcommands.
+async fn handle_proxy_command(action: ProxyCommands, json_output: bool) -> Result<()> {
+    match action {
+        ProxyCommands::Start {
+            daemon,
+            https_port,
+            http_port,
+            api_port,
+        } => {
+            let config = devflow_proxy::ProxyConfig {
+                https_port,
+                http_port,
+                api_port,
+                domain_suffix: "localhost".to_string(),
+            };
+
+            if daemon {
+                // Fork to background
+                let exe = std::env::current_exe()?;
+                let child = std::process::Command::new(exe)
+                    .args([
+                        "proxy",
+                        "start",
+                        "--https-port",
+                        &https_port.to_string(),
+                        "--http-port",
+                        &http_port.to_string(),
+                        "--api-port",
+                        &api_port.to_string(),
+                    ])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .context("Failed to spawn daemon process")?;
+
+                let pid_path = devflow_proxy::ca::default_ca_cert_path()
+                    .parent()
+                    .unwrap()
+                    .join("proxy.pid");
+                std::fs::write(&pid_path, child.id().to_string())?;
+
+                if json_output {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "started",
+                            "pid": child.id(),
+                            "https_port": https_port,
+                            "http_port": http_port,
+                            "api_port": api_port,
+                        })
+                    );
+                } else {
+                    println!("Proxy started (pid: {})", child.id());
+                    println!("  HTTPS: https://localhost:{}", https_port);
+                    println!("  HTTP:  http://localhost:{}", http_port);
+                    println!("  API:   http://localhost:{}", api_port);
+                }
+            } else {
+                // Run in foreground
+                println!("Starting devflow proxy...");
+                println!("  HTTPS: 0.0.0.0:{}", https_port);
+                println!("  HTTP:  0.0.0.0:{}", http_port);
+                println!("  API:   127.0.0.1:{}", api_port);
+                println!("Press Ctrl+C to stop");
+
+                let handle = devflow_proxy::run_proxy(config).await?;
+
+                // Wait for Ctrl+C
+                tokio::signal::ctrl_c().await?;
+                println!("\nShutting down proxy...");
+                handle.stop();
+                // Give servers a moment to shut down
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                println!("Proxy stopped.");
+            }
+        }
+        ProxyCommands::Stop => {
+            let pid_path = devflow_proxy::ca::default_ca_cert_path()
+                .parent()
+                .unwrap()
+                .join("proxy.pid");
+
+            if pid_path.exists() {
+                let pid_str = std::fs::read_to_string(&pid_path)?;
+                if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                    #[cfg(unix)]
+                    {
+                        use std::process::Command;
+                        let _ = Command::new("kill").arg(pid.to_string()).status();
+                    }
+                    std::fs::remove_file(&pid_path)?;
+
+                    if json_output {
+                        println!("{}", serde_json::json!({"status": "stopped", "pid": pid}));
+                    } else {
+                        println!("Proxy stopped (pid: {})", pid);
+                    }
+                } else {
+                    anyhow::bail!("Invalid PID file");
+                }
+            } else {
+                if json_output {
+                    println!("{}", serde_json::json!({"status": "not_running"}));
+                } else {
+                    println!("Proxy is not running (no PID file found)");
+                }
+            }
+        }
+        ProxyCommands::Status => {
+            // Try to query the API
+            let api_url = "http://127.0.0.1:2019/api/status";
+            match reqwest_get_json(api_url).await {
+                Ok(status) => {
+                    if json_output {
+                        println!("{}", status);
+                    } else {
+                        let running = status["running"].as_bool().unwrap_or(false);
+                        let targets = status["targets"].as_u64().unwrap_or(0);
+                        let ca_installed = status["ca_installed"].as_bool().unwrap_or(false);
+                        println!("Proxy: {}", if running { "running" } else { "stopped" });
+                        println!("Targets: {}", targets);
+                        println!(
+                            "CA: {}",
+                            if ca_installed {
+                                "installed"
+                            } else {
+                                "not installed"
+                            }
+                        );
+                    }
+                }
+                Err(_) => {
+                    if json_output {
+                        println!("{}", serde_json::json!({"running": false}));
+                    } else {
+                        println!("Proxy is not running");
+                    }
+                }
+            }
+        }
+        ProxyCommands::List => {
+            let api_url = "http://127.0.0.1:2019/api/targets";
+            match reqwest_get_json(api_url).await {
+                Ok(targets) => {
+                    if json_output {
+                        println!("{}", targets);
+                    } else if let Some(arr) = targets.as_array() {
+                        if arr.is_empty() {
+                            println!("No proxied containers");
+                        } else {
+                            println!(
+                                "{:<40} {:<20} {:<10}",
+                                "DOMAIN", "CONTAINER", "UPSTREAM"
+                            );
+                            for t in arr {
+                                let domain = t["domain"].as_str().unwrap_or("-");
+                                let name = t["container_name"].as_str().unwrap_or("-");
+                                let ip = t["container_ip"].as_str().unwrap_or("-");
+                                let port = t["port"].as_u64().unwrap_or(0);
+                                println!(
+                                    "{:<40} {:<20} {}:{}",
+                                    format!("https://{}", domain),
+                                    name,
+                                    ip,
+                                    port,
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(_) => {
+                    if json_output {
+                        println!("[]");
+                    } else {
+                        println!("Proxy is not running");
+                    }
+                }
+            }
+        }
+        ProxyCommands::Trust { action } => match action {
+            TrustCommands::Install => {
+                let ca = devflow_proxy::ca::CertificateAuthority::load_or_generate()?;
+                devflow_proxy::platform::install_system_trust(&ca)?;
+                println!("CA certificate installed to system trust store");
+            }
+            TrustCommands::Verify => {
+                let trusted = devflow_proxy::platform::verify_system_trust()?;
+                if json_output {
+                    println!("{}", serde_json::json!({"trusted": trusted}));
+                } else if trusted {
+                    println!("CA certificate is trusted by the system");
+                } else {
+                    println!("CA certificate is NOT trusted. Run: devflow proxy trust install");
+                }
+            }
+            TrustCommands::Remove => {
+                devflow_proxy::platform::remove_system_trust()?;
+                println!("CA certificate removed from system trust store");
+            }
+            TrustCommands::Info => {
+                println!("{}", devflow_proxy::platform::trust_info());
+            }
+        },
+    }
+
+    Ok(())
+}
+
+/// Simple HTTP GET returning JSON (for proxy API queries).
+async fn reqwest_get_json(url: &str) -> Result<serde_json::Value> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()?;
+    let resp = client.get(url).send().await?.json().await?;
+    Ok(resp)
 }
