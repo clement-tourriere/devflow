@@ -11,6 +11,7 @@ pub struct NewProject {
     pub image: String,
     pub storage_driver: StorageDriver,
     pub storage_config: Option<String>,
+    pub project_path: Option<String>,
 }
 
 #[derive(Debug)]
@@ -81,6 +82,7 @@ impl Store {
             "TEXT NOT NULL DEFAULT 'copy'",
         )?;
         ensure_column(&self.conn, "projects", "storage_config", "TEXT NULL")?;
+        ensure_column(&self.conn, "projects", "project_path", "TEXT NULL")?;
         ensure_column(&self.conn, "branches", "storage_metadata", "TEXT NULL")?;
 
         Ok(())
@@ -89,7 +91,7 @@ impl Store {
     #[allow(dead_code)]
     pub fn list_projects(&self) -> anyhow::Result<Vec<Project>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, image, storage_driver, storage_config, created_at FROM projects ORDER BY created_at DESC"
+            "SELECT id, name, image, storage_driver, storage_config, project_path, created_at FROM projects ORDER BY created_at DESC"
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -102,7 +104,8 @@ impl Store {
                 image: row.get(2)?,
                 storage_driver,
                 storage_config: row.get(4)?,
-                created_at: row.get(5)?,
+                project_path: row.get(5)?,
+                created_at: row.get(6)?,
             })
         })?;
 
@@ -112,7 +115,7 @@ impl Store {
 
     pub fn get_project_by_name(&self, name: &str) -> anyhow::Result<Option<Project>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, image, storage_driver, storage_config, created_at FROM projects WHERE name = ?1"
+            "SELECT id, name, image, storage_driver, storage_config, project_path, created_at FROM projects WHERE name = ?1"
         )?;
 
         let mut rows = stmt.query([name])?;
@@ -126,7 +129,8 @@ impl Store {
                 image: row.get(2)?,
                 storage_driver,
                 storage_config: row.get(4)?,
-                created_at: row.get(5)?,
+                project_path: row.get(5)?,
+                created_at: row.get(6)?,
             }));
         }
 
@@ -138,8 +142,8 @@ impl Store {
         let id = uuid::Uuid::new_v4().to_string();
 
         self.conn.execute(
-            "INSERT INTO projects(id, name, image, storage_driver, storage_config, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![id, input.name, input.image, input.storage_driver.as_str(), input.storage_config, created_at],
+            "INSERT INTO projects(id, name, image, storage_driver, storage_config, project_path, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![id, input.name, input.image, input.storage_driver.as_str(), input.storage_config, input.project_path, created_at],
         ).context("failed to insert project")?;
 
         Ok(Project {
@@ -148,6 +152,7 @@ impl Store {
             image: input.image,
             storage_driver: input.storage_driver,
             storage_config: input.storage_config,
+            project_path: input.project_path,
             created_at,
         })
     }
@@ -277,6 +282,17 @@ impl Store {
         self.conn
             .execute("DELETE FROM projects WHERE id = ?1", [project_id])
             .context("failed to delete project")?;
+        Ok(())
+    }
+
+    /// Backfill project_path for an existing project (used when path was not stored at creation time).
+    pub fn update_project_path(&self, project_id: &str, project_path: &str) -> anyhow::Result<()> {
+        self.conn
+            .execute(
+                "UPDATE projects SET project_path = ?1 WHERE id = ?2",
+                rusqlite::params![project_path, project_id],
+            )
+            .context("failed to update project path")?;
         Ok(())
     }
 }

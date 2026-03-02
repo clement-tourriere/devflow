@@ -124,7 +124,7 @@ pub async fn detect_orphans() -> Result<Vec<OrphanInfo>> {
     {
         if let Ok(store) = open_sqlite_store() {
             if let Ok(sqlite_projects) = store.list_projects() {
-                // Build a set of known-live project names from local state
+                // Build a set of known-live project names from local state (fallback for old rows)
                 let live_project_names: HashSet<String> = if let Ok(mgr) = LocalStateManager::new()
                 {
                     mgr.list_all_projects()
@@ -141,27 +141,36 @@ pub async fn detect_orphans() -> Result<Vec<OrphanInfo>> {
                 };
 
                 for proj in sqlite_projects {
-                    // If this project name matches a live project, skip
-                    if live_project_names.contains(&proj.name) {
-                        continue;
-                    }
-
-                    // Also check if any local state path exists for this name
-                    let has_live_path = if let Ok(mgr) = LocalStateManager::new() {
-                        mgr.list_all_projects().iter().any(|(key, _)| {
-                            let p = Path::new(key.as_str());
-                            p.exists()
-                                && p.file_name()
-                                    .map(|n| n.to_string_lossy().to_string())
-                                    .as_deref()
-                                    == Some(&proj.name)
-                        })
+                    // PRIMARY CHECK: If project_path is stored, check the directory directly
+                    if let Some(ref project_path) = proj.project_path {
+                        if Path::new(project_path).exists() {
+                            continue; // directory still exists — not an orphan
+                        }
+                        // Path was stored but directory is gone → orphan
                     } else {
-                        false
-                    };
+                        // FALLBACK for old rows without project_path:
+                        // Use name matching against live local-state entries
+                        if live_project_names.contains(&proj.name) {
+                            continue;
+                        }
 
-                    if has_live_path {
-                        continue;
+                        // Also check if any local state path exists for this name
+                        let has_live_path = if let Ok(mgr) = LocalStateManager::new() {
+                            mgr.list_all_projects().iter().any(|(key, _)| {
+                                let p = Path::new(key.as_str());
+                                p.exists()
+                                    && p.file_name()
+                                        .map(|n| n.to_string_lossy().to_string())
+                                        .as_deref()
+                                        == Some(&proj.name)
+                            })
+                        } else {
+                            false
+                        };
+
+                        if has_live_path {
+                            continue;
+                        }
                     }
 
                     let branch_count =
@@ -172,7 +181,7 @@ pub async fn detect_orphans() -> Result<Vec<OrphanInfo>> {
                             .entry(proj.name.clone())
                             .or_insert_with(|| OrphanInfo {
                                 project_name: proj.name.clone(),
-                                project_path: None,
+                                project_path: proj.project_path.clone(),
                                 sources: Vec::new(),
                                 sqlite_project_id: None,
                                 sqlite_branch_count: 0,
@@ -185,6 +194,10 @@ pub async fn detect_orphans() -> Result<Vec<OrphanInfo>> {
                     }
                     entry.sqlite_project_id = Some(proj.id.clone());
                     entry.sqlite_branch_count = branch_count;
+                    // Populate project_path from SQLite if not already set from local state
+                    if entry.project_path.is_none() {
+                        entry.project_path = proj.project_path.clone();
+                    }
                 }
             }
         }
@@ -194,7 +207,7 @@ pub async fn detect_orphans() -> Result<Vec<OrphanInfo>> {
     #[cfg(feature = "service-local")]
     {
         if let Ok(containers) = list_devflow_containers().await {
-            // Build a set of known-live project names
+            // Build a set of known-live project names from local state
             let live_names: HashSet<String> = if let Ok(mgr) = LocalStateManager::new() {
                 mgr.list_all_projects()
                     .iter()
@@ -209,8 +222,28 @@ pub async fn detect_orphans() -> Result<Vec<OrphanInfo>> {
                 HashSet::new()
             };
 
+            // Also build a set of live project names from SQLite project_path
+            let live_sqlite_names: HashSet<String> = if let Ok(store) = open_sqlite_store() {
+                if let Ok(projects) = store.list_projects() {
+                    projects
+                        .into_iter()
+                        .filter(|p| {
+                            p.project_path
+                                .as_ref()
+                                .map(|pp| Path::new(pp).exists())
+                                .unwrap_or(false)
+                        })
+                        .map(|p| p.name)
+                        .collect()
+                } else {
+                    HashSet::new()
+                }
+            } else {
+                HashSet::new()
+            };
+
             for (project_name, container_name) in &containers {
-                if live_names.contains(project_name) {
+                if live_names.contains(project_name) || live_sqlite_names.contains(project_name) {
                     continue;
                 }
 

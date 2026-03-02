@@ -193,6 +193,7 @@ impl MySQLLocalProvider {
 
         let mut labels = HashMap::new();
         labels.insert("devflow.managed".to_string(), "true".to_string());
+        labels.insert("devflow.project".to_string(), self.project_name.clone());
         labels.insert("devflow.service".to_string(), self.service_name.clone());
         labels.insert("devflow.service-type".to_string(), "mysql".to_string());
 

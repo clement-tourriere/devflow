@@ -46,6 +46,8 @@ pub struct StartBranchSpec {
     pub pg_user: String,
     pub pg_password: String,
     pub pg_db: String,
+    pub project_name: String,
+    pub service_name: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -206,6 +208,9 @@ impl DockerRuntime {
 
         let mut labels = HashMap::new();
         labels.insert("devflow.managed".to_string(), "true".to_string());
+        labels.insert("devflow.project".to_string(), spec.project_name.clone());
+        labels.insert("devflow.service".to_string(), spec.service_name.clone());
+        labels.insert("devflow.service-type".to_string(), "postgres".to_string());
 
         let config = ContainerCreateBody {
             image: Some(spec.image.clone()),

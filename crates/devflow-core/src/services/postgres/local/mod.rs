@@ -40,6 +40,8 @@ pub struct LocalProvider {
     runtime: DockerRuntime,
     storage: StorageCoordinator,
     data_root: PathBuf,
+    /// Canonical filesystem path of the project directory (for orphan detection).
+    project_path: Option<String>,
 }
 
 impl LocalProvider {
@@ -102,6 +104,12 @@ impl LocalProvider {
         let project_name = config.project_name();
         let service_name = service_name.to_string();
 
+        // Capture canonical project directory path for orphan detection
+        let project_path = std::env::current_dir()
+            .ok()
+            .and_then(|p| p.canonicalize().ok())
+            .map(|p| p.to_string_lossy().to_string());
+
         Ok(Self {
             project_name,
             service_name,
@@ -114,6 +122,7 @@ impl LocalProvider {
             runtime,
             storage,
             data_root,
+            project_path,
         })
     }
 
@@ -123,6 +132,17 @@ impl LocalProvider {
 
     async fn ensure_project(&self) -> Result<model::Project> {
         if let Some(project) = self.store().get_project_by_name(&self.project_name)? {
+            // Backfill project_path for existing projects created before this column existed
+            if project.project_path.is_none() {
+                if let Some(ref path) = self.project_path {
+                    self.store().update_project_path(&project.id, path)?;
+                    log::debug!(
+                        "Backfilled project_path for project '{}': {}",
+                        self.project_name,
+                        path
+                    );
+                }
+            }
             return Ok(project);
         }
 
@@ -134,6 +154,7 @@ impl LocalProvider {
             image: self.image.clone(),
             storage_driver: selection.driver,
             storage_config: selection.config,
+            project_path: self.project_path.clone(),
         })?;
 
         log::info!(
@@ -281,6 +302,8 @@ impl ServiceProvider for LocalProvider {
                 pg_user: self.pg_user.clone(),
                 pg_password: self.pg_password.clone(),
                 pg_db: self.pg_db.clone(),
+                project_name: self.project_name.clone(),
+                service_name: self.service_name.clone(),
             })
             .await?;
 
@@ -383,6 +406,8 @@ impl ServiceProvider for LocalProvider {
                     pg_user: self.pg_user.clone(),
                     pg_password: self.pg_password.clone(),
                     pg_db: self.pg_db.clone(),
+                    project_name: self.project_name.clone(),
+                    service_name: self.service_name.clone(),
                 })
                 .await?;
 
@@ -442,6 +467,8 @@ impl ServiceProvider for LocalProvider {
                 pg_user: self.pg_user.clone(),
                 pg_password: self.pg_password.clone(),
                 pg_db: self.pg_db.clone(),
+                project_name: self.project_name.clone(),
+                service_name: self.service_name.clone(),
             })
             .await?;
 
@@ -541,6 +568,8 @@ impl ServiceProvider for LocalProvider {
                     pg_user: self.pg_user.clone(),
                     pg_password: self.pg_password.clone(),
                     pg_db: self.pg_db.clone(),
+                    project_name: self.project_name.clone(),
+                    service_name: self.service_name.clone(),
                 })
                 .await?;
 

@@ -7,6 +7,7 @@ pub struct Project {
     pub image: String,
     pub storage_driver: StorageDriver,
     pub storage_config: Option<String>,
+    pub project_path: Option<String>,
     pub created_at: i64,
 }
 
