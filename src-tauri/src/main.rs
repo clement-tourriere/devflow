@@ -104,6 +104,12 @@ fn main() {
             commands::hooks::get_hook_variables,
             commands::hooks::install_vcs_hooks,
             commands::hooks::uninstall_vcs_hooks,
+            commands::hooks::get_action_types,
+            commands::hooks::save_hooks,
+            commands::hooks::validate_hook,
+            commands::hooks::preview_hook,
+            commands::hooks::run_hook,
+            commands::hooks::get_trigger_mappings,
             // Proxy
             commands::proxy::start_proxy,
             commands::proxy::stop_proxy,

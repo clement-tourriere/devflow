@@ -490,6 +490,16 @@ pub enum HookCommands {
         #[arg(long, help = "Workspace name to use for context (defaults to current)")]
         workspace: Option<String>,
     },
+    #[command(
+        about = "Show VCS event → devflow phase trigger mapping",
+        long_about = "Display the mapping from VCS events (e.g. git post-checkout) to\ndevflow hook phases (e.g. post-switch).\n\nThis mapping can be customized in .devflow.yml under the 'triggers' key.\n\nExamples:\n  devflow hook triggers"
+    )]
+    Triggers,
+    #[command(
+        about = "List available built-in hook actions",
+        long_about = "Show all built-in action types that can be used in hooks.\n\nActions replace shell commands for common operations like writing env files,\nfind-and-replace in files, copying files, HTTP requests, and notifications.\n\nExamples:\n  devflow hook actions"
+    )]
+    Actions,
 }
 
 #[derive(Subcommand)]
@@ -1472,34 +1482,6 @@ fn context_matches_branch(
         return false;
     };
     context == workspace_name || context == config.get_normalized_workspace_name(workspace_name)
-}
-
-fn worktree_template_repo_name(config: &Config) -> String {
-    config
-        .name
-        .as_ref()
-        .filter(|n| !n.trim().is_empty())
-        .cloned()
-        .or_else(|| {
-            std::env::current_dir().ok().and_then(|p| {
-                p.file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .filter(|n| !n.trim().is_empty())
-            })
-        })
-        .unwrap_or_else(|| "repo".to_string())
-}
-
-fn apply_worktree_path_template(
-    path_template: &str,
-    repo_name: &str,
-    workspace_name: &str,
-) -> String {
-    path_template
-        .replace("{repo}", repo_name)
-        .replace("{workspace}", workspace_name)
-        // Backward compatibility with legacy templates.
-        .replace("{branch}", workspace_name)
 }
 
 fn linked_workspace_exists(
@@ -2523,37 +2505,6 @@ async fn build_hook_context(config: &Config, workspace_name: &str) -> HookContex
     devflow_core::hooks::build_hook_context(config, &project_dir, workspace_name).await
 }
 
-/// Run hooks for the given phase.
-async fn run_hooks(
-    config: &Config,
-    workspace_name: &str,
-    phase: HookPhase,
-    json_output: bool,
-    non_interactive: bool,
-) -> Result<()> {
-    if let Some(ref hooks_config) = config.hooks {
-        let working_dir = resolve_project_dir_for_hooks();
-        let project_key = working_dir
-            .canonicalize()
-            .ok()
-            .map(|p| p.to_string_lossy().to_string());
-        let engine = if non_interactive || json_output {
-            HookEngine::new_non_interactive(hooks_config.clone(), working_dir, project_key)
-        } else {
-            HookEngine::new(hooks_config.clone(), working_dir, project_key)
-        }
-        .with_quiet_output(json_output);
-
-        let context = build_hook_context(config, workspace_name).await;
-        if json_output {
-            engine.run_phase(&phase, &context).await?;
-        } else {
-            engine.run_phase_verbose(&phase, &context).await?;
-        }
-    }
-    Ok(())
-}
-
 /// Handle `devflow hook` subcommands.
 async fn handle_hook_command(
     action: HookCommands,
@@ -2594,6 +2545,12 @@ async fn handle_hook_command(
             workspace,
         } => {
             handle_hook_render(config, &template, workspace.as_deref(), json_output).await?;
+        }
+        HookCommands::Triggers => {
+            handle_hook_triggers(config, json_output)?;
+        }
+        HookCommands::Actions => {
+            handle_hook_actions(json_output)?;
         }
     }
     Ok(())
@@ -2689,6 +2646,22 @@ fn handle_hook_show(config: &Config, phase_filter: Option<&str>, json_output: bo
                         for (k, v) in env {
                             println!("      {}: {}", k, v);
                         }
+                    }
+                }
+                HookEntry::Action(act) => {
+                    println!("  {}:", name);
+                    println!("    action: {}", act.action.type_name());
+                    if let Some(ref wd) = act.working_dir {
+                        println!("    working_dir: {}", wd);
+                    }
+                    if let Some(ref cond) = act.condition {
+                        println!("    condition: {}", cond);
+                    }
+                    if let Some(coe) = act.continue_on_error {
+                        println!("    continue_on_error: {}", coe);
+                    }
+                    if act.background {
+                        println!("    background: true");
                     }
                 }
             }
@@ -2814,6 +2787,8 @@ fn handle_hook_explain(phase: Option<&str>, json_output: bool) -> Result<()> {
             println!("  {{{{ workspace | sanitize }}}}     Path-safe (/ -> -)");
             println!("  {{{{ workspace | sanitize_db }}}}  DB-safe (lowercase, _, max 63 chars)");
             println!("  {{{{ workspace | hash_port }}}}    Deterministic port 10000-19999");
+            println!();
+            print_conditions_reference();
         } else {
             println!("Unknown phase: '{}'", phase_name);
             println!();
@@ -2862,10 +2837,55 @@ fn handle_hook_explain(phase: Option<&str>, json_output: bool) -> Result<()> {
             );
         }
         println!();
+        print_conditions_reference();
+        println!();
         println!("Use 'devflow hook explain <phase>' for detailed info and examples.");
     }
 
     Ok(())
+}
+
+fn print_conditions_reference() {
+    println!("Available conditions:");
+    println!("  Conditions control when a hook runs. Built-in conditions are safe");
+    println!("  (no approval needed). Custom shell conditions require approval.");
+    println!();
+    println!("  Worktree:");
+    println!("    is_worktree                    Only run in worktree workspaces");
+    println!("    not_worktree                   Skip worktree workspaces");
+    println!();
+    println!("  Trigger source:");
+    println!("    trigger_is:<source>            Only run for a trigger (vcs, cli, gui, auto)");
+    println!("    trigger_not:<source>           Skip for a trigger source");
+    println!();
+    println!("  Workspace:");
+    println!("    workspace_is:<name>            Only run for a specific workspace");
+    println!("    workspace_not:<name>           Skip a specific workspace");
+    println!("    workspace_matches:<regex>      Workspace name matches a regex");
+    println!("    is_default_workspace           Only run on the default workspace (e.g. main)");
+    println!("    not_default_workspace          Skip the default workspace");
+    println!();
+    println!("  File system:");
+    println!("    file_exists:<path>             Only run if a file exists");
+    println!("    dir_exists:<path>              Only run if a directory exists");
+    println!();
+    println!("  Environment:");
+    println!("    env_set:<VAR>                  Only run if an env var is set");
+    println!("    env_is:<VAR>=<value>           Only run if an env var has a specific value");
+    println!();
+    println!("  Boolean:");
+    println!("    always / true                  Always run");
+    println!("    never / false                  Never run (disable a hook)");
+    println!();
+    println!("  Custom:");
+    println!("    <shell command>                Exit 0 = true (requires approval)");
+    println!();
+    println!("  Example:");
+    println!("    hooks:");
+    println!("      post-create:");
+    println!("        trust-mise:");
+    println!("          command: \"mise trust\"");
+    println!("          condition: is_worktree");
 }
 
 /// `devflow hook vars` — show available template variables with current values.
@@ -2909,6 +2929,16 @@ async fn handle_hook_vars(
     }
     if let Some(ref commit) = context.commit {
         println!("  {{{{ commit }}}}              = {}", commit);
+    }
+    if let Some(ref sc) = context.short_commit {
+        println!("  {{{{ short_commit }}}}        = {}", sc);
+    }
+    println!("  {{{{ trigger_source }}}}      = {}", context.trigger_source);
+    if let Some(ref prev) = context.previous_workspace {
+        println!("  {{{{ previous_workspace }}}}  = {}", prev);
+    }
+    if let Some(ref ve) = context.vcs_event {
+        println!("  {{{{ vcs_event }}}}           = {}", ve);
     }
 
     if !context.service.is_empty() {
@@ -3167,6 +3197,105 @@ fn handle_hook_approvals(action: ApprovalCommands, json_output: bool) -> Result<
             }
         }
     }
+
+    Ok(())
+}
+
+/// `devflow hook triggers` — show VCS event → devflow phase mapping.
+fn handle_hook_triggers(config: &Config, json_output: bool) -> Result<()> {
+    let triggers = config
+        .triggers
+        .clone()
+        .unwrap_or_default();
+    let mappings = triggers.git_mappings();
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "git": mappings,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("VCS Event → Devflow Phase(s)");
+    println!("{}", "─".repeat(50));
+    for mapping in &mappings {
+        println!(
+            "  git {:<18} → [{}]",
+            mapping.vcs_event,
+            mapping.phases.join(", ")
+        );
+    }
+    println!();
+    println!("Override in .devflow.yml:");
+    println!("  triggers:");
+    println!("    git:");
+    for mapping in &mappings {
+        println!(
+            "      {}: [{}]",
+            mapping.vcs_event,
+            mapping.phases.join(", ")
+        );
+    }
+
+    Ok(())
+}
+
+/// `devflow hook actions` — list all available built-in action types.
+fn handle_hook_actions(json_output: bool) -> Result<()> {
+    let actions = vec![
+        ("shell", "Run a shell command", "action:\n  type: shell\n  command: \"npm ci\""),
+        ("replace", "Find and replace in a file (plain or regex)", "action:\n  type: replace\n  file: config/database.yml\n  pattern: \"database: \\\\w+\"\n  replacement: \"database: {{ service['app-db'].database }}\"\n  regex: true"),
+        ("write-file", "Write content to a file", "action:\n  type: write-file\n  path: config/branch.txt\n  content: \"{{ workspace }}\""),
+        ("write-env", "Write a .env-style file with key=value pairs", "action:\n  type: write-env\n  path: .env.local\n  vars:\n    DATABASE_URL: \"{{ service['app-db'].url }}\"\n    WORKSPACE: \"{{ workspace }}\""),
+        ("copy", "Copy a file", "action:\n  type: copy\n  from: .env.example\n  to: .env.local"),
+        ("docker-exec", "Execute a command inside a Docker container", "action:\n  type: docker-exec\n  container: myapp-postgres\n  command: \"psql -U postgres -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto'\""),
+        ("http", "Make an HTTP request", "action:\n  type: http\n  url: \"https://hooks.slack.com/services/XXX\"\n  method: POST\n  headers:\n    Content-Type: application/json\n  body: '{\"text\": \"Workspace {{ workspace }} ready\"}'"),
+        ("notify", "Send a desktop notification", "action:\n  type: notify\n  title: devflow\n  message: \"Workspace {{ workspace }} is ready\"\n  level: success"),
+    ];
+
+    if json_output {
+        let items: Vec<serde_json::Value> = actions
+            .iter()
+            .map(|(name, desc, example)| {
+                serde_json::json!({
+                    "type": name,
+                    "description": desc,
+                    "example": example,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&items)?);
+        return Ok(());
+    }
+
+    println!("Built-in Hook Actions");
+    println!("{}", "─".repeat(50));
+    println!();
+    println!(
+        "Actions replace shell commands for common operations.\nOnly 'shell' and 'docker-exec' require approval; all others run without prompting.\n"
+    );
+
+    for (name, description, example) in &actions {
+        println!("  {} — {}", name, description);
+        println!();
+        for line in example.lines() {
+            println!("    {}", line);
+        }
+        println!();
+    }
+
+    println!("Usage in .devflow.yml:");
+    println!("  hooks:");
+    println!("    post-create:");
+    println!("      my-hook:");
+    println!("        action:");
+    println!("          type: write-env");
+    println!("          path: .env.local");
+    println!("          vars:");
+    println!("            DATABASE_URL: \"{{{{ service['app-db'].url }}}}\"");
 
     Ok(())
 }
@@ -3602,21 +3731,22 @@ async fn handle_branch_command(
                         .ok()
                         .and_then(|repo| repo.workspace_exists(&workspace).ok());
 
+                    let project_dir = config_path
+                        .as_ref()
+                        .and_then(|p| p.parent())
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| PathBuf::from("."));
+
                     if json_output {
                         let mut wt_path_value = serde_json::Value::Null;
                         if worktree_enabled {
-                            let repo_name = worktree_template_repo_name(config);
-                            let path_template = config
-                                .worktree
-                                .as_ref()
-                                .map(|wt| wt.path_template.as_str())
-                                .unwrap_or("../{repo}.{workspace}");
-                            let wt_path =
-                                resolve_cd_target(&PathBuf::from(apply_worktree_path_template(
-                                    path_template,
-                                    &repo_name,
+                            let wt_path = resolve_cd_target(
+                                &devflow_core::workspace::worktree::resolve_worktree_path(
+                                    config,
+                                    &project_dir,
                                     &normalized_branch,
-                                )))?;
+                                ),
+                            )?;
                             wt_path_value =
                                 serde_json::Value::String(wt_path.display().to_string());
                         }
@@ -3663,18 +3793,13 @@ async fn handle_branch_command(
                         }
                         if worktree_enabled {
                             println!("  Worktree mode: enabled");
-                            let repo_name = worktree_template_repo_name(config);
-                            let path_template = config
-                                .worktree
-                                .as_ref()
-                                .map(|wt| wt.path_template.as_str())
-                                .unwrap_or("../{repo}.{workspace}");
-                            let wt_path =
-                                resolve_cd_target(&PathBuf::from(apply_worktree_path_template(
-                                    path_template,
-                                    &repo_name,
+                            let wt_path = resolve_cd_target(
+                                &devflow_core::workspace::worktree::resolve_worktree_path(
+                                    config,
+                                    &project_dir,
                                     &normalized_branch,
-                                )))?;
+                                ),
+                            )?;
                             println!("  Worktree path: {}", wt_path.display());
                         }
                         if !no_services {
@@ -3715,6 +3840,8 @@ async fn handle_branch_command(
                     no_services,
                     no_verify,
                     non_interactive,
+                    None,
+                    None,
                 )
                 .await?;
             } else if let Some(workspace) = workspace_name {
@@ -3726,6 +3853,8 @@ async fn handle_branch_command(
                         no_services,
                         no_verify,
                         non_interactive,
+                        None,
+                        None,
                     )
                     .await?;
                 } else {
@@ -3739,6 +3868,8 @@ async fn handle_branch_command(
                         no_verify,
                         json_output,
                         non_interactive,
+                        None,
+                        None,
                     )
                     .await?;
                 }
@@ -4451,18 +4582,39 @@ async fn handle_service_provider_command(
             workspace_name,
             from,
         } => {
+            let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let hook_opts = devflow_core::workspace::LifecycleOptions {
+                hook_approval: if non_interactive || json_output {
+                    devflow_core::workspace::hooks::HookApprovalMode::NonInteractive
+                } else {
+                    devflow_core::workspace::hooks::HookApprovalMode::Interactive
+                },
+                verbose_hooks: !json_output,
+                ..Default::default()
+            };
+
+            // Fire pre-service-create hooks
+            devflow_core::workspace::hooks::run_lifecycle_hooks(
+                config,
+                &project_dir,
+                &workspace_name,
+                HookPhase::PreServiceCreate,
+                &hook_opts,
+            )
+            .await?;
+
             // Single-service path (explicit --service or single service)
             let info = provider
                 .create_workspace(&workspace_name, from.as_deref())
                 .await?;
 
-            // Execute hooks
-            run_hooks(
+            // Fire post-service-create hooks
+            devflow_core::workspace::hooks::run_lifecycle_hooks(
                 config,
+                &project_dir,
                 &workspace_name,
                 HookPhase::PostServiceCreate,
-                json_output,
-                non_interactive,
+                &hook_opts,
             )
             .await?;
 
@@ -4485,8 +4637,40 @@ async fn handle_service_provider_command(
             }
         }
         ServiceCommands::Delete { workspace_name } => {
+            let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let hook_opts = devflow_core::workspace::LifecycleOptions {
+                hook_approval: if non_interactive || json_output {
+                    devflow_core::workspace::hooks::HookApprovalMode::NonInteractive
+                } else {
+                    devflow_core::workspace::hooks::HookApprovalMode::Interactive
+                },
+                verbose_hooks: !json_output,
+                ..Default::default()
+            };
+
+            // Fire pre-service-delete hooks
+            devflow_core::workspace::hooks::run_lifecycle_hooks(
+                config,
+                &project_dir,
+                &workspace_name,
+                HookPhase::PreServiceDelete,
+                &hook_opts,
+            )
+            .await?;
+
             // Single-service path (explicit --service or single service)
             provider.delete_workspace(&workspace_name).await?;
+
+            // Fire post-service-delete hooks
+            devflow_core::workspace::hooks::run_lifecycle_hooks(
+                config,
+                &project_dir,
+                &workspace_name,
+                HookPhase::PostServiceDelete,
+                &hook_opts,
+            )
+            .await?;
+
             if json_output {
                 println!(
                     "{}",
@@ -4539,6 +4723,29 @@ async fn handle_service_provider_command(
                 );
             }
             provider.start_workspace(&workspace_name).await?;
+
+            // Fire post-start hooks
+            {
+                let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let hook_opts = devflow_core::workspace::LifecycleOptions {
+                    hook_approval: if non_interactive || json_output {
+                        devflow_core::workspace::hooks::HookApprovalMode::NonInteractive
+                    } else {
+                        devflow_core::workspace::hooks::HookApprovalMode::Interactive
+                    },
+                    verbose_hooks: !json_output,
+                    ..Default::default()
+                };
+                devflow_core::workspace::hooks::run_lifecycle_hooks(
+                    config,
+                    &project_dir,
+                    &workspace_name,
+                    HookPhase::PostStart,
+                    &hook_opts,
+                )
+                .await?;
+            }
+
             if json_output {
                 println!(
                     "{}",
@@ -5229,11 +5436,32 @@ async fn handle_orchestrated_mutation(
     json_output: bool,
     non_interactive: bool,
 ) -> Result<()> {
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let hook_opts = devflow_core::workspace::LifecycleOptions {
+        hook_approval: if non_interactive || json_output {
+            devflow_core::workspace::hooks::HookApprovalMode::NonInteractive
+        } else {
+            devflow_core::workspace::hooks::HookApprovalMode::Interactive
+        },
+        verbose_hooks: !json_output,
+        ..Default::default()
+    };
+
     match cmd {
         ServiceCommands::Create {
             workspace_name,
             from,
         } => {
+            // Fire pre-service-create hooks before orchestrated creation
+            devflow_core::workspace::hooks::run_lifecycle_hooks(
+                config,
+                &project_dir,
+                &workspace_name,
+                HookPhase::PreServiceCreate,
+                &hook_opts,
+            )
+            .await?;
+
             let results =
                 services::factory::orchestrate_create(config, &workspace_name, from.as_deref())
                     .await?;
@@ -5298,12 +5526,12 @@ async fn handle_orchestrated_mutation(
             }
 
             // Run hooks after all services are created
-            run_hooks(
+            devflow_core::workspace::hooks::run_lifecycle_hooks(
                 config,
+                &project_dir,
                 &workspace_name,
                 HookPhase::PostServiceCreate,
-                json_output,
-                non_interactive,
+                &hook_opts,
             )
             .await?;
 
@@ -5312,6 +5540,16 @@ async fn handle_orchestrated_mutation(
             }
         }
         ServiceCommands::Delete { workspace_name } => {
+            // Fire pre-service-delete hooks before orchestrated deletion
+            devflow_core::workspace::hooks::run_lifecycle_hooks(
+                config,
+                &project_dir,
+                &workspace_name,
+                HookPhase::PreServiceDelete,
+                &hook_opts,
+            )
+            .await?;
+
             let results = services::factory::orchestrate_delete(config, &workspace_name).await?;
             let success_count = results.iter().filter(|r| r.success).count();
             let fail_count = results.iter().filter(|r| !r.success).count();
@@ -5356,6 +5594,16 @@ async fn handle_orchestrated_mutation(
                     );
                 }
             }
+
+            // Fire post-service-delete hooks after orchestrated deletion
+            devflow_core::workspace::hooks::run_lifecycle_hooks(
+                config,
+                &project_dir,
+                &workspace_name,
+                HookPhase::PostServiceDelete,
+                &hook_opts,
+            )
+            .await?;
 
             if fail_count > 0 {
                 anyhow::bail!(
@@ -5598,7 +5846,7 @@ async fn handle_git_hook(
         if config.should_switch_on_workspace(&current_git_branch) {
             // If switching to main git workspace, use main database
             if current_git_branch == config.git.main_workspace {
-                handle_switch_to_main(config, config_path, false, false, false, true).await?;
+                handle_switch_to_main(config, config_path, false, false, false, true, Some("vcs"), Some("post-checkout")).await?;
             } else {
                 // For other workspaces, check if we should create them and switch
                 if config.should_create_workspace(&current_git_branch) {
@@ -5612,6 +5860,8 @@ async fn handle_git_hook(
                         false, // no_verify
                         false, // json_output — git hooks are non-interactive
                         true,  // non_interactive
+                        Some("vcs"),
+                        Some("post-checkout"),
                     )
                     .await?;
                 } else {
@@ -5733,10 +5983,12 @@ async fn handle_interactive_switch(
                     false, // no_verify
                     false, // json_output
                     false, // non_interactive
+                    None,
+                    None,
                 )
                 .await?;
             } else if selected_branch == config.git.main_workspace {
-                handle_switch_to_main(config, config_path, false, false, false, false).await?;
+                handle_switch_to_main(config, config_path, false, false, false, false, None, None).await?;
             } else {
                 handle_switch_command(
                     config,
@@ -5748,6 +6000,8 @@ async fn handle_interactive_switch(
                     false, // no_verify
                     false, // json_output — interactive mode
                     false, // non_interactive
+                    None,
+                    None,
                 )
                 .await?;
             }
@@ -5854,11 +6108,20 @@ async fn link_branch_internal(
     from: Option<&str>,
     non_interactive: bool,
 ) -> Result<LinkBranchResult> {
-    let _ = non_interactive;
-    ensure_default_workspace_registered(config, config_path)?;
+    let project_dir = config_path
+        .as_ref()
+        .and_then(|p| p.parent())
+        .map(|d| d.to_path_buf())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
 
     let normalized_branch = config.get_normalized_workspace_name(workspace_name);
     let normalized_main = config.get_normalized_workspace_name(&config.git.main_workspace);
+
+    // Ensure main workspace is registered
+    if let Ok(mut state_mgr) = LocalStateManager::new() {
+        let _ = state_mgr.ensure_default_workspace(&project_dir, &config.git.main_workspace);
+    }
 
     let vcs_repo = vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
     if !vcs_repo.workspace_exists(workspace_name)? {
@@ -5870,13 +6133,9 @@ async fn link_branch_internal(
         );
     }
 
-    let existing_parent = config_path
-        .as_ref()
-        .and_then(|path| {
-            LocalStateManager::new()
-                .ok()
-                .and_then(|state| state.get_workspace(path, &normalized_branch))
-        })
+    let existing_parent = LocalStateManager::new()
+        .ok()
+        .and_then(|state| state.get_workspace_by_dir(&project_dir, &normalized_branch))
         .and_then(|b| b.parent);
 
     let mut parent = from
@@ -5898,7 +6157,10 @@ async fn link_branch_internal(
             );
         }
         if parent_workspace == &normalized_main {
-            ensure_default_workspace_registered(config, config_path)?;
+            if let Ok(mut state_mgr) = LocalStateManager::new() {
+                let _ =
+                    state_mgr.ensure_default_workspace(&project_dir, &config.git.main_workspace);
+            }
         }
     }
 
@@ -5915,14 +6177,50 @@ async fn link_branch_internal(
             }
         });
 
-    register_workspace_in_state(
+    // Register workspace in state using project-dir-based API
+    if let Ok(mut state_mgr) = LocalStateManager::new() {
+        let existing = state_mgr.get_workspace_by_dir(&project_dir, &normalized_branch);
+        let workspace = DevflowWorkspace {
+            name: normalized_branch.clone(),
+            parent: parent
+                .clone()
+                .or_else(|| existing.as_ref().and_then(|b| b.parent.clone())),
+            worktree_path: worktree_path
+                .clone()
+                .or_else(|| existing.as_ref().and_then(|b| b.worktree_path.clone())),
+            created_at: existing
+                .as_ref()
+                .map(|b| b.created_at)
+                .unwrap_or_else(chrono::Utc::now),
+            cow_used: existing.as_ref().map(|b| b.cow_used).unwrap_or(false),
+            agent_tool: existing.as_ref().and_then(|b| b.agent_tool.clone()),
+            agent_status: existing.as_ref().and_then(|b| b.agent_status.clone()),
+            agent_started_at: existing.as_ref().and_then(|b| b.agent_started_at),
+        };
+        if let Err(e) = state_mgr.register_workspace_by_dir(&project_dir, workspace) {
+            log::warn!("Failed to register workspace in devflow state: {}", e);
+        }
+    }
+
+    let hook_opts = devflow_core::workspace::LifecycleOptions {
+        hook_approval: if non_interactive {
+            devflow_core::workspace::hooks::HookApprovalMode::NonInteractive
+        } else {
+            devflow_core::workspace::hooks::HookApprovalMode::Interactive
+        },
+        verbose_hooks: true,
+        ..Default::default()
+    };
+
+    // Fire pre-service-switch hooks before service orchestration
+    devflow_core::workspace::hooks::run_lifecycle_hooks_best_effort(
         config,
-        config_path,
+        &project_dir,
         workspace_name,
-        parent.as_deref(),
-        worktree_path.clone(),
-        None,
-    )?;
+        HookPhase::PreSwitch,
+        &hook_opts,
+    )
+    .await;
 
     let mut service_results = Vec::new();
     let mut services_failed = 0usize;
@@ -5942,6 +6240,16 @@ async fn link_branch_internal(
             });
         }
     }
+
+    // Fire post-switch hooks
+    devflow_core::workspace::hooks::run_lifecycle_hooks_best_effort(
+        config,
+        &project_dir,
+        workspace_name,
+        HookPhase::PostSwitch,
+        &hook_opts,
+    )
+    .await;
 
     Ok(LinkBranchResult {
         workspace: normalized_branch,
@@ -6128,177 +6436,69 @@ async fn handle_switch_command(
     no_verify: bool,
     json_output: bool,
     non_interactive: bool,
+    trigger_source: Option<&str>,
+    vcs_event: Option<&str>,
 ) -> Result<()> {
-    if let Err(e) = ensure_default_workspace_registered(config, config_path) {
-        log::warn!("Failed to ensure default workspace registration: {}", e);
-    }
+    // Resolve parent via CLI-specific interactive prompt (if needed)
+    let from_workspace = if create {
+        let context = resolve_branch_context(config);
+        resolve_parent_for_branch_creation(
+            config,
+            config_path,
+            workspace_name,
+            from,
+            &context,
+            json_output,
+            non_interactive,
+        )
+        .await?
+    } else {
+        from.map(|s| s.to_string())
+    };
 
+    let approval_mode = if non_interactive || json_output {
+        devflow_core::workspace::hooks::HookApprovalMode::NonInteractive
+    } else {
+        devflow_core::workspace::hooks::HookApprovalMode::Interactive
+    };
+
+    let project_dir = config_path
+        .as_ref()
+        .and_then(|p| p.parent())
+        .map(|d| d.to_path_buf())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let options = devflow_core::workspace::switch::SwitchOptions {
+        lifecycle: devflow_core::workspace::LifecycleOptions {
+            skip_hooks: no_verify,
+            skip_services: no_services,
+            hook_approval: approval_mode,
+            verbose_hooks: !json_output,
+            trigger_source: trigger_source.map(String::from),
+            vcs_event: vcs_event.map(String::from),
+        },
+        create_if_missing: create,
+        from_workspace,
+    };
+
+    let result = devflow_core::workspace::switch::switch_workspace(
+        config,
+        &project_dir,
+        workspace_name,
+        &options,
+    )
+    .await?;
+
+    // ── CLI-specific output ──────────────────────────────────────────
     let worktree_enabled = config.worktree.as_ref().is_some_and(|wt| wt.enabled);
     let shell_integration = shell_integration_enabled();
-    let mut worktree_path: Option<String> = None;
-    let mut worktree_created = false;
-    let mut cow_used = false;
-    let mut branch_created = false;
-    let mut parent_for_new_branch: Option<String> = None;
-    let mut json_summary: Option<serde_json::Value> = None;
 
-    let context = resolve_branch_context(config);
-
-    // ── Worktree mode ──────────────────────────────────────────────────
-    if worktree_enabled {
-        let vcs_repo = vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
-
-        // Check if a worktree already exists for this workspace
-        let existing_path = vcs_repo.worktree_path(workspace_name)?;
-
-        if let Some(wt_path) = existing_path {
-            let wt_path = resolve_cd_target(&wt_path)?;
-            let wt_path = std::fs::canonicalize(&wt_path).unwrap_or(wt_path);
-            if !json_output {
-                println!("Switching to existing worktree: {}", wt_path.display());
-                // Print the path so shell integration can cd to it
-                println!("DEVFLOW_CD={}", wt_path.display());
-                if !shell_integration {
-                    print_manual_cd_hint(&wt_path);
-                }
-            }
-            worktree_path = Some(wt_path.display().to_string());
-        } else {
-            // Resolve worktree path from template
-            let repo_name = worktree_template_repo_name(config);
-            let normalized_workspace = config.get_normalized_workspace_name(workspace_name);
-            let path_template = config
-                .worktree
-                .as_ref()
-                .map(|wt| wt.path_template.as_str())
-                .unwrap_or("../{repo}.{workspace}");
-            let wt_path_str =
-                apply_worktree_path_template(path_template, &repo_name, &normalized_workspace);
-            let wt_path = resolve_cd_target(&PathBuf::from(&wt_path_str))?;
-
-            // Create workspace only when explicitly requested
-            let workspace_exists = vcs_repo.workspace_exists(workspace_name)?;
-            if !workspace_exists {
-                if !create {
-                    anyhow::bail!(
-                        "Workspace '{}' does not exist. Use `devflow switch -c {}` to create it.",
-                        workspace_name,
-                        workspace_name
-                    );
-                }
-
-                let parent = resolve_parent_for_branch_creation(
-                    config,
-                    config_path,
-                    workspace_name,
-                    from,
-                    &context,
-                    json_output,
-                    non_interactive,
-                )
-                .await?;
-
-                if !json_output {
-                    println!(
-                        "Creating workspace '{}' (parent: {})",
-                        workspace_name,
-                        parent.as_deref().unwrap_or("HEAD")
-                    );
-                }
-                vcs_repo
-                    .create_workspace(workspace_name, parent.as_deref())
-                    .with_context(|| {
-                        format!(
-                            "Failed to create workspace '{}' before worktree creation",
-                            workspace_name
-                        )
-                    })?;
-                branch_created = true;
-                parent_for_new_branch = parent;
-            } else if create && !json_output {
-                println!(
-                    "Workspace '{}' already exists; switching to it",
-                    workspace_name
-                );
-            }
-
-            if !json_output {
-                println!("Creating worktree at: {}", wt_path.display());
-            }
-            let wt_result = vcs_repo
-                .create_worktree(workspace_name, &wt_path)
-                .with_context(|| {
-                    format!(
-                        "Failed to create worktree for workspace '{}'",
-                        workspace_name
-                    )
-                })?;
-
-            // Copy files if configured
-            if let Some(ref wt_config) = config.worktree {
-                let main_dir = std::env::current_dir()?;
-
-                // Copy explicitly listed files.
-                // When CoW was used, these already exist as clones — overwrite with
-                // independent copies so they can diverge between workspaces.
-                for file in &wt_config.copy_files {
-                    let src = main_dir.join(file);
-                    let dst = wt_path.join(file);
-                    if src.exists() {
-                        if let Some(parent) = dst.parent() {
-                            std::fs::create_dir_all(parent).ok();
-                        }
-                        // Remove existing clone first so the new copy is independent
-                        if wt_result.cow_used && dst.exists() {
-                            let _ = std::fs::remove_file(&dst);
-                        }
-                        if let Err(e) = std::fs::copy(&src, &dst) {
-                            log::warn!("Failed to copy '{}' to worktree: {}", file, e);
-                        } else {
-                            log::debug!("Copied '{}' to worktree", file);
-                        }
-                    }
-                }
-
-                // Copy gitignored files — skip when CoW already cloned everything
-                if !wt_result.cow_used && wt_config.copy_ignored {
-                    match vcs_repo.list_ignored_files() {
-                        Ok(ignored_files) => {
-                            let mut count = 0;
-                            for rel_path in &ignored_files {
-                                let src = main_dir.join(rel_path);
-                                let dst = wt_path.join(rel_path);
-                                if src.exists() && !dst.exists() {
-                                    if let Some(parent) = dst.parent() {
-                                        std::fs::create_dir_all(parent).ok();
-                                    }
-                                    if let Err(e) = std::fs::copy(&src, &dst) {
-                                        log::warn!(
-                                            "Failed to copy ignored file '{}': {}",
-                                            rel_path.display(),
-                                            e
-                                        );
-                                    } else {
-                                        count += 1;
-                                        log::debug!("Copied ignored file: {}", rel_path.display());
-                                    }
-                                }
-                            }
-                            if count > 0 && !json_output {
-                                println!("Copied {} ignored file(s) to worktree", count);
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("Failed to enumerate ignored files: {}", e);
-                        }
-                    }
-                }
-            }
-
-            let wt_path_for_output = std::fs::canonicalize(&wt_path).unwrap_or(wt_path.clone());
-
-            if !json_output {
-                let cow_hint = if wt_result.cow_used {
+    // Worktree DEVFLOW_CD output
+    if let Some(ref wt) = result.worktree {
+        if !json_output {
+            if wt.created {
+                let cow_hint = if wt.cow_used {
                     " (APFS clone)"
                 } else {
                     " (full copy — CoW unavailable)"
@@ -6306,262 +6506,97 @@ async fn handle_switch_command(
                 println!(
                     "Created worktree for '{}' at {}{}",
                     workspace_name,
-                    wt_path_for_output.display(),
+                    wt.path.display(),
                     cow_hint,
                 );
+            } else {
+                println!("Switching to existing worktree: {}", wt.path.display());
             }
-            worktree_path = Some(wt_path_for_output.display().to_string());
-            worktree_created = true;
-            cow_used = wt_result.cow_used;
-            if !json_output {
-                println!("DEVFLOW_CD={}", wt_path_for_output.display());
-                if !shell_integration {
-                    print_manual_cd_hint(&wt_path_for_output);
-                }
+            println!("DEVFLOW_CD={}", wt.path.display());
+            if !shell_integration {
+                print_manual_cd_hint(&wt.path);
             }
         }
-    } else {
-        // ── Classic mode (no worktrees) ────────────────────────────────
-        let vcs_repo = vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
-        let workspace_exists = vcs_repo.workspace_exists(workspace_name)?;
-        if !workspace_exists {
-            if !create {
-                anyhow::bail!(
-                    "Workspace '{}' does not exist. Use `devflow switch -c {}` to create it.",
-                    workspace_name,
-                    workspace_name
-                );
-            }
-
-            let parent = resolve_parent_for_branch_creation(
-                config,
-                config_path,
-                workspace_name,
-                from,
-                &context,
-                json_output,
-                non_interactive,
-            )
-            .await?;
-
-            if !json_output {
-                println!(
-                    "Creating workspace '{}' (parent: {})",
-                    workspace_name,
-                    parent.as_deref().unwrap_or("HEAD")
-                );
-            }
-            vcs_repo.create_workspace(workspace_name, parent.as_deref())?;
-            branch_created = true;
-            parent_for_new_branch = parent;
-        } else if create && !json_output {
+    } else if !json_output {
+        if result.branch_created {
             println!(
-                "Workspace '{}' already exists; switching to it",
-                workspace_name
+                "Creating workspace '{}' (parent: {})",
+                workspace_name,
+                result.parent.as_deref().unwrap_or("HEAD")
             );
         }
-        // Switch the working directory to the target workspace
-        if !json_output {
-            println!("Checking out workspace: {}", workspace_name);
-        }
-        vcs_repo.checkout_workspace(workspace_name)?;
+        println!("Switched git workspace: {}", result.workspace);
     }
 
-    // ── Workspace registration (unconditional — independent of services) ──
-    let normalized_branch = config.get_normalized_workspace_name(workspace_name);
-    let parent_for_registry = if branch_created {
-        parent_for_new_branch.as_deref()
-    } else {
-        None
-    };
-    let cow_used_for_registry = if worktree_created {
-        Some(cow_used)
-    } else {
-        None
-    };
-    if let Err(e) = register_workspace_in_state(
-        config,
-        config_path,
-        workspace_name,
-        parent_for_registry,
-        worktree_path.clone(),
-        cow_used_for_registry,
-    ) {
-        log::warn!("Failed to register workspace in devflow registry: {}", e);
-    }
+    // Service results output
+    let success_count = result.services.iter().filter(|r| r.success).count();
+    let fail_count = result.services.iter().filter(|r| !r.success).count();
 
-    // ── Service branching (orchestrated across all auto_workspace services) ──
-    if !no_services {
-        // Check if any services are configured before attempting service branching
-        let has_services = !config.resolve_services().is_empty();
-
-        if has_services {
-            if !json_output {
-                println!("Switching service workspaces: {}", normalized_branch);
-            }
-
-            // Orchestrate switch across all auto-workspace services
-            let service_parent = if branch_created {
-                parent_for_new_branch
-                    .as_deref()
-                    .map(|p| config.get_normalized_workspace_name(p))
-            } else {
-                config_path.as_ref().and_then(|path| {
-                    LocalStateManager::new()
-                        .ok()
-                        .and_then(|state| state.get_workspace(path, &normalized_branch))
-                        .and_then(|b| b.parent)
+    if json_output {
+        let service_results: Vec<serde_json::Value> = result
+            .services
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "service": r.service_name,
+                    "success": r.success,
+                    "message": r.message,
                 })
-            };
-            let results = services::factory::orchestrate_switch(
-                config,
-                &normalized_branch,
-                service_parent.as_deref(),
-            )
-            .await?;
-
-            let success_count = results.iter().filter(|r| r.success).count();
-            let fail_count = results.iter().filter(|r| !r.success).count();
-
-            if json_output {
-                let service_results: Vec<serde_json::Value> = results
-                    .iter()
-                    .map(|r| {
-                        serde_json::json!({
-                            "service": r.service_name,
-                            "success": r.success,
-                            "message": r.message,
-                        })
-                    })
-                    .collect();
-                json_summary = Some(serde_json::json!({
-                    "workspace": normalized_branch,
-                    "parent": if branch_created {
-                        parent_for_new_branch
-                            .as_deref()
-                            .map(|p| config.get_normalized_workspace_name(p))
-                    } else {
-                        None
-                    },
-                    "worktree_path": worktree_path,
-                    "worktree_created": worktree_created,
-                    "cow_used": cow_used,
-                    "services_switched": success_count,
-                    "services_failed": fail_count,
-                    "service_results": service_results,
-                }));
-            } else {
-                for r in &results {
-                    if r.success {
-                        log::info!("[{}] {}", r.service_name, r.message);
-                    } else {
-                        println!("Warning: {}", r.message);
-                    }
-                }
-
-                if success_count > 0 && fail_count == 0 {
-                    println!(
-                        "Switched to service workspace: {} ({} service(s))",
-                        normalized_branch, success_count
-                    );
-                } else if success_count > 0 {
-                    println!(
-                        "Switched to service workspace: {} ({}/{} service(s), {} failed)",
-                        normalized_branch,
-                        success_count,
-                        results.len(),
-                        fail_count
-                    );
-                } else if !results.is_empty() {
-                    println!(
-                        "Warning: Failed to switch service workspaces on all {} service(s)",
-                        results.len()
-                    );
-                }
-            }
-
-            if fail_count > 0 {
-                if let Some(summary) = json_summary.take() {
-                    println!("{}", serde_json::to_string_pretty(&summary)?);
-                }
-                anyhow::bail!(
-                    "Failed to switch service workspaces on {}/{} service(s)",
-                    fail_count,
-                    results.len()
-                );
-            }
-        } else {
-            // No services configured — VCS switch already done above
-            if json_output {
-                json_summary = Some(serde_json::json!({
-                    "workspace": normalized_branch,
-                    "parent": if branch_created {
-                        parent_for_new_branch
-                            .as_deref()
-                            .map(|p| config.get_normalized_workspace_name(p))
-                    } else {
-                        None
-                    },
-                    "worktree_path": worktree_path,
-                    "worktree_created": worktree_created,
-                    "cow_used": cow_used,
-                    "services": "none_configured",
-                }));
-            } else {
-                if worktree_enabled {
-                    println!("Selected workspace/worktree: {}", normalized_branch);
-                } else {
-                    println!("Switched git workspace: {}", normalized_branch);
-                }
-                println!("  (no services configured — use 'devflow service add' to add one)");
-            }
-        }
-    } else {
-        // Services skipped (--no-services) — workspace registration already done above
-        if json_output {
-            json_summary = Some(serde_json::json!({
-                "workspace": normalized_branch,
-                "parent": if branch_created {
-                    parent_for_new_branch
-                        .as_deref()
-                        .map(|p| config.get_normalized_workspace_name(p))
-                } else {
-                    None
-                },
-                "worktree_path": worktree_path,
-                "worktree_created": worktree_created,
-                "cow_used": cow_used,
-                "services_skipped": true,
-            }));
-        } else {
-            if worktree_enabled {
-                println!(
-                    "Selected workspace/worktree (services skipped): {}",
-                    normalized_branch
-                );
-            } else {
-                println!(
-                    "Switched git workspace (services skipped): {}",
-                    normalized_branch
-                );
-            }
-        }
-    }
-
-    // ── Hooks ──────────────────────────────────────────────────────────
-    if !no_verify {
-        run_hooks(
-            config,
-            &normalized_branch,
-            HookPhase::PostSwitch,
-            json_output,
-            non_interactive,
-        )
-        .await?;
-    }
-
-    if let Some(summary) = json_summary {
+            })
+            .collect();
+        let summary = serde_json::json!({
+            "workspace": result.workspace,
+            "parent": result.parent,
+            "worktree_path": result.worktree.as_ref().map(|w| w.path.display().to_string()),
+            "worktree_created": result.worktree.as_ref().map(|w| w.created).unwrap_or(false),
+            "cow_used": result.worktree.as_ref().map(|w| w.cow_used).unwrap_or(false),
+            "services_switched": success_count,
+            "services_failed": fail_count,
+            "services_skipped": no_services,
+            "service_results": service_results,
+        });
         println!("{}", serde_json::to_string_pretty(&summary)?);
+    } else if !no_services && !result.services.is_empty() {
+        for r in &result.services {
+            if r.success {
+                log::info!("[{}] {}", r.service_name, r.message);
+            } else {
+                println!("Warning: {}", r.message);
+            }
+        }
+
+        if success_count > 0 && fail_count == 0 {
+            println!(
+                "Switched to service workspace: {} ({} service(s))",
+                result.workspace, success_count
+            );
+        } else if success_count > 0 {
+            println!(
+                "Switched to service workspace: {} ({}/{} service(s), {} failed)",
+                result.workspace,
+                success_count,
+                result.services.len(),
+                fail_count
+            );
+        } else {
+            println!(
+                "Warning: Failed to switch service workspaces on all {} service(s)",
+                result.services.len()
+            );
+        }
+
+        if fail_count > 0 {
+            anyhow::bail!(
+                "Failed to switch service workspaces on {}/{} service(s)",
+                fail_count,
+                result.services.len()
+            );
+        }
+    } else if !no_services && !json_output {
+        if worktree_enabled {
+            println!("Selected workspace/worktree: {}", result.workspace);
+        }
+        println!("  (no services configured — use 'devflow service add' to add one)");
     }
 
     Ok(())
@@ -6574,161 +6609,30 @@ async fn handle_switch_to_main(
     no_services: bool,
     no_verify: bool,
     non_interactive: bool,
+    trigger_source: Option<&str>,
+    vcs_event: Option<&str>,
 ) -> Result<()> {
-    let main_workspace = &config.git.main_workspace;
-    let shell_integration = shell_integration_enabled();
-
-    if let Err(e) = ensure_default_workspace_registered(config, config_path) {
-        log::warn!("Failed to ensure default workspace registration: {}", e);
-    }
+    let main_workspace = config.git.main_workspace.clone();
 
     if !json_output {
         println!("Switching to main workspace: {}", main_workspace);
     }
 
-    // ── Switch the git workspace / worktree ───────────────────────────────
-    let worktree_enabled = config.worktree.as_ref().is_some_and(|wt| wt.enabled);
-    let mut worktree_path: Option<String> = None;
-
-    if worktree_enabled {
-        let vcs_repo = vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
-        let target_path = vcs_repo
-            .worktree_path(main_workspace)?
-            .or_else(|| vcs_repo.main_worktree_dir());
-
-        if let Some(wt_path) = target_path {
-            // If we're already in the target directory, ensure main is checked out now.
-            if std::env::current_dir().ok().as_deref() == Some(wt_path.as_path()) {
-                vcs_repo.checkout_workspace(main_workspace)?;
-            }
-
-            if !json_output {
-                println!("Switching to main worktree: {}", wt_path.display());
-                println!("DEVFLOW_CD={}", wt_path.display());
-                if !shell_integration {
-                    print_manual_cd_hint(&wt_path);
-                }
-            }
-            worktree_path = Some(wt_path.display().to_string());
-        } else {
-            vcs_repo.checkout_workspace(main_workspace)?;
-        }
-    } else {
-        // Classic mode — switch the working directory to the main workspace
-        let vcs_repo = vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
-        vcs_repo.checkout_workspace(main_workspace)?;
-    }
-
-    if let Err(e) = register_workspace_in_state(
+    // Delegate to the shared switch command — main is just a special case
+    handle_switch_command(
         config,
+        &main_workspace,
         config_path,
-        main_workspace,
+        false,
         None,
-        worktree_path.clone(),
-        None,
-    ) {
-        log::warn!(
-            "Failed to register main workspace in devflow registry: {}",
-            e
-        );
-    }
-
-    // ── Switch services to main ────────────────────────────────────────
-    let has_services = !config.resolve_services().is_empty();
-    let mut json_summary: Option<serde_json::Value> = None;
-
-    if no_services {
-        if json_output {
-            json_summary = Some(serde_json::json!({
-                "workspace": main_workspace,
-                "worktree_path": worktree_path,
-                "services_skipped": true,
-            }));
-        } else {
-            println!(
-                "Switched to main workspace (services skipped): {}",
-                main_workspace
-            );
-        }
-    } else if has_services {
-        let results = services::factory::orchestrate_switch(config, main_workspace, None).await?;
-        let success_count = results.iter().filter(|r| r.success).count();
-        let fail_count = results.iter().filter(|r| !r.success).count();
-
-        if json_output {
-            let service_results: Vec<serde_json::Value> = results
-                .iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "service": r.service_name,
-                        "success": r.success,
-                        "message": r.message,
-                    })
-                })
-                .collect();
-            json_summary = Some(serde_json::json!({
-                "workspace": main_workspace,
-                "worktree_path": worktree_path,
-                "services_switched": success_count,
-                "services_failed": fail_count,
-                "service_results": service_results,
-            }));
-        } else if fail_count == 0 {
-            println!(
-                "Switched to main workspace: {} ({} service(s))",
-                main_workspace, success_count
-            );
-        } else {
-            println!(
-                "Switched to main workspace: {} ({}/{} service(s), {} failed)",
-                main_workspace,
-                success_count,
-                results.len(),
-                fail_count
-            );
-        }
-
-        if fail_count > 0 {
-            if let Some(summary) = json_summary.take() {
-                println!("{}", serde_json::to_string_pretty(&summary)?);
-            }
-            anyhow::bail!(
-                "Failed to switch to main on {}/{} service(s)",
-                fail_count,
-                results.len()
-            );
-        }
-    } else {
-        // No services configured
-        if json_output {
-            json_summary = Some(serde_json::json!({
-                "workspace": main_workspace,
-                "worktree_path": worktree_path,
-                "services": "none_configured",
-            }));
-        } else {
-            println!("Switched to main workspace: {}", main_workspace);
-            println!("  (no services configured — use 'devflow service add' to add one)");
-        }
-    }
-
-    // Execute hooks
-    if !no_verify {
-        run_hooks(
-            config,
-            main_workspace,
-            HookPhase::PostSwitch,
-            json_output,
-            non_interactive,
-        )
-        .await?;
-    }
-
-    if let Some(summary) = json_summary {
-        println!("{}", serde_json::to_string_pretty(&summary)?);
-    }
-
-    Ok(())
+        no_services,
+        no_verify,
+        json_output,
+        non_interactive,
+        trigger_source,
+        vcs_event,
+    )
+    .await
 }
 
 async fn handle_remove_command(
@@ -6740,8 +6644,7 @@ async fn handle_remove_command(
     json_output: bool,
     non_interactive: bool,
 ) -> Result<()> {
-    // VCS is optional — `remove` must work even without a git/jj repo
-    // (e.g. service-only cleanup in a plain directory with .devflow.yml).
+    // ── CLI-specific safety checks ──────────────────────────────────
     let vcs_repo = vcs::detect_vcs_provider(".").ok();
 
     // Safety check: don't remove main workspace
@@ -6789,133 +6692,105 @@ async fn handle_remove_command(
         }
     }
 
-    let mut worktree_removed = false;
-    let mut worktree_path_str: Option<String> = None;
-    let mut service_results: Vec<serde_json::Value> = Vec::new();
-    let mut service_failures = 0usize;
-    let mut branch_deleted = false;
-    let mut branch_delete_error: Option<String> = None;
+    // ── Delegate to core lifecycle ──────────────────────────────────
+    let approval_mode = if non_interactive || json_output {
+        devflow_core::workspace::hooks::HookApprovalMode::NonInteractive
+    } else {
+        devflow_core::workspace::hooks::HookApprovalMode::Interactive
+    };
 
-    // 1. Remove worktree (if VCS is available and worktree exists)
-    if let Some(ref repo) = vcs_repo {
-        if let Some(wt_path) = repo.worktree_path(workspace_name)? {
-            worktree_path_str = Some(wt_path.display().to_string());
-            if !json_output {
-                println!("Removing worktree at: {}", wt_path.display());
-            }
-            if let Err(e) = repo.remove_worktree(&wt_path) {
-                log::warn!(
-                    "Failed to remove worktree, falling back to fs removal: {}",
-                    e
-                );
-                if wt_path.exists() {
-                    std::fs::remove_dir_all(&wt_path)
-                        .context("Failed to remove worktree directory")?;
-                }
-            }
-            worktree_removed = true;
-            if !json_output {
-                println!("Worktree removed.");
-            }
-        }
-    }
+    let project_dir = config_path
+        .as_ref()
+        .and_then(|p| p.parent())
+        .map(|d| d.to_path_buf())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
 
-    // 2. Delete service workspaces (unless --keep-services)
-    if !keep_services {
-        let normalized = config.get_normalized_workspace_name(workspace_name);
-        if !json_output {
-            println!("Deleting service workspaces for: {}", normalized);
-        }
+    let options = devflow_core::workspace::delete::DeleteOptions {
+        lifecycle: devflow_core::workspace::LifecycleOptions {
+            skip_hooks: false,
+            skip_services: false,
+            hook_approval: approval_mode,
+            verbose_hooks: !json_output,
+            ..Default::default()
+        },
+        keep_services,
+    };
 
-        let results = services::factory::orchestrate_delete(config, &normalized).await?;
+    let result = devflow_core::workspace::delete::delete_workspace(
+        config,
+        &project_dir,
+        workspace_name,
+        &options,
+    )
+    .await?;
 
-        for r in &results {
-            if !r.success {
-                service_failures += 1;
-            }
-            if json_output {
-                service_results.push(serde_json::json!({
+    // ── CLI-specific output ──────────────────────────────────────────
+    let service_failures = result.services.iter().filter(|r| !r.success).count();
+
+    if json_output {
+        let service_json: Vec<serde_json::Value> = result
+            .services
+            .iter()
+            .map(|r| {
+                serde_json::json!({
                     "service": r.service_name,
                     "success": r.success,
                     "message": r.message,
-                }));
-            } else if r.success {
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": if service_failures == 0 && result.branch_deleted { "ok" } else { "error" },
+                "workspace": workspace_name,
+                "branch_deleted": result.branch_deleted,
+                "worktree_removed": result.worktree_removed,
+                "worktree_path": result.worktree_path,
+                "services_skipped": keep_services,
+                "service_failures": service_failures,
+                "service_results": service_json,
+            }))?
+        );
+    } else {
+        if result.worktree_removed {
+            if let Some(ref wt) = result.worktree_path {
+                println!("Removed worktree: {}", wt);
+            }
+        }
+        for r in &result.services {
+            if r.success {
                 println!("  [{}] {}", r.service_name, r.message);
             } else {
                 println!("  [{}] Warning: {}", r.service_name, r.message);
             }
         }
-    }
-
-    // 3. Delete the VCS workspace (if VCS is available)
-    if let Some(ref repo) = vcs_repo {
-        if !json_output {
-            println!("Deleting workspace: {}", workspace_name);
+        if result.branch_deleted {
+            println!("Workspace deleted: {}", workspace_name);
         }
-        if let Err(e) = repo.delete_workspace(workspace_name) {
-            log::warn!("Failed to delete workspace '{}': {}", workspace_name, e);
-            branch_delete_error = Some(e.to_string());
-            if !json_output {
-                println!("Warning: Failed to delete workspace: {}", e);
-            }
+        if service_failures == 0 && result.branch_deleted {
+            println!("Workspace '{}' removed successfully.", workspace_name);
         } else {
-            branch_deleted = true;
-            if !json_output {
-                println!("Workspace deleted: {}", workspace_name);
-            }
+            println!(
+                "Workspace '{}' removal completed with errors.",
+                workspace_name
+            );
         }
-    }
-
-    // 4. Unregister the workspace from local devflow registry
-    if let Some(ref path) = config_path {
-        if let Ok(mut state) = LocalStateManager::new() {
-            let normalized = config.get_normalized_workspace_name(workspace_name);
-            if let Err(e) = state.unregister_workspace(path, &normalized) {
-                log::warn!(
-                    "Failed to unregister workspace from devflow registry: {}",
-                    e
-                );
-            }
-        }
-    }
-
-    if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "status": if service_failures == 0 && branch_delete_error.is_none() { "ok" } else { "error" },
-                "workspace": workspace_name,
-                "branch_deleted": branch_deleted,
-                "branch_delete_error": branch_delete_error.clone(),
-                "worktree_removed": worktree_removed,
-                "worktree_path": worktree_path_str,
-                "services_skipped": keep_services,
-                "service_failures": service_failures,
-                "service_results": service_results,
-            }))?
-        );
-    } else if service_failures == 0 && branch_delete_error.is_none() {
-        println!("Workspace '{}' removed successfully.", workspace_name);
-    } else {
-        println!(
-            "Workspace '{}' removal completed with errors.",
-            workspace_name
-        );
     }
 
     if service_failures > 0 {
         anyhow::bail!(
             "Failed to remove service workspaces on {}/{} service(s)",
             service_failures,
-            service_results.len()
+            result.services.len()
         );
     }
 
-    if let Some(error) = branch_delete_error {
+    if !result.branch_deleted {
         anyhow::bail!(
-            "Failed to delete VCS workspace '{}': {}",
-            workspace_name,
-            error
+            "Failed to delete VCS workspace '{}'",
+            workspace_name
         );
     }
 
@@ -7361,6 +7236,24 @@ async fn handle_merge_command(
         }
     }
 
+    // Fire pre-merge hooks
+    {
+        let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let hook_opts = devflow_core::workspace::LifecycleOptions {
+            hook_approval: devflow_core::workspace::hooks::HookApprovalMode::Interactive,
+            verbose_hooks: !json_output,
+            ..Default::default()
+        };
+        devflow_core::workspace::hooks::run_lifecycle_hooks(
+            config,
+            &project_dir,
+            &source,
+            HookPhase::PreMerge,
+            &hook_opts,
+        )
+        .await?;
+    }
+
     // Perform the merge using git CLI (git2 merge is complex; shelling out is more reliable)
     if merge_dir == initial_dir {
         // Merge in the current worktree, so we must first move to target workspace.
@@ -7398,48 +7291,34 @@ async fn handle_merge_command(
         println!("Merge successful.");
     }
 
+    // Fire post-merge hooks
+    {
+        let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let hook_opts = devflow_core::workspace::LifecycleOptions {
+            hook_approval: devflow_core::workspace::hooks::HookApprovalMode::Interactive,
+            verbose_hooks: !json_output,
+            ..Default::default()
+        };
+        devflow_core::workspace::hooks::run_lifecycle_hooks(
+            config,
+            &project_dir,
+            target_workspace,
+            HookPhase::PostMerge,
+            &hook_opts,
+        )
+        .await?;
+    }
+
     let mut cleanup_result = serde_json::json!(null);
 
-    // Cleanup if requested
+    // Cleanup if requested — delegate to the core workspace delete lifecycle
     if cleanup {
         if !json_output {
             println!("\nCleaning up source workspace '{}'...", source);
         }
 
-        let mut worktree_removed = false;
-        let mut branch_deleted = false;
-        let mut service_results: Vec<serde_json::Value> = Vec::new();
-
-        // Remove worktree if exists
-        if let Ok(Some(wt_path)) = vcs_repo.worktree_path(&source) {
-            if wt_path == initial_dir {
-                log::warn!(
-                    "Skipping removal of current worktree '{}'; run cleanup from another directory/worktree",
-                    wt_path.display()
-                );
-                if !json_output {
-                    println!(
-                        "Warning: Skipping removal of current worktree: {}",
-                        wt_path.display()
-                    );
-                }
-            } else {
-                if !json_output {
-                    println!("Removing worktree at: {}", wt_path.display());
-                }
-                if let Err(e) = vcs_repo.remove_worktree(&wt_path) {
-                    log::warn!("Failed to remove worktree: {}", e);
-                    if wt_path.exists() {
-                        std::fs::remove_dir_all(&wt_path).ok();
-                    }
-                }
-                worktree_removed = true;
-            }
-        }
-
-        // Delete VCS workspace
-        // If this invocation is still on the source workspace, detach first so the
-        // workspace becomes deletable.
+        // Safety: if we are still on the source workspace, detach HEAD first
+        // so the branch becomes deletable.
         if let Ok(Some(current)) = vcs_repo.current_workspace() {
             if current == source {
                 let detach_status = tokio::process::Command::new("git")
@@ -7448,8 +7327,7 @@ async fn handle_merge_command(
                     .status()
                     .await;
                 match detach_status {
-                    Ok(s) if s.success() => {}
-                    Ok(s) => {
+                    Ok(s) if !s.success() => {
                         log::warn!(
                             "Failed to detach HEAD before deleting workspace '{}': exit code {:?}",
                             source,
@@ -7463,59 +7341,81 @@ async fn handle_merge_command(
                             e
                         );
                     }
+                    _ => {}
                 }
             }
         }
 
-        if let Err(e) = vcs_repo.delete_workspace(&source) {
-            log::warn!("Failed to delete workspace '{}': {}", source, e);
-            if !json_output {
-                println!("Warning: Failed to delete workspace: {}", e);
-            }
-        } else {
-            branch_deleted = true;
-            if !json_output {
-                println!("Deleted workspace: {}", source);
-            }
-        }
+        let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-        // Delete service workspaces across all auto-workspace services
-        let normalized = config.get_normalized_workspace_name(&source);
-        let results = services::factory::orchestrate_delete(config, &normalized).await;
-        match results {
-            Ok(results) => {
-                for r in &results {
-                    if json_output {
-                        service_results.push(serde_json::json!({
+        let delete_options = devflow_core::workspace::delete::DeleteOptions {
+            lifecycle: devflow_core::workspace::LifecycleOptions {
+                skip_hooks: false,
+                skip_services: false,
+                hook_approval: devflow_core::workspace::hooks::HookApprovalMode::Interactive,
+                verbose_hooks: !json_output,
+                ..Default::default()
+            },
+            keep_services: false,
+        };
+
+        let delete_result = devflow_core::workspace::delete::delete_workspace(
+            config,
+            &project_dir,
+            &source,
+            &delete_options,
+        )
+        .await;
+
+        match delete_result {
+            Ok(result) => {
+                if !json_output {
+                    if result.worktree_removed {
+                        if let Some(ref wt) = result.worktree_path {
+                            println!("Removed worktree: {}", wt);
+                        }
+                    }
+                    for r in &result.services {
+                        if r.success {
+                            println!("{}", r.message);
+                        } else {
+                            println!("Warning: {}", r.message);
+                        }
+                    }
+                    if result.branch_deleted {
+                        println!("Deleted workspace: {}", source);
+                    }
+                    println!("Cleanup complete.");
+                }
+
+                let service_json: Vec<serde_json::Value> = result
+                    .services
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
                             "service": r.service_name,
                             "success": r.success,
                             "message": r.message,
-                        }));
-                    } else if r.success {
-                        println!("{}", r.message);
-                    } else {
-                        log::warn!("{}", r.message);
-                        println!("Warning: {}", r.message);
-                    }
-                }
+                        })
+                    })
+                    .collect();
+
+                cleanup_result = serde_json::json!({
+                    "worktree_removed": result.worktree_removed,
+                    "branch_deleted": result.branch_deleted,
+                    "service_results": service_json,
+                });
             }
             Err(e) => {
-                log::warn!("Failed to delete service workspaces: {}", e);
+                log::warn!("Failed to clean up source workspace '{}': {}", source, e);
                 if !json_output {
-                    println!("Warning: Failed to delete service workspaces: {}", e);
+                    println!("Warning: Failed to clean up source workspace: {}", e);
                 }
+                cleanup_result = serde_json::json!({
+                    "error": e.to_string(),
+                });
             }
         }
-
-        if !json_output {
-            println!("Cleanup complete.");
-        }
-
-        cleanup_result = serde_json::json!({
-            "worktree_removed": worktree_removed,
-            "branch_deleted": branch_deleted,
-            "service_results": service_results,
-        });
     }
 
     if json_output {
@@ -7943,6 +7843,8 @@ async fn handle_agent_command(
                 true,  // no_verify (agent workspaces skip hooks)
                 json_output,
                 true, // non_interactive
+                None,
+                None,
             )
             .await?;
 

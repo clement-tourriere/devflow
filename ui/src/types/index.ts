@@ -10,6 +10,7 @@ export interface ProjectDetail {
   current_workspace: string | null;
   service_count: number;
   workspace_count: number;
+  hook_count: number;
   worktree_enabled: boolean;
   vcs_type: string | null;
 }
@@ -105,11 +106,53 @@ export interface HookInfo {
   name: string;
   command: string;
   is_extended: boolean;
+  action_type?: string;
+  condition?: string;
+  background: boolean;
+  raw: unknown;
 }
 
 export interface VcsHooksActionResult {
   installed: boolean;
   detail: string;
+}
+
+export interface ActionTypeInfo {
+  type: string;
+  label: string;
+  description: string;
+  requires_approval: boolean;
+  fields: ActionFieldInfo[];
+}
+
+export interface ActionFieldInfo {
+  name: string;
+  label: string;
+  field_type: string; // "string" | "text" | "bool" | "select" | "key-value"
+  required: boolean;
+  default_value?: string;
+  options?: string[];
+  template: boolean;
+}
+
+export interface HookRunResult {
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  background: number;
+  errors: string[];
+}
+
+export interface HookPreview {
+  type: string;
+  rendered_command?: string;
+  action_type?: string;
+  requires_approval?: boolean;
+}
+
+export interface TriggerMapping {
+  vcs_event: string;
+  phases: string[];
 }
 
 export interface ProxyStatus {

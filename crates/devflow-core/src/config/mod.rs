@@ -28,6 +28,9 @@ pub struct Config {
     /// Maps hook phase names to named hook entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hooks: Option<crate::hooks::HooksConfig>,
+    /// VCS event → devflow phase trigger mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggers: Option<crate::hooks::triggers::TriggersConfig>,
     /// AI agent integration configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentConfig>,
@@ -660,6 +663,7 @@ impl Default for Config {
             services: None,
             worktree: None,
             hooks: None,
+            triggers: None,
             agent: None,
             commit: None,
         }

@@ -213,6 +213,12 @@ function ProjectCard({ project }: { project: ProjectInfo }) {
             {d.workspace_count} workspace{d.workspace_count !== 1 ? "es" : ""}
             {" \u00B7 "}
             {d.service_count} service{d.service_count !== 1 ? "s" : ""}
+            {d.hook_count > 0 && (
+              <>
+                {" \u00B7 "}
+                {d.hook_count} hook{d.hook_count !== 1 ? "s" : ""}
+              </>
+            )}
           </span>
         )}
         {project.containerCount > 0 && (

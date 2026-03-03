@@ -10,3 +10,4 @@ pub mod state;
 pub mod vcs;
 
 pub mod agent;
+pub mod workspace;

@@ -208,9 +208,17 @@ impl App {
     /// Spawn a background task to align services to a workspace.
     fn spawn_switch_services(&self, workspace_name: String) {
         let config = self.context.config.clone();
+        let project_dir = self
+            .context
+            .config_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|d| d.to_path_buf())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
-            match DevflowContext::switch_services_bg(&config, &workspace_name).await {
+            match DevflowContext::switch_services_bg(&config, &workspace_name, &project_dir).await {
                 Ok(msg) => {
                     let _ = tx.send(Action::OperationComplete {
                         success: true,
@@ -229,9 +237,19 @@ impl App {
     /// Spawn a background task for creating a workspace (service orchestration).
     fn spawn_create_workspace(&self, name: String, from: Option<String>) {
         let config = self.context.config.clone();
+        let project_dir = self
+            .context
+            .config_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|d| d.to_path_buf())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
-            match DevflowContext::create_workspace_bg(&config, &name, from.as_deref()).await {
+            match DevflowContext::create_workspace_bg(&config, &name, from.as_deref(), &project_dir)
+                .await
+            {
                 Ok(msg) => {
                     let _ = tx.send(Action::OperationComplete {
                         success: true,
@@ -251,9 +269,17 @@ impl App {
     /// main thread so VCS deletion can happen synchronously.
     fn spawn_delete_workspace(&self, name: String) {
         let config = self.context.config.clone();
+        let project_dir = self
+            .context
+            .config_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|d| d.to_path_buf())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
-            match DevflowContext::delete_workspace_bg(&config, &name).await {
+            match DevflowContext::delete_workspace_bg(&config, &name, &project_dir).await {
                 Ok(msg) => {
                     let _ = tx.send(Action::OperationComplete {
                         success: true,
@@ -554,6 +580,28 @@ impl App {
                 if let Err(e) = self.context.delete_vcs_branch(name) {
                     self.set_status(format!("VCS workspace delete failed: {}", e), true);
                 } else {
+                    // Fire post-remove hooks in background
+                    let config = self.context.config.clone();
+                    let project_dir = self
+                        .context
+                        .config_path
+                        .as_ref()
+                        .and_then(|p| p.parent())
+                        .map(|d| d.to_path_buf())
+                        .or_else(|| std::env::current_dir().ok())
+                        .unwrap_or_else(|| std::path::PathBuf::from("."));
+                    let ws_name = name.clone();
+                    tokio::spawn(async move {
+                        let hook_opts = devflow_core::workspace::LifecycleOptions::default();
+                        devflow_core::workspace::hooks::run_lifecycle_hooks_best_effort(
+                            &config,
+                            &project_dir,
+                            &ws_name,
+                            devflow_core::hooks::HookPhase::PostRemove,
+                            &hook_opts,
+                        )
+                        .await;
+                    });
                     // Refresh everything after workspace deletion
                     self.context.refresh_vcs_snapshot();
                     self.load_initial_data();

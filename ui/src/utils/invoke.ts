@@ -9,6 +9,10 @@ import type {
   AddServiceRequest,
   HookPhaseEntry,
   VcsHooksActionResult,
+  ActionTypeInfo,
+  HookRunResult,
+  HookPreview,
+  TriggerMapping,
   ProxyStatus,
   ContainerEntry,
   CertificateStatus,
@@ -147,6 +151,44 @@ export const installVcsHooks = (projectPath: string) =>
   invoke<VcsHooksActionResult>("install_vcs_hooks", { projectPath });
 export const uninstallVcsHooks = (projectPath: string) =>
   invoke<VcsHooksActionResult>("uninstall_vcs_hooks", { projectPath });
+export const getActionTypes = () =>
+  invoke<ActionTypeInfo[]>("get_action_types");
+export const saveHooks = (projectPath: string, hooks: unknown) =>
+  invoke<void>("save_hooks", { projectPath, hooks });
+export const validateHook = (
+  projectPath: string,
+  hook: unknown,
+  workspaceName?: string
+) =>
+  invoke<{ valid: boolean }>("validate_hook", {
+    projectPath,
+    hook,
+    workspaceName,
+  });
+export const previewHook = (
+  projectPath: string,
+  hook: unknown,
+  workspaceName?: string
+) =>
+  invoke<HookPreview>("preview_hook", {
+    projectPath,
+    hook,
+    workspaceName,
+  });
+export const runHook = (
+  projectPath: string,
+  phase: string,
+  hookName: string,
+  workspaceName?: string
+) =>
+  invoke<HookRunResult>("run_hook", {
+    projectPath,
+    phase,
+    hookName,
+    workspaceName,
+  });
+export const getTriggerMappings = (projectPath: string) =>
+  invoke<TriggerMapping[]>("get_trigger_mappings", { projectPath });
 
 // Proxy
 export const startProxy = () => invoke<ProxyStatus>("start_proxy");

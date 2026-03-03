@@ -12,6 +12,7 @@ pub struct ProjectDetail {
     pub current_workspace: Option<String>,
     pub service_count: usize,
     pub workspace_count: usize,
+    pub hook_count: usize,
     pub worktree_enabled: bool,
     pub vcs_type: Option<String>,
 }
@@ -400,6 +401,12 @@ pub async fn get_project_detail(
         .and_then(|c| c.services.as_ref().map(|s| s.len()))
         .unwrap_or(0);
 
+    let hook_count = config
+        .as_ref()
+        .and_then(|c| c.hooks.as_ref())
+        .map(|h| h.values().map(|phase| phase.len()).sum())
+        .unwrap_or(0);
+
     let worktree_enabled = config
         .as_ref()
         .and_then(|c| c.worktree.as_ref())
@@ -445,6 +452,7 @@ pub async fn get_project_detail(
         current_workspace,
         service_count,
         workspace_count,
+        hook_count,
         worktree_enabled,
         vcs_type,
     })

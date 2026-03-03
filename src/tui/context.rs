@@ -262,6 +262,12 @@ impl DevflowContext {
                             ext.background,
                             ext.condition.clone(),
                         ),
+                        HookEntry::Action(act) => (
+                            format!("action: {}", act.action.type_name()),
+                            true,
+                            act.background,
+                            act.condition.clone(),
+                        ),
                     };
                     hooks.push(HookEntryInfo {
                         name: name.clone(),
@@ -484,13 +490,53 @@ impl DevflowContext {
     }
 
     /// Switch/align services to a workspace without changing VCS checkout.
-    pub async fn switch_services_bg(config: &Config, workspace_name: &str) -> Result<String> {
+    pub async fn switch_services_bg(
+        config: &Config,
+        workspace_name: &str,
+        project_dir: &std::path::Path,
+    ) -> Result<String> {
         if config.resolve_services().is_empty() {
             return Ok("No services configured".to_string());
         }
 
+        use devflow_core::workspace::hooks::run_lifecycle_hooks_best_effort;
+        let hook_opts = devflow_core::workspace::LifecycleOptions::default();
+
+        // Pre-switch hooks (best-effort, no approval in TUI)
+        run_lifecycle_hooks_best_effort(
+            config,
+            project_dir,
+            workspace_name,
+            devflow_core::hooks::HookPhase::PreSwitch,
+            &hook_opts,
+        )
+        .await;
+
         let results = factory::orchestrate_switch(config, workspace_name, None).await?;
         let failures: Vec<_> = results.iter().filter(|r| !r.success).collect();
+
+        // Post-service-switch hooks
+        if failures.len() < results.len() {
+            run_lifecycle_hooks_best_effort(
+                config,
+                project_dir,
+                workspace_name,
+                devflow_core::hooks::HookPhase::PostServiceSwitch,
+                &hook_opts,
+            )
+            .await;
+        }
+
+        // Post-switch hooks
+        run_lifecycle_hooks_best_effort(
+            config,
+            project_dir,
+            workspace_name,
+            devflow_core::hooks::HookPhase::PostSwitch,
+            &hook_opts,
+        )
+        .await;
+
         if failures.is_empty() {
             Ok(format!(
                 "Aligned services to workspace '{}'",
@@ -511,9 +557,54 @@ impl DevflowContext {
         config: &Config,
         name: &str,
         from: Option<&str>,
+        project_dir: &std::path::Path,
     ) -> Result<String> {
+        use devflow_core::workspace::hooks::run_lifecycle_hooks_best_effort;
+        let hook_opts = devflow_core::workspace::LifecycleOptions::default();
+
+        // Pre-service-create hooks
+        run_lifecycle_hooks_best_effort(
+            config,
+            project_dir,
+            name,
+            devflow_core::hooks::HookPhase::PreServiceCreate,
+            &hook_opts,
+        )
+        .await;
+
         let results = factory::orchestrate_create(config, name, from).await?;
         let failures: Vec<_> = results.iter().filter(|r| !r.success).collect();
+
+        // Post-service-create hooks
+        run_lifecycle_hooks_best_effort(
+            config,
+            project_dir,
+            name,
+            devflow_core::hooks::HookPhase::PostServiceCreate,
+            &hook_opts,
+        )
+        .await;
+
+        // Post-create hooks
+        run_lifecycle_hooks_best_effort(
+            config,
+            project_dir,
+            name,
+            devflow_core::hooks::HookPhase::PostCreate,
+            &hook_opts,
+        )
+        .await;
+
+        // Post-switch hooks
+        run_lifecycle_hooks_best_effort(
+            config,
+            project_dir,
+            name,
+            devflow_core::hooks::HookPhase::PostSwitch,
+            &hook_opts,
+        )
+        .await;
+
         if failures.is_empty() {
             Ok(format!("Created and switched to workspace '{}'", name))
         } else {
@@ -527,9 +618,47 @@ impl DevflowContext {
     }
 
     /// Delete service workspaces + VCS workspace.
-    pub async fn delete_workspace_bg(config: &Config, name: &str) -> Result<String> {
+    pub async fn delete_workspace_bg(
+        config: &Config,
+        name: &str,
+        project_dir: &std::path::Path,
+    ) -> Result<String> {
+        use devflow_core::workspace::hooks::run_lifecycle_hooks_best_effort;
+        let hook_opts = devflow_core::workspace::LifecycleOptions::default();
+
+        // Pre-remove hooks
+        run_lifecycle_hooks_best_effort(
+            config,
+            project_dir,
+            name,
+            devflow_core::hooks::HookPhase::PreRemove,
+            &hook_opts,
+        )
+        .await;
+
+        // Pre-service-delete hooks
+        run_lifecycle_hooks_best_effort(
+            config,
+            project_dir,
+            name,
+            devflow_core::hooks::HookPhase::PreServiceDelete,
+            &hook_opts,
+        )
+        .await;
+
         let results = factory::orchestrate_delete(config, name).await?;
         let failures: Vec<_> = results.iter().filter(|r| !r.success).collect();
+
+        // Post-service-delete hooks
+        run_lifecycle_hooks_best_effort(
+            config,
+            project_dir,
+            name,
+            devflow_core::hooks::HookPhase::PostServiceDelete,
+            &hook_opts,
+        )
+        .await;
+
         if failures.is_empty() {
             Ok(format!("Deleted workspace '{}'", name))
         } else {

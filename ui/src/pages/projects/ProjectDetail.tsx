@@ -483,8 +483,17 @@ function ProjectDetail() {
           <Link
             to={`/hooks/${encodeURIComponent(projectPath)}`}
             className="btn"
+            style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
           >
             Hooks
+            {detail.hook_count > 0 && (
+              <span
+                className="badge badge-info"
+                style={{ fontSize: 10, minWidth: 18, textAlign: "center", padding: "1px 5px" }}
+              >
+                {detail.hook_count}
+              </span>
+            )}
           </Link>
           <Link
             to={`/config/${encodeURIComponent(projectPath)}`}
