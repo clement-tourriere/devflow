@@ -29,9 +29,6 @@ fn workspace_tray_label(workspace: &commands::workspaces::WorkspaceEntry) -> (St
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string());
         let mut details = vec![format!("dir={}", folder)];
-        if workspace.cow_used {
-            details.push("CoW".to_string());
-        }
         if let Some(parent) = workspace.parent.as_ref().filter(|p| !p.trim().is_empty()) {
             details.push(format!("from {}", parent));
         }

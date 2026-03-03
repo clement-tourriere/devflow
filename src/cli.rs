@@ -81,6 +81,8 @@ Examples:
         template: bool,
         #[arg(long, help = "Simulate switching without actual operations")]
         dry_run: bool,
+        #[arg(long, help = "Include gitignored files in worktree (overrides config)")]
+        no_respect_gitignore: bool,
     },
     #[command(
         about = "Remove a workspace, its worktree, and associated service workspaces",
@@ -1506,7 +1508,6 @@ fn register_workspace_in_state(
     workspace_name: &str,
     parent_workspace: Option<&str>,
     worktree_path: Option<String>,
-    cow_used: Option<bool>,
 ) -> Result<()> {
     let Some(path) = config_path.as_ref() else {
         return Ok(());
@@ -1529,9 +1530,6 @@ fn register_workspace_in_state(
             .as_ref()
             .and_then(|b| b.worktree_path.as_ref().cloned())
     });
-    let final_cow_used = cow_used
-        .or_else(|| existing.as_ref().map(|b| b.cow_used))
-        .unwrap_or(false);
 
     state.register_workspace(
         path,
@@ -1540,7 +1538,6 @@ fn register_workspace_in_state(
             parent: final_parent,
             worktree_path: final_worktree,
             created_at,
-            cow_used: final_cow_used,
             agent_tool: None,
             agent_status: None,
             agent_started_at: None,
@@ -1556,7 +1553,7 @@ fn ensure_default_workspace_registered(
 ) -> Result<()> {
     let main = config.git.main_workspace.clone();
     if !linked_workspace_exists(config, config_path, &main) {
-        register_workspace_in_state(config, config_path, &main, None, None, Some(false))?;
+        register_workspace_in_state(config, config_path, &main, None, None)?;
     }
     Ok(())
 }
@@ -3716,6 +3713,7 @@ async fn handle_branch_command(
             no_verify,
             template,
             dry_run,
+            no_respect_gitignore,
         } => {
             if dry_run {
                 if let Some(workspace) = workspace_name {
@@ -3870,6 +3868,7 @@ async fn handle_branch_command(
                         non_interactive,
                         None,
                         None,
+                        if no_respect_gitignore { Some(true) } else { None },
                     )
                     .await?;
                 }
@@ -5754,43 +5753,69 @@ fn copy_worktree_files(config: &Config, main_worktree_dir: &str) -> Result<()> {
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::copy(&source, &target)?;
+            reflink_copy::reflink_or_copy(&source, &target)?;
             println!("Copied {} from main worktree", file);
         }
     }
 
-    // 2. Copy gitignored files when copy_ignored is enabled
+    // 2. Copy gitignored entries when copy_ignored is enabled.
+    // Uses list_ignored_entries() for collapsed directory-level entries
+    // (e.g. "node_modules" as one entry) instead of enumerating every file.
+    // Copies run in parallel via rayon for maximum throughput.
     if wt_config.copy_ignored {
         if let Ok(vcs_repo) = vcs::detect_vcs_provider(main_worktree_dir) {
-            match vcs_repo.list_ignored_files() {
-                Ok(ignored_files) => {
-                    let mut count = 0;
-                    for rel_path in &ignored_files {
-                        let source = main_dir.join(rel_path);
-                        let target = current_dir.join(rel_path);
+            match vcs_repo.list_ignored_entries() {
+                Ok(ignored_entries) => {
+                    use std::sync::atomic::{AtomicUsize, Ordering};
+                    let count = AtomicUsize::new(0);
 
-                        if source.exists() && !target.exists() {
-                            if let Some(parent) = target.parent() {
-                                std::fs::create_dir_all(parent).ok();
+                    rayon::scope(|s| {
+                        for rel_path in &ignored_entries {
+                            let source = main_dir.join(rel_path);
+                            let target = current_dir.join(rel_path);
+                            let count = &count;
+
+                            if !source.exists() || target.exists() {
+                                continue;
                             }
-                            if let Err(e) = std::fs::copy(&source, &target) {
-                                log::warn!(
-                                    "Failed to copy ignored file '{}': {}",
-                                    rel_path.display(),
-                                    e
-                                );
-                            } else {
-                                count += 1;
-                                log::debug!("Copied ignored file: {}", rel_path.display());
-                            }
+
+                            s.spawn(move |_| {
+                                if source.is_dir() {
+                                    devflow_core::workspace::worktree::reflink_copy_dir(
+                                        &source, &target,
+                                    );
+                                    count.fetch_add(1, Ordering::Relaxed);
+                                } else if source.is_file() {
+                                    if let Some(parent) = target.parent() {
+                                        std::fs::create_dir_all(parent).ok();
+                                    }
+                                    if let Err(e) =
+                                        reflink_copy::reflink_or_copy(&source, &target)
+                                    {
+                                        log::warn!(
+                                            "Failed to copy ignored entry '{}': {}",
+                                            rel_path.display(),
+                                            e
+                                        );
+                                    } else {
+                                        count.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            });
                         }
-                    }
-                    if count > 0 {
-                        println!("Copied {} ignored file(s) from main worktree", count);
+                    });
+
+                    let copied = count.load(Ordering::Relaxed);
+                    if copied > 0 {
+                        println!(
+                            "Copied {} ignored entr{} from main worktree",
+                            copied,
+                            if copied == 1 { "y" } else { "ies" }
+                        );
                     }
                 }
                 Err(e) => {
-                    log::warn!("Failed to enumerate ignored files: {}", e);
+                    log::warn!("Failed to enumerate ignored entries: {}", e);
                 }
             }
         }
@@ -5862,6 +5887,7 @@ async fn handle_git_hook(
                         true,  // non_interactive
                         Some("vcs"),
                         Some("post-checkout"),
+                        None, // copy_ignored — use config default
                     )
                     .await?;
                 } else {
@@ -5985,6 +6011,7 @@ async fn handle_interactive_switch(
                     false, // non_interactive
                     None,
                     None,
+                    None, // copy_ignored — use config default
                 )
                 .await?;
             } else if selected_branch == config.git.main_workspace {
@@ -6002,6 +6029,7 @@ async fn handle_interactive_switch(
                     false, // non_interactive
                     None,
                     None,
+                    None, // copy_ignored — use config default
                 )
                 .await?;
             }
@@ -6192,7 +6220,6 @@ async fn link_branch_internal(
                 .as_ref()
                 .map(|b| b.created_at)
                 .unwrap_or_else(chrono::Utc::now),
-            cow_used: existing.as_ref().map(|b| b.cow_used).unwrap_or(false),
             agent_tool: existing.as_ref().and_then(|b| b.agent_tool.clone()),
             agent_status: existing.as_ref().and_then(|b| b.agent_status.clone()),
             agent_started_at: existing.as_ref().and_then(|b| b.agent_started_at),
@@ -6438,6 +6465,7 @@ async fn handle_switch_command(
     non_interactive: bool,
     trigger_source: Option<&str>,
     vcs_event: Option<&str>,
+    copy_ignored_override: Option<bool>,
 ) -> Result<()> {
     // Resolve parent via CLI-specific interactive prompt (if needed)
     let from_workspace = if create {
@@ -6480,6 +6508,8 @@ async fn handle_switch_command(
         },
         create_if_missing: create,
         from_workspace,
+        copy_files: None,
+        copy_ignored: copy_ignored_override,
     };
 
     let result = devflow_core::workspace::switch::switch_workspace(
@@ -6498,16 +6528,10 @@ async fn handle_switch_command(
     if let Some(ref wt) = result.worktree {
         if !json_output {
             if wt.created {
-                let cow_hint = if wt.cow_used {
-                    " (APFS clone)"
-                } else {
-                    " (full copy — CoW unavailable)"
-                };
                 println!(
-                    "Created worktree for '{}' at {}{}",
+                    "Created worktree for '{}' at {}",
                     workspace_name,
                     wt.path.display(),
-                    cow_hint,
                 );
             } else {
                 println!("Switching to existing worktree: {}", wt.path.display());
@@ -6549,7 +6573,6 @@ async fn handle_switch_command(
             "parent": result.parent,
             "worktree_path": result.worktree.as_ref().map(|w| w.path.display().to_string()),
             "worktree_created": result.worktree.as_ref().map(|w| w.created).unwrap_or(false),
-            "cow_used": result.worktree.as_ref().map(|w| w.cow_used).unwrap_or(false),
             "services_switched": success_count,
             "services_failed": fail_count,
             "services_skipped": no_services,
@@ -6631,6 +6654,7 @@ async fn handle_switch_to_main(
         non_interactive,
         trigger_source,
         vcs_event,
+        None, // copy_ignored — use config default
     )
     .await
 }
@@ -7845,6 +7869,7 @@ async fn handle_agent_command(
                 true, // non_interactive
                 None,
                 None,
+                None, // copy_ignored — use config default
             )
             .await?;
 

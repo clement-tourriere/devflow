@@ -58,6 +58,8 @@ function ProjectDetail() {
   const [newWorkspaceName, setNewWorkspaceName] = useState("");
   const [fromWorkspace, setFromWorkspace] = useState("");
   const [creationMode, setCreationMode] = useState<WorkspaceCreationMode>("branch");
+  const [copyFiles, setCopyFiles] = useState<string[]>([]);
+  const [copyIgnored, setCopyIgnored] = useState(false);
   const [deletingWorkspace, setDeletingWorkspace] = useState<string | null>(null);
   const [connInfoWorkspace, setConnInfoWorkspace] = useState<string | null>(null);
   const [connInfo, setConnInfo] = useState<Record<string, ConnectionInfo>>({});
@@ -169,12 +171,16 @@ function ProjectDetail() {
         projectPath,
         newWorkspaceName.trim(),
         fromWorkspace || undefined,
-        creationMode
+        creationMode,
+        creationMode === "worktree" ? copyFiles : undefined,
+        creationMode === "worktree" ? copyIgnored : undefined
       );
       setShowCreateWorkspace(false);
       setNewWorkspaceName("");
       setFromWorkspace("");
       setCreationMode(projectDefaultCreationMode);
+      setCopyFiles(detail?.worktree_copy_files ?? []);
+      setCopyIgnored(detail?.worktree_copy_ignored ?? false);
       await reload();
     } catch (e) {
       alert(`${e}`);
@@ -525,6 +531,8 @@ function ProjectDetail() {
               setFromWorkspace(defaultWorkspace?.name ?? "");
               setNewWorkspaceName("");
               setCreationMode(projectDefaultCreationMode);
+              setCopyFiles(detail.worktree_copy_files);
+              setCopyIgnored(detail.worktree_copy_ignored);
               setShowCreateWorkspace(true);
             }}
             style={{ padding: "4px 12px", fontSize: 13 }}
@@ -578,10 +586,6 @@ function ProjectDetail() {
                       ) : (
                         <span className="badge" style={{ fontSize: 10 }}>git branch</span>
                       )}
-                      {b.cow_used && (
-                        <span className="badge badge-success" style={{ fontSize: 10 }}
-                          title="Copy-on-Write clone">CoW</span>
-                      )}
                       {b.is_current && (
                         <span className="badge badge-success" style={{ fontSize: 10 }}>active</span>
                       )}
@@ -632,6 +636,8 @@ function ProjectDetail() {
                             setFromWorkspace(b.name);
                             setNewWorkspaceName("");
                             setCreationMode(projectDefaultCreationMode);
+                            setCopyFiles(detail.worktree_copy_files);
+                            setCopyIgnored(detail.worktree_copy_ignored);
                             setShowCreateWorkspace(true);
                           }}
                         title="Workspace from this workspace"
@@ -1262,6 +1268,86 @@ function ProjectDetail() {
             The project default is preselected.
           </p>
         </div>
+        {creationMode === "worktree" && detail.worktree_copy_files.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <label
+              style={{
+                display: "block",
+                marginBottom: 4,
+                fontSize: 13,
+                color: "var(--text-secondary)",
+              }}
+            >
+              Files copied to worktree
+            </label>
+            <div
+              style={{
+                background: "var(--bg-secondary)",
+                border: "1px solid var(--border)",
+                borderRadius: 6,
+                padding: "6px 10px",
+                fontSize: 12,
+                fontFamily: "monospace",
+              }}
+            >
+              {detail.worktree_copy_files.map((f, i) => (
+                <label
+                  key={i}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "2px 0",
+                    cursor: "pointer",
+                    color: copyFiles.includes(f)
+                      ? "var(--text-secondary)"
+                      : "var(--text-muted)",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={copyFiles.includes(f)}
+                    onChange={(e) => {
+                      if (e.target.checked) {
+                        setCopyFiles((prev) => [...prev, f]);
+                      } else {
+                        setCopyFiles((prev) => prev.filter((x) => x !== f));
+                      }
+                    }}
+                  />
+                  {f}
+                </label>
+              ))}
+            </div>
+            <p style={{ marginTop: 4, color: "var(--text-muted)", fontSize: 12 }}>
+              Uncheck to skip copying a file (configured in .devflow.yml).
+            </p>
+          </div>
+        )}
+        {creationMode === "worktree" && (
+          <div style={{ marginBottom: 16 }}>
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                fontSize: 13,
+                color: "var(--text-secondary)",
+                cursor: "pointer",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={copyIgnored}
+                onChange={(e) => setCopyIgnored(e.target.checked)}
+              />
+              Copy gitignored files (node_modules, target, etc.)
+            </label>
+            <p style={{ marginTop: 4, color: "var(--text-muted)", fontSize: 12 }}>
+              Reflink-copies ignored directories from the main worktree for faster setup.
+            </p>
+          </div>
+        )}
         <div style={{ marginBottom: 16 }}>
           <label
             style={{

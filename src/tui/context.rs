@@ -167,14 +167,11 @@ impl DevflowContext {
                     .as_ref()
                     .and_then(|b| b.parent.clone())
                     .or(normalized_parent);
-                let cow_used = existing.as_ref().map(|b| b.cow_used).unwrap_or(false);
-
                 let workspace = DevflowWorkspace {
                     name: normalized_branch,
                     parent,
                     worktree_path,
                     created_at,
-                    cow_used,
                     agent_tool: None,
                     agent_status: None,
                     agent_started_at: None,

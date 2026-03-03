@@ -63,13 +63,17 @@ export const createWorkspace = (
   projectPath: string,
   workspaceName: string,
   fromWorkspace?: string,
-  creationMode?: WorkspaceCreationMode
+  creationMode?: WorkspaceCreationMode,
+  copyFiles?: string[],
+  copyIgnored?: boolean
 ) =>
   invoke<CreateWorkspaceResult>("create_workspace", {
     projectPath,
     workspaceName,
     fromWorkspace,
     creationMode,
+    copyFiles,
+    copyIgnored,
   });
 export const deleteWorkspace = (projectPath: string, workspaceName: string) =>
   invoke<OrchestrationResult[]>("delete_workspace", {

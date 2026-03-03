@@ -325,6 +325,10 @@ pub struct WorktreeConfig {
     /// Also copy files that are git-ignored (e.g. `.env.local`).
     #[serde(default)]
     pub copy_ignored: bool,
+    /// Exclude gitignored files from worktrees (both CoW and non-CoW paths).
+    /// Default: `true` — saves disk space by removing dirs like `node_modules/`, `target/`.
+    #[serde(default = "default_respect_gitignore")]
+    pub respect_gitignore: bool,
 }
 
 impl WorktreeConfig {
@@ -336,6 +340,7 @@ impl WorktreeConfig {
             path_template: default_worktree_path_template(),
             copy_files: vec![".env".to_string(), ".env.local".to_string()],
             copy_ignored: true,
+            respect_gitignore: true,
         }
     }
 }
@@ -429,6 +434,10 @@ fn default_main_workspace() -> String {
 
 fn default_worktree_path_template() -> String {
     "../{repo}.{workspace}".to_string()
+}
+
+fn default_respect_gitignore() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1712,5 +1721,35 @@ services:
 
         assert!(config.should_create_workspace("chore/deps"));
         assert!(!config.should_create_workspace("feature/deps"));
+    }
+
+    #[test]
+    fn test_worktree_respect_gitignore_defaults_true() {
+        let yaml = r#"
+worktree:
+  enabled: true
+  copy_files: [".env"]
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+        let wt = config.worktree.expect("worktree should be Some");
+        assert!(wt.respect_gitignore);
+    }
+
+    #[test]
+    fn test_worktree_respect_gitignore_explicit_false() {
+        let yaml = r#"
+worktree:
+  enabled: true
+  respect_gitignore: false
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+        let wt = config.worktree.expect("worktree should be Some");
+        assert!(!wt.respect_gitignore);
+    }
+
+    #[test]
+    fn test_worktree_recommended_default_includes_respect_gitignore() {
+        let wt = WorktreeConfig::recommended_default();
+        assert!(wt.respect_gitignore);
     }
 }

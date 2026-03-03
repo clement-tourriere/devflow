@@ -3,7 +3,6 @@ use git2::{ErrorCode, Repository, WorktreeAddOptions, WorktreeLockStatus, Worktr
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::cow_worktree;
 use super::{VcsProvider, WorkspaceInfo, WorktreeCreateResult, WorktreeInfo};
 
 pub struct GitRepository {
@@ -564,42 +563,16 @@ impl VcsProvider for GitRepository {
             }
         }
 
-        // Check if the workspace already exists
-        let workspace_exists = self.workspace_exists(workspace)?;
-
-        // If the workspace doesn't exist yet, create it from HEAD so both the CoW
-        // fast path and the git2 fallback can reference it.
+        // If the workspace doesn't exist yet, create it from HEAD so the
+        // git2 worktree creation can reference it.
         // On unborn repos this auto-creates an initial empty commit.
-        if !workspace_exists {
+        if !self.workspace_exists(workspace)? {
             let head_commit = self.head_commit_or_init()?;
             self.repo
                 .branch(workspace, &head_commit, false)
                 .with_context(|| format!("Failed to create workspace '{}'", workspace))?;
         }
 
-        // ── CoW fast path ──────────────────────────────────────────────
-        // Try to create the worktree using APFS clonefile / reflink.
-        // This avoids a full checkout by registering the worktree with
-        // --no-checkout and then copying files with Copy-on-Write.
-        let source_dir = self.get_repo_root();
-        match cow_worktree::create_cow_worktree(source_dir, path, workspace) {
-            Ok(true) => {
-                log::info!(
-                    "Created worktree for '{}' at '{}' using Copy-on-Write",
-                    workspace,
-                    path.display()
-                );
-                return Ok(WorktreeCreateResult { cow_used: true });
-            }
-            Ok(false) => {
-                log::debug!("CoW not available, falling back to git2 worktree creation");
-            }
-            Err(e) => {
-                log::warn!("CoW worktree creation failed: {e:#}. Falling back to git2.");
-            }
-        }
-
-        // ── Standard git2 worktree path ────────────────────────────────
         let branch_ref = self
             .repo
             .find_branch(workspace, git2::BranchType::Local)
@@ -619,7 +592,7 @@ impl VcsProvider for GitRepository {
                 )
             })?;
 
-        Ok(WorktreeCreateResult { cow_used: false })
+        Ok(WorktreeCreateResult::new())
     }
 
     fn remove_worktree(&self, path: &Path) -> Result<()> {
@@ -822,6 +795,35 @@ impl VcsProvider for GitRepository {
                     if full_path.is_file() {
                         ignored.push(PathBuf::from(path_str));
                     }
+                }
+            }
+        }
+
+        Ok(ignored)
+    }
+
+    fn list_ignored_entries(&self) -> Result<Vec<PathBuf>> {
+        let mut opts = git2::StatusOptions::new();
+        opts.include_ignored(true)
+            .include_untracked(false)
+            .exclude_submodules(true)
+            // Don't recurse into ignored dirs — we want the directory itself,
+            // not every file inside node_modules/ or .venv/.
+            .recurse_ignored_dirs(false);
+
+        let statuses = self
+            .repo
+            .statuses(Some(&mut opts))
+            .context("Failed to enumerate git statuses for ignored entries")?;
+
+        let mut ignored = Vec::new();
+
+        for entry in statuses.iter() {
+            if entry.status().contains(git2::Status::IGNORED) {
+                if let Some(path_str) = entry.path() {
+                    // git2 may append '/' for directories
+                    let cleaned = path_str.trim_end_matches('/');
+                    ignored.push(PathBuf::from(cleaned));
                 }
             }
         }

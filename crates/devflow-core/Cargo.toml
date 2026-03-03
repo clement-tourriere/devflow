@@ -86,3 +86,9 @@ inquire = { version = "0.9", default-features = false, features = ["crossterm"] 
 
 # Ordered maps for deterministic hook execution
 indexmap = { version = "2", default-features = false, features = ["serde"] }
+
+# Cross-platform Copy-on-Write file copies (APFS clonefile, ioctl FICLONE, ReFS)
+reflink-copy = "0.1"
+
+# Work-stealing parallelism for directory copies
+rayon = "1.10"

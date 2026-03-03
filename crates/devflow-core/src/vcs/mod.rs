@@ -24,8 +24,13 @@ pub struct WorkspaceInfo {
 /// Result of a worktree creation operation.
 #[derive(Debug, Clone, Copy)]
 pub struct WorktreeCreateResult {
-    /// Whether Copy-on-Write (APFS clone / reflink) was used.
-    pub cow_used: bool,
+    _private: (),
+}
+
+impl WorktreeCreateResult {
+    pub(crate) fn new() -> Self {
+        Self { _private: () }
+    }
 }
 
 /// Information about a Git worktree.
@@ -90,6 +95,17 @@ pub trait VcsProvider: Send {
     /// Returns paths relative to the repo root.  Used by `copy_ignored`
     /// to replicate gitignored files into new worktrees.
     fn list_ignored_files(&self) -> Result<Vec<PathBuf>> {
+        Ok(Vec::new())
+    }
+
+    /// List ignored entries (files **and** directories) without recursing
+    /// into ignored directories.
+    ///
+    /// Returns paths relative to the repo root.  An ignored directory like
+    /// `front/node_modules` appears as a single entry rather than listing
+    /// every file inside it.  Used by `respect_gitignore` to exclude heavy
+    /// directories from worktree clones.
+    fn list_ignored_entries(&self) -> Result<Vec<PathBuf>> {
         Ok(Vec::new())
     }
 

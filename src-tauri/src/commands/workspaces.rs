@@ -10,7 +10,6 @@ pub struct WorkspaceEntry {
     pub is_current: bool,
     pub is_default: bool,
     pub worktree_path: Option<String>,
-    pub cow_used: bool,
     pub parent: Option<String>,
     pub created_at: Option<String>,
     pub agent_tool: Option<String>,
@@ -95,7 +94,6 @@ pub async fn list_workspaces(project_path: String) -> Result<WorkspacesResponse,
                 is_current,
                 is_default,
                 worktree_path,
-                cow_used: b.cow_used,
                 parent: b.parent,
                 created_at: Some(b.created_at.format("%Y-%m-%d %H:%M").to_string()),
                 agent_tool: b.agent_tool,
@@ -153,7 +151,6 @@ pub async fn get_connection_info(
 pub struct CreateWorkspaceResult {
     pub services: Vec<OrchestrationResultDto>,
     pub worktree_path: Option<String>,
-    pub cow_used: bool,
 }
 
 #[tauri::command]
@@ -163,6 +160,8 @@ pub async fn create_workspace(
     workspace_name: String,
     from_workspace: Option<String>,
     creation_mode: Option<String>,
+    copy_files: Option<Vec<String>>,
+    copy_ignored: Option<bool>,
 ) -> Result<CreateWorkspaceResult, String> {
     let project_dir = std::path::Path::new(&project_path);
     let config_path = project_dir.join(".devflow.yml");
@@ -179,6 +178,8 @@ pub async fn create_workspace(
         lifecycle: gui_lifecycle_options(),
         creation_mode,
         from_workspace,
+        copy_files,
+        copy_ignored,
     };
 
     let result = workspace::create::create_workspace(&cfg, project_dir, &workspace_name, &options)
@@ -196,7 +197,6 @@ pub async fn create_workspace(
             })
             .collect(),
         worktree_path: result.worktree.as_ref().map(|w| w.path.display().to_string()),
-        cow_used: result.worktree.as_ref().map(|w| w.cow_used).unwrap_or(false),
     };
 
     crate::update_tray_menu(&app);
@@ -221,6 +221,8 @@ pub async fn switch_workspace(
         lifecycle: gui_lifecycle_options(),
         create_if_missing: false,
         from_workspace: None,
+        copy_files: None,
+        copy_ignored: None,
     };
 
     let result =

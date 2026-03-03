@@ -25,9 +25,6 @@ pub struct DevflowWorkspace {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
-    /// Whether Copy-on-Write (APFS clone / reflink) was used for the worktree.
-    #[serde(default)]
-    pub cow_used: bool,
     /// AI agent tool used for this workspace (e.g., "claude", "codex").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_tool: Option<String>,
@@ -389,7 +386,6 @@ impl LocalStateManager {
             parent: None,
             worktree_path: None,
             created_at: chrono::Utc::now(),
-            cow_used: false,
             agent_tool: None,
             agent_status: None,
             agent_started_at: None,

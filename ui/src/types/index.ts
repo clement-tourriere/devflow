@@ -12,6 +12,8 @@ export interface ProjectDetail {
   workspace_count: number;
   hook_count: number;
   worktree_enabled: boolean;
+  worktree_copy_files: string[];
+  worktree_copy_ignored: boolean;
   vcs_type: string | null;
 }
 
@@ -20,7 +22,6 @@ export interface WorkspaceEntry {
   is_current: boolean;
   is_default: boolean;
   worktree_path: string | null;
-  cow_used: boolean;
   parent: string | null;
   created_at: string | null;
   agent_tool: string | null;
@@ -92,7 +93,6 @@ export interface OrchestrationResult {
 export interface CreateWorkspaceResult {
   services: OrchestrationResult[];
   worktree_path: string | null;
-  cow_used: boolean;
 }
 
 export type WorkspaceCreationMode = "default" | "worktree" | "branch";

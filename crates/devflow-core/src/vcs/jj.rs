@@ -307,7 +307,7 @@ impl VcsProvider for JjRepository {
             }
         }
 
-        Ok(WorktreeCreateResult { cow_used: false })
+        Ok(WorktreeCreateResult::new())
     }
 
     fn remove_worktree(&self, path: &Path) -> Result<()> {

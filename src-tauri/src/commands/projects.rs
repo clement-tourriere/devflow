@@ -14,6 +14,8 @@ pub struct ProjectDetail {
     pub workspace_count: usize,
     pub hook_count: usize,
     pub worktree_enabled: bool,
+    pub worktree_copy_files: Vec<String>,
+    pub worktree_copy_ignored: bool,
     pub vcs_type: Option<String>,
 }
 
@@ -413,6 +415,18 @@ pub async fn get_project_detail(
         .map(|w| w.enabled)
         .unwrap_or(false);
 
+    let worktree_copy_files: Vec<String> = config
+        .as_ref()
+        .and_then(|c| c.worktree.as_ref())
+        .map(|w| w.copy_files.clone())
+        .unwrap_or_default();
+
+    let worktree_copy_ignored: bool = config
+        .as_ref()
+        .and_then(|c| c.worktree.as_ref())
+        .map(|w| w.copy_ignored)
+        .unwrap_or(false);
+
     let config_name = config
         .as_ref()
         .and_then(|c| c.name.clone())
@@ -454,6 +468,8 @@ pub async fn get_project_detail(
         workspace_count,
         hook_count,
         worktree_enabled,
+        worktree_copy_files,
+        worktree_copy_ignored,
         vcs_type,
     })
 }

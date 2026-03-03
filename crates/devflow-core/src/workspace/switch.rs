@@ -20,6 +20,10 @@ pub struct SwitchOptions {
     pub create_if_missing: bool,
     /// Parent workspace to branch from when creating.
     pub from_workspace: Option<String>,
+    /// Override the config `worktree.copy_files` for worktree creation.
+    pub copy_files: Option<Vec<String>>,
+    /// Override the config `worktree.copy_ignored` for worktree creation.
+    pub copy_ignored: Option<bool>,
 }
 
 impl Default for SwitchOptions {
@@ -28,6 +32,8 @@ impl Default for SwitchOptions {
             lifecycle: LifecycleOptions::default(),
             create_if_missing: false,
             from_workspace: None,
+            copy_files: None,
+            copy_ignored: None,
         }
     }
 }
@@ -81,7 +87,6 @@ pub async fn switch_workspace(
             let resolved = std::fs::canonicalize(&wt_path).unwrap_or(wt_path);
             worktree_result = Some(WorktreeSetupResult {
                 path: resolved,
-                cow_used: false,
                 created: false,
             });
         } else {
@@ -107,6 +112,8 @@ pub async fn switch_workspace(
                 config,
                 project_dir,
                 workspace_name,
+                options.copy_files.as_deref(),
+                options.copy_ignored,
             )?;
             worktree_result = Some(wt);
         }
@@ -242,16 +249,6 @@ fn register_workspace_state(
     // Preserve existing metadata on upsert
     let existing = state_mgr.get_workspace_by_dir(project_dir, normalized_name);
 
-    let final_cow_used = if let Some(wt) = worktree {
-        if wt.created {
-            wt.cow_used
-        } else {
-            existing.as_ref().map(|b| b.cow_used).unwrap_or(false)
-        }
-    } else {
-        existing.as_ref().map(|b| b.cow_used).unwrap_or(false)
-    };
-
     let workspace = DevflowWorkspace {
         name: normalized_name.to_string(),
         parent: normalized_parent
@@ -264,7 +261,6 @@ fn register_workspace_state(
             .as_ref()
             .map(|b| b.created_at)
             .unwrap_or_else(chrono::Utc::now),
-        cow_used: final_cow_used,
         agent_tool: existing.as_ref().and_then(|b| b.agent_tool.clone()),
         agent_status: existing.as_ref().and_then(|b| b.agent_status.clone()),
         agent_started_at: existing.as_ref().and_then(|b| b.agent_started_at),

@@ -43,8 +43,6 @@ impl WorkspaceCreationMode {
 pub struct WorktreeSetupResult {
     /// Resolved absolute path to the worktree.
     pub path: PathBuf,
-    /// Whether CoW (APFS clone / reflink) was used.
-    pub cow_used: bool,
     /// Whether the worktree was freshly created (vs. already existing).
     pub created: bool,
 }

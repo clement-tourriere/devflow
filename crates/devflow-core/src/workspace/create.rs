@@ -23,6 +23,10 @@ pub struct CreateOptions {
     pub creation_mode: WorkspaceCreationMode,
     /// Parent workspace to branch from (like `--from`).
     pub from_workspace: Option<String>,
+    /// Override the config `worktree.copy_files` for this creation.
+    pub copy_files: Option<Vec<String>>,
+    /// Override the config `worktree.copy_ignored` for this creation.
+    pub copy_ignored: Option<bool>,
 }
 
 impl Default for CreateOptions {
@@ -31,6 +35,8 @@ impl Default for CreateOptions {
             lifecycle: LifecycleOptions::default(),
             creation_mode: WorkspaceCreationMode::Default,
             from_workspace: None,
+            copy_files: None,
+            copy_ignored: None,
         }
     }
 }
@@ -85,6 +91,8 @@ pub async fn create_workspace(
             config,
             project_dir,
             workspace_name,
+            options.copy_files.as_deref(),
+            options.copy_ignored,
         )?)
     } else {
         None
@@ -180,11 +188,6 @@ fn register_workspace_state(
     // Preserve existing metadata on upsert
     let existing = state_mgr.get_workspace_by_dir(project_dir, normalized_name);
 
-    let final_cow_used = worktree
-        .map(|w| w.cow_used)
-        .or(existing.as_ref().map(|b| b.cow_used))
-        .unwrap_or(false);
-
     let workspace = DevflowWorkspace {
         name: normalized_name.to_string(),
         parent: normalized_parent
@@ -197,7 +200,6 @@ fn register_workspace_state(
             .as_ref()
             .map(|b| b.created_at)
             .unwrap_or_else(chrono::Utc::now),
-        cow_used: final_cow_used,
         agent_tool: existing.as_ref().and_then(|b| b.agent_tool.clone()),
         agent_status: existing.as_ref().and_then(|b| b.agent_status.clone()),
         agent_started_at: existing.as_ref().and_then(|b| b.agent_started_at),
