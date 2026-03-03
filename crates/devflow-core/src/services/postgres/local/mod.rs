@@ -15,8 +15,8 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use super::super::{
-    BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceCapabilities,
-    ServiceProvider,
+    ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceCapabilities, ServiceProvider,
+    WorkspaceInfo,
 };
 use crate::config::{Config, LocalServiceConfig};
 use docker::{DockerRuntime, ReserveBranchSpec, StartBranchSpec};
@@ -166,11 +166,11 @@ impl LocalProvider {
     }
 
     async fn reconcile_project(&self, project: &model::Project) -> Result<()> {
-        // Read branches from store (sync, releases lock before await)
-        let branches = self.store().list_branches(&project.id)?;
+        // Read workspaces from store (sync, releases lock before await)
+        let workspaces = self.store().list_workspaces(&project.id)?;
 
         // Compute state changes (async, no store reference held)
-        let changes = reconcile::compute_state_changes(&self.runtime, branches).await;
+        let changes = reconcile::compute_state_changes(&self.runtime, workspaces).await;
 
         // Apply changes (sync)
         if !changes.is_empty() {
@@ -193,21 +193,24 @@ impl LocalProvider {
 
 #[async_trait]
 impl ServiceProvider for LocalProvider {
-    async fn create_branch(
+    async fn create_workspace(
         &self,
-        branch_name: &str,
-        from_branch: Option<&str>,
-    ) -> Result<BranchInfo> {
+        workspace_name: &str,
+        from_workspace: Option<&str>,
+    ) -> Result<WorkspaceInfo> {
         let project = self.ensure_project().await?;
         self.reconcile_project(&project).await?;
 
-        // Check if branch already exists
-        if let Some(existing) = self.store().get_branch_by_name(&project.id, branch_name)? {
+        // Check if workspace already exists
+        if let Some(existing) = self
+            .store()
+            .get_workspace_by_name(&project.id, workspace_name)?
+        {
             if existing.state == BranchState::Running {
-                return Ok(BranchInfo {
+                return Ok(WorkspaceInfo {
                     name: existing.name,
                     created_at: None,
-                    parent_branch: None,
+                    parent_workspace: None,
                     database_name: self.pg_db.clone(),
                     state: Some(existing.state.as_str().to_string()),
                 });
@@ -219,7 +222,7 @@ impl ServiceProvider for LocalProvider {
             .data_root
             .join("projects")
             .join(&project.id)
-            .join("branches")
+            .join("workspaces")
             .join(&branch_id)
             .join("pgdata");
 
@@ -229,7 +232,7 @@ impl ServiceProvider for LocalProvider {
             .reserve_branch(&ReserveBranchSpec {
                 project_name: self.project_name.clone(),
                 service_name: self.service_name.clone(),
-                branch_name: branch_name.to_string(),
+                workspace_name: workspace_name.to_string(),
             })
             .await?;
 
@@ -237,38 +240,38 @@ impl ServiceProvider for LocalProvider {
         let port = docker::pick_available_port(self.runtime.client(), start_port).await?;
 
         // Clone or create empty
-        let parent = if let Some(from_name) = from_branch {
-            self.store().get_branch_by_name(&project.id, from_name)?
+        let parent = if let Some(from_name) = from_workspace {
+            self.store().get_workspace_by_name(&project.id, from_name)?
         } else {
-            // Try to clone from most recent branch
-            let branches = self.store().list_branches(&project.id)?;
-            branches
+            // Try to clone from most recent workspace
+            let workspaces = self.store().list_workspaces(&project.id)?;
+            workspaces
                 .into_iter()
                 .find(|b| b.state == BranchState::Running || b.state == BranchState::Stopped)
         };
 
-        let storage_metadata = if let Some(ref parent_branch) = parent {
+        let storage_metadata = if let Some(ref parent_workspace) = parent {
             // Pause parent if running
             let parent_running = self
                 .runtime
-                .container_status(&parent_branch.container_name)
+                .container_status(&parent_workspace.container_name)
                 .await?
                 == docker::ContainerStatus::Running;
 
             if parent_running {
                 self.runtime
-                    .pause_branch(&parent_branch.container_name)
+                    .pause_branch(&parent_workspace.container_name)
                     .await?;
             }
 
             let result = self
                 .storage
-                .clone_branch_from_parent(&project, parent_branch, &branch_id, &data_dir)
+                .clone_branch_from_parent(&project, parent_workspace, &branch_id, &data_dir)
                 .await;
 
             if parent_running {
                 self.runtime
-                    .unpause_branch(&parent_branch.container_name)
+                    .unpause_branch(&parent_workspace.container_name)
                     .await?;
             }
 
@@ -280,11 +283,11 @@ impl ServiceProvider for LocalProvider {
         };
 
         // Persist to state
-        let branch = self.store().create_branch(NewBranch {
+        let workspace = self.store().create_workspace(NewBranch {
             id: branch_id,
             project_id: project.id.clone(),
-            name: branch_name.to_string(),
-            parent_branch_id: parent.as_ref().map(|p| p.id.clone()),
+            name: workspace_name.to_string(),
+            parent_workspace_id: parent.as_ref().map(|p| p.id.clone()),
             state: BranchState::Provisioning,
             data_dir: data_dir.to_string_lossy().to_string(),
             container_name: reserved.container_name.clone(),
@@ -294,7 +297,7 @@ impl ServiceProvider for LocalProvider {
 
         // Start container
         self.runtime
-            .start_branch(&StartBranchSpec {
+            .start_workspace(&StartBranchSpec {
                 image: project.image.clone(),
                 container_name: reserved.container_name.clone(),
                 data_dir,
@@ -304,7 +307,7 @@ impl ServiceProvider for LocalProvider {
                 pg_db: self.pg_db.clone(),
                 project_name: self.project_name.clone(),
                 service_name: self.service_name.clone(),
-                branch_name: branch_name.to_string(),
+                workspace_name: workspace_name.to_string(),
             })
             .await?;
 
@@ -320,56 +323,60 @@ impl ServiceProvider for LocalProvider {
 
         // Update state
         self.store()
-            .update_branch_state(&branch.id, BranchState::Running)?;
+            .update_branch_state(&workspace.id, BranchState::Running)?;
 
-        Ok(BranchInfo {
-            name: branch_name.to_string(),
+        Ok(WorkspaceInfo {
+            name: workspace_name.to_string(),
             created_at: Some(Utc::now()),
-            parent_branch: parent.as_ref().map(|p| p.name.clone()),
+            parent_workspace: parent.as_ref().map(|p| p.name.clone()),
             database_name: self.pg_db.clone(),
             state: Some("running".to_string()),
         })
     }
 
-    async fn delete_branch(&self, branch_name: &str) -> Result<()> {
+    async fn delete_workspace(&self, workspace_name: &str) -> Result<()> {
         let project = self.ensure_project().await?;
 
-        let branch = self
+        let workspace = self
             .store()
-            .get_branch_by_name(&project.id, branch_name)?
-            .ok_or_else(|| anyhow::anyhow!("Branch '{}' not found", branch_name))?;
+            .get_workspace_by_name(&project.id, workspace_name)?
+            .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
 
         // Remove container
-        self.runtime.remove_branch(&branch.container_name).await?;
+        self.runtime
+            .remove_branch(&workspace.container_name)
+            .await?;
 
         // Delete storage data
-        self.storage.delete_branch_data(&project, &branch).await?;
+        self.storage
+            .delete_workspace_data(&project, &workspace)
+            .await?;
 
         // Delete from state
-        self.store().delete_branch(&branch.id)?;
+        self.store().delete_workspace(&workspace.id)?;
 
         Ok(())
     }
 
-    async fn list_branches(&self) -> Result<Vec<BranchInfo>> {
+    async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
         let project = self.ensure_project().await?;
         self.reconcile_project(&project).await?;
 
-        let branches = self.store().list_branches(&project.id)?;
+        let workspaces = self.store().list_workspaces(&project.id)?;
 
-        // Build id→name map so we can resolve parent_branch_id to a name
-        let id_to_name: std::collections::HashMap<&str, &str> = branches
+        // Build id→name map so we can resolve parent_workspace_id to a name
+        let id_to_name: std::collections::HashMap<&str, &str> = workspaces
             .iter()
             .map(|b| (b.id.as_str(), b.name.as_str()))
             .collect();
 
-        Ok(branches
+        Ok(workspaces
             .iter()
-            .map(|b| BranchInfo {
+            .map(|b| WorkspaceInfo {
                 name: b.name.clone(),
                 created_at: None,
-                parent_branch: b
-                    .parent_branch_id
+                parent_workspace: b
+                    .parent_workspace_id
                     .as_deref()
                     .and_then(|pid| id_to_name.get(pid))
                     .map(|name| name.to_string()),
@@ -379,183 +386,187 @@ impl ServiceProvider for LocalProvider {
             .collect())
     }
 
-    async fn branch_exists(&self, branch_name: &str) -> Result<bool> {
+    async fn workspace_exists(&self, workspace_name: &str) -> Result<bool> {
         let project = self.ensure_project().await?;
         Ok(self
             .store()
-            .get_branch_by_name(&project.id, branch_name)?
+            .get_workspace_by_name(&project.id, workspace_name)?
             .is_some())
     }
 
-    async fn switch_to_branch(&self, branch_name: &str) -> Result<BranchInfo> {
+    async fn switch_to_branch(&self, workspace_name: &str) -> Result<WorkspaceInfo> {
         let project = self.ensure_project().await?;
         self.reconcile_project(&project).await?;
 
-        let branch = self
+        let workspace = self
             .store()
-            .get_branch_by_name(&project.id, branch_name)?
-            .ok_or_else(|| anyhow::anyhow!("Branch '{}' not found", branch_name))?;
+            .get_workspace_by_name(&project.id, workspace_name)?
+            .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
 
         // Start if stopped
-        if branch.state == BranchState::Stopped {
+        if workspace.state == BranchState::Stopped {
             self.runtime
-                .start_branch(&StartBranchSpec {
+                .start_workspace(&StartBranchSpec {
                     image: project.image.clone(),
-                    container_name: branch.container_name.clone(),
-                    data_dir: PathBuf::from(&branch.data_dir),
-                    port: branch.port,
+                    container_name: workspace.container_name.clone(),
+                    data_dir: PathBuf::from(&workspace.data_dir),
+                    port: workspace.port,
                     pg_user: self.pg_user.clone(),
                     pg_password: self.pg_password.clone(),
                     pg_db: self.pg_db.clone(),
                     project_name: self.project_name.clone(),
                     service_name: self.service_name.clone(),
-                    branch_name: branch_name.to_string(),
+                    workspace_name: workspace_name.to_string(),
                 })
                 .await?;
 
             self.runtime
                 .wait_ready(
-                    &branch.container_name,
+                    &workspace.container_name,
                     &self.pg_user,
                     &self.pg_db,
                     STARTUP_TIMEOUT,
                 )
                 .await?;
             self.store()
-                .update_branch_state(&branch.id, BranchState::Running)?;
+                .update_branch_state(&workspace.id, BranchState::Running)?;
         }
 
-        Ok(BranchInfo {
-            name: branch.name,
+        Ok(WorkspaceInfo {
+            name: workspace.name,
             created_at: None,
-            parent_branch: None,
+            parent_workspace: None,
             database_name: self.pg_db.clone(),
             state: Some("running".to_string()),
         })
     }
 
-    async fn get_connection_info(&self, branch_name: &str) -> Result<ConnectionInfo> {
+    async fn get_connection_info(&self, workspace_name: &str) -> Result<ConnectionInfo> {
         let project = self.ensure_project().await?;
 
-        let branch = self
+        let workspace = self
             .store()
-            .get_branch_by_name(&project.id, branch_name)?
-            .ok_or_else(|| anyhow::anyhow!("Branch '{}' not found", branch_name))?;
+            .get_workspace_by_name(&project.id, workspace_name)?
+            .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
 
         Ok(ConnectionInfo {
             host: "127.0.0.1".to_string(),
-            port: branch.port,
+            port: workspace.port,
             database: self.pg_db.clone(),
             user: self.pg_user.clone(),
             password: Some(self.pg_password.clone()),
-            connection_string: Some(self.connection_uri(branch.port)),
+            connection_string: Some(self.connection_uri(workspace.port)),
         })
     }
 
-    async fn start_branch(&self, branch_name: &str) -> Result<()> {
+    async fn start_workspace(&self, workspace_name: &str) -> Result<()> {
         let project = self.ensure_project().await?;
 
-        let branch = self
+        let workspace = self
             .store()
-            .get_branch_by_name(&project.id, branch_name)?
-            .ok_or_else(|| anyhow::anyhow!("Branch '{}' not found", branch_name))?;
+            .get_workspace_by_name(&project.id, workspace_name)?
+            .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
 
         self.runtime
-            .start_branch(&StartBranchSpec {
+            .start_workspace(&StartBranchSpec {
                 image: project.image.clone(),
-                container_name: branch.container_name.clone(),
-                data_dir: PathBuf::from(&branch.data_dir),
-                port: branch.port,
+                container_name: workspace.container_name.clone(),
+                data_dir: PathBuf::from(&workspace.data_dir),
+                port: workspace.port,
                 pg_user: self.pg_user.clone(),
                 pg_password: self.pg_password.clone(),
                 pg_db: self.pg_db.clone(),
                 project_name: self.project_name.clone(),
                 service_name: self.service_name.clone(),
-                branch_name: branch_name.to_string(),
+                workspace_name: workspace_name.to_string(),
             })
             .await?;
 
         self.runtime
             .wait_ready(
-                &branch.container_name,
+                &workspace.container_name,
                 &self.pg_user,
                 &self.pg_db,
                 STARTUP_TIMEOUT,
             )
             .await?;
         self.store()
-            .update_branch_state(&branch.id, BranchState::Running)?;
+            .update_branch_state(&workspace.id, BranchState::Running)?;
 
         Ok(())
     }
 
-    async fn stop_branch(&self, branch_name: &str) -> Result<()> {
+    async fn stop_workspace(&self, workspace_name: &str) -> Result<()> {
         let project = self.ensure_project().await?;
 
-        let branch = self
+        let workspace = self
             .store()
-            .get_branch_by_name(&project.id, branch_name)?
-            .ok_or_else(|| anyhow::anyhow!("Branch '{}' not found", branch_name))?;
+            .get_workspace_by_name(&project.id, workspace_name)?
+            .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
 
-        self.runtime.stop_branch(&branch.container_name).await?;
+        self.runtime
+            .stop_workspace(&workspace.container_name)
+            .await?;
         self.store()
-            .update_branch_state(&branch.id, BranchState::Stopped)?;
+            .update_branch_state(&workspace.id, BranchState::Stopped)?;
 
         Ok(())
     }
 
-    async fn reset_branch(&self, branch_name: &str) -> Result<()> {
+    async fn reset_workspace(&self, workspace_name: &str) -> Result<()> {
         let project = self.ensure_project().await?;
 
-        let branch = self
+        let workspace = self
             .store()
-            .get_branch_by_name(&project.id, branch_name)?
-            .ok_or_else(|| anyhow::anyhow!("Branch '{}' not found", branch_name))?;
+            .get_workspace_by_name(&project.id, workspace_name)?
+            .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
 
-        let was_running = branch.state == BranchState::Running;
+        let was_running = workspace.state == BranchState::Running;
 
         // Stop container
-        self.runtime.stop_branch(&branch.container_name).await?;
+        self.runtime
+            .stop_workspace(&workspace.container_name)
+            .await?;
 
         // Re-clone from parent if available
-        if let Some(parent_id) = &branch.parent_branch_id {
+        if let Some(parent_id) = &workspace.parent_workspace_id {
             let parent = self
                 .store()
-                .list_branches(&project.id)?
+                .list_workspaces(&project.id)?
                 .into_iter()
                 .find(|b| &b.id == parent_id);
 
-            if let Some(parent_branch) = parent {
+            if let Some(parent_workspace) = parent {
                 let parent_running = self
                     .runtime
-                    .container_status(&parent_branch.container_name)
+                    .container_status(&parent_workspace.container_name)
                     .await?
                     == docker::ContainerStatus::Running;
 
                 if parent_running {
                     self.runtime
-                        .pause_branch(&parent_branch.container_name)
+                        .pause_branch(&parent_workspace.container_name)
                         .await?;
                 }
 
-                let data_dir = PathBuf::from(&branch.data_dir);
+                let data_dir = PathBuf::from(&workspace.data_dir);
                 let clone_result = self
                     .storage
-                    .clone_branch_from_parent(&project, &parent_branch, &branch.id, &data_dir)
+                    .clone_branch_from_parent(&project, &parent_workspace, &workspace.id, &data_dir)
                     .await;
 
                 if parent_running {
                     self.runtime
-                        .unpause_branch(&parent_branch.container_name)
+                        .unpause_branch(&parent_workspace.container_name)
                         .await
-                        .context("failed to unpause parent branch after reset clone attempt")?;
+                        .context("failed to unpause parent workspace after reset clone attempt")?;
                 }
 
                 let new_metadata = clone_result?;
 
                 if let Some(metadata) = &new_metadata {
                     self.store()
-                        .update_branch_storage_metadata(&branch.id, Some(metadata))?;
+                        .update_branch_storage_metadata(&workspace.id, Some(metadata))?;
                 }
             }
         }
@@ -563,33 +574,33 @@ impl ServiceProvider for LocalProvider {
         // Restart if it was running
         if was_running {
             self.runtime
-                .start_branch(&StartBranchSpec {
+                .start_workspace(&StartBranchSpec {
                     image: project.image.clone(),
-                    container_name: branch.container_name.clone(),
-                    data_dir: PathBuf::from(&branch.data_dir),
-                    port: branch.port,
+                    container_name: workspace.container_name.clone(),
+                    data_dir: PathBuf::from(&workspace.data_dir),
+                    port: workspace.port,
                     pg_user: self.pg_user.clone(),
                     pg_password: self.pg_password.clone(),
                     pg_db: self.pg_db.clone(),
                     project_name: self.project_name.clone(),
                     service_name: self.service_name.clone(),
-                    branch_name: branch_name.to_string(),
+                    workspace_name: workspace_name.to_string(),
                 })
                 .await?;
 
             self.runtime
                 .wait_ready(
-                    &branch.container_name,
+                    &workspace.container_name,
                     &self.pg_user,
                     &self.pg_db,
                     STARTUP_TIMEOUT,
                 )
                 .await?;
             self.store()
-                .update_branch_state(&branch.id, BranchState::Running)?;
+                .update_branch_state(&workspace.id, BranchState::Running)?;
         } else {
             self.store()
-                .update_branch_state(&branch.id, BranchState::Stopped)?;
+                .update_branch_state(&workspace.id, BranchState::Stopped)?;
         }
 
         Ok(())
@@ -658,17 +669,17 @@ impl ServiceProvider for LocalProvider {
         Ok(())
     }
 
-    async fn seed_from_source(&self, branch_name: &str, source: &str) -> Result<()> {
+    async fn seed_from_source(&self, workspace_name: &str, source: &str) -> Result<()> {
         let project = self.ensure_project().await?;
-        let branch = self
+        let workspace = self
             .store()
-            .get_branch_by_name(&project.id, branch_name)?
-            .ok_or_else(|| anyhow::anyhow!("Branch '{}' not found", branch_name))?;
+            .get_workspace_by_name(&project.id, workspace_name)?
+            .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
         let parsed = seed::parse_source(source)?;
         seed::seed_branch(
             self.runtime.client(),
             &parsed,
-            &branch.container_name,
+            &workspace.container_name,
             &self.pg_user,
             &self.pg_db,
             &self.image,
@@ -700,7 +711,7 @@ impl ServiceProvider for LocalProvider {
             cleanup: true,
             seed_from_source: true,
             template_from_time: false,
-            max_branch_name_length: 255,
+            max_workspace_name_length: 255,
         }
     }
 
@@ -708,7 +719,7 @@ impl ServiceProvider for LocalProvider {
         true
     }
 
-    fn max_branch_name_length(&self) -> usize {
+    fn max_workspace_name_length(&self) -> usize {
         255
     }
 
@@ -716,15 +727,15 @@ impl ServiceProvider for LocalProvider {
         true
     }
 
-    async fn logs(&self, branch_name: &str, tail: Option<usize>) -> Result<String> {
+    async fn logs(&self, workspace_name: &str, tail: Option<usize>) -> Result<String> {
         let project = self.ensure_project().await?;
-        let branch = self
+        let workspace = self
             .store()
-            .get_branch_by_name(&project.id, branch_name)?
-            .ok_or_else(|| anyhow::anyhow!("Branch '{}' not found", branch_name))?;
+            .get_workspace_by_name(&project.id, workspace_name)?
+            .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
 
         self.runtime
-            .container_logs(&branch.container_name, tail)
+            .container_logs(&workspace.container_name, tail)
             .await
     }
 
@@ -734,10 +745,10 @@ impl ServiceProvider for LocalProvider {
             None => return Ok(None),
         };
 
-        let branches = self.store().list_branches(&project.id)?;
-        let branch_names: Vec<String> = branches.iter().map(|b| b.name.clone()).collect();
+        let workspaces = self.store().list_workspaces(&project.id)?;
+        let workspace_names: Vec<String> = workspaces.iter().map(|b| b.name.clone()).collect();
 
-        Ok(Some((project.name.clone(), branch_names)))
+        Ok(Some((project.name.clone(), workspace_names)))
     }
 
     async fn destroy_project(&self) -> Result<Vec<String>> {
@@ -746,15 +757,15 @@ impl ServiceProvider for LocalProvider {
             .get_project_by_name(&self.project_name)?
             .ok_or_else(|| anyhow::anyhow!("Project '{}' not found", self.project_name))?;
 
-        let branches = self.store().list_branches(&project.id)?;
-        let branch_names: Vec<String> = branches.iter().map(|b| b.name.clone()).collect();
+        let workspaces = self.store().list_workspaces(&project.id)?;
+        let workspace_names: Vec<String> = workspaces.iter().map(|b| b.name.clone()).collect();
 
         // 1. Remove all Docker containers (best-effort)
-        for branch in &branches {
-            if let Err(e) = self.runtime.remove_branch(&branch.container_name).await {
+        for workspace in &workspaces {
+            if let Err(e) = self.runtime.remove_branch(&workspace.container_name).await {
                 log::warn!(
                     "Failed to remove container '{}': {}",
-                    branch.container_name,
+                    workspace.container_name,
                     e
                 );
             }
@@ -763,10 +774,10 @@ impl ServiceProvider for LocalProvider {
         // 2. Delete project-level storage data
         self.storage.delete_project_data(&project).await?;
 
-        // 3. Delete project from SQLite (cascades to branches)
+        // 3. Delete project from SQLite (cascades to workspaces)
         self.store().delete_project(&project.id)?;
 
-        Ok(branch_names)
+        Ok(workspace_names)
     }
 }
 

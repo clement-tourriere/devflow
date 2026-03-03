@@ -13,8 +13,8 @@ pub struct ProxyTarget {
     pub project: Option<String>,
     /// Compose service name (if applicable)
     pub service: Option<String>,
-    /// devflow branch name (if applicable)
-    pub branch: Option<String>,
+    /// devflow workspace name (if applicable)
+    pub workspace: Option<String>,
 }
 
 /// Extract proxy targets from a container inspection result.
@@ -50,7 +50,7 @@ pub fn extract_proxy_targets(
         .get("devflow.service")
         .or_else(|| labels.get("com.docker.compose.service"))
         .cloned();
-    let branch = labels.get("devflow.branch").cloned();
+    let workspace = labels.get("devflow.workspace").cloned();
 
     domains
         .into_iter()
@@ -62,7 +62,7 @@ pub fn extract_proxy_targets(
             container_name: container_name.clone(),
             project: project.clone(),
             service: service_name.clone(),
-            branch: branch.clone(),
+            workspace: workspace.clone(),
         })
         .collect()
 }
@@ -134,15 +134,15 @@ fn extract_domains(container: &ContainerInspectResponse, domain_suffix: &str) ->
         .trim_start_matches('/')
         .to_string();
 
-    // devflow-managed: service.branch.project.suffix
-    if let (Some(project), Some(branch), Some(service_name)) = (
+    // devflow-managed: service.workspace.project.suffix
+    if let (Some(project), Some(workspace), Some(service_name)) = (
         labels.get("devflow.project"),
-        labels.get("devflow.branch"),
+        labels.get("devflow.workspace"),
         labels.get("devflow.service"),
     ) {
         return vec![format!(
             "{}.{}.{}.{}",
-            service_name, branch, project, domain_suffix
+            service_name, workspace, project, domain_suffix
         )];
     }
 

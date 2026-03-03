@@ -1,4 +1,4 @@
-use super::super::{BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ServiceProvider};
+use super::super::{ConnectionInfo, DoctorCheck, DoctorReport, ServiceProvider, WorkspaceInfo};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -31,12 +31,12 @@ struct NeonBranch {
 
 #[derive(Debug, Deserialize)]
 struct ListBranchesResponse {
-    branches: Vec<NeonBranch>,
+    workspaces: Vec<NeonBranch>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CreateBranchResponse {
-    branch: NeonBranch,
+    workspace: NeonBranch,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,58 +109,58 @@ impl NeonProvider {
             .with_context(|| "Failed to parse JSON response from Neon API")
     }
 
-    async fn get_branch_endpoint(&self, branch_name: &str) -> Result<NeonEndpoint> {
+    async fn get_workspace_endpoint(&self, workspace_name: &str) -> Result<NeonEndpoint> {
         let path = format!("projects/{}/endpoints", self.project_id);
         let response: ListEndpointsResponse = self
             .make_request(reqwest::Method::GET, &path, None::<&()>)
             .await?;
 
         for endpoint in response.endpoints {
-            if endpoint.database_name == branch_name || endpoint.id.contains(branch_name) {
+            if endpoint.database_name == workspace_name || endpoint.id.contains(workspace_name) {
                 return Ok(endpoint);
             }
         }
 
-        anyhow::bail!("No endpoint found for branch: {}", branch_name);
+        anyhow::bail!("No endpoint found for workspace: {}", workspace_name);
     }
 }
 
 #[async_trait]
 impl ServiceProvider for NeonProvider {
-    async fn create_branch(
+    async fn create_workspace(
         &self,
-        branch_name: &str,
-        from_branch: Option<&str>,
-    ) -> Result<BranchInfo> {
+        workspace_name: &str,
+        from_workspace: Option<&str>,
+    ) -> Result<WorkspaceInfo> {
         let request = CreateBranchRequest {
-            name: branch_name.to_string(),
-            parent_id: from_branch.map(|s| s.to_string()),
+            name: workspace_name.to_string(),
+            parent_id: from_workspace.map(|s| s.to_string()),
         };
 
-        let path = format!("projects/{}/branches", self.project_id);
+        let path = format!("projects/{}/workspaces", self.project_id);
         let response: CreateBranchResponse = self
             .make_request(reqwest::Method::POST, &path, Some(&request))
             .await?;
 
-        Ok(BranchInfo {
-            name: response.branch.name,
-            created_at: Some(response.branch.created_at),
-            parent_branch: response.branch.parent_id,
-            database_name: response.branch.id,
+        Ok(WorkspaceInfo {
+            name: response.workspace.name,
+            created_at: Some(response.workspace.created_at),
+            parent_workspace: response.workspace.parent_id,
+            database_name: response.workspace.id,
             state: Some("running".to_string()),
         })
     }
 
-    async fn delete_branch(&self, branch_name: &str) -> Result<()> {
-        let branches = self.list_branches().await?;
-        let branch = branches
+    async fn delete_workspace(&self, workspace_name: &str) -> Result<()> {
+        let workspaces = self.list_workspaces().await?;
+        let workspace = workspaces
             .into_iter()
-            .find(|b| b.name == branch_name)
-            .ok_or_else(|| anyhow::anyhow!("Branch '{}' not found", branch_name))?;
+            .find(|b| b.name == workspace_name)
+            .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
 
         let path = format!(
-            "projects/{}/branches/{}",
-            self.project_id, branch.database_name
+            "projects/{}/workspaces/{}",
+            self.project_id, workspace.database_name
         );
         let _: serde_json::Value = self
             .make_request(reqwest::Method::DELETE, &path, None::<&()>)
@@ -169,42 +169,42 @@ impl ServiceProvider for NeonProvider {
         Ok(())
     }
 
-    async fn list_branches(&self) -> Result<Vec<BranchInfo>> {
-        let path = format!("projects/{}/branches", self.project_id);
+    async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
+        let path = format!("projects/{}/workspaces", self.project_id);
         let response: ListBranchesResponse = self
             .make_request(reqwest::Method::GET, &path, None::<&()>)
             .await?;
 
-        let branches = response
-            .branches
+        let workspaces = response
+            .workspaces
             .into_iter()
-            .map(|branch| BranchInfo {
-                name: branch.name,
-                created_at: Some(branch.created_at),
-                parent_branch: branch.parent_id,
-                database_name: branch.id,
+            .map(|workspace| WorkspaceInfo {
+                name: workspace.name,
+                created_at: Some(workspace.created_at),
+                parent_workspace: workspace.parent_id,
+                database_name: workspace.id,
                 state: Some("running".to_string()),
             })
             .collect();
 
-        Ok(branches)
+        Ok(workspaces)
     }
 
-    async fn branch_exists(&self, branch_name: &str) -> Result<bool> {
-        let branches = self.list_branches().await?;
-        Ok(branches.iter().any(|b| b.name == branch_name))
+    async fn workspace_exists(&self, workspace_name: &str) -> Result<bool> {
+        let workspaces = self.list_workspaces().await?;
+        Ok(workspaces.iter().any(|b| b.name == workspace_name))
     }
 
-    async fn switch_to_branch(&self, branch_name: &str) -> Result<BranchInfo> {
-        let branches = self.list_branches().await?;
-        branches
+    async fn switch_to_branch(&self, workspace_name: &str) -> Result<WorkspaceInfo> {
+        let workspaces = self.list_workspaces().await?;
+        workspaces
             .into_iter()
-            .find(|b| b.name == branch_name)
-            .ok_or_else(|| anyhow::anyhow!("Branch '{}' does not exist", branch_name))
+            .find(|b| b.name == workspace_name)
+            .ok_or_else(|| anyhow::anyhow!("Workspace '{}' does not exist", workspace_name))
     }
 
-    async fn get_connection_info(&self, branch_name: &str) -> Result<ConnectionInfo> {
-        let endpoint = self.get_branch_endpoint(branch_name).await?;
+    async fn get_connection_info(&self, workspace_name: &str) -> Result<ConnectionInfo> {
+        let endpoint = self.get_workspace_endpoint(workspace_name).await?;
 
         let connection_string = if let Some(ref password) = endpoint.database_password {
             format!(
@@ -229,7 +229,7 @@ impl ServiceProvider for NeonProvider {
     }
 
     async fn test_connection(&self) -> Result<()> {
-        let _ = self.list_branches().await?;
+        let _ = self.list_workspaces().await?;
         Ok(())
     }
 

@@ -1,7 +1,7 @@
 //! Generic Docker service provider.
 //!
-//! Runs arbitrary Docker images as branch-isolated containers.
-//! Each branch gets its own container instance. Data persistence is optional
+//! Runs arbitrary Docker images as workspace-isolated containers.
+//! Each workspace gets its own container instance. Data persistence is optional
 //! (via Docker volumes or bind mounts configured in the service config).
 
 use std::collections::HashMap;
@@ -22,13 +22,13 @@ use crate::config::GenericDockerConfig;
 use crate::services::{
     local_docker::{
         collect_container_logs, inspect_container_status, list_managed_service_containers,
-        pick_available_port, sanitize_name_component, service_branch_prefix, ContainerStatus,
+        pick_available_port, sanitize_name_component, service_workspace_prefix, ContainerStatus,
     },
-    BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceCapabilities,
-    ServiceProvider,
+    ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceCapabilities, ServiceProvider,
+    WorkspaceInfo,
 };
 
-/// A generic Docker service provider that manages branch-isolated containers.
+/// A generic Docker service provider that manages workspace-isolated containers.
 pub struct GenericDockerProvider {
     /// Project name from config (e.g. "myapp").
     project_name: String,
@@ -36,9 +36,9 @@ pub struct GenericDockerProvider {
     service_name: String,
     /// Docker image to use.
     image: String,
-    /// Static port mapping (e.g. "6379:6379"). Used when auto_branch is false.
+    /// Static port mapping (e.g. "6379:6379"). Used when auto_workspace is false.
     port_mapping: Option<String>,
-    /// Start of port range for branch-specific instances.
+    /// Start of port range for workspace-specific instances.
     port_range_start: Option<u16>,
     /// Environment variables for the container.
     environment: HashMap<String, String>,
@@ -75,12 +75,12 @@ impl GenericDockerProvider {
         })
     }
 
-    fn container_name(&self, branch_name: &str) -> String {
+    fn container_name(&self, workspace_name: &str) -> String {
         let raw = format!(
             "devflow-{}-{}-{}",
             sanitize_name_component(&self.project_name),
             sanitize_name_component(&self.service_name),
-            sanitize_name_component(branch_name)
+            sanitize_name_component(workspace_name)
         );
         if raw.len() > 128 {
             raw[..128].trim_end_matches('-').to_string()
@@ -119,7 +119,7 @@ impl GenericDockerProvider {
         Ok(())
     }
 
-    /// Pick a port for a branch. Uses port_range_start + offset based on existing containers.
+    /// Pick a port for a workspace. Uses port_range_start + offset based on existing containers.
     async fn pick_port_for_branch(&self) -> anyhow::Result<u16> {
         let start = self.port_range_start.unwrap_or(56000);
         pick_available_port(&self.client, start).await
@@ -178,7 +178,7 @@ impl GenericDockerProvider {
         &self,
         container_name: &str,
         port: u16,
-        branch_name: &str,
+        workspace_name: &str,
     ) -> anyhow::Result<()> {
         self.ensure_image().await?;
 
@@ -200,7 +200,7 @@ impl GenericDockerProvider {
         labels.insert("devflow.project".to_string(), self.project_name.clone());
         labels.insert("devflow.service".to_string(), self.service_name.clone());
         labels.insert("devflow.service-type".to_string(), "generic".to_string());
-        labels.insert("devflow.branch".to_string(), branch_name.to_string());
+        labels.insert("devflow.workspace".to_string(), workspace_name.to_string());
 
         let binds: Option<Vec<String>> = if self.volumes.is_empty() {
             None
@@ -322,23 +322,23 @@ impl GenericDockerProvider {
 
     /// List all devflow-managed containers for this service.
     async fn list_managed_containers(&self) -> anyhow::Result<Vec<(String, String, bool)>> {
-        let prefix = service_branch_prefix(&self.project_name, &self.service_name);
+        let prefix = service_workspace_prefix(&self.project_name, &self.service_name);
         list_managed_service_containers(&self.client, &self.service_name, &prefix).await
     }
 }
 
 #[async_trait]
 impl ServiceProvider for GenericDockerProvider {
-    async fn create_branch(
+    async fn create_workspace(
         &self,
-        branch_name: &str,
-        from_branch: Option<&str>,
-    ) -> anyhow::Result<BranchInfo> {
-        let container_name = self.container_name(branch_name);
+        workspace_name: &str,
+        from_workspace: Option<&str>,
+    ) -> anyhow::Result<WorkspaceInfo> {
+        let container_name = self.container_name(workspace_name);
 
-        if from_branch.is_some() {
+        if from_workspace.is_some() {
             eprintln!(
-                "note: generic Docker provider does not support data cloning from parent branches. \
+                "note: generic Docker provider does not support data cloning from parent workspaces. \
                  Creating a fresh container instead."
             );
         }
@@ -346,10 +346,10 @@ impl ServiceProvider for GenericDockerProvider {
         // Check if already exists
         match self.container_status(&container_name).await? {
             ContainerStatus::Running => {
-                return Ok(BranchInfo {
-                    name: branch_name.to_string(),
+                return Ok(WorkspaceInfo {
+                    name: workspace_name.to_string(),
                     created_at: Some(Utc::now()),
-                    parent_branch: from_branch.map(|s| s.to_string()),
+                    parent_workspace: from_workspace.map(|s| s.to_string()),
                     database_name: container_name,
                     state: Some("running".to_string()),
                 });
@@ -364,10 +364,10 @@ impl ServiceProvider for GenericDockerProvider {
                     .await
                     .with_context(|| format!("failed to start container '{container_name}'"))?;
 
-                return Ok(BranchInfo {
-                    name: branch_name.to_string(),
+                return Ok(WorkspaceInfo {
+                    name: workspace_name.to_string(),
                     created_at: Some(Utc::now()),
-                    parent_branch: from_branch.map(|s| s.to_string()),
+                    parent_workspace: from_workspace.map(|s| s.to_string()),
                     database_name: container_name,
                     state: Some("running".to_string()),
                 });
@@ -376,22 +376,22 @@ impl ServiceProvider for GenericDockerProvider {
         }
 
         let port = self.pick_port_for_branch().await?;
-        self.create_and_start_container(&container_name, port, branch_name)
+        self.create_and_start_container(&container_name, port, workspace_name)
             .await?;
         self.wait_healthy(&container_name, Duration::from_secs(60))
             .await?;
 
-        Ok(BranchInfo {
-            name: branch_name.to_string(),
+        Ok(WorkspaceInfo {
+            name: workspace_name.to_string(),
             created_at: Some(Utc::now()),
-            parent_branch: from_branch.map(|s| s.to_string()),
+            parent_workspace: from_workspace.map(|s| s.to_string()),
             database_name: container_name,
             state: Some("running".to_string()),
         })
     }
 
-    async fn delete_branch(&self, branch_name: &str) -> anyhow::Result<()> {
-        let container_name = self.container_name(branch_name);
+    async fn delete_workspace(&self, workspace_name: &str) -> anyhow::Result<()> {
+        let container_name = self.container_name(workspace_name);
 
         if matches!(
             self.container_status(&container_name).await?,
@@ -413,30 +413,30 @@ impl ServiceProvider for GenericDockerProvider {
         Ok(())
     }
 
-    async fn list_branches(&self) -> anyhow::Result<Vec<BranchInfo>> {
+    async fn list_workspaces(&self) -> anyhow::Result<Vec<WorkspaceInfo>> {
         let containers = self.list_managed_containers().await?;
         Ok(containers
             .into_iter()
-            .map(|(branch, container_name, is_running)| BranchInfo {
-                name: branch,
+            .map(|(workspace, container_name, is_running)| WorkspaceInfo {
+                name: workspace,
                 created_at: None,
-                parent_branch: None,
+                parent_workspace: None,
                 database_name: container_name,
                 state: Some(if is_running { "running" } else { "stopped" }.to_string()),
             })
             .collect())
     }
 
-    async fn branch_exists(&self, branch_name: &str) -> anyhow::Result<bool> {
-        let container_name = self.container_name(branch_name);
+    async fn workspace_exists(&self, workspace_name: &str) -> anyhow::Result<bool> {
+        let container_name = self.container_name(workspace_name);
         Ok(!matches!(
             self.container_status(&container_name).await?,
             ContainerStatus::NotFound
         ))
     }
 
-    async fn switch_to_branch(&self, branch_name: &str) -> anyhow::Result<BranchInfo> {
-        let container_name = self.container_name(branch_name);
+    async fn switch_to_branch(&self, workspace_name: &str) -> anyhow::Result<WorkspaceInfo> {
+        let container_name = self.container_name(workspace_name);
 
         match self.container_status(&container_name).await? {
             ContainerStatus::Running => {}
@@ -454,24 +454,24 @@ impl ServiceProvider for GenericDockerProvider {
             }
             ContainerStatus::NotFound => {
                 return Err(anyhow!(
-                    "no container found for branch '{}' on service '{}'",
-                    branch_name,
+                    "no container found for workspace '{}' on service '{}'",
+                    workspace_name,
                     self.service_name
                 ));
             }
         }
 
-        Ok(BranchInfo {
-            name: branch_name.to_string(),
+        Ok(WorkspaceInfo {
+            name: workspace_name.to_string(),
             created_at: None,
-            parent_branch: None,
+            parent_workspace: None,
             database_name: container_name,
             state: Some("running".to_string()),
         })
     }
 
-    async fn get_connection_info(&self, branch_name: &str) -> anyhow::Result<ConnectionInfo> {
-        let container_name = self.container_name(branch_name);
+    async fn get_connection_info(&self, workspace_name: &str) -> anyhow::Result<ConnectionInfo> {
+        let container_name = self.container_name(workspace_name);
         let port = self.get_container_port(&container_name).await?.unwrap_or(0);
 
         Ok(ConnectionInfo {
@@ -488,14 +488,14 @@ impl ServiceProvider for GenericDockerProvider {
         true
     }
 
-    async fn start_branch(&self, branch_name: &str) -> anyhow::Result<()> {
-        let container_name = self.container_name(branch_name);
+    async fn start_workspace(&self, workspace_name: &str) -> anyhow::Result<()> {
+        let container_name = self.container_name(workspace_name);
 
         match self.container_status(&container_name).await? {
             ContainerStatus::Running => Ok(()),
             ContainerStatus::NotFound => Err(anyhow!(
-                "no container for branch '{}' on service '{}'",
-                branch_name,
+                "no container for workspace '{}' on service '{}'",
+                workspace_name,
                 self.service_name
             )),
             _ => {
@@ -512,8 +512,8 @@ impl ServiceProvider for GenericDockerProvider {
         }
     }
 
-    async fn stop_branch(&self, branch_name: &str) -> anyhow::Result<()> {
-        let container_name = self.container_name(branch_name);
+    async fn stop_workspace(&self, workspace_name: &str) -> anyhow::Result<()> {
+        let container_name = self.container_name(workspace_name);
 
         match self.container_status(&container_name).await? {
             ContainerStatus::NotFound | ContainerStatus::Exited => return Ok(()),
@@ -553,7 +553,7 @@ impl ServiceProvider for GenericDockerProvider {
         let containers = self.list_managed_containers().await?;
         let mut deleted = Vec::new();
 
-        for (branch_name, container_name, _) in &containers {
+        for (workspace_name, container_name, _) in &containers {
             let options = RemoveContainerOptions {
                 force: true,
                 ..Default::default()
@@ -563,7 +563,7 @@ impl ServiceProvider for GenericDockerProvider {
                 .remove_container(container_name, Some(options))
                 .await
             {
-                Ok(()) => deleted.push(branch_name.clone()),
+                Ok(()) => deleted.push(workspace_name.clone()),
                 Err(e) => log::warn!("failed to remove container '{}': {}", container_name, e),
             }
         }
@@ -626,8 +626,8 @@ impl ServiceProvider for GenericDockerProvider {
         })
     }
 
-    async fn logs(&self, branch_name: &str, tail: Option<usize>) -> anyhow::Result<String> {
-        let container = self.container_name(branch_name);
+    async fn logs(&self, workspace_name: &str, tail: Option<usize>) -> anyhow::Result<String> {
+        let container = self.container_name(workspace_name);
         collect_container_logs(&self.client, &container, tail).await
     }
 
@@ -643,11 +643,11 @@ impl ServiceProvider for GenericDockerProvider {
             cleanup: true,
             seed_from_source: false,
             template_from_time: false,
-            max_branch_name_length: 255,
+            max_workspace_name_length: 255,
         }
     }
 
-    fn max_branch_name_length(&self) -> usize {
+    fn max_workspace_name_length(&self) -> usize {
         255
     }
 }

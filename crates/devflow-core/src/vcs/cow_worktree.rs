@@ -32,7 +32,7 @@ pub fn detect_cow_capability(path: &Path) -> CowCapability {
         }
     }
 
-    // Suppress unused-variable warning on platforms where neither branch fires
+    // Suppress unused-variable warning on platforms where neither workspace fires
     let _ = path;
 
     CowCapability::None
@@ -185,7 +185,7 @@ fn test_reflink_cross(source_dir: &Path, target_parent: &Path) -> bool {
 /// Create a worktree using Copy-on-Write if the filesystem supports it.
 ///
 /// The CoW fast path:
-/// 1. `git worktree add --no-checkout <path> <branch>` — registers worktree
+/// 1. `git worktree add --no-checkout <path> <workspace>` — registers worktree
 ///    without performing a full checkout.
 /// 2. For each top-level entry in the source (excluding `.git`):
 ///    `cp -cR` (macOS) or `cp -a --reflink=always` (Linux).
@@ -195,7 +195,7 @@ fn test_reflink_cross(source_dir: &Path, target_parent: &Path) -> bool {
 /// Returns `Ok(true)` if CoW was used, `Ok(false)` if the caller should fall
 /// back to the standard git2 worktree creation (CoW not available).
 /// Returns `Err` if CoW was attempted but failed mid-way (worktree is cleaned up).
-pub fn create_cow_worktree(source_dir: &Path, target_path: &Path, branch: &str) -> Result<bool> {
+pub fn create_cow_worktree(source_dir: &Path, target_path: &Path, workspace: &str) -> Result<bool> {
     // Resolve the target's parent directory for the cross-directory probe.
     // Ensure it exists so the probe can write into it.
     let target_parent = target_path.parent().unwrap_or(target_path);
@@ -224,7 +224,7 @@ pub fn create_cow_worktree(source_dir: &Path, target_path: &Path, branch: &str) 
             target_path
                 .to_str()
                 .context("Target path is not valid UTF-8")?,
-            branch,
+            workspace,
         ])
         .current_dir(source_dir)
         .output()

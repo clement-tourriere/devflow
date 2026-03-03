@@ -50,7 +50,7 @@ function ProjectList() {
 
   // User selections
   const [selectedVcs, setSelectedVcs] = useState<string>("git");
-  const [branchingMode, setBranchingMode] = useState<"worktree" | "branch">("worktree");
+  const [branchingMode, setBranchingMode] = useState<"worktree" | "workspace">("worktree");
 
   const loadProjects = async () => {
     try {
@@ -205,7 +205,7 @@ function ProjectList() {
               <tr>
                 <th>Name</th>
                 <th>Path</th>
-                <th>Branch</th>
+                <th>Workspace</th>
                 <th>Services</th>
                 <th>VCS</th>
                 <th>Mode</th>
@@ -242,9 +242,9 @@ function ProjectList() {
                     {p.path}
                   </td>
                   <td>
-                    {p.detail?.current_branch && !p.detail?.worktree_enabled && (
+                    {p.detail?.current_workspace && !p.detail?.worktree_enabled && (
                       <span className="badge" style={{ opacity: 0.7 }}>
-                        HEAD: {p.detail.current_branch}
+                        HEAD: {p.detail.current_workspace}
                       </span>
                     )}
                   </td>
@@ -479,9 +479,9 @@ function ProjectList() {
                 worktree
               </button>
               <button
-                className={`btn${branchingMode === "branch" ? " btn-primary" : ""}`}
+                className={`btn${branchingMode === "workspace" ? " btn-primary" : ""}`}
                 style={{ padding: "4px 16px", fontSize: 13 }}
-                onClick={() => setBranchingMode("branch")}
+                onClick={() => setBranchingMode("workspace")}
                 type="button"
               >
                 checkout
@@ -495,7 +495,7 @@ function ProjectList() {
               }}
             >
               {branchingMode === "worktree"
-                ? "Each branch gets its own directory — parallel work without stashing."
+                ? "Each workspace gets its own directory — parallel work without stashing."
                 : `Branches share a single directory — switches in place like ${
                     (vcsInfo?.existing_vcs || selectedVcs) === "jj" ? "jj edit" : "git checkout"
                   }.`}

@@ -12,11 +12,11 @@ pub struct Project {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Branch {
+pub struct Workspace {
     pub id: String,
     pub project_id: String,
     pub name: String,
-    pub parent_branch_id: Option<String>,
+    pub parent_workspace_id: Option<String>,
     pub state: BranchState,
     pub data_dir: String,
     pub container_name: String,

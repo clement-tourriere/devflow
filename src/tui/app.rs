@@ -111,7 +111,7 @@ impl App {
 
     // ── Background task spawners ────────────────────────────────────
 
-    /// Spawn a background task to fetch branches.
+    /// Spawn a background task to fetch workspaces.
     fn spawn_fetch_branches(&self) {
         let config = self.context.config.clone();
         let vcs_data = self.context.snapshot_vcs_data();
@@ -131,7 +131,7 @@ impl App {
                     let _ = tx.send(Action::DataLoaded(DataPayload::Branches(data)));
                 }
                 Err(e) => {
-                    let _ = tx.send(Action::Error(format!("Failed to load branches: {}", e)));
+                    let _ = tx.send(Action::Error(format!("Failed to load workspaces: {}", e)));
                 }
             }
         });
@@ -170,11 +170,11 @@ impl App {
     }
 
     /// Spawn a background task to fetch logs.
-    fn spawn_fetch_logs(&self, service: String, branch: String) {
+    fn spawn_fetch_logs(&self, service: String, workspace: String) {
         let config = self.context.config.clone();
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
-            match DevflowContext::fetch_logs_bg(&config, &service, &branch).await {
+            match DevflowContext::fetch_logs_bg(&config, &service, &workspace).await {
                 Ok(content) => {
                     let _ = tx.send(Action::DataLoaded(DataPayload::Logs { service, content }));
                 }
@@ -205,12 +205,12 @@ impl App {
         });
     }
 
-    /// Spawn a background task to align services to a branch.
-    fn spawn_switch_services(&self, branch_name: String) {
+    /// Spawn a background task to align services to a workspace.
+    fn spawn_switch_services(&self, workspace_name: String) {
         let config = self.context.config.clone();
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
-            match DevflowContext::switch_services_bg(&config, &branch_name).await {
+            match DevflowContext::switch_services_bg(&config, &workspace_name).await {
                 Ok(msg) => {
                     let _ = tx.send(Action::OperationComplete {
                         success: true,
@@ -226,12 +226,12 @@ impl App {
         });
     }
 
-    /// Spawn a background task for creating a branch (service orchestration).
-    fn spawn_create_branch(&self, name: String, from: Option<String>) {
+    /// Spawn a background task for creating a workspace (service orchestration).
+    fn spawn_create_workspace(&self, name: String, from: Option<String>) {
         let config = self.context.config.clone();
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
-            match DevflowContext::create_branch_bg(&config, &name, from.as_deref()).await {
+            match DevflowContext::create_workspace_bg(&config, &name, from.as_deref()).await {
                 Ok(msg) => {
                     let _ = tx.send(Action::OperationComplete {
                         success: true,
@@ -246,20 +246,20 @@ impl App {
         });
     }
 
-    /// Spawn a background task for deleting a branch (service orchestration).
-    /// After service branches are deleted, sends `DeleteVcsBranch` back to the
+    /// Spawn a background task for deleting a workspace (service orchestration).
+    /// After service workspaces are deleted, sends `DeleteVcsBranch` back to the
     /// main thread so VCS deletion can happen synchronously.
-    fn spawn_delete_branch(&self, name: String) {
+    fn spawn_delete_workspace(&self, name: String) {
         let config = self.context.config.clone();
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
-            match DevflowContext::delete_branch_bg(&config, &name).await {
+            match DevflowContext::delete_workspace_bg(&config, &name).await {
                 Ok(msg) => {
                     let _ = tx.send(Action::OperationComplete {
                         success: true,
                         message: msg,
                     });
-                    // Ask main thread to delete the VCS branch
+                    // Ask main thread to delete the VCS workspace
                     let _ = tx.send(Action::DeleteVcsBranch(name));
                 }
                 Err(e) => {
@@ -270,22 +270,22 @@ impl App {
     }
 
     /// Spawn a background task for a service operation (start/stop/reset/delete).
-    fn spawn_service_op(&self, service: String, branch: String, op: ServiceOp) {
+    fn spawn_service_op(&self, service: String, workspace: String, op: ServiceOp) {
         let config = self.context.config.clone();
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
             let result = match op {
                 ServiceOp::Start => {
-                    DevflowContext::start_service_bg(&config, &service, &branch).await
+                    DevflowContext::start_service_bg(&config, &service, &workspace).await
                 }
                 ServiceOp::Stop => {
-                    DevflowContext::stop_service_bg(&config, &service, &branch).await
+                    DevflowContext::stop_service_bg(&config, &service, &workspace).await
                 }
                 ServiceOp::Reset => {
-                    DevflowContext::reset_service_bg(&config, &service, &branch).await
+                    DevflowContext::reset_service_bg(&config, &service, &workspace).await
                 }
                 ServiceOp::Delete => {
-                    DevflowContext::delete_service_branch_bg(&config, &service, &branch).await
+                    DevflowContext::delete_service_branch_bg(&config, &service, &workspace).await
                 }
             };
             match result {
@@ -517,7 +517,7 @@ impl App {
             Action::SwitchServices(ref name) => {
                 if self.context.service_configs().is_empty() {
                     self.set_status(
-                        "No services configured. Press 'o' to open the branch/worktree."
+                        "No services configured. Press 'o' to open the workspace/worktree."
                             .to_string(),
                         true,
                     );
@@ -532,71 +532,74 @@ impl App {
                 self.running = false;
             }
             Action::CreateBranch { ref name, ref from } => {
-                self.set_status(format!("Creating branch '{}'...", name), false);
+                self.set_status(format!("Creating workspace '{}'...", name), false);
                 // VCS create + checkout is fast + local
                 if let Err(e) = self
                     .context
-                    .create_and_checkout_branch(name, from.as_deref())
+                    .create_and_checkout_workspace(name, from.as_deref())
                 {
                     self.set_status(format!("Create failed: {}", e), true);
                     return;
                 }
                 // Spawn async service orchestration
-                self.spawn_create_branch(name.clone(), from.clone());
+                self.spawn_create_workspace(name.clone(), from.clone());
             }
             Action::DeleteBranch(ref name) => {
-                self.set_status(format!("Deleting branch '{}'...", name), false);
+                self.set_status(format!("Deleting workspace '{}'...", name), false);
                 // Spawn async service delete; VCS delete happens when DeleteVcsBranch comes back
-                self.spawn_delete_branch(name.clone());
+                self.spawn_delete_workspace(name.clone());
             }
             Action::DeleteVcsBranch(ref name) => {
-                // Sync VCS branch deletion on main thread, after services are cleaned up
+                // Sync VCS workspace deletion on main thread, after services are cleaned up
                 if let Err(e) = self.context.delete_vcs_branch(name) {
-                    self.set_status(format!("VCS branch delete failed: {}", e), true);
+                    self.set_status(format!("VCS workspace delete failed: {}", e), true);
                 } else {
-                    // Refresh everything after branch deletion
+                    // Refresh everything after workspace deletion
                     self.context.refresh_vcs_snapshot();
                     self.load_initial_data();
                 }
             }
             Action::StartService {
                 ref service,
-                ref branch,
+                ref workspace,
             } => {
-                self.set_status(format!("Starting {} on '{}'...", service, branch), false);
-                self.spawn_service_op(service.clone(), branch.clone(), ServiceOp::Start);
+                self.set_status(format!("Starting {} on '{}'...", service, workspace), false);
+                self.spawn_service_op(service.clone(), workspace.clone(), ServiceOp::Start);
             }
             Action::StopService {
                 ref service,
-                ref branch,
+                ref workspace,
             } => {
-                self.set_status(format!("Stopping {} on '{}'...", service, branch), false);
-                self.spawn_service_op(service.clone(), branch.clone(), ServiceOp::Stop);
+                self.set_status(format!("Stopping {} on '{}'...", service, workspace), false);
+                self.spawn_service_op(service.clone(), workspace.clone(), ServiceOp::Stop);
             }
             Action::ResetService {
                 ref service,
-                ref branch,
-            } => {
-                self.set_status(format!("Resetting {} on '{}'...", service, branch), false);
-                self.spawn_service_op(service.clone(), branch.clone(), ServiceOp::Reset);
-            }
-            Action::DeleteServiceBranch {
-                ref service,
-                ref branch,
+                ref workspace,
             } => {
                 self.set_status(
-                    format!("Deleting {} branch '{}'...", service, branch),
+                    format!("Resetting {} on '{}'...", service, workspace),
                     false,
                 );
-                self.spawn_service_op(service.clone(), branch.clone(), ServiceOp::Delete);
+                self.spawn_service_op(service.clone(), workspace.clone(), ServiceOp::Reset);
+            }
+            Action::DeleteServiceWorkspace {
+                ref service,
+                ref workspace,
+            } => {
+                self.set_status(
+                    format!("Deleting {} workspace '{}'...", service, workspace),
+                    false,
+                );
+                self.spawn_service_op(service.clone(), workspace.clone(), ServiceOp::Delete);
             }
             Action::ViewLogs {
                 ref service,
-                ref branch,
+                ref workspace,
             } => {
-                self.logs.set_loading(service, branch);
+                self.logs.set_loading(service, workspace);
                 self.switch_tab(2); // Switch to logs tab
-                self.spawn_fetch_logs(service.clone(), branch.clone());
+                self.spawn_fetch_logs(service.clone(), workspace.clone());
             }
             Action::RunDoctor => {
                 self.set_status("Running doctor checks...".to_string(), false);
@@ -666,31 +669,45 @@ impl App {
             Action::Error(ref msg) => {
                 self.set_status(msg.clone(), true);
             }
-            Action::StartAllServices(ref branch) => {
-                let services = self.environments.services_for_branch(branch);
+            Action::StartAllServices(ref workspace) => {
+                let services = self.environments.services_for_branch(workspace);
                 if services.is_empty() {
-                    self.set_status(format!("No services to start on branch '{}'", branch), true);
+                    self.set_status(
+                        format!("No services to start on workspace '{}'", workspace),
+                        true,
+                    );
                 } else {
                     self.set_status(
-                        format!("Starting {} service(s) on '{}'...", services.len(), branch),
+                        format!(
+                            "Starting {} service(s) on '{}'...",
+                            services.len(),
+                            workspace
+                        ),
                         false,
                     );
                     for service in services {
-                        self.spawn_service_op(service, branch.clone(), ServiceOp::Start);
+                        self.spawn_service_op(service, workspace.clone(), ServiceOp::Start);
                     }
                 }
             }
-            Action::StopAllServices(ref branch) => {
-                let services = self.environments.services_for_branch(branch);
+            Action::StopAllServices(ref workspace) => {
+                let services = self.environments.services_for_branch(workspace);
                 if services.is_empty() {
-                    self.set_status(format!("No services to stop on branch '{}'", branch), true);
+                    self.set_status(
+                        format!("No services to stop on workspace '{}'", workspace),
+                        true,
+                    );
                 } else {
                     self.set_status(
-                        format!("Stopping {} service(s) on '{}'...", services.len(), branch),
+                        format!(
+                            "Stopping {} service(s) on '{}'...",
+                            services.len(),
+                            workspace
+                        ),
                         false,
                     );
                     for service in services {
-                        self.spawn_service_op(service, branch.clone(), ServiceOp::Stop);
+                        self.spawn_service_op(service, workspace.clone(), ServiceOp::Stop);
                     }
                 }
             }

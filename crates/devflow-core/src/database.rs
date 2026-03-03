@@ -38,9 +38,9 @@ impl DatabaseManager {
         std::env::var(var_name).ok()
     }
 
-    pub async fn create_database_branch(&self, branch_name: &str) -> Result<()> {
+    pub async fn create_database_branch(&self, workspace_name: &str) -> Result<()> {
         let client = self.connect().await?;
-        let db_name = self.config.get_database_name(branch_name);
+        let db_name = self.config.get_database_name(workspace_name);
 
         if self.database_exists(&client, &db_name).await? {
             log::info!("Database {} already exists, skipping creation", db_name);
@@ -60,15 +60,15 @@ impl DatabaseManager {
         client
             .execute(&query, &[])
             .await
-            .with_context(|| format!("Failed to create database branch: {}", db_name))?;
+            .with_context(|| format!("Failed to create database workspace: {}", db_name))?;
 
-        log::info!("Created database branch: {}", db_name);
+        log::info!("Created database workspace: {}", db_name);
         Ok(())
     }
 
-    pub async fn drop_database_branch(&self, branch_name: &str) -> Result<()> {
+    pub async fn drop_database_branch(&self, workspace_name: &str) -> Result<()> {
         let client = self.connect().await?;
-        let db_name = self.config.get_database_name(branch_name);
+        let db_name = self.config.get_database_name(workspace_name);
 
         if !self.database_exists(&client, &db_name).await? {
             log::info!("Database {} does not exist, skipping deletion", db_name);
@@ -80,9 +80,9 @@ impl DatabaseManager {
         client
             .execute(&query, &[])
             .await
-            .with_context(|| format!("Failed to drop database branch: {}", db_name))?;
+            .with_context(|| format!("Failed to drop database workspace: {}", db_name))?;
 
-        log::info!("Dropped database branch: {}", db_name);
+        log::info!("Dropped database workspace: {}", db_name);
         Ok(())
     }
 
@@ -96,17 +96,17 @@ impl DatabaseManager {
         let rows = client
             .query(query, &[&pattern])
             .await
-            .context("Failed to list database branches")?;
+            .context("Failed to list database workspaces")?;
 
-        let mut branches = Vec::new();
+        let mut workspaces = Vec::new();
         for row in rows {
             let db_name: String = row.get(0);
-            if let Some(branch_name) = self.extract_branch_name(&db_name) {
-                branches.push(branch_name);
+            if let Some(workspace_name) = self.extract_workspace_name(&db_name) {
+                workspaces.push(workspace_name);
             }
         }
 
-        Ok(branches)
+        Ok(workspaces)
     }
 
     pub async fn database_exists(&self, client: &Client, db_name: &str) -> Result<bool> {
@@ -181,7 +181,7 @@ impl DatabaseManager {
         Ok(())
     }
 
-    pub async fn cleanup_old_branches(&self, max_count: usize) -> Result<()> {
+    pub async fn cleanup_old_workspaces(&self, max_count: usize) -> Result<()> {
         let client = self.connect().await?;
         let prefix = &self.config.database.database_prefix;
 
@@ -197,12 +197,12 @@ impl DatabaseManager {
         let rows = client
             .query(query, &[&pattern, &(max_count as i64)])
             .await
-            .context("Failed to query old branches for cleanup")?;
+            .context("Failed to query old workspaces for cleanup")?;
 
         for row in rows {
             let db_name: String = row.get(0);
-            if let Some(branch_name) = self.extract_branch_name(&db_name) {
-                self.drop_database_branch(&branch_name).await?;
+            if let Some(workspace_name) = self.extract_workspace_name(&db_name) {
+                self.drop_database_branch(&workspace_name).await?;
             }
         }
 
@@ -292,7 +292,7 @@ impl DatabaseManager {
         Ok(conn_str)
     }
 
-    fn extract_branch_name(&self, db_name: &str) -> Option<String> {
+    fn extract_workspace_name(&self, db_name: &str) -> Option<String> {
         let prefix = format!("{}_", self.config.database.database_prefix);
         if db_name.starts_with(&prefix) {
             Some(db_name[prefix.len()..].to_string())

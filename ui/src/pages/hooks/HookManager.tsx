@@ -16,7 +16,7 @@ function HookManager() {
   const [template, setTemplate] = useState("");
   const [rendered, setRendered] = useState<string | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
-  const [branchName, setBranchName] = useState("");
+  const [workspaceName, setBranchName] = useState("");
 
   useEffect(() => {
     if (!projectPath) return;
@@ -33,7 +33,7 @@ function HookManager() {
       const result = await renderTemplate(
         projectPath,
         template,
-        branchName || undefined
+        workspaceName || undefined
       );
       setRendered(result);
     } catch (e) {
@@ -112,16 +112,16 @@ function HookManager() {
             <div className="flex gap-2 mb-4">
               <input
                 type="text"
-                value={branchName}
+                value={workspaceName}
                 onChange={(e) => setBranchName(e.target.value)}
-                placeholder="Branch name (optional)"
+                placeholder="Workspace name (optional)"
                 style={{ flex: 1 }}
               />
             </div>
             <textarea
               value={template}
               onChange={(e) => setTemplate(e.target.value)}
-              placeholder="Enter a MiniJinja template... e.g. {{ branch }}"
+              placeholder="Enter a MiniJinja template... e.g. {{ workspace }}"
               style={{ marginBottom: 8 }}
             />
             <button className="btn btn-primary" onClick={handleRender}>

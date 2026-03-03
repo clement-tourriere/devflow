@@ -9,9 +9,9 @@ pub struct ProjectDetail {
     pub name: String,
     pub path: String,
     pub has_config: bool,
-    pub current_branch: Option<String>,
+    pub current_workspace: Option<String>,
     pub service_count: usize,
-    pub branch_count: usize,
+    pub workspace_count: usize,
     pub worktree_enabled: bool,
     pub vcs_type: Option<String>,
 }
@@ -33,12 +33,42 @@ pub async fn add_project(
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
 
-    let name = name.unwrap_or_else(|| {
-        abs_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string())
-    });
+    let explicit_name = name.filter(|n| !n.trim().is_empty());
+
+    let config_name = {
+        let config_path = abs_path.join(".devflow.yml");
+        if config_path.exists() {
+            devflow_core::config::Config::from_file(&config_path)
+                .ok()
+                .and_then(|c| c.name)
+                .filter(|n| !n.trim().is_empty())
+        } else {
+            None
+        }
+    };
+
+    let fallback_name = abs_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let name = explicit_name
+        .clone()
+        .or(config_name)
+        .unwrap_or(fallback_name);
+
+    // If user explicitly provided a project name, persist it into config when available.
+    if let Some(explicit) = explicit_name {
+        let config_path = abs_path.join(".devflow.yml");
+        if config_path.exists() {
+            if let Ok(mut config) = devflow_core::config::Config::from_file(&config_path) {
+                if config.name.as_ref() != Some(&explicit) {
+                    config.name = Some(explicit);
+                    let _ = config.save_to_file(&config_path);
+                }
+            }
+        }
+    }
 
     let entry = ProjectEntry {
         path: abs_path.display().to_string(),
@@ -114,6 +144,8 @@ pub async fn init_project(
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
 
+    let explicit_name = name.filter(|n| !n.trim().is_empty());
+
     // Initialize VCS if not already a repo
     if devflow_core::vcs::detect_vcs_kind(&abs_path).is_none() {
         let preference = vcs_preference.as_deref().and_then(|s| match s {
@@ -125,19 +157,34 @@ pub async fn init_project(
             .map_err(|e| format!("Failed to init VCS: {}", e))?;
     } else {
         // VCS already exists — ensure it has at least one commit so the
-        // default branch is materialised and `list_branches` returns it.
+        // default workspace is materialised and `list_workspaces` returns it.
         if let Ok(vcs) = devflow_core::vcs::detect_vcs_provider(&abs_path) {
             let _ = vcs.ensure_initial_commit();
         }
     }
 
-    // Derive project name first so we can embed it in config
-    let project_name = name.unwrap_or_else(|| {
-        abs_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string())
-    });
+    // Derive project name: explicit arg -> existing config name -> directory name
+    let existing_config_name = {
+        let config_path = abs_path.join(".devflow.yml");
+        if config_path.exists() {
+            devflow_core::config::Config::from_file(&config_path)
+                .ok()
+                .and_then(|c| c.name)
+                .filter(|n| !n.trim().is_empty())
+        } else {
+            None
+        }
+    };
+
+    let fallback_name = abs_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let project_name = explicit_name
+        .clone()
+        .or(existing_config_name)
+        .unwrap_or(fallback_name);
 
     // Create default .devflow.yml if it doesn't exist
     let config_path = abs_path.join(".devflow.yml");
@@ -151,6 +198,15 @@ pub async fn init_project(
         config
             .save_to_file(&config_path)
             .map_err(|e| format!("Failed to create config: {}", e))?;
+    } else if let Ok(mut config) = devflow_core::config::Config::from_file(&config_path) {
+        let should_set_name =
+            explicit_name.is_some() || config.name.as_ref().is_none_or(|n| n.trim().is_empty());
+        if should_set_name {
+            config.name = Some(project_name.clone());
+            config
+                .save_to_file(&config_path)
+                .map_err(|e| format!("Failed to update config: {}", e))?;
+        }
     }
 
     let entry = ProjectEntry {
@@ -175,7 +231,7 @@ pub async fn init_project(
 /// 1. Initializes VCS if missing
 /// 2. Creates `.devflow.yml` if missing (with optional worktree config)
 /// 3. Adds worktree config to existing `.devflow.yml` if requested and missing
-/// 4. Registers default devflow branch
+/// 4. Registers default devflow workspace
 /// 5. Registers project in GUI settings
 #[tauri::command]
 pub async fn add_or_init_project(
@@ -195,6 +251,8 @@ pub async fn add_or_init_project(
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
 
+    let explicit_name = name.filter(|n| !n.trim().is_empty());
+
     // Initialize VCS if not already a repo
     if devflow_core::vcs::detect_vcs_kind(&abs_path).is_none() {
         let preference = vcs_preference.as_deref().and_then(|s| match s {
@@ -211,13 +269,28 @@ pub async fn add_or_init_project(
         }
     }
 
-    // Derive project name
-    let project_name = name.unwrap_or_else(|| {
-        abs_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string())
-    });
+    // Derive project name: explicit arg -> existing config name -> directory name
+    let existing_config_name = {
+        let config_path = abs_path.join(".devflow.yml");
+        if config_path.exists() {
+            devflow_core::config::Config::from_file(&config_path)
+                .ok()
+                .and_then(|c| c.name)
+                .filter(|n| !n.trim().is_empty())
+        } else {
+            None
+        }
+    };
+
+    let fallback_name = abs_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let project_name = explicit_name
+        .clone()
+        .or(existing_config_name)
+        .unwrap_or(fallback_name);
 
     let config_path = abs_path.join(".devflow.yml");
     let wt_enabled = worktree_enabled.unwrap_or(true);
@@ -232,31 +305,37 @@ pub async fn add_or_init_project(
         config
             .save_to_file(&config_path)
             .map_err(|e| format!("Failed to create config: {}", e))?;
-    } else if wt_enabled {
-        // Config exists — add worktree config if not already present
-        if let Ok(mut config) = devflow_core::config::Config::from_file(&config_path) {
-            if config.worktree.is_none() {
-                config.worktree = Some(devflow_core::config::WorktreeConfig::recommended_default());
-                config
-                    .save_to_file(&config_path)
-                    .map_err(|e| format!("Failed to update config: {}", e))?;
-            }
+    } else if let Ok(mut config) = devflow_core::config::Config::from_file(&config_path) {
+        // Config exists — keep name canonical and optionally add worktree settings.
+        let mut changed = false;
+        if explicit_name.is_some() || config.name.as_ref().is_none_or(|n| n.trim().is_empty()) {
+            config.name = Some(project_name.clone());
+            changed = true;
+        }
+        if wt_enabled && config.worktree.is_none() {
+            config.worktree = Some(devflow_core::config::WorktreeConfig::recommended_default());
+            changed = true;
+        }
+        if changed {
+            config
+                .save_to_file(&config_path)
+                .map_err(|e| format!("Failed to update config: {}", e))?;
         }
     }
 
-    // Register default devflow branch
-    let main_branch = if config_path.exists() {
+    // Register default devflow workspace
+    let main_workspace = if config_path.exists() {
         devflow_core::config::Config::from_file(&config_path)
             .ok()
-            .map(|c| c.git.main_branch.clone())
+            .map(|c| c.git.main_workspace.clone())
             .unwrap_or_else(|| "main".to_string())
     } else {
         "main".to_string()
     };
 
     if let Ok(mut state_mgr) = devflow_core::state::LocalStateManager::new() {
-        if let Err(e) = state_mgr.ensure_default_branch(&abs_path, &main_branch) {
-            log::warn!("Failed to register default branch: {}", e);
+        if let Err(e) = state_mgr.ensure_default_workspace(&abs_path, &main_workspace) {
+            log::warn!("Failed to register default workspace: {}", e);
         }
     }
 
@@ -277,15 +356,13 @@ pub async fn add_or_init_project(
 }
 
 #[tauri::command]
-pub async fn get_project_detail(project_path: String) -> Result<ProjectDetail, String> {
+pub async fn get_project_detail(
+    state: State<'_, AppState>,
+    project_path: String,
+) -> Result<ProjectDetail, String> {
     let path = std::path::Path::new(&project_path);
     let config_path = path.join(".devflow.yml");
     let has_config = config_path.exists();
-
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
 
     let vcs = devflow_core::vcs::detect_vcs_provider(&project_path).ok();
     let vcs_type = vcs.as_ref().map(|v| v.provider_name().to_string());
@@ -296,25 +373,27 @@ pub async fn get_project_detail(project_path: String) -> Result<ProjectDetail, S
         None
     };
 
-    // Derive current devflow branch: VCS branch → normalize → look up in registry
-    let vcs_branch = vcs.as_ref().and_then(|v| v.current_branch().ok().flatten());
+    // Derive current devflow workspace: VCS workspace → normalize → look up in registry
+    let vcs_branch = vcs
+        .as_ref()
+        .and_then(|v| v.current_workspace().ok().flatten());
 
     let normalized_branch = vcs_branch.as_deref().map(|b| {
         config
             .as_ref()
-            .map(|c| c.get_normalized_branch_name(b))
+            .map(|c| c.get_normalized_workspace_name(b))
             .unwrap_or_else(|| b.to_string())
     });
 
-    // Use devflow registry for branch count
-    let branch_count = if let Ok(state_mgr) = devflow_core::state::LocalStateManager::new() {
-        let branches = state_mgr.get_branches_by_dir(path);
-        branches.len()
+    // Use devflow registry for workspace count
+    let workspace_count = if let Ok(state_mgr) = devflow_core::state::LocalStateManager::new() {
+        let workspaces = state_mgr.get_workspaces_by_dir(path);
+        workspaces.len()
     } else {
         0
     };
 
-    let current_branch = normalized_branch;
+    let current_workspace = normalized_branch;
 
     let service_count = config
         .as_ref()
@@ -327,13 +406,45 @@ pub async fn get_project_detail(project_path: String) -> Result<ProjectDetail, S
         .map(|w| w.enabled)
         .unwrap_or(false);
 
+    let config_name = config
+        .as_ref()
+        .and_then(|c| c.name.clone())
+        .filter(|n| !n.trim().is_empty());
+
+    let settings_name = {
+        let canonical_input = path.canonicalize().ok();
+        let settings = state.settings.read().await;
+        settings
+            .projects
+            .iter()
+            .find(|p| {
+                if p.path == project_path {
+                    return true;
+                }
+                if let Some(ref wanted) = canonical_input {
+                    return std::path::Path::new(&p.path).canonicalize().ok().as_ref()
+                        == Some(wanted);
+                }
+                false
+            })
+            .map(|p| p.name.clone())
+            .filter(|n| !n.trim().is_empty())
+    };
+
+    let fallback_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let name = config_name.or(settings_name).unwrap_or(fallback_name);
+
     Ok(ProjectDetail {
         name,
         path: project_path,
         has_config,
-        current_branch,
+        current_workspace,
         service_count,
-        branch_count,
+        workspace_count,
         worktree_enabled,
         vcs_type,
     })
@@ -343,7 +454,7 @@ pub async fn get_project_detail(project_path: String) -> Result<ProjectDetail, S
 pub struct ServiceDestroyResult {
     pub name: String,
     pub success: bool,
-    pub branches_destroyed: Vec<String>,
+    pub workspaces_destroyed: Vec<String>,
     pub error: Option<String>,
 }
 
@@ -388,11 +499,11 @@ pub async fn destroy_project(project_path: String) -> Result<DestroyResult, Stri
             Ok(provider) => {
                 if provider.supports_destroy() {
                     match provider.destroy_project().await {
-                        Ok(branches) => {
+                        Ok(workspaces) => {
                             services_destroyed.push(ServiceDestroyResult {
                                 name: svc_config.name.clone(),
                                 success: true,
-                                branches_destroyed: branches,
+                                workspaces_destroyed: workspaces,
                                 error: None,
                             });
                         }
@@ -400,25 +511,25 @@ pub async fn destroy_project(project_path: String) -> Result<DestroyResult, Stri
                             services_destroyed.push(ServiceDestroyResult {
                                 name: svc_config.name.clone(),
                                 success: false,
-                                branches_destroyed: Vec::new(),
+                                workspaces_destroyed: Vec::new(),
                                 error: Some(e.to_string()),
                             });
                         }
                     }
                 } else {
-                    // Fallback: delete all branches individually
-                    match provider.list_branches().await {
-                        Ok(branches) => {
+                    // Fallback: delete all workspaces individually
+                    match provider.list_workspaces().await {
+                        Ok(workspaces) => {
                             let mut deleted = Vec::new();
-                            for branch in &branches {
-                                if provider.delete_branch(&branch.name).await.is_ok() {
-                                    deleted.push(branch.name.clone());
+                            for workspace in &workspaces {
+                                if provider.delete_workspace(&workspace.name).await.is_ok() {
+                                    deleted.push(workspace.name.clone());
                                 }
                             }
                             services_destroyed.push(ServiceDestroyResult {
                                 name: svc_config.name.clone(),
                                 success: true,
-                                branches_destroyed: deleted,
+                                workspaces_destroyed: deleted,
                                 error: None,
                             });
                         }
@@ -426,7 +537,7 @@ pub async fn destroy_project(project_path: String) -> Result<DestroyResult, Stri
                             services_destroyed.push(ServiceDestroyResult {
                                 name: svc_config.name.clone(),
                                 success: false,
-                                branches_destroyed: Vec::new(),
+                                workspaces_destroyed: Vec::new(),
                                 error: Some(e.to_string()),
                             });
                         }
@@ -437,7 +548,7 @@ pub async fn destroy_project(project_path: String) -> Result<DestroyResult, Stri
                 services_destroyed.push(ServiceDestroyResult {
                     name: svc_config.name.clone(),
                     success: false,
-                    branches_destroyed: Vec::new(),
+                    workspaces_destroyed: Vec::new(),
                     error: Some(e.to_string()),
                 });
             }
@@ -506,10 +617,10 @@ pub struct OrphanProjectEntry {
     pub project_path: Option<String>,
     pub sources: Vec<String>,
     pub sqlite_project_id: Option<String>,
-    pub sqlite_branch_count: usize,
+    pub sqlite_workspace_count: usize,
     pub container_names: Vec<String>,
     pub local_state_service_count: usize,
-    pub local_state_branch_count: usize,
+    pub local_state_workspace_count: usize,
 }
 
 #[derive(Serialize)]
@@ -543,10 +654,10 @@ pub async fn detect_orphan_projects() -> Result<Vec<OrphanProjectEntry>, String>
                 })
                 .collect(),
             sqlite_project_id: o.sqlite_project_id,
-            sqlite_branch_count: o.sqlite_branch_count,
+            sqlite_workspace_count: o.sqlite_workspace_count,
             container_names: o.container_names,
             local_state_service_count: o.local_state_service_count,
-            local_state_branch_count: o.local_state_branch_count,
+            local_state_workspace_count: o.local_state_workspace_count,
         })
         .collect())
 }

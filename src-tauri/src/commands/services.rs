@@ -11,13 +11,13 @@ pub struct ServiceEntry {
     pub name: String,
     pub service_type: String,
     pub provider_type: String,
-    pub auto_branch: bool,
+    pub auto_workspace: bool,
 }
 
 #[derive(Serialize)]
-pub struct ServiceBranchStatus {
+pub struct ServiceWorkspaceStatus {
     pub service_name: String,
-    pub branch_name: String,
+    pub workspace_name: String,
     pub state: Option<String>,
 }
 
@@ -26,7 +26,7 @@ pub struct AddServiceRequest {
     pub name: String,
     pub service_type: String,
     pub provider_type: String,
-    pub auto_branch: Option<bool>,
+    pub auto_workspace: Option<bool>,
     pub image: Option<String>,
     pub seed_from: Option<String>,
 }
@@ -61,7 +61,7 @@ pub async fn add_service(
         if let Ok(provider) =
             services::factory::create_provider_from_named_config(&config, &named).await
         {
-            let _ = provider.create_branch("main", None).await;
+            let _ = provider.create_workspace("main", None).await;
 
             if let Some(ref seed) = request.seed_from {
                 if !seed.is_empty() {
@@ -75,7 +75,7 @@ pub async fn add_service(
         name: named.name,
         service_type: named.service_type,
         provider_type: named.provider_type,
-        auto_branch: named.auto_branch,
+        auto_workspace: named.auto_workspace,
     })
 }
 
@@ -86,13 +86,13 @@ fn build_named_config(request: &AddServiceRequest) -> Result<NamedServiceConfig,
         request.provider_type.clone()
     };
 
-    let auto_branch = request.auto_branch.unwrap_or(true);
+    let auto_workspace = request.auto_workspace.unwrap_or(true);
 
     let mut named = NamedServiceConfig {
         name: request.name.clone(),
         provider_type: provider_type.clone(),
         service_type: request.service_type.clone(),
-        auto_branch,
+        auto_workspace,
         default: false,
         local: None,
         neon: None,
@@ -188,7 +188,7 @@ pub async fn list_services(project_path: String) -> Result<Vec<ServiceEntry>, St
             name: s.name.clone(),
             service_type: s.service_type.clone(),
             provider_type: s.provider_type.clone(),
-            auto_branch: s.auto_branch,
+            auto_workspace: s.auto_workspace,
         })
         .collect())
 }
@@ -197,7 +197,7 @@ pub async fn list_services(project_path: String) -> Result<Vec<ServiceEntry>, St
 pub async fn start_service(
     project_path: String,
     service_name: String,
-    branch_name: String,
+    workspace_name: String,
 ) -> Result<(), String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
@@ -214,7 +214,7 @@ pub async fn start_service(
         .map_err(|e| e.to_string())?;
 
     provider
-        .start_branch(&branch_name)
+        .start_workspace(&workspace_name)
         .await
         .map_err(|e| e.to_string())
 }
@@ -223,7 +223,7 @@ pub async fn start_service(
 pub async fn stop_service(
     project_path: String,
     service_name: String,
-    branch_name: String,
+    workspace_name: String,
 ) -> Result<(), String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
@@ -240,7 +240,7 @@ pub async fn stop_service(
         .map_err(|e| e.to_string())?;
 
     provider
-        .stop_branch(&branch_name)
+        .stop_workspace(&workspace_name)
         .await
         .map_err(|e| e.to_string())
 }
@@ -323,7 +323,7 @@ pub async fn run_doctor(project_path: String) -> Result<serde_json::Value, Strin
         if has_hooks {
             "devflow hooks installed".to_string()
         } else {
-            "Hooks not installed (run devflow install-hooks)".to_string()
+            "Hooks not installed (use Install hooks below or run devflow install-hooks)".to_string()
         },
     ));
 
@@ -369,27 +369,27 @@ pub async fn run_doctor(project_path: String) -> Result<serde_json::Value, Strin
         }
     }
 
-    // Branch registry stale paths
+    // Workspace registry stale paths
     match LocalStateManager::new() {
         Ok(state) => {
             let missing: Vec<_> = state
-                .get_branches_by_dir(project_dir)
+                .get_workspaces_by_dir(project_dir)
                 .into_iter()
                 .filter_map(|b| b.worktree_path.map(|p| (b.name, p)))
                 .filter(|(_, p)| !std::path::Path::new(p).exists())
                 .collect();
 
             if missing.is_empty() {
-                general_checks.push(check("Branch registry paths", true, "No stale entries"));
+                general_checks.push(check("Workspace registry paths", true, "No stale entries"));
             } else {
                 let examples = missing
                     .iter()
                     .take(3)
-                    .map(|(branch, p)| format!("{} -> {}", branch, p))
+                    .map(|(workspace, p)| format!("{} -> {}", workspace, p))
                     .collect::<Vec<_>>()
                     .join(", ");
                 general_checks.push(check(
-                    "Branch registry paths",
+                    "Workspace registry paths",
                     false,
                     format!(
                         "{} stale entr{}: {}",
@@ -402,7 +402,7 @@ pub async fn run_doctor(project_path: String) -> Result<serde_json::Value, Strin
         }
         Err(e) => {
             general_checks.push(check(
-                "Branch registry paths",
+                "Workspace registry paths",
                 false,
                 format!("Inspection failed: {}", e),
             ));
@@ -440,7 +440,7 @@ pub async fn run_doctor(project_path: String) -> Result<serde_json::Value, Strin
 pub async fn get_service_logs(
     project_path: String,
     service_name: String,
-    branch_name: String,
+    workspace_name: String,
 ) -> Result<String, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
@@ -457,7 +457,7 @@ pub async fn get_service_logs(
         .map_err(|e| e.to_string())?;
 
     provider
-        .logs(&branch_name, Some(200))
+        .logs(&workspace_name, Some(200))
         .await
         .map_err(|e| e.to_string())
 }
@@ -466,7 +466,7 @@ pub async fn get_service_logs(
 pub async fn reset_service(
     project_path: String,
     service_name: String,
-    branch_name: String,
+    workspace_name: String,
 ) -> Result<(), String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
@@ -483,16 +483,16 @@ pub async fn reset_service(
         .map_err(|e| e.to_string())?;
 
     provider
-        .reset_branch(&branch_name)
+        .reset_workspace(&workspace_name)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]
-pub struct ServiceBranchInfo {
+pub struct ServiceWorkspaceInfo {
     pub name: String,
     pub created_at: Option<String>,
-    pub parent_branch: Option<String>,
+    pub parent_workspace: Option<String>,
     pub database_name: String,
     pub state: Option<String>,
 }
@@ -501,7 +501,7 @@ pub struct ServiceBranchInfo {
 pub async fn list_service_branches(
     project_path: String,
     service_name: String,
-) -> Result<Vec<ServiceBranchInfo>, String> {
+) -> Result<Vec<ServiceWorkspaceInfo>, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
         devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
@@ -516,14 +516,17 @@ pub async fn list_service_branches(
         .await
         .map_err(|e| e.to_string())?;
 
-    let branches = provider.list_branches().await.map_err(|e| e.to_string())?;
+    let workspaces = provider
+        .list_workspaces()
+        .await
+        .map_err(|e| e.to_string())?;
 
-    Ok(branches
+    Ok(workspaces
         .into_iter()
-        .map(|b| ServiceBranchInfo {
+        .map(|b| ServiceWorkspaceInfo {
             name: b.name,
             created_at: b.created_at.map(|dt| dt.to_rfc3339()),
-            parent_branch: b.parent_branch,
+            parent_workspace: b.parent_workspace,
             database_name: b.database_name,
             state: b.state,
         })
@@ -534,8 +537,8 @@ pub async fn list_service_branches(
 pub async fn get_service_status(
     project_path: String,
     service_name: String,
-    branch_name: String,
-) -> Result<ServiceBranchStatus, String> {
+    workspace_name: String,
+) -> Result<ServiceWorkspaceStatus, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
         devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
@@ -550,16 +553,19 @@ pub async fn get_service_status(
         .await
         .map_err(|e| e.to_string())?;
 
-    let branches = provider.list_branches().await.map_err(|e| e.to_string())?;
+    let workspaces = provider
+        .list_workspaces()
+        .await
+        .map_err(|e| e.to_string())?;
 
-    let state = branches
+    let state = workspaces
         .iter()
-        .find(|b| b.name == branch_name)
+        .find(|b| b.name == workspace_name)
         .and_then(|b| b.state.clone());
 
-    Ok(ServiceBranchStatus {
+    Ok(ServiceWorkspaceStatus {
         service_name,
-        branch_name,
+        workspace_name,
         state,
     })
 }

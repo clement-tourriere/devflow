@@ -202,15 +202,15 @@ function ProjectCard({ project }: { project: ProjectInfo }) {
 
       {/* Info row */}
       <div className="flex items-center gap-2" style={{ flexWrap: "wrap" }}>
-        {d?.current_branch && !d?.worktree_enabled && (
-          <span className="badge" style={{ opacity: 0.7 }}>HEAD: {d.current_branch}</span>
+        {d?.current_workspace && !d?.worktree_enabled && (
+          <span className="badge" style={{ opacity: 0.7 }}>HEAD: {d.current_workspace}</span>
         )}
         {d?.worktree_enabled && (
           <span className="badge badge-success" style={{ fontSize: 11 }}>worktrees</span>
         )}
         {d && (
           <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>
-            {d.branch_count} branch{d.branch_count !== 1 ? "es" : ""}
+            {d.workspace_count} workspace{d.workspace_count !== 1 ? "es" : ""}
             {" \u00B7 "}
             {d.service_count} service{d.service_count !== 1 ? "s" : ""}
           </span>

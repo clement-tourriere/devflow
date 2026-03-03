@@ -2,7 +2,7 @@
 
 ## Objective
 
-Build devflow into a service-first environment orchestrator that can branch, switch, and clean up full developer environments (VCS, databases, caches, containers, and plugins) with deterministic automation semantics.
+Build devflow into a service-first environment orchestrator that can workspace, switch, and clean up full developer environments (VCS, databases, caches, containers, and plugins) with deterministic automation semantics.
 
 The target is "Worktrunk + first-class services + CoW policy engine", with room to integrate proxy-style workflows from `devproxy` as a native service capability.
 
@@ -10,7 +10,7 @@ The target is "Worktrunk + first-class services + CoW policy engine", with room 
 
 devflow should be:
 
-1. **Environment-centric**: a branch is an environment, not just a VCS ref.
+1. **Environment-centric**: a workspace is an environment, not just a VCS ref.
 2. **Capability-driven**: every provider advertises what it can do (CoW, reset, logs, seed, destroy, snapshots).
 3. **Deterministic for automation**: JSON-first, explicit failure modes, non-interactive guarantees.
 4. **Fast by default**: CoW where available, predictable fallback where not.
@@ -35,7 +35,7 @@ Acceptance criteria:
 
 Treat CoW as an execution policy, not provider-specific behavior.
 
-- Inputs: OS, filesystem, provider capability, branch lineage, user overrides.
+- Inputs: OS, filesystem, provider capability, workspace lineage, user overrides.
 - Outputs: selected strategy (`apfs_clone`, `reflink`, `zfs_clone`, `copy`) + reason.
 - Record decision in state for observability and retries.
 
@@ -46,16 +46,16 @@ Acceptance criteria:
 
 ### 3) State as Source of Truth
 
-Use local state to represent devflow branch identity independently from VCS HEAD.
+Use local state to represent devflow workspace identity independently from VCS HEAD.
 
-- branch registry (name, parent, worktree path, created_at)
-- active branch pointer
+- workspace registry (name, parent, worktree path, created_at)
+- active workspace pointer
 - service membership and health snapshots
 
 Acceptance criteria:
 
-- branch metadata survives branch switches and does not drift.
-- CLI and TUI use the same active branch semantics.
+- workspace metadata survives workspace switches and does not drift.
+- CLI and TUI use the same active workspace semantics.
 
 ### 4) Orchestration Decomposition
 
@@ -77,12 +77,12 @@ Add a first-class model for runtime sidecars/proxies:
 
 - service kind: `proxy`
 - lifecycle hooks for routing/bootstrap
-- per-branch endpoint publication in connection info
+- per-workspace endpoint publication in connection info
 
 Acceptance criteria:
 
 - proxy-like providers can be added without CLI changes.
-- branch switch can atomically update data service + proxy service.
+- workspace switch can atomically update data service + proxy service.
 
 ## Delivery Plan
 
@@ -90,14 +90,14 @@ Acceptance criteria:
 
 Scope:
 
-- stabilize branch registry persistence and active branch semantics
+- stabilize workspace registry persistence and active workspace semantics
 - ensure init/destroy/switch/remove flows preserve state correctly
 - align TUI operations with state updates
 
 Exit criteria:
 
-- no metadata loss for existing branches during switch
-- TUI and CLI display the same active branch in multi-worktree setups
+- no metadata loss for existing workspaces during switch
+- TUI and CLI display the same active workspace in multi-worktree setups
 
 ## Phase 1 - Capability Contracts
 
@@ -117,7 +117,7 @@ Exit criteria:
 Scope:
 
 - extract shared Docker/container lifecycle primitives
-- unify branch naming, labels, and cleanup semantics across postgres/mysql/clickhouse/generic
+- unify workspace naming, labels, and cleanup semantics across postgres/mysql/clickhouse/generic
 
 Exit criteria:
 
@@ -158,14 +158,14 @@ Scope:
 
 Exit criteria:
 
-- branch == environment is fully represented and automatable
+- workspace == environment is fully represented and automatable
 - plugin/provider ecosystem can extend environment graph safely
 
 ## First Implementation Slices (recommended PR order)
 
 1. **State consistency pass**
-   - preserve branch metadata on switch
-   - synchronize active branch updates across CLI and TUI
+   - preserve workspace metadata on switch
+   - synchronize active workspace updates across CLI and TUI
 2. **Capability schema introduction**
    - add provider capability descriptor types
    - expose in `doctor` and `capabilities`
@@ -187,4 +187,4 @@ Exit criteria:
 - switch/create/remove median latency (local CoW and fallback paths)
 - orchestration success rate with partial-failure diagnostics
 - number of provider-specific conditionals in CLI/TUI (should trend down)
-- branch-state reconciliation warnings per week (should trend to near zero)
+- workspace-state reconciliation warnings per week (should trend to near zero)

@@ -5,7 +5,7 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 use super::{ZfsBranchMetadata, ZfsProjectConfig};
-use crate::services::postgres::local::model::{Branch, Project};
+use crate::services::postgres::local::model::{Project, Workspace};
 
 #[derive(Debug, Clone)]
 pub struct DriverDetection {
@@ -149,7 +149,7 @@ impl ZfsDriver {
         let branch_dataset = branch_dataset_name(config, &project.id, branch_id);
 
         ensure_dataset_exists(&project_dataset).await?;
-        ensure_dataset_exists(&format!("{project_dataset}/branches")).await?;
+        ensure_dataset_exists(&format!("{project_dataset}/workspaces")).await?;
         ensure_dataset_absent(&branch_dataset).await?;
 
         create_dataset_with_mountpoint(&branch_dataset, branch_root).await?;
@@ -163,7 +163,8 @@ impl ZfsDriver {
         };
 
         Ok(Some(
-            serde_json::to_string(&metadata).context("failed to serialize ZFS branch metadata")?,
+            serde_json::to_string(&metadata)
+                .context("failed to serialize ZFS workspace metadata")?,
         ))
     }
 
@@ -171,7 +172,7 @@ impl ZfsDriver {
         &self,
         project: &Project,
         config: &ZfsProjectConfig,
-        parent: &Branch,
+        parent: &Workspace,
         child_branch_id: &str,
         child_data_dir: &Path,
     ) -> anyhow::Result<Option<String>> {
@@ -218,17 +219,18 @@ impl ZfsDriver {
         };
 
         Ok(Some(
-            serde_json::to_string(&metadata).context("failed to serialize ZFS branch metadata")?,
+            serde_json::to_string(&metadata)
+                .context("failed to serialize ZFS workspace metadata")?,
         ))
     }
 
-    pub async fn delete_branch(
+    pub async fn delete_workspace(
         &self,
         _project: &Project,
         _config: &ZfsProjectConfig,
-        branch: &Branch,
+        workspace: &Workspace,
     ) -> anyhow::Result<()> {
-        let metadata = parse_zfs_branch_metadata(branch)?;
+        let metadata = parse_zfs_branch_metadata(workspace)?;
 
         let _ = zfs_output_os(vec![
             OsString::from("destroy"),
@@ -241,7 +243,7 @@ impl ZfsDriver {
             let _ = zfs_output_os(vec![OsString::from("destroy"), OsString::from(snapshot)]).await;
         }
 
-        let branch_root = branch_root_from_data_dir(Path::new(&branch.data_dir))?;
+        let branch_root = branch_root_from_data_dir(Path::new(&workspace.data_dir))?;
         if tokio::fs::metadata(branch_root).await.is_ok() {
             tokio::fs::remove_dir_all(branch_root)
                 .await
@@ -283,16 +285,18 @@ fn detect_dataset_from_mountpoints(projects_root: &Path, zfs_list_output: &str) 
     winner.map(|(dataset, _)| dataset)
 }
 
-fn parse_zfs_branch_metadata(branch: &Branch) -> anyhow::Result<ZfsBranchMetadata> {
-    let raw = branch
-        .storage_metadata
-        .as_ref()
-        .ok_or_else(|| anyhow!("branch '{}' is missing ZFS storage metadata", branch.id))?;
+fn parse_zfs_branch_metadata(workspace: &Workspace) -> anyhow::Result<ZfsBranchMetadata> {
+    let raw = workspace.storage_metadata.as_ref().ok_or_else(|| {
+        anyhow!(
+            "workspace '{}' is missing ZFS storage metadata",
+            workspace.id
+        )
+    })?;
 
     serde_json::from_str(raw).with_context(|| {
         format!(
-            "branch '{}' has invalid ZFS storage metadata: {}",
-            branch.id, raw
+            "workspace '{}' has invalid ZFS storage metadata: {}",
+            workspace.id, raw
         )
     })
 }
@@ -300,7 +304,7 @@ fn parse_zfs_branch_metadata(branch: &Branch) -> anyhow::Result<ZfsBranchMetadat
 fn branch_root_from_data_dir(data_dir: &Path) -> anyhow::Result<&Path> {
     data_dir.parent().ok_or_else(|| {
         anyhow!(
-            "invalid branch data dir '{}': no parent",
+            "invalid workspace data dir '{}': no parent",
             data_dir.display()
         )
     })
@@ -312,7 +316,7 @@ fn project_dataset_name(config: &ZfsProjectConfig, project_id: &str) -> String {
 
 fn branch_dataset_name(config: &ZfsProjectConfig, project_id: &str, branch_id: &str) -> String {
     format!(
-        "{}/projects/{}/branches/{}",
+        "{}/projects/{}/workspaces/{}",
         config.root_dataset, project_id, branch_id
     )
 }

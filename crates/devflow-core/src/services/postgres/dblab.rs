@@ -1,4 +1,4 @@
-use super::super::{BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ServiceProvider};
+use super::super::{ConnectionInfo, DoctorCheck, DoctorReport, ServiceProvider, WorkspaceInfo};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -130,8 +130,8 @@ impl DBLabProvider {
             .ok_or_else(|| anyhow::anyhow!("No snapshots available"))
     }
 
-    fn normalize_clone_name(branch_name: &str) -> String {
-        branch_name
+    fn normalize_clone_name(workspace_name: &str) -> String {
+        workspace_name
             .to_lowercase()
             .chars()
             .map(|c| {
@@ -149,15 +149,15 @@ impl DBLabProvider {
 
 #[async_trait]
 impl ServiceProvider for DBLabProvider {
-    async fn create_branch(
+    async fn create_workspace(
         &self,
-        branch_name: &str,
-        from_branch: Option<&str>,
-    ) -> Result<BranchInfo> {
-        let clone_name = Self::normalize_clone_name(branch_name);
+        workspace_name: &str,
+        from_workspace: Option<&str>,
+    ) -> Result<WorkspaceInfo> {
+        let clone_name = Self::normalize_clone_name(workspace_name);
 
-        let snapshot_id = if let Some(from) = from_branch {
-            let clones = self.list_branches().await?;
+        let snapshot_id = if let Some(from) = from_workspace {
+            let clones = self.list_workspaces().await?;
             clones
                 .into_iter()
                 .find(|c| c.name == from)
@@ -180,17 +180,17 @@ impl ServiceProvider for DBLabProvider {
             .make_request(reqwest::Method::POST, "/api/clones", Some(&request))
             .await?;
 
-        Ok(BranchInfo {
-            name: branch_name.to_string(),
+        Ok(WorkspaceInfo {
+            name: workspace_name.to_string(),
             created_at: Some(response.clone.created_at),
-            parent_branch: from_branch.map(|s| s.to_string()),
+            parent_workspace: from_workspace.map(|s| s.to_string()),
             database_name: response.clone.snapshot_id,
             state: Some("running".to_string()),
         })
     }
 
-    async fn delete_branch(&self, branch_name: &str) -> Result<()> {
-        let clone_name = Self::normalize_clone_name(branch_name);
+    async fn delete_workspace(&self, workspace_name: &str) -> Result<()> {
+        let clone_name = Self::normalize_clone_name(workspace_name);
 
         let clones: ListClonesResponse = self
             .make_request(reqwest::Method::GET, "/api/clones", None::<&()>)
@@ -199,7 +199,7 @@ impl ServiceProvider for DBLabProvider {
             .clones
             .into_iter()
             .find(|c| c.name == clone_name)
-            .ok_or_else(|| anyhow::anyhow!("Clone '{}' not found", branch_name))?;
+            .ok_or_else(|| anyhow::anyhow!("Clone '{}' not found", workspace_name))?;
 
         let path = format!("/api/clones/{}", clone.id);
         let _: serde_json::Value = self
@@ -209,43 +209,43 @@ impl ServiceProvider for DBLabProvider {
         Ok(())
     }
 
-    async fn list_branches(&self) -> Result<Vec<BranchInfo>> {
+    async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
         let response: ListClonesResponse = self
             .make_request(reqwest::Method::GET, "/api/clones", None::<&()>)
             .await?;
 
-        let branches = response
+        let workspaces = response
             .clones
             .into_iter()
-            .map(|clone| BranchInfo {
+            .map(|clone| WorkspaceInfo {
                 name: clone.name,
                 created_at: Some(clone.created_at),
-                parent_branch: None,
+                parent_workspace: None,
                 database_name: clone.snapshot_id,
                 state: Some("running".to_string()),
             })
             .collect();
 
-        Ok(branches)
+        Ok(workspaces)
     }
 
-    async fn branch_exists(&self, branch_name: &str) -> Result<bool> {
-        let clone_name = Self::normalize_clone_name(branch_name);
-        let branches = self.list_branches().await?;
-        Ok(branches.iter().any(|b| b.name == clone_name))
+    async fn workspace_exists(&self, workspace_name: &str) -> Result<bool> {
+        let clone_name = Self::normalize_clone_name(workspace_name);
+        let workspaces = self.list_workspaces().await?;
+        Ok(workspaces.iter().any(|b| b.name == clone_name))
     }
 
-    async fn switch_to_branch(&self, branch_name: &str) -> Result<BranchInfo> {
-        let clone_name = Self::normalize_clone_name(branch_name);
-        let branches = self.list_branches().await?;
-        branches
+    async fn switch_to_branch(&self, workspace_name: &str) -> Result<WorkspaceInfo> {
+        let clone_name = Self::normalize_clone_name(workspace_name);
+        let workspaces = self.list_workspaces().await?;
+        workspaces
             .into_iter()
             .find(|b| b.name == clone_name)
-            .ok_or_else(|| anyhow::anyhow!("Branch '{}' does not exist", branch_name))
+            .ok_or_else(|| anyhow::anyhow!("Workspace '{}' does not exist", workspace_name))
     }
 
-    async fn get_connection_info(&self, branch_name: &str) -> Result<ConnectionInfo> {
-        let clone_name = Self::normalize_clone_name(branch_name);
+    async fn get_connection_info(&self, workspace_name: &str) -> Result<ConnectionInfo> {
+        let clone_name = Self::normalize_clone_name(workspace_name);
 
         let clones: ListClonesResponse = self
             .make_request(reqwest::Method::GET, "/api/clones", None::<&()>)
@@ -254,7 +254,7 @@ impl ServiceProvider for DBLabProvider {
             .clones
             .into_iter()
             .find(|c| c.name == clone_name)
-            .ok_or_else(|| anyhow::anyhow!("Clone '{}' not found", branch_name))?;
+            .ok_or_else(|| anyhow::anyhow!("Clone '{}' not found", workspace_name))?;
 
         let db = clone.db;
         let connection_string = format!(

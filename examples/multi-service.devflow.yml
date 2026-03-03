@@ -2,25 +2,25 @@
 # This example shows PostgreSQL + ClickHouse + Redis with lifecycle hooks.
 
 git:
-  auto_create_on_branch: true
-  auto_switch_on_branch: true
-  main_branch: main
-  exclude_branches:
+  auto_create_on_workspace: true
+  auto_switch_on_workspace: true
+  main_workspace: main
+  exclude_workspaces:
     - main
     - master
     - develop
 
 behavior:
   auto_cleanup: true
-  max_branches: 10
+  max_workspaces: 10
   naming_strategy: prefix
 
-# Multiple services — each service gets its own branch per git branch
+# Multiple services — each service gets its own workspace per git workspace
 services:
   - name: app-db
     type: local
     service_type: postgres
-    auto_branch: true
+    auto_workspace: true
     default: true
     local:
       image: postgres:17
@@ -28,22 +28,22 @@ services:
   - name: analytics
     type: local
     service_type: clickhouse
-    auto_branch: true
+    auto_workspace: true
     clickhouse:
       image: clickhouse/clickhouse-server:latest
 
   - name: cache
     type: local
     service_type: generic
-    auto_branch: false
+    auto_workspace: false
     generic:
       image: redis:7-alpine
       port_mapping: "6379:6379"
 
-# Worktree support — each branch gets its own directory
+# Worktree support — each workspace gets its own directory
 worktree:
   enabled: true
-  path_template: "../{repo}.{branch}"
+  path_template: "../{repo}.{workspace}"
   copy_files:
     - .env.local
     - .env

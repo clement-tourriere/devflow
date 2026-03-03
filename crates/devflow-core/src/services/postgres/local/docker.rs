@@ -29,7 +29,7 @@ pub enum ContainerStatus {
 pub struct ReserveBranchSpec {
     pub project_name: String,
     pub service_name: String,
-    pub branch_name: String,
+    pub workspace_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -48,7 +48,7 @@ pub struct StartBranchSpec {
     pub pg_db: String,
     pub project_name: String,
     pub service_name: String,
-    pub branch_name: String,
+    pub workspace_name: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -101,7 +101,7 @@ impl DockerRuntime {
             "devflow-{}-{}-{}",
             sanitize(&spec.project_name),
             sanitize(&spec.service_name),
-            sanitize(&spec.branch_name)
+            sanitize(&spec.workspace_name)
         );
         // Docker container names must be <= 128 chars
         let container_name = if raw.len() > 128 {
@@ -171,7 +171,7 @@ impl DockerRuntime {
         }
     }
 
-    pub async fn start_branch(&self, spec: &StartBranchSpec) -> anyhow::Result<()> {
+    pub async fn start_workspace(&self, spec: &StartBranchSpec) -> anyhow::Result<()> {
         self.ensure_image(&spec.image).await?;
 
         match self.container_status(&spec.container_name).await? {
@@ -212,7 +212,7 @@ impl DockerRuntime {
         labels.insert("devflow.project".to_string(), spec.project_name.clone());
         labels.insert("devflow.service".to_string(), spec.service_name.clone());
         labels.insert("devflow.service-type".to_string(), "postgres".to_string());
-        labels.insert("devflow.branch".to_string(), spec.branch_name.clone());
+        labels.insert("devflow.workspace".to_string(), spec.workspace_name.clone());
 
         let config = ContainerCreateBody {
             image: Some(spec.image.clone()),
@@ -252,7 +252,7 @@ impl DockerRuntime {
         Ok(())
     }
 
-    pub async fn stop_branch(&self, container_name: &str) -> anyhow::Result<()> {
+    pub async fn stop_workspace(&self, container_name: &str) -> anyhow::Result<()> {
         match self.container_status(container_name).await? {
             ContainerStatus::NotFound | ContainerStatus::Exited | ContainerStatus::Other(_) => {
                 return Ok(())

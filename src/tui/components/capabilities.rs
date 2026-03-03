@@ -232,11 +232,11 @@ impl Component for CapabilitiesComponent {
 
             lines.push(Line::from(vec![
                 Span::styled(
-                    "  max_branch_name_length",
+                    "  max_workspace_name_length",
                     Style::default().fg(theme::TEXT_SECONDARY),
                 ),
                 Span::styled(
-                    format!(" {}", caps.max_branch_name_length),
+                    format!(" {}", caps.max_workspace_name_length),
                     Style::default().fg(theme::TEXT_PRIMARY),
                 ),
             ]));

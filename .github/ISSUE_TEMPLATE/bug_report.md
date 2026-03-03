@@ -39,5 +39,5 @@ What actually happened. Include full error output if available.
 ## Logs
 
 ```
-# Output of `devflow doctor` or container logs (`devflow service logs <branch>`)
+# Output of `devflow doctor` or container logs (`devflow service logs <workspace>`)
 ```

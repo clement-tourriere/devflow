@@ -1,9 +1,47 @@
-use devflow_core::state::{DevflowBranch, LocalStateManager};
+use devflow_core::state::{DevflowWorkspace, LocalStateManager};
 use devflow_core::{config, services, vcs};
 use serde::Serialize;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceCreationMode {
+    Default,
+    Worktree,
+    Branch,
+}
+
+impl WorkspaceCreationMode {
+    fn parse(raw: Option<&str>) -> Result<Self, String> {
+        match raw
+            .unwrap_or("default")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "default" => Ok(Self::Default),
+            "worktree" => Ok(Self::Worktree),
+            "branch" => Ok(Self::Branch),
+            other => Err(format!(
+                "Invalid workspace creation mode '{}'. Use: default, worktree, branch",
+                other
+            )),
+        }
+    }
+}
+
+fn apply_worktree_path_template(
+    path_template: &str,
+    repo_name: &str,
+    workspace_name: &str,
+) -> String {
+    path_template
+        .replace("{repo}", repo_name)
+        .replace("{workspace}", workspace_name)
+        // Backward compatibility with legacy templates.
+        .replace("{branch}", workspace_name)
+}
+
 #[derive(Serialize)]
-pub struct BranchEntry {
+pub struct WorkspaceEntry {
     pub name: String,
     pub is_current: bool,
     pub is_default: bool,
@@ -16,8 +54,8 @@ pub struct BranchEntry {
 }
 
 #[derive(Serialize)]
-pub struct BranchesResponse {
-    pub branches: Vec<BranchEntry>,
+pub struct WorkspacesResponse {
+    pub workspaces: Vec<WorkspaceEntry>,
     pub current: Option<String>,
 }
 
@@ -29,39 +67,39 @@ pub struct OrchestrationResultDto {
 }
 
 #[tauri::command]
-pub async fn list_branches(project_path: String) -> Result<BranchesResponse, String> {
+pub async fn list_workspaces(project_path: String) -> Result<WorkspacesResponse, String> {
     let project_dir = std::path::Path::new(&project_path);
     let config_path = project_dir.join(".devflow.yml");
 
-    // Load config for main_branch / normalization
+    // Load config for main_workspace / normalization
     let cfg = if config_path.exists() {
         config::Config::from_file(&config_path).ok()
     } else {
         None
     };
 
-    let main_branch = cfg
+    let main_workspace = cfg
         .as_ref()
-        .map(|c| c.git.main_branch.clone())
+        .map(|c| c.git.main_workspace.clone())
         .unwrap_or_else(|| "main".to_string());
 
-    // Read devflow branch registry
+    // Read devflow workspace registry
     let mut state_mgr = LocalStateManager::new().map_err(|e| e.to_string())?;
 
     let devflow_branches = state_mgr
-        .get_or_init_branches_by_dir(project_dir, &main_branch)
+        .get_or_init_workspaces_by_dir(project_dir, &main_workspace)
         .map_err(|e| e.to_string())?;
 
-    // Determine current git branch to find active devflow branch
+    // Determine current git workspace to find active devflow workspace
     let vcs_provider = vcs::detect_vcs_provider(&project_path).ok();
     let current_vcs_branch = vcs_provider
         .as_ref()
-        .and_then(|v| v.current_branch().ok().flatten());
+        .and_then(|v| v.current_workspace().ok().flatten());
 
-    // Normalize the VCS branch name for matching
+    // Normalize the VCS workspace name for matching
     let normalized_current = current_vcs_branch.as_deref().map(|b| {
         cfg.as_ref()
-            .map(|c| c.get_normalized_branch_name(b))
+            .map(|c| c.get_normalized_workspace_name(b))
             .unwrap_or_else(|| b.to_string())
     });
 
@@ -71,25 +109,25 @@ pub async fn list_branches(project_path: String) -> Result<BranchesResponse, Str
         .and_then(|v| v.list_worktrees().ok())
         .unwrap_or_default();
 
-    let entries: Vec<BranchEntry> = devflow_branches
+    let entries: Vec<WorkspaceEntry> = devflow_branches
         .into_iter()
         .map(|b| {
-            // Check if this is the current branch
+            // Check if this is the current workspace
             let is_current = normalized_current
                 .as_deref()
                 .map(|cur| cur == b.name)
                 .unwrap_or(false);
 
-            let is_default = b.name == main_branch;
+            let is_default = b.name == main_workspace;
 
             // Prefer worktree_path from VCS if available, fall back to registry
             let worktree_path = worktrees
                 .iter()
-                .find(|w| w.branch.as_deref() == Some(&b.name))
+                .find(|w| w.workspace.as_deref() == Some(&b.name))
                 .map(|w| w.path.display().to_string())
                 .or(b.worktree_path);
 
-            BranchEntry {
+            WorkspaceEntry {
                 name: b.name,
                 is_current,
                 is_default,
@@ -108,8 +146,8 @@ pub async fn list_branches(project_path: String) -> Result<BranchesResponse, Str
         .find(|e| e.is_current)
         .map(|e| e.name.clone());
 
-    Ok(BranchesResponse {
-        branches: entries,
+    Ok(WorkspacesResponse {
+        workspaces: entries,
         current,
     })
 }
@@ -117,7 +155,7 @@ pub async fn list_branches(project_path: String) -> Result<BranchesResponse, Str
 #[tauri::command]
 pub async fn get_connection_info(
     project_path: String,
-    branch_name: String,
+    workspace_name: String,
     service_name: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
@@ -137,7 +175,7 @@ pub async fn get_connection_info(
             .map_err(|e| e.to_string())?;
 
         let info = provider
-            .get_connection_info(&branch_name)
+            .get_connection_info(&workspace_name)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -148,20 +186,23 @@ pub async fn get_connection_info(
 }
 
 #[derive(Serialize)]
-pub struct CreateBranchResult {
+pub struct CreateWorkspaceResult {
     pub services: Vec<OrchestrationResultDto>,
     pub worktree_path: Option<String>,
     pub cow_used: bool,
 }
 
 #[tauri::command]
-pub async fn create_branch(
+pub async fn create_workspace(
+    app: tauri::AppHandle,
     project_path: String,
-    branch_name: String,
-    from_branch: Option<String>,
-) -> Result<CreateBranchResult, String> {
+    workspace_name: String,
+    from_workspace: Option<String>,
+    creation_mode: Option<String>,
+) -> Result<CreateWorkspaceResult, String> {
     let project_dir = std::path::Path::new(&project_path);
     let vcs_provider = vcs::detect_vcs_provider(&project_path).map_err(|e| e.to_string())?;
+    let creation_mode = WorkspaceCreationMode::parse(creation_mode.as_deref())?;
 
     // Load config if it exists
     let config_path = project_dir.join(".devflow.yml");
@@ -171,50 +212,69 @@ pub async fn create_branch(
         None
     };
 
-    let worktree_enabled = cfg
+    let config_prefers_worktree = cfg
         .as_ref()
         .and_then(|c| c.worktree.as_ref())
         .is_some_and(|wt| wt.enabled);
 
-    // Normalize the branch name
+    let create_as_worktree = match creation_mode {
+        WorkspaceCreationMode::Default => config_prefers_worktree,
+        WorkspaceCreationMode::Worktree => true,
+        WorkspaceCreationMode::Branch => false,
+    };
+
+    if create_as_worktree && !vcs_provider.supports_worktrees() {
+        return Err(format!(
+            "VCS provider '{}' does not support worktrees",
+            vcs_provider.provider_name()
+        ));
+    }
+
+    // Normalize the workspace name
     let normalized_name = cfg
         .as_ref()
-        .map(|c| c.get_normalized_branch_name(&branch_name))
-        .unwrap_or_else(|| branch_name.clone());
+        .map(|c| c.get_normalized_workspace_name(&workspace_name))
+        .unwrap_or_else(|| workspace_name.clone());
 
-    let normalized_parent = from_branch.as_deref().map(|fb| {
+    let normalized_parent = from_workspace.as_deref().map(|fb| {
         cfg.as_ref()
-            .map(|c| c.get_normalized_branch_name(fb))
+            .map(|c| c.get_normalized_workspace_name(fb))
             .unwrap_or_else(|| fb.to_string())
     });
 
-    // Create VCS branch
+    // Create VCS workspace
     vcs_provider
-        .create_branch(&branch_name, from_branch.as_deref())
+        .create_workspace(&workspace_name, from_workspace.as_deref())
         .map_err(|e| e.to_string())?;
 
     // Create worktree if enabled
     let mut worktree_path: Option<String> = None;
     let mut cow_used = false;
-    if worktree_enabled && vcs_provider.supports_worktrees() {
-        // Check if a worktree already exists for this branch
-        let existing = vcs_provider.worktree_path(&branch_name).unwrap_or(None);
+    if create_as_worktree {
+        // Check if a worktree already exists for this workspace
+        let existing = vcs_provider.worktree_path(&workspace_name).unwrap_or(None);
 
         if let Some(existing_path) = existing {
             worktree_path = Some(existing_path.display().to_string());
         } else {
             // Resolve worktree path from template
-            let repo_name = project_dir
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "repo".to_string());
+            let repo_name = cfg
+                .as_ref()
+                .and_then(|c| c.name.as_ref())
+                .filter(|n| !n.trim().is_empty())
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| {
+                    project_dir
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "repo".to_string())
+                });
             let wt_config = cfg.as_ref().and_then(|c| c.worktree.as_ref());
             let path_template = wt_config
                 .map(|wt| wt.path_template.as_str())
-                .unwrap_or("../{repo}.{branch}");
-            let wt_path_str = path_template
-                .replace("{repo}", &repo_name)
-                .replace("{branch}", &branch_name);
+                .unwrap_or("../{repo}.{workspace}");
+            let wt_path_str =
+                apply_worktree_path_template(path_template, &repo_name, &normalized_name);
             let wt_path = project_dir.join(&wt_path_str);
 
             // Resolve to absolute path
@@ -225,7 +285,7 @@ pub async fn create_branch(
             };
 
             let wt_result = vcs_provider
-                .create_worktree(&branch_name, &wt_path)
+                .create_worktree(&workspace_name, &wt_path)
                 .map_err(|e| format!("Failed to create worktree: {}", e))?;
             cow_used = wt_result.cow_used;
 
@@ -237,7 +297,7 @@ pub async fn create_branch(
 
                 // Copy explicitly listed files.
                 // When CoW was used, these already exist as clones — overwrite with
-                // independent copies so they can diverge between branches.
+                // independent copies so they can diverge between workspaces.
                 for file in &wt_cfg.copy_files {
                     let src = main_dir.join(file);
                     let dst = wt_path.join(file);
@@ -283,10 +343,10 @@ pub async fn create_branch(
         }
     }
 
-    // Orchestrate service branches if config exists
+    // Orchestrate service workspaces if config exists
     let service_results = if let Some(ref cfg) = cfg {
         let results =
-            services::factory::orchestrate_create(cfg, &branch_name, from_branch.as_deref())
+            services::factory::orchestrate_create(cfg, &workspace_name, from_workspace.as_deref())
                 .await
                 .map_err(|e| e.to_string())?;
         results
@@ -301,18 +361,18 @@ pub async fn create_branch(
         vec![]
     };
 
-    // Register the new branch in devflow state
+    // Register the new workspace in devflow state
     if let Ok(mut state_mgr) = LocalStateManager::new() {
         let final_cow_used = if cow_used {
             true
         } else {
             state_mgr
-                .get_branch_by_dir(project_dir, &normalized_name)
+                .get_workspace_by_dir(project_dir, &normalized_name)
                 .map(|existing| existing.cow_used)
                 .unwrap_or(false)
         };
 
-        let branch = DevflowBranch {
+        let workspace = DevflowWorkspace {
             name: normalized_name,
             parent: normalized_parent,
             worktree_path: worktree_path.clone(),
@@ -322,60 +382,69 @@ pub async fn create_branch(
             agent_status: None,
             agent_started_at: None,
         };
-        if let Err(e) = state_mgr.register_branch_by_dir(project_dir, branch) {
-            log::warn!("Failed to register branch in devflow state: {}", e);
+        if let Err(e) = state_mgr.register_workspace_by_dir(project_dir, workspace) {
+            log::warn!("Failed to register workspace in devflow state: {}", e);
         }
     }
 
-    Ok(CreateBranchResult {
+    let response = CreateWorkspaceResult {
         services: service_results,
         worktree_path,
         cow_used,
-    })
+    };
+
+    crate::update_tray_menu(&app);
+
+    Ok(response)
 }
 
 #[tauri::command]
-pub async fn switch_branch(
+pub async fn switch_workspace(
+    app: tauri::AppHandle,
     project_path: String,
-    branch_name: String,
+    workspace_name: String,
 ) -> Result<Vec<OrchestrationResultDto>, String> {
     let vcs_provider = vcs::detect_vcs_provider(&project_path).map_err(|e| e.to_string())?;
 
-    // Checkout VCS branch
+    // Checkout VCS workspace
     vcs_provider
-        .checkout_branch(&branch_name)
+        .checkout_workspace(&workspace_name)
         .map_err(|e| e.to_string())?;
 
     // Orchestrate service switch if config exists
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     if config_path.exists() {
         let cfg = config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
-        let results = services::factory::orchestrate_switch(&cfg, &branch_name, None)
+        let results = services::factory::orchestrate_switch(&cfg, &workspace_name, None)
             .await
             .map_err(|e| e.to_string())?;
-        Ok(results
+        let response: Vec<OrchestrationResultDto> = results
             .into_iter()
             .map(|r| OrchestrationResultDto {
                 service_name: r.service_name,
                 success: r.success,
                 message: r.message,
             })
-            .collect())
+            .collect();
+        crate::update_tray_menu(&app);
+        Ok(response)
     } else {
+        crate::update_tray_menu(&app);
         Ok(vec![])
     }
 }
 
 #[tauri::command]
-pub async fn delete_branch(
+pub async fn delete_workspace(
+    app: tauri::AppHandle,
     project_path: String,
-    branch_name: String,
+    workspace_name: String,
 ) -> Result<Vec<OrchestrationResultDto>, String> {
     let project_dir = std::path::Path::new(&project_path);
     let vcs_provider = vcs::detect_vcs_provider(&project_path).map_err(|e| e.to_string())?;
 
-    // 1. Remove worktree if one exists for this branch
-    if let Ok(Some(wt_path)) = vcs_provider.worktree_path(&branch_name) {
+    // 1. Remove worktree if one exists for this workspace
+    if let Ok(Some(wt_path)) = vcs_provider.worktree_path(&workspace_name) {
         if let Err(e) = vcs_provider.remove_worktree(&wt_path) {
             log::warn!(
                 "Failed to remove worktree via VCS, falling back to fs removal: {}",
@@ -388,16 +457,16 @@ pub async fn delete_branch(
         }
     }
 
-    // 2. Orchestrate service branch deletion if config exists
+    // 2. Orchestrate service workspace deletion if config exists
     let config_path = project_dir.join(".devflow.yml");
     let mut results = vec![];
     if config_path.exists() {
         let cfg = config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
 
-        // Normalize the branch name for unregistration
-        let normalized = cfg.get_normalized_branch_name(&branch_name);
+        // Normalize the workspace name for unregistration
+        let normalized = cfg.get_normalized_workspace_name(&workspace_name);
 
-        results = services::factory::orchestrate_delete(&cfg, &branch_name)
+        results = services::factory::orchestrate_delete(&cfg, &workspace_name)
             .await
             .map_err(|e| e.to_string())?
             .into_iter()
@@ -410,23 +479,24 @@ pub async fn delete_branch(
 
         // 3. Unregister from devflow state
         if let Ok(mut state_mgr) = LocalStateManager::new() {
-            if let Err(e) = state_mgr.unregister_branch_by_dir(project_dir, &normalized) {
-                log::warn!("Failed to unregister branch from devflow state: {}", e);
+            if let Err(e) = state_mgr.unregister_workspace_by_dir(project_dir, &normalized) {
+                log::warn!("Failed to unregister workspace from devflow state: {}", e);
             }
         }
     } else {
         // No config — still unregister from state using the raw name
         if let Ok(mut state_mgr) = LocalStateManager::new() {
-            if let Err(e) = state_mgr.unregister_branch_by_dir(project_dir, &branch_name) {
-                log::warn!("Failed to unregister branch from devflow state: {}", e);
+            if let Err(e) = state_mgr.unregister_workspace_by_dir(project_dir, &workspace_name) {
+                log::warn!("Failed to unregister workspace from devflow state: {}", e);
             }
         }
     }
 
-    // 4. Delete VCS branch
+    // 4. Delete VCS workspace
     vcs_provider
-        .delete_branch(&branch_name)
+        .delete_workspace(&workspace_name)
         .map_err(|e| e.to_string())?;
 
+    crate::update_tray_menu(&app);
     Ok(results)
 }

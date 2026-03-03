@@ -1,6 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
-import { runDoctor } from "../../utils/invoke";
+import { runDoctor, installVcsHooks, uninstallVcsHooks } from "../../utils/invoke";
 import type { DoctorReport, DoctorServiceReport } from "../../types";
 
 function DoctorPage() {
@@ -10,20 +10,66 @@ function DoctorPage() {
   const [report, setReport] = useState<DoctorReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [hookActionLoading, setHookActionLoading] = useState<
+    "install" | "remove" | null
+  >(null);
+  const [hookActionError, setHookActionError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!projectPath) return;
+  const reloadDoctor = useCallback(async () => {
+    if (!projectPath) {
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
-    runDoctor(projectPath)
-      .then((results) => {
-        setReport(results);
-        setError(null);
-      })
-      .catch((e) => setError(`Doctor failed: ${e}`))
-      .finally(() => setLoading(false));
+    try {
+      const results = await runDoctor(projectPath);
+      setReport(results);
+      setError(null);
+    } catch (e) {
+      setError(`Doctor failed: ${e}`);
+    } finally {
+      setLoading(false);
+    }
   }, [projectPath]);
 
-  const renderServiceReport = (entry: DoctorServiceReport, title: string) => (
+  useEffect(() => {
+    reloadDoctor();
+  }, [reloadDoctor]);
+
+  const handleInstallHooks = async () => {
+    if (!projectPath || hookActionLoading) return;
+    setHookActionError(null);
+    setHookActionLoading("install");
+    try {
+      await installVcsHooks(projectPath);
+      await reloadDoctor();
+    } catch (e) {
+      setHookActionError(`Failed to install hooks: ${e}`);
+    } finally {
+      setHookActionLoading(null);
+    }
+  };
+
+  const handleRemoveHooks = async () => {
+    if (!projectPath || hookActionLoading) return;
+    setHookActionError(null);
+    setHookActionLoading("remove");
+    try {
+      await uninstallVcsHooks(projectPath);
+      await reloadDoctor();
+    } catch (e) {
+      setHookActionError(`Failed to remove hooks: ${e}`);
+    } finally {
+      setHookActionLoading(null);
+    }
+  };
+
+  const renderServiceReport = (
+    entry: DoctorServiceReport,
+    title: string,
+    showHookActions = false
+  ) => (
     <div className="card" key={entry.service}>
       <div className="card-title">{title}</div>
       <table className="table">
@@ -32,34 +78,64 @@ function DoctorPage() {
             <th style={{ width: 40 }}>Status</th>
             <th>Check</th>
             <th>Detail</th>
+            {showHookActions && <th style={{ width: 220, textAlign: "right" }}>Actions</th>}
           </tr>
         </thead>
         <tbody>
-          {entry.checks.map((check) => (
-            <tr key={check.name}>
-              <td>
-                <span
+          {entry.checks.map((check) => {
+            const isHooksCheck = showHookActions && check.name === "VCS hooks";
+            return (
+              <tr key={check.name}>
+                <td>
+                  <span
+                    style={{
+                      color: check.available ? "var(--success)" : "var(--danger)",
+                      fontWeight: 600,
+                      fontSize: 16,
+                    }}
+                  >
+                    {check.available ? "\u2713" : "\u2717"}
+                  </span>
+                </td>
+                <td style={{ fontWeight: 500 }}>{check.name}</td>
+                <td
+                  className="mono"
                   style={{
-                    color: check.available ? "var(--success)" : "var(--danger)",
-                    fontWeight: 600,
-                    fontSize: 16,
+                    color: "var(--text-secondary)",
+                    fontSize: 12,
                   }}
                 >
-                  {check.available ? "\u2713" : "\u2717"}
-                </span>
-              </td>
-              <td style={{ fontWeight: 500 }}>{check.name}</td>
-              <td
-                className="mono"
-                style={{
-                  color: "var(--text-secondary)",
-                  fontSize: 12,
-                }}
-              >
-                {check.detail}
-              </td>
-            </tr>
-          ))}
+                  {check.detail}
+                </td>
+                {showHookActions && (
+                  <td style={{ textAlign: "right" }}>
+                    {isHooksCheck ? (
+                      <div className="flex gap-2" style={{ justifyContent: "flex-end" }}>
+                        <button
+                          className="btn"
+                          onClick={handleInstallHooks}
+                          disabled={hookActionLoading !== null || check.available}
+                          style={{ padding: "4px 10px", fontSize: 12 }}
+                        >
+                          {hookActionLoading === "install" ? "Installing..." : "Install hooks"}
+                        </button>
+                        <button
+                          className="btn btn-danger"
+                          onClick={handleRemoveHooks}
+                          disabled={hookActionLoading !== null || !check.available}
+                          style={{ padding: "4px 10px", fontSize: 12 }}
+                        >
+                          {hookActionLoading === "remove" ? "Removing..." : "Remove hooks"}
+                        </button>
+                      </div>
+                    ) : (
+                      <span style={{ color: "var(--text-muted)", fontSize: 12 }}>-</span>
+                    )}
+                  </td>
+                )}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -95,10 +171,17 @@ function DoctorPage() {
         </div>
       )}
 
+      {hookActionError && (
+        <div className="card">
+          <p style={{ color: "var(--danger)" }}>{hookActionError}</p>
+        </div>
+      )}
+
       {!loading && !error && report &&
         renderServiceReport(
           { service: "__general__", checks: report.general },
-          "General"
+          "General",
+          true
         )}
 
       {!loading && !error && report && report.services.length === 0 && (

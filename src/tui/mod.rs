@@ -54,17 +54,17 @@ pub async fn run() -> Result<()> {
 
     run_result?;
 
-    if let Some(branch_name) = app.take_open_branch_on_exit() {
+    if let Some(workspace_name) = app.take_open_branch_on_exit() {
         let exe = std::env::current_exe()?;
         let status = tokio::process::Command::new(exe)
             .arg("switch")
-            .arg(&branch_name)
+            .arg(&workspace_name)
             .status()
             .await?;
         if !status.success() {
             anyhow::bail!(
-                "Failed to open branch '{}' from TUI (switch exited with code {})",
-                branch_name,
+                "Failed to open workspace '{}' from TUI (switch exited with code {})",
+                workspace_name,
                 status.code().unwrap_or(-1)
             );
         }

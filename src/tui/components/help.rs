@@ -32,10 +32,10 @@ pub fn render_help(frame: &mut Frame) {
             vec![
                 ("j/k / Up/Down", "Navigate tree"),
                 ("Space", "Collapse/expand node"),
-                ("Enter", "Align services to selected branch"),
-                ("o", "Open selected branch/worktree (exit TUI)"),
-                ("c", "Create new branch"),
-                ("d", "Delete selected branch"),
+                ("Enter", "Align services to selected workspace"),
+                ("o", "Open selected workspace/worktree (exit TUI)"),
+                ("c", "Create new workspace"),
+                ("d", "Delete selected workspace"),
                 ("n / p", "Cycle focused service"),
                 ("S", "Start focused service"),
                 ("x", "Stop focused service"),
@@ -67,7 +67,7 @@ pub fn render_help(frame: &mut Frame) {
             vec![
                 ("f", "Toggle picker/content focus"),
                 ("j/k / Up/Down", "Navigate picker or scroll logs"),
-                ("/", "Filter service/branch picker"),
+                ("/", "Filter service/workspace picker"),
                 ("Esc", "Clear picker filter"),
                 ("Enter", "Load logs for selected service"),
                 ("g/G", "Go to top/bottom (content)"),

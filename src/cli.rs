@@ -10,20 +10,20 @@ use devflow_core::hooks::{
     approval::ApprovalStore, HookContext, HookEngine, HookEntry, HookPhase, IndexMap,
     TemplateEngine,
 };
-use devflow_core::state::{DevflowBranch, LocalStateManager};
+use devflow_core::state::{DevflowWorkspace, LocalStateManager};
 use devflow_core::vcs;
 
 #[derive(Subcommand)]
 pub enum Commands {
-    // ── Branch Management ──
-    #[command(about = "List all branches (with service + worktree status)")]
+    // ── Workspace Management ──
+    #[command(about = "List all workspaces (with service + worktree status)")]
     List,
     #[command(
         about = "Render full environment graph",
-        long_about = "Render the full environment graph (branch tree + service states + worktree paths).
+        long_about = "Render the full environment graph (workspace tree + service states + worktree paths).
 
 This command is designed for both humans and automation:
-  - human mode prints an ASCII tree with service branches under each branch
+  - human mode prints an ASCII tree with service workspaces under each workspace
   - --json mode prints a graph document suitable for tools/agents
 
 Examples:
@@ -32,43 +32,43 @@ Examples:
     )]
     Graph,
     #[command(
-        about = "Link an existing VCS branch into devflow",
-        long_about = "Link an existing VCS branch into devflow.
+        about = "Link an existing VCS workspace into devflow",
+        long_about = "Link an existing VCS workspace into devflow.
 
-This command records the branch in the devflow registry and materializes
-service branches when auto-branch services are configured.
+This command records the workspace in the devflow registry and materializes
+service workspaces when auto-workspace services are configured.
 
 Examples:
   devflow link feature/auth
   devflow link feature/auth --from main"
     )]
     Link {
-        #[arg(help = "Branch name to link")]
-        branch_name: String,
+        #[arg(help = "Workspace name to link")]
+        workspace_name: String,
         #[arg(
             short = 'b',
             long = "from",
             visible_alias = "base",
-            help = "Parent branch for lineage/service creation"
+            help = "Parent workspace for lineage/service creation"
         )]
         from: Option<String>,
     },
     #[command(
-        about = "Switch to an existing branch/worktree (use -c to create)",
-        long_about = "Switch to an existing branch/worktree.\n\nWith no arguments, shows an interactive branch picker with fuzzy search.\nWith a branch name, switches to that branch and aligns services/worktrees.\nIf the branch does not exist, use -c/--create to create it first.\n\nExamples:\n  devflow switch                     # Interactive picker\n  devflow switch feature-auth        # Switch to existing branch\n  devflow switch -c feature-new      # Create new branch from current context\n  devflow switch -c feature-new --from release_1_0  # Create from explicit parent\n  devflow switch --template           # Switch to main/template\n  devflow switch feature-auth -x 'npm run migrate'  # Run command after switch"
+        about = "Switch to an existing workspace/worktree (use -c to create)",
+        long_about = "Switch to an existing workspace/worktree.\n\nWith no arguments, shows an interactive workspace picker with fuzzy search.\nWith a workspace name, switches to that workspace and aligns services/worktrees.\nIf the workspace does not exist, use -c/--create to create it first.\n\nExamples:\n  devflow switch                     # Interactive picker\n  devflow switch feature-auth        # Switch to existing workspace\n  devflow switch -c feature-new      # Create new workspace from current context\n  devflow switch -c feature-new --from release_1_0  # Create from explicit parent\n  devflow switch --template           # Switch to main/template\n  devflow switch feature-auth -x 'npm run migrate'  # Run command after switch"
     )]
     Switch {
         #[arg(
-            help = "Branch name to switch to (optional - if omitted, shows interactive selection)"
+            help = "Workspace name to switch to (optional - if omitted, shows interactive selection)"
         )]
-        branch_name: Option<String>,
-        #[arg(short = 'c', long, help = "Create a new branch before switching")]
+        workspace_name: Option<String>,
+        #[arg(short = 'c', long, help = "Create a new workspace before switching")]
         create: bool,
         #[arg(
             short = 'b',
             long = "from",
             visible_alias = "base",
-            help = "Parent branch for new branch creation (defaults to current context branch)"
+            help = "Parent workspace for new workspace creation (defaults to current context workspace)"
         )]
         from: Option<String>,
         #[arg(short = 'x', long, help = "Run a command after switching")]
@@ -83,42 +83,42 @@ Examples:
         dry_run: bool,
     },
     #[command(
-        about = "Remove a branch, its worktree, and associated service branches",
-        long_about = "Remove a branch, its worktree, and associated service branches.\n\nThis is a comprehensive cleanup command that removes:\n  - The Git branch\n  - The worktree directory (if any)\n  - All associated service branches (containers, cloud branches)\n\nUnlike 'devflow service delete' which only removes service branches, 'remove'\ncleans up everything related to the branch.\n\nExamples:\n  devflow remove feature-auth\n  devflow remove feature-auth --force\n  devflow remove feature-auth --keep-services  # Only remove worktree + git branch"
+        about = "Remove a workspace, its worktree, and associated service workspaces",
+        long_about = "Remove a workspace, its worktree, and associated service workspaces.\n\nThis is a comprehensive cleanup command that removes:\n  - The Git workspace\n  - The worktree directory (if any)\n  - All associated service workspaces (containers, cloud workspaces)\n\nUnlike 'devflow service delete' which only removes service workspaces, 'remove'\ncleans up everything related to the workspace.\n\nExamples:\n  devflow remove feature-auth\n  devflow remove feature-auth --force\n  devflow remove feature-auth --keep-services  # Only remove worktree + git workspace"
     )]
     Remove {
-        #[arg(help = "Branch name to remove")]
-        branch_name: String,
+        #[arg(help = "Workspace name to remove")]
+        workspace_name: String,
         #[arg(long, help = "Skip confirmation prompt")]
         force: bool,
-        #[arg(long, help = "Keep service branches (only remove worktree)")]
+        #[arg(long, help = "Keep service workspaces (only remove worktree)")]
         keep_services: bool,
     },
     #[command(
-        about = "Merge current branch into target (with optional cleanup)",
-        long_about = "Merge current branch into target (with optional cleanup).\n\nPerforms a git merge of the current branch into the target branch (defaults to main).\nWith --cleanup, also removes the source branch, its worktree, and associated service branches.\n\nExamples:\n  devflow merge                        # Merge into main\n  devflow merge develop                # Merge into develop\n  devflow merge --cleanup              # Merge and delete source branch + services\n  devflow merge --dry-run              # Preview without merging"
+        about = "Merge current workspace into target (with optional cleanup)",
+        long_about = "Merge current workspace into target (with optional cleanup).\n\nPerforms a git merge of the current workspace into the target workspace (defaults to main).\nWith --cleanup, also removes the source workspace, its worktree, and associated service workspaces.\n\nExamples:\n  devflow merge                        # Merge into main\n  devflow merge develop                # Merge into develop\n  devflow merge --cleanup              # Merge and delete source workspace + services\n  devflow merge --dry-run              # Preview without merging"
     )]
     Merge {
-        #[arg(help = "Target branch to merge into (default: main branch)")]
+        #[arg(help = "Target workspace to merge into (default: main workspace)")]
         target: Option<String>,
-        #[arg(long, help = "Delete the source branch and worktree after merge")]
+        #[arg(long, help = "Delete the source workspace and worktree after merge")]
         cleanup: bool,
         #[arg(long, help = "Simulate merge without actual operations")]
         dry_run: bool,
     },
     #[command(
-        about = "Clean up old service branches (alias for 'service cleanup')",
-        long_about = "Clean up old service branches.\n\nRemoves stale service branches that no longer have a corresponding VCS branch.\nOptionally limit the number of branches to retain.\n\nExamples:\n  devflow cleanup                  # Remove orphaned service branches\n  devflow cleanup --max-count 10   # Keep at most 10 service branches"
+        about = "Clean up old service workspaces (alias for 'service cleanup')",
+        long_about = "Clean up old service workspaces.\n\nRemoves stale service workspaces that no longer have a corresponding VCS workspace.\nOptionally limit the number of workspaces to retain.\n\nExamples:\n  devflow cleanup                  # Remove orphaned service workspaces\n  devflow cleanup --max-count 10   # Keep at most 10 service workspaces"
     )]
     Cleanup {
-        #[arg(long, help = "Maximum number of branches to keep")]
+        #[arg(long, help = "Maximum number of workspaces to keep")]
         max_count: Option<usize>,
     },
 
     // ── Services ──
     #[command(
         about = "Manage services (create, delete, start, stop, reset, ...)",
-        long_about = "Manage service providers and their branches.\n\nService commands operate on the configured service providers (local Docker,\nNeon, DBLab, etc.) to create, delete, and manage branch-isolated environments.\n\nExamples:\n  devflow service add                       # Interactive wizard\n  devflow service add mydb --provider local # Add with explicit options\n  devflow service create feature-auth       # Create service branch\n  devflow service delete feature-auth       # Delete service branch\n  devflow service cleanup --max-count 10    # Cleanup old service branches\n  devflow service start feature-auth        # Start a stopped container\n  devflow service stop feature-auth         # Stop a running container\n  devflow service reset feature-auth        # Reset to parent state\n  devflow service connection feature-auth   # Show connection info\n  devflow service status                    # Show service status\n  devflow service list                      # List configured services\n  devflow service remove mydb               # Remove a service config\n  devflow service logs feature-auth         # Show container logs\n  devflow service seed main --from dump.sql # Seed from external source\n  devflow service destroy                   # Destroy all data"
+        long_about = "Manage service providers and their workspaces.\n\nService commands operate on the configured service providers (local Docker,\nNeon, DBLab, etc.) to create, delete, and manage workspace-isolated environments.\n\nExamples:\n  devflow service add                       # Interactive wizard\n  devflow service add mydb --provider local # Add with explicit options\n  devflow service create feature-auth       # Create service workspace\n  devflow service delete feature-auth       # Delete service workspace\n  devflow service cleanup --max-count 10    # Cleanup old service workspaces\n  devflow service start feature-auth        # Start a stopped container\n  devflow service stop feature-auth         # Stop a running container\n  devflow service reset feature-auth        # Reset to parent state\n  devflow service connection feature-auth   # Show connection info\n  devflow service status                    # Show service status\n  devflow service list                      # List configured services\n  devflow service remove mydb               # Remove a service config\n  devflow service logs feature-auth         # Show container logs\n  devflow service seed main --from dump.sql # Seed from external source\n  devflow service destroy                   # Destroy all data"
     )]
     Service {
         #[command(subcommand)]
@@ -127,18 +127,18 @@ Examples:
 
     // ── Top-level aliases ──
     #[command(
-        about = "Show connection info for a service branch (alias for 'service connection')",
-        long_about = "Show connection info for a service branch.\n\nOutputs connection details in various formats for use in scripts and configuration.\nThis is an alias for 'devflow service connection'.\n\nExamples:\n  devflow connection feature-auth              # Connection URI\n  devflow connection feature-auth --format env  # Environment variables\n  devflow connection feature-auth --format json # JSON object"
+        about = "Show connection info for a service workspace (alias for 'service connection')",
+        long_about = "Show connection info for a service workspace.\n\nOutputs connection details in various formats for use in scripts and configuration.\nThis is an alias for 'devflow service connection'.\n\nExamples:\n  devflow connection feature-auth              # Connection URI\n  devflow connection feature-auth --format env  # Environment variables\n  devflow connection feature-auth --format json # JSON object"
     )]
     Connection {
-        #[arg(help = "Name of the branch")]
-        branch_name: String,
+        #[arg(help = "Name of the workspace")]
+        workspace_name: String,
         #[arg(long, help = "Output format: uri, env, or json")]
         format: Option<String>,
     },
     #[command(
         about = "Show current project and service status",
-        long_about = "Show current project and service status.\n\nDisplays the current branch, configured services, their states,\nand connection info. Useful for quick orientation.\n\nExamples:\n  devflow status\n  devflow --json status"
+        long_about = "Show current project and service status.\n\nDisplays the current workspace, configured services, their states,\nand connection info. Useful for quick orientation.\n\nExamples:\n  devflow status\n  devflow --json status"
     )]
     Status,
 
@@ -176,7 +176,7 @@ Examples:
     },
     #[command(
         about = "Tear down the entire devflow project",
-        long_about = "Tear down the entire devflow project.\n\nThis is the inverse of 'devflow init'. It permanently destroys:\n  - All service data (containers, databases, branches)\n  - Git worktrees created by devflow\n  - VCS hooks installed by devflow\n  - Branch registry and local state\n  - Hook approvals\n  - Configuration files (.devflow.yml, .devflow.local.yml)\n\nThis is irreversible. Use --force to skip the confirmation prompt.\n\nExamples:\n  devflow destroy              # Interactive confirmation\n  devflow destroy --force      # Skip confirmation"
+        long_about = "Tear down the entire devflow project.\n\nThis is the inverse of 'devflow init'. It permanently destroys:\n  - All service data (containers, databases, workspaces)\n  - Git worktrees created by devflow\n  - VCS hooks installed by devflow\n  - Workspace registry and local state\n  - Hook approvals\n  - Configuration files (.devflow.yml, .devflow.local.yml)\n\nThis is irreversible. Use --force to skip the confirmation prompt.\n\nExamples:\n  devflow destroy              # Interactive confirmation\n  devflow destroy --force      # Skip confirmation"
     )]
     Destroy {
         #[arg(long, help = "Skip confirmation prompt")]
@@ -201,12 +201,12 @@ Examples:
     Doctor,
     #[command(
         about = "Install Git hooks",
-        long_about = "Install Git hooks.\n\nSets up post-checkout and post-commit Git hooks so devflow\nautomatically creates service branches and switches environments\non checkout. Safe to re-run.\n\nExamples:\n  devflow install-hooks"
+        long_about = "Install Git hooks.\n\nSets up post-checkout and post-commit Git hooks so devflow\nautomatically creates service workspaces and switches environments\non checkout. Safe to re-run.\n\nExamples:\n  devflow install-hooks"
     )]
     InstallHooks,
     #[command(
         about = "Uninstall Git hooks",
-        long_about = "Uninstall Git hooks.\n\nRemoves the devflow Git hooks (post-checkout, post-commit).\nYour existing service branches and worktrees are not affected.\n\nExamples:\n  devflow uninstall-hooks"
+        long_about = "Uninstall Git hooks.\n\nRemoves the devflow Git hooks (post-checkout, post-commit).\nYour existing service workspaces and worktrees are not affected.\n\nExamples:\n  devflow uninstall-hooks"
     )]
     UninstallHooks,
     #[command(about = "Handle Git hook execution", hide = true)]
@@ -227,8 +227,8 @@ Examples:
     },
     #[command(
         name = "worktree-setup",
-        about = "Set up devflow in a Git worktree (copy files, create DB branch)",
-        long_about = "Set up devflow in a Git worktree.\n\nCopies configuration files and creates service branches for the current\nworktree. Normally called automatically by Git hooks, but can be run\nmanually if hooks are not installed.\n\nExamples:\n  devflow worktree-setup"
+        about = "Set up devflow in a Git worktree (copy files, create DB workspace)",
+        long_about = "Set up devflow in a Git worktree.\n\nCopies configuration files and creates service workspaces for the current\nworktree. Normally called automatically by Git hooks, but can be run\nmanually if hooks are not installed.\n\nExamples:\n  devflow worktree-setup"
     )]
     WorktreeSetup,
     #[command(
@@ -276,7 +276,7 @@ Examples:
     // ── AI Agent ──
     #[command(
         about = "AI agent integration (start, status, context, skill)",
-        long_about = "AI agent integration.\n\nManage AI coding agents that work in isolated branch environments.\nLaunch agents into worktrees, track their status, and generate\nproject-specific skills/rules for different AI tools.\n\nExamples:\n  devflow agent start fix-login -- 'Fix the login timeout bug'\n  devflow agent status\n  devflow agent context\n  devflow agent skill\n  devflow agent docs"
+        long_about = "AI agent integration.\n\nManage AI coding agents that work in isolated workspace environments.\nLaunch agents into worktrees, track their status, and generate\nproject-specific skills/rules for different AI tools.\n\nExamples:\n  devflow agent start fix-login -- 'Fix the login timeout bug'\n  devflow agent status\n  devflow agent context\n  devflow agent skill\n  devflow agent docs"
     )]
     Agent {
         #[command(subcommand)]
@@ -324,26 +324,26 @@ Examples:
 #[derive(Subcommand)]
 pub enum ServiceCommands {
     #[command(
-        about = "Create a new service branch",
-        long_about = "Create a new service branch.\n\nCreates Docker containers and/or cloud branches for the specified branch name.\n\nExamples:\n  devflow service create feature-auth\n  devflow service create feature-auth --from develop"
+        about = "Create a new service workspace",
+        long_about = "Create a new service workspace.\n\nCreates Docker containers and/or cloud workspaces for the specified workspace name.\n\nExamples:\n  devflow service create feature-auth\n  devflow service create feature-auth --from develop"
     )]
     Create {
-        #[arg(help = "Name of the branch to create")]
-        branch_name: String,
-        #[arg(long, help = "Parent branch to clone from")]
+        #[arg(help = "Name of the workspace to create")]
+        workspace_name: String,
+        #[arg(long, help = "Parent workspace to clone from")]
         from: Option<String>,
     },
     #[command(
-        about = "Delete a service branch (keeps Git branch and worktree)",
-        long_about = "Delete a service branch (keeps Git branch and worktree).\n\nRemoves service branches (containers, cloud branches) but preserves the Git branch\nand any worktree directory. Use 'devflow remove' to delete everything.\n\nExamples:\n  devflow service delete feature-auth"
+        about = "Delete a service workspace (keeps Git workspace and worktree)",
+        long_about = "Delete a service workspace (keeps Git workspace and worktree).\n\nRemoves service workspaces (containers, cloud workspaces) but preserves the Git workspace\nand any worktree directory. Use 'devflow remove' to delete everything.\n\nExamples:\n  devflow service delete feature-auth"
     )]
     Delete {
-        #[arg(help = "Name of the branch to delete")]
-        branch_name: String,
+        #[arg(help = "Name of the workspace to delete")]
+        workspace_name: String,
     },
-    #[command(about = "Clean up old branches for this service")]
+    #[command(about = "Clean up old workspaces for this service")]
     Cleanup {
-        #[arg(long, help = "Maximum number of branches to keep")]
+        #[arg(long, help = "Maximum number of workspaces to keep")]
         max_count: Option<usize>,
     },
     #[command(about = "List configured services")]
@@ -373,7 +373,7 @@ pub enum ServiceCommands {
         force: bool,
         #[arg(
             long,
-            help = "Seed main branch from source (PostgreSQL URL, file path, or s3:// URL)"
+            help = "Seed main workspace from source (PostgreSQL URL, file path, or s3:// URL)"
         )]
         from: Option<String>,
     },
@@ -385,53 +385,53 @@ pub enum ServiceCommands {
         #[arg(help = "Service name to remove")]
         name: String,
     },
-    #[command(about = "Start a stopped branch container (local provider)")]
+    #[command(about = "Start a stopped workspace container (local provider)")]
     Start {
-        #[arg(help = "Name of the branch to start")]
-        branch_name: String,
+        #[arg(help = "Name of the workspace to start")]
+        workspace_name: String,
     },
-    #[command(about = "Stop a running branch container (local provider)")]
+    #[command(about = "Stop a running workspace container (local provider)")]
     Stop {
-        #[arg(help = "Name of the branch to stop")]
-        branch_name: String,
+        #[arg(help = "Name of the workspace to stop")]
+        workspace_name: String,
     },
-    #[command(about = "Reset a branch to its parent state (local provider)")]
+    #[command(about = "Reset a workspace to its parent state (local provider)")]
     Reset {
-        #[arg(help = "Name of the branch to reset")]
-        branch_name: String,
+        #[arg(help = "Name of the workspace to reset")]
+        workspace_name: String,
     },
-    #[command(about = "Destroy all branches and data for a service (local provider)")]
+    #[command(about = "Destroy all workspaces and data for a service (local provider)")]
     Destroy {
         #[arg(long, help = "Skip confirmation prompt")]
         force: bool,
     },
     #[command(
-        about = "Show connection info for a service branch",
-        long_about = "Show connection info for a service branch.\n\nOutputs connection details in various formats for use in scripts and configuration.\n\nExamples:\n  devflow service connection feature-auth              # Connection URI\n  devflow service connection feature-auth --format env  # Environment variables\n  devflow service connection feature-auth --format json # JSON object"
+        about = "Show connection info for a service workspace",
+        long_about = "Show connection info for a service workspace.\n\nOutputs connection details in various formats for use in scripts and configuration.\n\nExamples:\n  devflow service connection feature-auth              # Connection URI\n  devflow service connection feature-auth --format env  # Environment variables\n  devflow service connection feature-auth --format json # JSON object"
     )]
     Connection {
-        #[arg(help = "Name of the branch")]
-        branch_name: String,
+        #[arg(help = "Name of the workspace")]
+        workspace_name: String,
         #[arg(long, help = "Output format: uri, env, or json")]
         format: Option<String>,
     },
     #[command(
-        about = "Show container logs for a branch",
-        long_about = "Show container logs for a branch.\n\nDisplays stdout/stderr from the Docker container backing a service branch.\nUseful for debugging startup failures, query errors, or crash loops.\n\nExamples:\n  devflow service logs main                    # Last 100 lines from main\n  devflow service logs feature/auth --tail 50  # Last 50 lines\n  devflow service logs main -s analytics       # Logs from a specific service"
+        about = "Show container logs for a workspace",
+        long_about = "Show container logs for a workspace.\n\nDisplays stdout/stderr from the Docker container backing a service workspace.\nUseful for debugging startup failures, query errors, or crash loops.\n\nExamples:\n  devflow service logs main                    # Last 100 lines from main\n  devflow service logs feature/auth --tail 50  # Last 50 lines\n  devflow service logs main -s analytics       # Logs from a specific service"
     )]
     Logs {
-        #[arg(help = "Name of the branch to show logs for")]
-        branch_name: String,
+        #[arg(help = "Name of the workspace to show logs for")]
+        workspace_name: String,
         #[arg(long, help = "Number of lines to show (default: 100)")]
         tail: Option<usize>,
     },
     #[command(
-        about = "Seed a branch from an external source",
-        long_about = "Seed a branch database from an external source.\n\nLoads data into an existing branch from a PostgreSQL URL, local dump file,\nor S3 URL. The branch must already exist.\n\nExamples:\n  devflow service seed main --from dump.sql                    # Seed from local file\n  devflow service seed feature/auth --from postgresql://...     # Seed from live database\n  devflow service seed main --from s3://bucket/path/dump.sql   # Seed from S3"
+        about = "Seed a workspace from an external source",
+        long_about = "Seed a workspace database from an external source.\n\nLoads data into an existing workspace from a PostgreSQL URL, local dump file,\nor S3 URL. The workspace must already exist.\n\nExamples:\n  devflow service seed main --from dump.sql                    # Seed from local file\n  devflow service seed feature/auth --from postgresql://...     # Seed from live database\n  devflow service seed main --from s3://bucket/path/dump.sql   # Seed from S3"
     )]
     Seed {
-        #[arg(help = "Name of the branch to seed")]
-        branch_name: String,
+        #[arg(help = "Name of the workspace to seed")]
+        workspace_name: String,
         #[arg(
             long,
             help = "Source to seed from (PostgreSQL URL, file path, or s3:// URL)"
@@ -453,8 +453,11 @@ pub enum HookCommands {
         phase: String,
         #[arg(help = "Run only a specific named hook within the phase")]
         name: Option<String>,
-        #[arg(long, help = "Branch name context (defaults to current Git branch)")]
-        branch: Option<String>,
+        #[arg(
+            long,
+            help = "Workspace name context (defaults to current Git workspace)"
+        )]
+        workspace: Option<String>,
     },
     #[command(about = "Manage hook approvals")]
     Approvals {
@@ -471,21 +474,21 @@ pub enum HookCommands {
     },
     #[command(
         about = "Show available template variables with current values",
-        long_about = "Show all template variables available in hook templates.\n\nDisplays the current branch, repo, services, and all filters\nwith their actual resolved values.\n\nExamples:\n  devflow hook vars\n  devflow hook vars --branch feature/auth"
+        long_about = "Show all template variables available in hook templates.\n\nDisplays the current workspace, repo, services, and all filters\nwith their actual resolved values.\n\nExamples:\n  devflow hook vars\n  devflow hook vars --workspace feature/auth"
     )]
     Vars {
-        #[arg(long, help = "Branch name to use for context (defaults to current)")]
-        branch: Option<String>,
+        #[arg(long, help = "Workspace name to use for context (defaults to current)")]
+        workspace: Option<String>,
     },
     #[command(
         about = "Render a template string with current context",
-        long_about = "Render a MiniJinja template string using the current project context.\n\nUseful for testing templates before adding them to .devflow.yml.\n\nExamples:\n  devflow hook render '{{ service[\"db\"].url }}'\n  devflow hook render 'DATABASE_URL={{ service[\"db\"].url }}'\n  devflow hook render '{{ branch | sanitize_db }}'"
+        long_about = "Render a MiniJinja template string using the current project context.\n\nUseful for testing templates before adding them to .devflow.yml.\n\nExamples:\n  devflow hook render '{{ service[\"db\"].url }}'\n  devflow hook render 'DATABASE_URL={{ service[\"db\"].url }}'\n  devflow hook render '{{ workspace | sanitize_db }}'"
     )]
     Render {
         #[arg(help = "Template string to render")]
         template: String,
-        #[arg(long, help = "Branch name to use for context (defaults to current)")]
-        branch: Option<String>,
+        #[arg(long, help = "Workspace name to use for context (defaults to current)")]
+        workspace: Option<String>,
     },
 }
 
@@ -528,12 +531,12 @@ pub enum PluginCommands {
 #[derive(Subcommand)]
 pub enum AgentCommands {
     #[command(
-        about = "Start an AI agent in a new branch",
-        long_about = "Start an AI agent in a new isolated branch.\n\nCreates a worktree branch and launches the configured agent tool.\n\nExamples:\n  devflow agent start fix-login -- 'Fix the login timeout'\n  devflow agent start fix-login --command claude\n  devflow agent start fix-login --dry-run"
+        about = "Start an AI agent in a new workspace",
+        long_about = "Start an AI agent in a new isolated workspace.\n\nCreates a worktree workspace and launches the configured agent tool.\n\nExamples:\n  devflow agent start fix-login -- 'Fix the login timeout'\n  devflow agent start fix-login --command claude\n  devflow agent start fix-login --dry-run"
     )]
     Start {
-        #[arg(help = "Branch name (will be prefixed with agent/ by default)")]
-        branch: String,
+        #[arg(help = "Workspace name (will be prefixed with agent/ by default)")]
+        workspace: String,
         #[arg(long, help = "Agent command to launch (overrides config)")]
         command: Option<String>,
         #[arg(last = true, help = "Prompt to pass to the agent")]
@@ -541,11 +544,11 @@ pub enum AgentCommands {
         #[arg(long, help = "Show what would be done without executing")]
         dry_run: bool,
     },
-    #[command(about = "Show agent status across all branches")]
+    #[command(about = "Show agent status across all workspaces")]
     Status,
     #[command(
-        about = "Output project context for the current branch",
-        long_about = "Output structured context for AI agents.\n\nIncludes branch info, service connections, and project config.\n\nExamples:\n  devflow agent context\n  devflow agent context --format json\n  devflow agent context --branch feature/auth"
+        about = "Output project context for the current workspace",
+        long_about = "Output structured context for AI agents.\n\nIncludes workspace info, service connections, and project config.\n\nExamples:\n  devflow agent context\n  devflow agent context --format json\n  devflow agent context --workspace feature/auth"
     )]
     Context {
         #[arg(
@@ -554,8 +557,8 @@ pub enum AgentCommands {
             help = "Output format: json or markdown"
         )]
         format: String,
-        #[arg(long, help = "Branch to generate context for")]
-        branch: Option<String>,
+        #[arg(long, help = "Workspace to generate context for")]
+        workspace: Option<String>,
     },
     #[command(
         about = "Generate AI tool skills/rules for this project",
@@ -667,7 +670,7 @@ pub async fn handle_command(
         if effective_config.is_disabled() {
             log::debug!("devflow is globally disabled via configuration");
         } else {
-            log::debug!("devflow is disabled for current branch");
+            log::debug!("devflow is disabled for current workspace");
         }
         return Ok(());
     }
@@ -704,12 +707,12 @@ pub async fn handle_command(
         }
         return match cmd {
             Commands::Connection {
-                branch_name,
+                workspace_name,
                 format,
             } => {
                 // Top-level alias: delegate to service connection
                 let svc_cmd = ServiceCommands::Connection {
-                    branch_name,
+                    workspace_name,
                     format,
                 };
                 handle_service_provider_command(
@@ -745,7 +748,7 @@ pub async fn handle_command(
                 )
                 .await
             }
-            // Branch management commands that need service context
+            // Workspace management commands that need service context
             _ => {
                 handle_branch_command(
                     cmd,
@@ -839,26 +842,26 @@ pub async fn handle_command(
                 }
             } else {
                 // VCS already exists — ensure it has at least one commit so the
-                // default branch is materialised and `list_branches` works.
+                // default workspace is materialised and `list_workspaces` works.
                 if let Ok(vcs_provider) = vcs::detect_vcs_provider(".") {
                     let _ = vcs_provider.ensure_initial_commit();
                 }
                 None
             };
 
-            // Auto-detect main branch from VCS
+            // Auto-detect main workspace from VCS
             if let Ok(vcs) = vcs::detect_vcs_provider(".") {
-                if let Ok(Some(detected_main)) = vcs.default_branch() {
-                    config.git.main_branch = detected_main.clone();
+                if let Ok(Some(detected_main)) = vcs.default_workspace() {
+                    config.git.main_workspace = detected_main.clone();
                     if !json_output {
                         println!(
-                            "Auto-detected main branch: {} ({})",
+                            "Auto-detected main workspace: {} ({})",
                             detected_main,
                             vcs.provider_name()
                         );
                     }
                 } else if !json_output {
-                    println!("Could not auto-detect main branch, using default: main");
+                    println!("Could not auto-detect main workspace, using default: main");
                 }
             }
 
@@ -869,11 +872,11 @@ pub async fn handle_command(
             } else {
                 println!();
                 inquire::Confirm::new(
-                    "Enable worktrees? (isolate each branch in its own directory)",
+                    "Enable worktrees? (isolate each workspace in its own directory)",
                 )
                 .with_default(true)
                 .with_help_message(
-                    "Recommended. Each branch gets its own working directory via git worktrees.",
+                    "Recommended. Each workspace gets its own working directory via git worktrees.",
                 )
                 .prompt()
                 .unwrap_or(true)
@@ -917,9 +920,10 @@ pub async fn handle_command(
             config.services = None;
             config.save_to_file(&config_path)?;
 
-            // Register the VCS default branch as devflow root.
-            if let Err(e) = ensure_default_branch_registered(&config, &Some(config_path.clone())) {
-                log::warn!("Failed to register default branch in local state: {}", e);
+            // Register the VCS default workspace as devflow root.
+            if let Err(e) = ensure_default_workspace_registered(&config, &Some(config_path.clone()))
+            {
+                log::warn!("Failed to register default workspace in local state: {}", e);
             }
 
             // Derive vcs_initialized label for JSON output
@@ -957,9 +961,9 @@ pub async fn handle_command(
 
                 if enable_worktrees {
                     println!(
-                        "\nWorktrees enabled. Each branch will get its own working directory."
+                        "\nWorktrees enabled. Each workspace will get its own working directory."
                     );
-                    println!("  Path template: ../{{repo}}.{{branch}}");
+                    println!("  Path template: ../{{repo}}.{{workspace}}");
                     println!("  Files copied:  .env, .env.local");
                 }
 
@@ -1058,7 +1062,7 @@ pub async fn handle_command(
                         serde_json::to_string_pretty(&serde_json::json!({
                             "disabled": effective_config.is_disabled(),
                             "skip_hooks": effective_config.should_skip_hooks(),
-                            "current_branch_disabled": effective_config.is_current_branch_disabled(),
+                            "current_workspace_disabled": effective_config.is_current_workspace_disabled(),
                             "has_local_config": effective_config.local_config.is_some(),
                             "config": serde_json::to_value(&merged_config)?,
                         }))?
@@ -1353,10 +1357,10 @@ async fn init_local_service_main(
 ) {
     match services::factory::create_provider_from_named_config(config, named_cfg).await {
         Ok(be) => {
-            match be.create_branch("main", None).await {
+            match be.create_workspace("main", None).await {
                 Ok(info) => {
                     if !quiet_output {
-                        println!("Created main branch");
+                        println!("Created main workspace");
                     }
                     if let Ok(conn) = be.get_connection_info("main").await {
                         if let Some(ref uri) = conn.connection_string {
@@ -1374,7 +1378,7 @@ async fn init_local_service_main(
                     // Seed if --from specified
                     if let Some(source) = from {
                         if !quiet_output {
-                            println!("Seeding main branch from: {}", source);
+                            println!("Seeding main workspace from: {}", source);
                         }
                         match be.seed_from_source("main", source).await {
                             Ok(_) => {
@@ -1388,7 +1392,7 @@ async fn init_local_service_main(
                 }
                 Err(e) => {
                     eprintln!(
-                        "Warning: could not create main branch for '{}': {}",
+                        "Warning: could not create main workspace for '{}': {}",
                         named_cfg.name, e
                     );
                     eprintln!("  You can create it later with: devflow service create main");
@@ -1400,7 +1404,9 @@ async fn init_local_service_main(
                 "Warning: could not initialize service '{}': {}",
                 named_cfg.name, e
             );
-            eprintln!("  You can create the main branch later with: devflow service create main");
+            eprintln!(
+                "  You can create the main workspace later with: devflow service create main"
+            );
         }
     }
 }
@@ -1414,11 +1420,11 @@ enum BranchContextSource {
 
 #[derive(Debug, Clone)]
 struct BranchContext {
-    /// Raw branch used as context (env override or cwd branch).
+    /// Raw workspace used as context (env override or cwd workspace).
     context_branch_raw: Option<String>,
-    /// Normalized devflow context branch name.
+    /// Normalized devflow context workspace name.
     context_branch: Option<String>,
-    /// Raw VCS branch currently checked out in this directory.
+    /// Raw VCS workspace currently checked out in this directory.
     cwd_branch: Option<String>,
     source: BranchContextSource,
 }
@@ -1426,14 +1432,14 @@ struct BranchContext {
 fn resolve_branch_context(config: &Config) -> BranchContext {
     let cwd_branch = vcs::detect_vcs_provider(".")
         .ok()
-        .and_then(|repo| repo.current_branch().ok().flatten());
+        .and_then(|repo| repo.current_workspace().ok().flatten());
 
     if let Ok(env_branch) = std::env::var("DEVFLOW_CONTEXT_BRANCH") {
         let trimmed = env_branch.trim();
         if !trimmed.is_empty() {
             return BranchContext {
                 context_branch_raw: Some(trimmed.to_string()),
-                context_branch: Some(config.get_normalized_branch_name(trimmed)),
+                context_branch: Some(config.get_normalized_workspace_name(trimmed)),
                 cwd_branch,
                 source: BranchContextSource::EnvOverride,
             };
@@ -1443,7 +1449,7 @@ fn resolve_branch_context(config: &Config) -> BranchContext {
     if let Some(cwd) = cwd_branch.as_deref() {
         return BranchContext {
             context_branch_raw: Some(cwd.to_string()),
-            context_branch: Some(config.get_normalized_branch_name(cwd)),
+            context_branch: Some(config.get_normalized_workspace_name(cwd)),
             cwd_branch,
             source: BranchContextSource::Cwd,
         };
@@ -1460,31 +1466,63 @@ fn resolve_branch_context(config: &Config) -> BranchContext {
 fn context_matches_branch(
     config: &Config,
     context_branch: Option<&str>,
-    branch_name: &str,
+    workspace_name: &str,
 ) -> bool {
     let Some(context) = context_branch else {
         return false;
     };
-    context == branch_name || context == config.get_normalized_branch_name(branch_name)
+    context == workspace_name || context == config.get_normalized_workspace_name(workspace_name)
 }
 
-fn linked_branch_exists(config: &Config, config_path: &Option<PathBuf>, branch_name: &str) -> bool {
+fn worktree_template_repo_name(config: &Config) -> String {
+    config
+        .name
+        .as_ref()
+        .filter(|n| !n.trim().is_empty())
+        .cloned()
+        .or_else(|| {
+            std::env::current_dir().ok().and_then(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .filter(|n| !n.trim().is_empty())
+            })
+        })
+        .unwrap_or_else(|| "repo".to_string())
+}
+
+fn apply_worktree_path_template(
+    path_template: &str,
+    repo_name: &str,
+    workspace_name: &str,
+) -> String {
+    path_template
+        .replace("{repo}", repo_name)
+        .replace("{workspace}", workspace_name)
+        // Backward compatibility with legacy templates.
+        .replace("{branch}", workspace_name)
+}
+
+fn linked_workspace_exists(
+    config: &Config,
+    config_path: &Option<PathBuf>,
+    workspace_name: &str,
+) -> bool {
     let Some(path) = config_path.as_ref() else {
         return false;
     };
 
-    let normalized = config.get_normalized_branch_name(branch_name);
+    let normalized = config.get_normalized_workspace_name(workspace_name);
     LocalStateManager::new()
         .ok()
-        .and_then(|state| state.get_branch(path, &normalized))
+        .and_then(|state| state.get_workspace(path, &normalized))
         .is_some()
 }
 
-fn register_branch_in_state(
+fn register_workspace_in_state(
     config: &Config,
     config_path: &Option<PathBuf>,
-    branch_name: &str,
-    parent_branch: Option<&str>,
+    workspace_name: &str,
+    parent_workspace: Option<&str>,
     worktree_path: Option<String>,
     cow_used: Option<bool>,
 ) -> Result<()> {
@@ -1493,10 +1531,10 @@ fn register_branch_in_state(
     };
 
     let mut state = LocalStateManager::new()?;
-    let normalized_branch = config.get_normalized_branch_name(branch_name);
-    let normalized_parent = parent_branch.map(|p| config.get_normalized_branch_name(p));
+    let normalized_branch = config.get_normalized_workspace_name(workspace_name);
+    let normalized_parent = parent_workspace.map(|p| config.get_normalized_workspace_name(p));
 
-    let existing = state.get_branch(path, &normalized_branch);
+    let existing = state.get_workspace(path, &normalized_branch);
     let created_at = existing
         .as_ref()
         .map(|b| b.created_at)
@@ -1513,9 +1551,9 @@ fn register_branch_in_state(
         .or_else(|| existing.as_ref().map(|b| b.cow_used))
         .unwrap_or(false);
 
-    state.register_branch(
+    state.register_workspace(
         path,
-        DevflowBranch {
+        DevflowWorkspace {
             name: normalized_branch,
             parent: final_parent,
             worktree_path: final_worktree,
@@ -1530,10 +1568,13 @@ fn register_branch_in_state(
     Ok(())
 }
 
-fn ensure_default_branch_registered(config: &Config, config_path: &Option<PathBuf>) -> Result<()> {
-    let main = config.git.main_branch.clone();
-    if !linked_branch_exists(config, config_path, &main) {
-        register_branch_in_state(config, config_path, &main, None, None, Some(false))?;
+fn ensure_default_workspace_registered(
+    config: &Config,
+    config_path: &Option<PathBuf>,
+) -> Result<()> {
+    let main = config.git.main_workspace.clone();
+    if !linked_workspace_exists(config, config_path, &main) {
+        register_workspace_in_state(config, config_path, &main, None, None, Some(false))?;
     }
     Ok(())
 }
@@ -1541,7 +1582,7 @@ fn ensure_default_branch_registered(config: &Config, config_path: &Option<PathBu
 fn load_registry_branches_for_list(
     config: &Config,
     config_path: &Option<PathBuf>,
-) -> Vec<DevflowBranch> {
+) -> Vec<DevflowWorkspace> {
     let Some(config_file) = config_path.as_ref() else {
         return Vec::new();
     };
@@ -1554,14 +1595,14 @@ fn load_registry_branches_for_list(
     };
 
     state
-        .get_or_init_branches_by_dir(project_dir, &config.git.main_branch)
-        .unwrap_or_else(|_| state.get_branches(config_file))
+        .get_or_init_workspaces_by_dir(project_dir, &config.git.main_workspace)
+        .unwrap_or_else(|_| state.get_workspaces(config_file))
 }
 
-fn collect_list_branch_names(
-    registry_branches: &[DevflowBranch],
-    git_branches: &[devflow_core::vcs::BranchInfo],
-    service_branches: &[services::BranchInfo],
+fn collect_list_workspace_names(
+    registry_branches: &[DevflowWorkspace],
+    git_branches: &[devflow_core::vcs::WorkspaceInfo],
+    service_branches: &[services::WorkspaceInfo],
 ) -> Vec<String> {
     if !registry_branches.is_empty() {
         return registry_branches.iter().map(|b| b.name.clone()).collect();
@@ -1584,12 +1625,12 @@ fn collect_list_branch_names(
     all_names
 }
 
-/// Print an enriched branch list as a tree, showing git branches, worktree paths, and service status.
+/// Print an enriched workspace list as a tree, showing git workspaces, worktree paths, and service status.
 ///
 /// Unifies information from the VCS provider, the service provider, and the
-/// branch registry (for parent-child relationships) into a single tree view.
+/// workspace registry (for parent-child relationships) into a single tree view.
 fn print_enriched_branch_list(
-    service_branches: &[services::BranchInfo],
+    service_branches: &[services::WorkspaceInfo],
     config: &Config,
     config_path: &Option<PathBuf>,
 ) {
@@ -1597,9 +1638,9 @@ fn print_enriched_branch_list(
 
     // Gather VCS + worktree info
     let vcs_provider = vcs::detect_vcs_provider(".").ok();
-    let git_branches: Vec<devflow_core::vcs::BranchInfo> = vcs_provider
+    let git_branches: Vec<devflow_core::vcs::WorkspaceInfo> = vcs_provider
         .as_ref()
-        .and_then(|r| r.list_branches().ok())
+        .and_then(|r| r.list_workspaces().ok())
         .unwrap_or_default();
     let worktrees: Vec<devflow_core::vcs::WorktreeInfo> = vcs_provider
         .as_ref()
@@ -1607,30 +1648,30 @@ fn print_enriched_branch_list(
         .unwrap_or_default();
     let current_git = vcs_provider
         .as_ref()
-        .and_then(|r| r.current_branch().ok().flatten());
+        .and_then(|r| r.current_workspace().ok().flatten());
     let current_normalized = current_git
         .as_deref()
-        .map(|b| config.get_normalized_branch_name(b));
+        .map(|b| config.get_normalized_workspace_name(b));
 
-    // Build a set of service branch names for quick lookup
+    // Build a set of service workspace names for quick lookup
     let mut service_names: HashSet<String> = HashSet::new();
     for b in service_branches {
         service_names.insert(b.name.clone());
-        service_names.insert(config.get_normalized_branch_name(&b.name));
+        service_names.insert(config.get_normalized_workspace_name(&b.name));
     }
 
-    // Build a worktree lookup: branch name -> path
+    // Build a worktree lookup: workspace name -> path
     let mut wt_lookup: HashMap<String, PathBuf> = HashMap::new();
     for wt in &worktrees {
-        if let Some(branch) = wt.branch.as_ref() {
-            wt_lookup.insert(branch.clone(), wt.path.clone());
+        if let Some(workspace) = wt.workspace.as_ref() {
+            wt_lookup.insert(workspace.clone(), wt.path.clone());
             wt_lookup
-                .entry(config.get_normalized_branch_name(branch))
+                .entry(config.get_normalized_workspace_name(workspace))
                 .or_insert_with(|| wt.path.clone());
         }
     }
 
-    // Load branch registry from local state
+    // Load workspace registry from local state
     let registry_branches = load_registry_branches_for_list(config, config_path);
     let registry: HashMap<String, Option<String>> = registry_branches
         .iter()
@@ -1639,8 +1680,9 @@ fn print_enriched_branch_list(
 
     let context = resolve_branch_context(config);
 
-    // Registry-first scope: align CLI with GUI/TUI branch model.
-    let all_names = collect_list_branch_names(&registry_branches, &git_branches, service_branches);
+    // Registry-first scope: align CLI with GUI/TUI workspace model.
+    let all_names =
+        collect_list_workspace_names(&registry_branches, &git_branches, service_branches);
     let seen: HashSet<&str> = all_names.iter().map(|s| s.as_str()).collect();
 
     if all_names.is_empty() {
@@ -1656,7 +1698,7 @@ fn print_enriched_branch_list(
         if !seen.contains(sb.name.as_str()) {
             continue;
         }
-        if let Some(ref parent) = sb.parent_branch {
+        if let Some(ref parent) = sb.parent_workspace {
             if seen.contains(parent.as_str()) {
                 parent_map.insert(sb.name.as_str(), parent.as_str());
             }
@@ -1687,18 +1729,18 @@ fn print_enriched_branch_list(
         .map(|s| s.as_str())
         .collect();
 
-    // Sort roots: default branch first, then context branch, then cwd, then alphabetical
-    let default_branch = config.get_normalized_branch_name(&config.git.main_branch);
+    // Sort roots: default workspace first, then context workspace, then cwd, then alphabetical
+    let default_workspace = config.get_normalized_workspace_name(&config.git.main_workspace);
     roots.sort_by(|a, b| {
-        let a_default = *a == default_branch
+        let a_default = *a == default_workspace
             || git_branches.iter().any(|gb| {
                 gb.is_default
-                    && (gb.name == *a || config.get_normalized_branch_name(&gb.name) == *a)
+                    && (gb.name == *a || config.get_normalized_workspace_name(&gb.name) == *a)
             });
-        let b_default = *b == default_branch
+        let b_default = *b == default_workspace
             || git_branches.iter().any(|gb| {
                 gb.is_default
-                    && (gb.name == *b || config.get_normalized_branch_name(&gb.name) == *b)
+                    && (gb.name == *b || config.get_normalized_workspace_name(&gb.name) == *b)
             });
         if a_default != b_default {
             return b_default.cmp(&a_default);
@@ -1722,7 +1764,7 @@ fn print_enriched_branch_list(
         if let Some(context_branch) = context.context_branch.as_deref() {
             let cwd = context.cwd_branch.as_deref().unwrap_or("unknown");
             println!(
-                "Context override: '{}' (from DEVFLOW_CONTEXT_BRANCH), cwd branch='{}'",
+                "Context override: '{}' (from DEVFLOW_CONTEXT_BRANCH), cwd workspace='{}'",
                 context_branch, cwd
             );
         }
@@ -1737,18 +1779,18 @@ fn print_enriched_branch_list(
         current_git: &Option<String>,
         current_normalized: &Option<String>,
         context_branch: Option<&str>,
-        service_branches: &[services::BranchInfo],
+        service_branches: &[services::WorkspaceInfo],
         service_names: &HashSet<String>,
         wt_lookup: &HashMap<String, PathBuf>,
         config: &Config,
-        #[allow(unused_variables)] git_branches: &[devflow_core::vcs::BranchInfo],
+        #[allow(unused_variables)] git_branches: &[devflow_core::vcs::WorkspaceInfo],
     ) {
         let is_current =
             current_git.as_deref() == Some(name) || current_normalized.as_deref() == Some(name);
         let marker = if is_current { "* " } else { "  " };
         let is_context = context_matches_branch(config, context_branch, name);
 
-        let normalized = config.get_normalized_branch_name(name);
+        let normalized = config.get_normalized_workspace_name(name);
         let has_service = service_names.contains(&normalized) || service_names.contains(name);
 
         let service_state = service_branches
@@ -1839,7 +1881,7 @@ struct EnvGraphServiceEntry {
     provider_name: String,
     state: Option<String>,
     database_name: String,
-    parent_branch: Option<String>,
+    parent_workspace: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1866,9 +1908,9 @@ async fn handle_environment_graph(
         .as_ref()
         .map(|p| p.provider_name().to_string())
         .unwrap_or_else(|| "none".to_string());
-    let git_branches: Vec<devflow_core::vcs::BranchInfo> = vcs_provider
+    let git_branches: Vec<devflow_core::vcs::WorkspaceInfo> = vcs_provider
         .as_ref()
-        .and_then(|r| r.list_branches().ok())
+        .and_then(|r| r.list_workspaces().ok())
         .unwrap_or_default();
     let worktrees: Vec<devflow_core::vcs::WorktreeInfo> = vcs_provider
         .as_ref()
@@ -1876,9 +1918,9 @@ async fn handle_environment_graph(
         .unwrap_or_default();
     let cwd_branch = vcs_provider
         .as_ref()
-        .and_then(|r| r.current_branch().ok().flatten());
+        .and_then(|r| r.current_workspace().ok().flatten());
 
-    // Local state view (branch registry only)
+    // Local state view (workspace registry only)
     let registry_branches = load_registry_branches_for_list(config, config_path);
     let registry: HashMap<String, Option<String>> = registry_branches
         .into_iter()
@@ -1894,9 +1936,9 @@ async fn handle_environment_graph(
         Ok(all_providers) => {
             for named in &all_providers {
                 let provider_name = named.provider.provider_name().to_string();
-                match named.provider.list_branches().await {
-                    Ok(branches) => {
-                        for b in branches {
+                match named.provider.list_workspaces().await {
+                    Ok(workspaces) => {
+                        for b in workspaces {
                             service_entries_by_branch
                                 .entry(b.name.clone())
                                 .or_default()
@@ -1905,7 +1947,7 @@ async fn handle_environment_graph(
                                     provider_name: provider_name.clone(),
                                     state: b.state.clone(),
                                     database_name: b.database_name.clone(),
-                                    parent_branch: b.parent_branch.clone(),
+                                    parent_workspace: b.parent_workspace.clone(),
                                 });
                         }
                     }
@@ -1923,10 +1965,10 @@ async fn handle_environment_graph(
 
     let wt_lookup: HashMap<String, PathBuf> = worktrees
         .iter()
-        .filter_map(|wt| wt.branch.as_ref().map(|b| (b.clone(), wt.path.clone())))
+        .filter_map(|wt| wt.workspace.as_ref().map(|b| (b.clone(), wt.path.clone())))
         .collect();
 
-    // Union of all known branch names
+    // Union of all known workspace names
     let mut all_names: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
 
@@ -1970,11 +2012,11 @@ async fn handle_environment_graph(
         return Ok(());
     }
 
-    // Parent map with precedence: registry > service branch parent
+    // Parent map with precedence: registry > service workspace parent
     let mut parent_map: HashMap<String, String> = HashMap::new();
 
     for (name, entries) in &service_entries_by_branch {
-        if let Some(parent) = entries.iter().find_map(|e| e.parent_branch.clone()) {
+        if let Some(parent) = entries.iter().find_map(|e| e.parent_workspace.clone()) {
             if seen.contains(parent.as_str()) {
                 parent_map.insert(name.clone(), parent);
             }
@@ -2009,7 +2051,7 @@ async fn handle_environment_graph(
 
     let cwd_normalized = cwd_branch
         .as_deref()
-        .map(|b| config.get_normalized_branch_name(b));
+        .map(|b| config.get_normalized_workspace_name(b));
 
     roots.sort_by(|a, b| {
         let a_default = git_branches.iter().any(|gb| gb.name == *a && gb.is_default);
@@ -2038,7 +2080,7 @@ async fn handle_environment_graph(
     // Build node map for JSON and human rendering
     let mut node_map: HashMap<String, EnvGraphNode> = HashMap::new();
     for name in &all_names {
-        let normalized = config.get_normalized_branch_name(name);
+        let normalized = config.get_normalized_workspace_name(name);
 
         let mut services = Vec::new();
         if let Some(entries) = service_entries_by_branch.get(name) {
@@ -2079,7 +2121,9 @@ async fn handle_environment_graph(
                     .or_else(|| {
                         wt_lookup
                             .iter()
-                            .find(|(branch, _)| config.get_normalized_branch_name(branch) == *name)
+                            .find(|(workspace, _)| {
+                                config.get_normalized_workspace_name(workspace) == *name
+                            })
                             .map(|(_, p)| p.display().to_string())
                     }),
                 services,
@@ -2111,10 +2155,10 @@ async fn handle_environment_graph(
 
     println!("Environment graph ({})", vcs_provider_name);
     if let Some(context_branch) = context.context_branch.as_deref() {
-        println!("Context branch: {}", context_branch);
+        println!("Context workspace: {}", context_branch);
     }
     if let Some(cwd) = cwd_branch.as_deref() {
-        println!("CWD branch: {}", cwd);
+        println!("CWD workspace: {}", cwd);
     }
     if !service_probe_warnings.is_empty() {
         println!("Warnings:");
@@ -2163,7 +2207,7 @@ async fn handle_environment_graph(
             let mut parts = vec![format!("{}:{}", svc.service_name, state)];
             parts.push(format!("provider: {}", svc.provider_name));
             parts.push(format!("db: {}", svc.database_name));
-            if let Some(parent) = &svc.parent_branch {
+            if let Some(parent) = &svc.parent_workspace {
                 parts.push(format!("parent: {}", parent));
             }
             println!("{}   • {}", prefix, parts.join(", "));
@@ -2203,14 +2247,14 @@ async fn handle_environment_graph(
 
 /// Build enriched JSON for the list command, merging git + worktree + service info.
 fn enrich_branch_list_json(
-    service_branches: &[services::BranchInfo],
+    service_branches: &[services::WorkspaceInfo],
     config: &Config,
     config_path: &Option<PathBuf>,
 ) -> serde_json::Value {
     let vcs_provider = vcs::detect_vcs_provider(".").ok();
-    let git_branches: Vec<devflow_core::vcs::BranchInfo> = vcs_provider
+    let git_branches: Vec<devflow_core::vcs::WorkspaceInfo> = vcs_provider
         .as_ref()
-        .and_then(|r| r.list_branches().ok())
+        .and_then(|r| r.list_workspaces().ok())
         .unwrap_or_default();
     let worktrees: Vec<devflow_core::vcs::WorktreeInfo> = vcs_provider
         .as_ref()
@@ -2218,28 +2262,28 @@ fn enrich_branch_list_json(
         .unwrap_or_default();
     let current_git = vcs_provider
         .as_ref()
-        .and_then(|r| r.current_branch().ok().flatten());
+        .and_then(|r| r.current_workspace().ok().flatten());
     let current_normalized = current_git
         .as_deref()
-        .map(|b| config.get_normalized_branch_name(b));
+        .map(|b| config.get_normalized_workspace_name(b));
 
     let mut wt_lookup: std::collections::HashMap<String, PathBuf> =
         std::collections::HashMap::new();
     for wt in &worktrees {
-        if let Some(branch) = wt.branch.as_ref() {
-            wt_lookup.insert(branch.clone(), wt.path.clone());
+        if let Some(workspace) = wt.workspace.as_ref() {
+            wt_lookup.insert(workspace.clone(), wt.path.clone());
             wt_lookup
-                .entry(config.get_normalized_branch_name(branch))
+                .entry(config.get_normalized_workspace_name(workspace))
                 .or_insert_with(|| wt.path.clone());
         }
     }
 
-    let mut service_map: std::collections::HashMap<String, &services::BranchInfo> =
+    let mut service_map: std::collections::HashMap<String, &services::WorkspaceInfo> =
         std::collections::HashMap::new();
     for b in service_branches {
         service_map.entry(b.name.clone()).or_insert(b);
         service_map
-            .entry(config.get_normalized_branch_name(&b.name))
+            .entry(config.get_normalized_workspace_name(&b.name))
             .or_insert(b);
     }
 
@@ -2253,11 +2297,12 @@ fn enrich_branch_list_json(
 
     let mut entries = Vec::new();
 
-    let all_names = collect_list_branch_names(&registry_branches, &git_branches, service_branches);
-    let default_branch = config.get_normalized_branch_name(&config.git.main_branch);
+    let all_names =
+        collect_list_workspace_names(&registry_branches, &git_branches, service_branches);
+    let default_workspace = config.get_normalized_workspace_name(&config.git.main_workspace);
 
     for name in &all_names {
-        let normalized = config.get_normalized_branch_name(name);
+        let normalized = config.get_normalized_workspace_name(name);
         let sb = service_map
             .get(name)
             .or_else(|| service_map.get(&normalized))
@@ -2266,10 +2311,10 @@ fn enrich_branch_list_json(
         let is_context = context_matches_branch(config, context.context_branch.as_deref(), name);
         let is_current = current_git.as_deref() == Some(name.as_str())
             || current_normalized.as_deref() == Some(name.as_str());
-        let is_default = *name == default_branch
+        let is_default = *name == default_workspace
             || git_branches.iter().any(|gb| {
                 gb.is_default
-                    && (gb.name == *name || config.get_normalized_branch_name(&gb.name) == *name)
+                    && (gb.name == *name || config.get_normalized_workspace_name(&gb.name) == *name)
             });
 
         let mut entry = serde_json::json!({
@@ -2283,7 +2328,7 @@ fn enrich_branch_list_json(
             entry["service"] = serde_json::json!({
                 "database": svc.database_name,
                 "state": svc.state,
-                "parent": svc.parent_branch,
+                "parent": svc.parent_workspace,
             });
         }
 
@@ -2296,7 +2341,7 @@ fn enrich_branch_list_json(
             .get(name)
             .and_then(|p| p.clone())
             .or_else(|| registry.get(&normalized).and_then(|p| p.clone()))
-            .or_else(|| sb.and_then(|s| s.parent_branch.clone()));
+            .or_else(|| sb.and_then(|s| s.parent_workspace.clone()));
         if let Some(parent_name) = parent {
             entry["parent"] = serde_json::Value::String(parent_name);
         }
@@ -2459,25 +2504,35 @@ end
     Ok(())
 }
 
-/// Build a `HookContext` from the current config and branch name.
+/// Resolve the project directory used for hook rendering/execution.
 ///
-/// Populates legacy template variables (branch_name, db_name, etc.) so that
-/// both new MiniJinja templates and old `{branch_name}` style work.
-async fn build_hook_context(config: &Config, branch_name: &str) -> HookContext {
-    devflow_core::hooks::build_hook_context(config, branch_name).await
+/// Prefers the directory containing `.devflow.yml`, falling back to current
+/// directory if no config file is found.
+fn resolve_project_dir_for_hooks() -> PathBuf {
+    Config::find_config_file()
+        .ok()
+        .flatten()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Build a `HookContext` from project config and workspace name.
+async fn build_hook_context(config: &Config, workspace_name: &str) -> HookContext {
+    let project_dir = resolve_project_dir_for_hooks();
+    devflow_core::hooks::build_hook_context(config, &project_dir, workspace_name).await
 }
 
 /// Run hooks for the given phase.
 async fn run_hooks(
     config: &Config,
-    branch_name: &str,
+    workspace_name: &str,
     phase: HookPhase,
     json_output: bool,
     non_interactive: bool,
 ) -> Result<()> {
     if let Some(ref hooks_config) = config.hooks {
-        let working_dir =
-            std::env::current_dir().map_err(|e| anyhow::anyhow!("Failed to get cwd: {}", e))?;
+        let working_dir = resolve_project_dir_for_hooks();
         let project_key = working_dir
             .canonicalize()
             .ok()
@@ -2489,7 +2544,7 @@ async fn run_hooks(
         }
         .with_quiet_output(json_output);
 
-        let context = build_hook_context(config, branch_name).await;
+        let context = build_hook_context(config, workspace_name).await;
         if json_output {
             engine.run_phase(&phase, &context).await?;
         } else {
@@ -2513,13 +2568,13 @@ async fn handle_hook_command(
         HookCommands::Run {
             phase,
             name,
-            branch,
+            workspace,
         } => {
             handle_hook_run(
                 config,
                 &phase,
                 name.as_deref(),
-                branch.as_deref(),
+                workspace.as_deref(),
                 json_output,
                 non_interactive,
             )
@@ -2531,11 +2586,14 @@ async fn handle_hook_command(
         HookCommands::Explain { phase } => {
             handle_hook_explain(phase.as_deref(), json_output)?;
         }
-        HookCommands::Vars { branch } => {
-            handle_hook_vars(config, branch.as_deref(), json_output).await?;
+        HookCommands::Vars { workspace } => {
+            handle_hook_vars(config, workspace.as_deref(), json_output).await?;
         }
-        HookCommands::Render { template, branch } => {
-            handle_hook_render(config, &template, branch.as_deref(), json_output).await?;
+        HookCommands::Render {
+            template,
+            workspace,
+        } => {
+            handle_hook_render(config, &template, workspace.as_deref(), json_output).await?;
         }
     }
     Ok(())
@@ -2650,21 +2708,21 @@ fn handle_hook_show(config: &Config, phase_filter: Option<&str>, json_output: bo
 fn handle_hook_explain(phase: Option<&str>, json_output: bool) -> Result<()> {
     // Static phase documentation: (name, summary, blocking, category, detail)
     let phases: Vec<(&str, &str, bool, &str, &str)> = vec![
-        ("pre-switch",           "Before switching branches/worktrees",           true,  "VCS",     "Runs before any branch/worktree switch. Use for saving state or running checks."),
-        ("post-create",          "After creating a new branch/worktree",          true,  "VCS",     "Runs after a new branch is created (via `switch -c`). Use for one-time setup: install dependencies, run migrations, write .env files."),
+        ("pre-switch",           "Before switching workspaces/worktrees",           true,  "VCS",     "Runs before any workspace/worktree switch. Use for saving state or running checks."),
+        ("post-create",          "After creating a new workspace/worktree",          true,  "VCS",     "Runs after a new workspace is created (via `switch -c`). Use for one-time setup: install dependencies, run migrations, write .env files."),
         ("post-start",           "After starting a stopped service container",    false, "VCS",     "Runs after `devflow service start`. Use for warming caches or re-applying state."),
-        ("post-switch",          "After switching to a branch/worktree",          false, "VCS",     "Runs every time you switch branches. Use for updating .env files, restarting dev servers."),
-        ("pre-remove",           "Before removing a branch",                      true,  "VCS",     "Runs before `devflow remove`. Use for cleanup tasks or archival."),
-        ("post-remove",          "After removing a branch",                       false, "VCS",     "Runs after branch removal. Use for notifying external systems."),
+        ("post-switch",          "After switching to a workspace/worktree",          false, "VCS",     "Runs every time you switch workspaces. Use for updating .env files, restarting dev servers."),
+        ("pre-remove",           "Before removing a workspace",                      true,  "VCS",     "Runs before `devflow remove`. Use for cleanup tasks or archival."),
+        ("post-remove",          "After removing a workspace",                       false, "VCS",     "Runs after workspace removal. Use for notifying external systems."),
         ("pre-commit",           "Before committing",                             true,  "Merge",   "Runs before `devflow commit`. Use for linting, formatting, or test checks."),
-        ("pre-merge",            "Before merging branches",                       true,  "Merge",   "Runs before `devflow merge`. Use for running tests or CI checks."),
-        ("post-merge",           "After merging branches",                        false, "Merge",   "Runs after a successful merge. Use for cleanup or deployment triggers."),
+        ("pre-merge",            "Before merging workspaces",                       true,  "Merge",   "Runs before `devflow merge`. Use for running tests or CI checks."),
+        ("post-merge",           "After merging workspaces",                        false, "Merge",   "Runs after a successful merge. Use for cleanup or deployment triggers."),
         ("post-rewrite",         "After rewriting history (rebase, amend)",       false, "Merge",   "Runs after Git history rewrite. Use for re-applying migrations."),
-        ("pre-service-create",   "Before creating a service branch",              true,  "Service", "Runs before service provisioning. Use for pre-flight checks."),
-        ("post-service-create",  "After creating a service branch",               true,  "Service", "Runs after service provisioning. THE most common hook — use for npm ci, migrations, writing .env files."),
-        ("pre-service-delete",   "Before deleting a service branch",              true,  "Service", "Runs before service teardown. Use for data export or backups."),
-        ("post-service-delete",  "After deleting a service branch",               false, "Service", "Runs after service teardown. Use for cleanup."),
-        ("post-service-switch",  "After services switch to a branch",             false, "Service", "Runs after services switch (not VCS). Use for service-specific reconnection."),
+        ("pre-service-create",   "Before creating a service workspace",              true,  "Service", "Runs before service provisioning. Use for pre-flight checks."),
+        ("post-service-create",  "After creating a service workspace",               true,  "Service", "Runs after service provisioning. THE most common hook — use for npm ci, migrations, writing .env files."),
+        ("pre-service-delete",   "Before deleting a service workspace",              true,  "Service", "Runs before service teardown. Use for data export or backups."),
+        ("post-service-delete",  "After deleting a service workspace",               false, "Service", "Runs after service teardown. Use for cleanup."),
+        ("post-service-switch",  "After services switch to a workspace",             false, "Service", "Runs after services switch (not VCS). Use for service-specific reconnection."),
     ];
 
     if json_output {
@@ -2737,24 +2795,25 @@ fn handle_hook_explain(phase: Option<&str>, json_output: bool) -> Result<()> {
                     println!("  hooks:");
                     println!("    {}:", name);
                     println!(
-                        "      example: \"echo Running {} for {{{{ branch }}}}\"",
+                        "      example: \"echo Running {} for {{{{ workspace }}}}\"",
                         name
                     );
                 }
             }
             println!();
             println!("Available template variables:");
-            println!("  {{{{ branch }}}}              Current branch name");
+            println!("  {{{{ workspace }}}}              Current workspace name");
+            println!("  {{{{ name }}}}               Project name (from config.name)");
             println!("  {{{{ repo }}}}                Repository name");
-            println!("  {{{{ default_branch }}}}      Main branch (e.g. main)");
+            println!("  {{{{ default_workspace }}}}      Main workspace (e.g. main)");
             println!("  {{{{ worktree_path }}}}       Worktree directory path");
             println!("  {{{{ service['name'].url }}}} Full connection URL for a service");
             println!("  {{{{ service['name'].host/port/database/user/password }}}}");
             println!();
             println!("Available filters:");
-            println!("  {{{{ branch | sanitize }}}}     Path-safe (/ -> -)");
-            println!("  {{{{ branch | sanitize_db }}}}  DB-safe (lowercase, _, max 63 chars)");
-            println!("  {{{{ branch | hash_port }}}}    Deterministic port 10000-19999");
+            println!("  {{{{ workspace | sanitize }}}}     Path-safe (/ -> -)");
+            println!("  {{{{ workspace | sanitize_db }}}}  DB-safe (lowercase, _, max 63 chars)");
+            println!("  {{{{ workspace | hash_port }}}}    Deterministic port 10000-19999");
         } else {
             println!("Unknown phase: '{}'", phase_name);
             println!();
@@ -2778,7 +2837,7 @@ fn handle_hook_explain(phase: Option<&str>, json_output: bool) -> Result<()> {
         println!("===========");
         println!();
         println!("Which hook should I use?");
-        println!("  Setting up a new branch?     -> post-create or post-service-create");
+        println!("  Setting up a new workspace?     -> post-create or post-service-create");
         println!("  Updating env on switch?      -> post-switch");
         println!("  Running tests before merge?  -> pre-merge");
         println!("  Custom setup per service?    -> post-service-create");
@@ -2815,12 +2874,12 @@ async fn handle_hook_vars(
     branch_override: Option<&str>,
     json_output: bool,
 ) -> Result<()> {
-    let branch_name = if let Some(b) = branch_override {
+    let workspace_name = if let Some(b) = branch_override {
         b.to_string()
     } else {
         match vcs::detect_vcs_provider(".") {
             Ok(vcs_repo) => vcs_repo
-                .current_branch()
+                .current_workspace()
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| "unknown".to_string()),
@@ -2828,7 +2887,7 @@ async fn handle_hook_vars(
         }
     };
 
-    let context = build_hook_context(config, &branch_name).await;
+    let context = build_hook_context(config, &workspace_name).await;
     let engine = TemplateEngine::new();
 
     if json_output {
@@ -2838,11 +2897,12 @@ async fn handle_hook_vars(
 
     println!("Template Variables (current context):");
     println!();
-    println!("  {{{{ branch }}}}              = {}", context.branch);
+    println!("  {{{{ workspace }}}}              = {}", context.workspace);
+    println!("  {{{{ name }}}}               = {}", context.name);
     println!("  {{{{ repo }}}}                = {}", context.repo);
     println!(
-        "  {{{{ default_branch }}}}      = {}",
-        context.default_branch
+        "  {{{{ default_workspace }}}}      = {}",
+        context.default_workspace
     );
     if let Some(ref wt) = context.worktree_path {
         println!("  {{{{ worktree_path }}}}       = {}", wt);
@@ -2874,17 +2934,17 @@ async fn handle_hook_vars(
     println!();
     println!("  Filters:");
     let sanitized = engine
-        .render("{{ branch | sanitize }}", &context)
+        .render("{{ workspace | sanitize }}", &context)
         .unwrap_or_default();
     let sanitized_db = engine
-        .render("{{ branch | sanitize_db }}", &context)
+        .render("{{ workspace | sanitize_db }}", &context)
         .unwrap_or_default();
     let hash_port = engine
-        .render("{{ branch | hash_port }}", &context)
+        .render("{{ workspace | hash_port }}", &context)
         .unwrap_or_default();
-    println!("    {{{{ branch | sanitize }}}}      = {}", sanitized);
-    println!("    {{{{ branch | sanitize_db }}}}   = {}", sanitized_db);
-    println!("    {{{{ branch | hash_port }}}}     = {}", hash_port);
+    println!("    {{{{ workspace | sanitize }}}}      = {}", sanitized);
+    println!("    {{{{ workspace | sanitize_db }}}}   = {}", sanitized_db);
+    println!("    {{{{ workspace | hash_port }}}}     = {}", hash_port);
 
     Ok(())
 }
@@ -2896,12 +2956,12 @@ async fn handle_hook_render(
     branch_override: Option<&str>,
     json_output: bool,
 ) -> Result<()> {
-    let branch_name = if let Some(b) = branch_override {
+    let workspace_name = if let Some(b) = branch_override {
         b.to_string()
     } else {
         match vcs::detect_vcs_provider(".") {
             Ok(vcs_repo) => vcs_repo
-                .current_branch()
+                .current_workspace()
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| "unknown".to_string()),
@@ -2909,7 +2969,7 @@ async fn handle_hook_render(
         }
     };
 
-    let context = build_hook_context(config, &branch_name).await;
+    let context = build_hook_context(config, &workspace_name).await;
     let engine = TemplateEngine::new();
     let rendered = engine.render(template, &context)?;
 
@@ -2956,13 +3016,13 @@ async fn handle_hook_run(
         );
     }
 
-    // Determine branch name: use override, or try current git branch, or fallback
-    let branch_name = if let Some(b) = branch_override {
+    // Determine workspace name: use override, or try current git workspace, or fallback
+    let workspace_name = if let Some(b) = branch_override {
         b.to_string()
     } else {
         match vcs::detect_vcs_provider(".") {
             Ok(vcs_repo) => vcs_repo
-                .current_branch()
+                .current_workspace()
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| "unknown".to_string()),
@@ -2970,7 +3030,7 @@ async fn handle_hook_run(
         }
     };
 
-    let context = build_hook_context(config, &branch_name).await;
+    let context = build_hook_context(config, &workspace_name).await;
 
     // If a specific hook name is given, build a filtered config
     let effective_config = if let Some(name) = name_filter {
@@ -3152,7 +3212,7 @@ async fn handle_plugin_command(
                         serde_json::json!({
                             "name": p.name,
                             "executable": executable,
-                            "auto_branch": p.auto_branch,
+                            "auto_workspace": p.auto_workspace,
                             "timeout": plugin_cfg.map(|c| c.timeout).unwrap_or(30),
                         })
                     })
@@ -3173,7 +3233,7 @@ async fn handle_plugin_command(
                     if let Some(cfg) = plugin_cfg {
                         println!("    timeout: {}s", cfg.timeout);
                     }
-                    println!("    auto_branch: {}", p.auto_branch);
+                    println!("    auto_workspace: {}", p.auto_workspace);
                 }
             }
         }
@@ -3331,31 +3391,31 @@ case "$METHOD" in
   test_connection)
     ok "null"
     ;;
-  create_branch)
-    BRANCH=$(echo "$PARAMS" | jq -r '.branch_name')
-    # TODO: implement branch creation for {name}
-    ok "{{\\"name\\": \\"$BRANCH\\", \\"created_at\\": null, \\"parent_branch\\": null, \\"database_name\\": \\"$BRANCH\\"}}"
+  create_workspace)
+    BRANCH=$(echo "$PARAMS" | jq -r '.workspace_name')
+    # TODO: implement workspace creation for {name}
+    ok "{{\\"name\\": \\"$BRANCH\\", \\"created_at\\": null, \\"parent_workspace\\": null, \\"database_name\\": \\"$BRANCH\\"}}"
     ;;
-  delete_branch)
-    BRANCH=$(echo "$PARAMS" | jq -r '.branch_name')
-    # TODO: implement branch deletion for {name}
+  delete_workspace)
+    BRANCH=$(echo "$PARAMS" | jq -r '.workspace_name')
+    # TODO: implement workspace deletion for {name}
     ok "null"
     ;;
-  list_branches)
-    # TODO: implement branch listing for {name}
+  list_workspaces)
+    # TODO: implement workspace listing for {name}
     ok "[]"
     ;;
-  branch_exists)
-    BRANCH=$(echo "$PARAMS" | jq -r '.branch_name')
-    # TODO: implement branch existence check
+  workspace_exists)
+    BRANCH=$(echo "$PARAMS" | jq -r '.workspace_name')
+    # TODO: implement workspace existence check
     ok "false"
     ;;
   switch_to_branch)
-    BRANCH=$(echo "$PARAMS" | jq -r '.branch_name')
-    ok "{{\\"name\\": \\"$BRANCH\\", \\"created_at\\": null, \\"parent_branch\\": null, \\"database_name\\": \\"$BRANCH\\"}}"
+    BRANCH=$(echo "$PARAMS" | jq -r '.workspace_name')
+    ok "{{\\"name\\": \\"$BRANCH\\", \\"created_at\\": null, \\"parent_workspace\\": null, \\"database_name\\": \\"$BRANCH\\"}}"
     ;;
   get_connection_info)
-    BRANCH=$(echo "$PARAMS" | jq -r '.branch_name')
+    BRANCH=$(echo "$PARAMS" | jq -r '.workspace_name')
     ok "{{\\"host\\": \\"localhost\\", \\"port\\": 6379, \\"database\\": \\"$BRANCH\\", \\"user\\": \\"default\\", \\"password\\": null, \\"connection_string\\": null}}"
     ;;
   doctor)
@@ -3409,37 +3469,37 @@ def main():
         ok("{name}")
     elif method == "test_connection":
         ok(None)
-    elif method == "create_branch":
-        branch = params["branch_name"]
-        # TODO: implement branch creation for {name}
-        ok({{"name": branch, "created_at": None, "parent_branch": None, "database_name": branch}})
-    elif method == "delete_branch":
-        branch = params["branch_name"]
-        # TODO: implement branch deletion for {name}
+    elif method == "create_workspace":
+        workspace = params["workspace_name"]
+        # TODO: implement workspace creation for {name}
+        ok({{"name": workspace, "created_at": None, "parent_workspace": None, "database_name": workspace}})
+    elif method == "delete_workspace":
+        workspace = params["workspace_name"]
+        # TODO: implement workspace deletion for {name}
         ok(None)
-    elif method == "list_branches":
-        # TODO: implement branch listing for {name}
+    elif method == "list_workspaces":
+        # TODO: implement workspace listing for {name}
         ok([])
-    elif method == "branch_exists":
-        branch = params["branch_name"]
-        # TODO: implement branch existence check
+    elif method == "workspace_exists":
+        workspace = params["workspace_name"]
+        # TODO: implement workspace existence check
         ok(False)
     elif method == "switch_to_branch":
-        branch = params["branch_name"]
-        ok({{"name": branch, "created_at": None, "parent_branch": None, "database_name": branch}})
+        workspace = params["workspace_name"]
+        ok({{"name": workspace, "created_at": None, "parent_workspace": None, "database_name": workspace}})
     elif method == "get_connection_info":
-        branch = params["branch_name"]
+        workspace = params["workspace_name"]
         ok({{
             "host": "localhost",
             "port": 6379,
-            "database": branch,
+            "database": workspace,
             "user": "default",
             "password": None,
             "connection_string": None,
         }})
     elif method == "doctor":
         ok({{"checks": [{{"name": "{name}", "available": True, "detail": "Plugin is running"}}]}})
-    elif method == "cleanup_old_branches":
+    elif method == "cleanup_old_workspaces":
         ok([])
     elif method == "destroy_project":
         ok([])
@@ -3452,7 +3512,7 @@ if __name__ == "__main__":
     )
 }
 
-/// Handle branch management commands that need service context.
+/// Handle workspace management commands that need service context.
 async fn handle_branch_command(
     cmd: Commands,
     config: &mut Config,
@@ -3463,7 +3523,7 @@ async fn handle_branch_command(
 ) -> Result<()> {
     match cmd {
         Commands::List => {
-            // List: show combined VCS + service branch info
+            // List: show combined VCS + service workspace info
             let has_multiple_services = config.resolve_services().len() > 1;
             if database_name.is_none() && has_multiple_services {
                 return handle_multi_service_aggregation(
@@ -3476,21 +3536,21 @@ async fn handle_branch_command(
             }
 
             // Try to resolve a service provider; if none is available we
-            // still show VCS branches with an empty service branch list.
-            let (provider_name, branches) =
+            // still show VCS workspaces with an empty service workspace list.
+            let (provider_name, workspaces) =
                 match services::factory::resolve_provider(config, database_name).await {
                     Ok(named) => {
-                        let branches = named.provider.list_branches().await?;
-                        (named.provider.provider_name().to_string(), branches)
+                        let workspaces = named.provider.list_workspaces().await?;
+                        (named.provider.provider_name().to_string(), workspaces)
                     }
                     Err(_) => {
-                        // No service provider available — still show VCS branches.
+                        // No service provider available — still show VCS workspaces.
                         ("none".to_string(), Vec::new())
                     }
                 };
 
             if json_output {
-                let enriched = enrich_branch_list_json(&branches, config, &config_path);
+                let enriched = enrich_branch_list_json(&workspaces, config, &config_path);
                 println!("{}", serde_json::to_string_pretty(&enriched)?);
             } else {
                 if provider_name == "none" {
@@ -3498,17 +3558,20 @@ async fn handle_branch_command(
                 } else {
                     println!("Branches ({}):", provider_name);
                 }
-                print_enriched_branch_list(&branches, config, &config_path);
+                print_enriched_branch_list(&workspaces, config, &config_path);
             }
         }
         Commands::Graph => {
             handle_environment_graph(config, config_path, json_output).await?;
         }
-        Commands::Link { branch_name, from } => {
+        Commands::Link {
+            workspace_name,
+            from,
+        } => {
             handle_link_command(
                 config,
                 config_path,
-                &branch_name,
+                &workspace_name,
                 from.as_deref(),
                 json_output,
                 non_interactive,
@@ -3516,7 +3579,7 @@ async fn handle_branch_command(
             .await?;
         }
         Commands::Switch {
-            branch_name,
+            workspace_name,
             create,
             from,
             execute,
@@ -3526,8 +3589,8 @@ async fn handle_branch_command(
             dry_run,
         } => {
             if dry_run {
-                if let Some(branch) = branch_name {
-                    let normalized_branch = config.get_normalized_branch_name(&branch);
+                if let Some(workspace) = workspace_name {
+                    let normalized_branch = config.get_normalized_workspace_name(&workspace);
                     let worktree_enabled = config.worktree.as_ref().is_some_and(|wt| wt.enabled);
                     let context = resolve_branch_context(config);
                     let default_parent = if create {
@@ -3535,29 +3598,25 @@ async fn handle_branch_command(
                     } else {
                         None
                     };
-                    let branch_exists = vcs::detect_vcs_provider(".")
+                    let workspace_exists = vcs::detect_vcs_provider(".")
                         .ok()
-                        .and_then(|repo| repo.branch_exists(&branch).ok());
+                        .and_then(|repo| repo.workspace_exists(&workspace).ok());
 
                     if json_output {
                         let mut wt_path_value = serde_json::Value::Null;
                         if worktree_enabled {
-                            let repo_name = std::env::current_dir()
-                                .ok()
-                                .and_then(|p| {
-                                    p.file_name().map(|n| n.to_string_lossy().to_string())
-                                })
-                                .unwrap_or_else(|| "repo".to_string());
+                            let repo_name = worktree_template_repo_name(config);
                             let path_template = config
                                 .worktree
                                 .as_ref()
                                 .map(|wt| wt.path_template.as_str())
-                                .unwrap_or("../{repo}.{branch}");
-                            let wt_path = resolve_cd_target(&PathBuf::from(
-                                path_template
-                                    .replace("{repo}", &repo_name)
-                                    .replace("{branch}", &branch),
-                            ))?;
+                                .unwrap_or("../{repo}.{workspace}");
+                            let wt_path =
+                                resolve_cd_target(&PathBuf::from(apply_worktree_path_template(
+                                    path_template,
+                                    &repo_name,
+                                    &normalized_branch,
+                                )))?;
                             wt_path_value =
                                 serde_json::Value::String(wt_path.display().to_string());
                         }
@@ -3565,7 +3624,7 @@ async fn handle_branch_command(
                             config
                                 .resolve_services()
                                 .into_iter()
-                                .filter(|b| b.auto_branch)
+                                .filter(|b| b.auto_workspace)
                                 .map(|b| {
                                     serde_json::json!({
                                         "name": b.name,
@@ -3580,61 +3639,57 @@ async fn handle_branch_command(
                             "{}",
                             serde_json::to_string_pretty(&serde_json::json!({
                                 "dry_run": true,
-                                "branch": normalized_branch,
+                                "workspace": normalized_branch,
                                 "worktree_enabled": worktree_enabled,
                                 "worktree_path": wt_path_value,
                                 "parent": default_parent,
-                                "branch_exists": branch_exists,
+                                "workspace_exists": workspace_exists,
                                 "services_skipped": no_services,
                                 "auto_branch_services": auto_providers,
                                 "hooks_skipped": no_verify,
                                 "execute": execute,
-                                "would_fail_without_create": branch_exists == Some(false) && !create,
+                                "would_fail_without_create": workspace_exists == Some(false) && !create,
                             }))?
                         );
                     } else {
-                        println!("Dry run: would switch to branch: {}", normalized_branch);
+                        println!("Dry run: would switch to workspace: {}", normalized_branch);
                         if let Some(ref parent) = default_parent {
-                            println!("  Parent branch: {}", parent);
+                            println!("  Parent workspace: {}", parent);
                         }
-                        if branch_exists == Some(false) && !create {
+                        if workspace_exists == Some(false) && !create {
                             println!(
-                                "  Note: branch does not exist; this would fail (use -c to create it)"
+                                "  Note: workspace does not exist; this would fail (use -c to create it)"
                             );
                         }
                         if worktree_enabled {
                             println!("  Worktree mode: enabled");
-                            let repo_name = std::env::current_dir()
-                                .ok()
-                                .and_then(|p| {
-                                    p.file_name().map(|n| n.to_string_lossy().to_string())
-                                })
-                                .unwrap_or_else(|| "repo".to_string());
+                            let repo_name = worktree_template_repo_name(config);
                             let path_template = config
                                 .worktree
                                 .as_ref()
                                 .map(|wt| wt.path_template.as_str())
-                                .unwrap_or("../{repo}.{branch}");
-                            let wt_path = resolve_cd_target(&PathBuf::from(
-                                path_template
-                                    .replace("{repo}", &repo_name)
-                                    .replace("{branch}", &branch),
-                            ))?;
+                                .unwrap_or("../{repo}.{workspace}");
+                            let wt_path =
+                                resolve_cd_target(&PathBuf::from(apply_worktree_path_template(
+                                    path_template,
+                                    &repo_name,
+                                    &normalized_branch,
+                                )))?;
                             println!("  Worktree path: {}", wt_path.display());
                         }
                         if !no_services {
                             let auto_providers = config
                                 .resolve_services()
                                 .into_iter()
-                                .filter(|b| b.auto_branch)
+                                .filter(|b| b.auto_workspace)
                                 .collect::<Vec<_>>();
                             if auto_providers.is_empty() {
                                 println!(
-                                    "  Would not switch any service branches (none configured)"
+                                    "  Would not switch any service workspaces (none configured)"
                                 );
                             } else {
                                 println!(
-                                    "  Would create/switch service branches on {} service(s):",
+                                    "  Would create/switch service workspaces on {} service(s):",
                                     auto_providers.len()
                                 );
                                 for b in &auto_providers {
@@ -3650,7 +3705,7 @@ async fn handle_branch_command(
                         }
                     }
                 } else {
-                    anyhow::bail!("Dry run requires a branch name");
+                    anyhow::bail!("Dry run requires a workspace name");
                 }
             } else if template {
                 handle_switch_to_main(
@@ -3662,8 +3717,8 @@ async fn handle_branch_command(
                     non_interactive,
                 )
                 .await?;
-            } else if let Some(branch) = branch_name {
-                if branch == config.git.main_branch {
+            } else if let Some(workspace) = workspace_name {
+                if workspace == config.git.main_workspace {
                     handle_switch_to_main(
                         config,
                         config_path,
@@ -3676,7 +3731,7 @@ async fn handle_branch_command(
                 } else {
                     handle_switch_command(
                         config,
-                        &branch,
+                        &workspace,
                         config_path,
                         create,
                         from.as_deref(),
@@ -3689,7 +3744,7 @@ async fn handle_branch_command(
                 }
             } else if non_interactive {
                 anyhow::bail!(
-                    "No branch specified. Use 'devflow switch <branch>' in non-interactive mode."
+                    "No workspace specified. Use 'devflow switch <workspace>' in non-interactive mode."
                 );
             } else {
                 handle_interactive_switch(config, config_path).await?;
@@ -3717,13 +3772,13 @@ async fn handle_branch_command(
             }
         }
         Commands::Remove {
-            branch_name,
+            workspace_name,
             force,
             keep_services,
         } => {
             handle_remove_command(
                 config,
-                &branch_name,
+                &workspace_name,
                 force,
                 keep_services,
                 config_path,
@@ -4019,7 +4074,7 @@ async fn handle_service_dispatch(
                 name: name.clone(),
                 provider_type: provider_type.clone(),
                 service_type: service_type.clone(),
-                auto_branch: devflow_core::config::default_auto_branch(),
+                auto_workspace: devflow_core::config::default_auto_branch(),
                 default: false,
                 local: if is_local {
                     Some(devflow_core::config::LocalServiceConfig {
@@ -4072,7 +4127,7 @@ async fn handle_service_dispatch(
                 println!("Added service '{}' to local state", name);
             }
 
-            // Create main branch for local providers
+            // Create main workspace for local providers
             if is_local {
                 // Build a config with the service injected so the factory can find it
                 let mut config_with_service = config.clone();
@@ -4080,7 +4135,7 @@ async fn handle_service_dispatch(
                     config_with_service.services = Some(state_services);
                 }
 
-                // On Linux, offer ZFS auto-setup before creating the main branch
+                // On Linux, offer ZFS auto-setup before creating the main workspace
                 #[cfg(feature = "service-local")]
                 if cfg!(target_os = "linux") {
                     if let Some(data_root) =
@@ -4172,7 +4227,7 @@ async fn handle_service_dispatch(
             }
         }
         ServiceCommands::List => {
-            // List configured services (not branches)
+            // List configured services (not workspaces)
             let has_multiple_services = config.resolve_services().len() > 1;
             if database_name.is_none() && has_multiple_services {
                 return handle_multi_service_aggregation(
@@ -4184,13 +4239,13 @@ async fn handle_service_dispatch(
                 .await;
             }
             let named = services::factory::resolve_provider(config, database_name).await?;
-            let branches = named.provider.list_branches().await?;
+            let workspaces = named.provider.list_workspaces().await?;
             if json_output {
-                let enriched = enrich_branch_list_json(&branches, config, &config_path);
+                let enriched = enrich_branch_list_json(&workspaces, config, &config_path);
                 println!("{}", serde_json::to_string_pretty(&enriched)?);
             } else {
                 println!("Branches ({}):", named.provider.provider_name());
-                print_enriched_branch_list(&branches, config, &config_path);
+                print_enriched_branch_list(&workspaces, config, &config_path);
             }
         }
         ServiceCommands::Status => {
@@ -4206,12 +4261,12 @@ async fn handle_service_dispatch(
             }
             let named = services::factory::resolve_provider(config, database_name).await?;
             let provider = named.provider;
-            let branches = provider.list_branches().await.unwrap_or_default();
-            let running = branches
+            let workspaces = provider.list_workspaces().await.unwrap_or_default();
+            let running = workspaces
                 .iter()
                 .filter(|b| b.state.as_deref() == Some("running"))
                 .count();
-            let stopped = branches
+            let stopped = workspaces
                 .iter()
                 .filter(|b| b.state.as_deref() == Some("stopped"))
                 .count();
@@ -4220,7 +4275,7 @@ async fn handle_service_dispatch(
             if json_output {
                 let mut status = serde_json::json!({
                     "provider": provider.provider_name(),
-                    "total_branches": branches.len(),
+                    "total_branches": workspaces.len(),
                     "running": running,
                     "stopped": stopped,
                     "supports_lifecycle": provider.supports_lifecycle(),
@@ -4248,7 +4303,7 @@ async fn handle_service_dispatch(
                 }
                 println!(
                     "Branches: {} total ({} running, {} stopped)",
-                    branches.len(),
+                    workspaces.len(),
                     running,
                     stopped
                 );
@@ -4303,7 +4358,10 @@ async fn handle_service_dispatch(
                             "  template_from_time: {}",
                             if caps.template_from_time { "yes" } else { "no" }
                         );
-                        println!("  max_branch_name_length: {}", caps.max_branch_name_length);
+                        println!(
+                            "  max_workspace_name_length: {}",
+                            caps.max_workspace_name_length
+                        );
                     }
                 }
                 Err(e) => {
@@ -4363,7 +4421,7 @@ async fn handle_service_provider_command(
         return Ok(());
     }
 
-    // Orchestratable mutation commands: Create and Delete operate on all auto_branch services
+    // Orchestratable mutation commands: Create and Delete operate on all auto_workspace services
     let is_orchestratable_mutation = matches!(
         &cmd,
         ServiceCommands::Create { .. } | ServiceCommands::Delete { .. }
@@ -4371,7 +4429,7 @@ async fn handle_service_provider_command(
     let has_multiple_services = config.resolve_services().len() > 1;
 
     // For Create/Delete: if there are multiple services and no --service flag,
-    // use orchestration to operate on all auto_branch services atomically.
+    // use orchestration to operate on all auto_workspace services atomically.
     if is_orchestratable_mutation && database_name.is_none() && has_multiple_services {
         return handle_orchestrated_mutation(cmd, config, json_output, non_interactive).await;
     }
@@ -4389,16 +4447,19 @@ async fn handle_service_provider_command(
     }
 
     match cmd {
-        ServiceCommands::Create { branch_name, from } => {
+        ServiceCommands::Create {
+            workspace_name,
+            from,
+        } => {
             // Single-service path (explicit --service or single service)
             let info = provider
-                .create_branch(&branch_name, from.as_deref())
+                .create_workspace(&workspace_name, from.as_deref())
                 .await?;
 
             // Execute hooks
             run_hooks(
                 config,
-                &branch_name,
+                &workspace_name,
                 HookPhase::PostServiceCreate,
                 json_output,
                 non_interactive,
@@ -4408,34 +4469,34 @@ async fn handle_service_provider_command(
             if json_output {
                 println!("{}", serde_json::to_string_pretty(&info)?);
             } else {
-                println!("Created service branch: {}", info.name);
+                println!("Created service workspace: {}", info.name);
                 if let Some(state) = &info.state {
                     println!("  State: {}", state);
                 }
-                if let Some(parent) = &info.parent_branch {
+                if let Some(parent) = &info.parent_workspace {
                     println!("  Parent: {}", parent);
                 }
                 // Show connection info
-                if let Ok(conn) = provider.get_connection_info(&branch_name).await {
+                if let Ok(conn) = provider.get_connection_info(&workspace_name).await {
                     if let Some(ref uri) = conn.connection_string {
                         println!("  Connection: {}", uri);
                     }
                 }
             }
         }
-        ServiceCommands::Delete { branch_name } => {
+        ServiceCommands::Delete { workspace_name } => {
             // Single-service path (explicit --service or single service)
-            provider.delete_branch(&branch_name).await?;
+            provider.delete_workspace(&workspace_name).await?;
             if json_output {
                 println!(
                     "{}",
                     serde_json::to_string(&serde_json::json!({
                         "status": "ok",
-                        "deleted": branch_name
+                        "deleted": workspace_name
                     }))?
                 );
             } else {
-                println!("Deleted service branch: {}", branch_name);
+                println!("Deleted service workspace: {}", workspace_name);
             }
         }
         ServiceCommands::Cleanup { max_count } => {
@@ -4446,8 +4507,8 @@ async fn handle_service_provider_command(
                 );
             }
 
-            let max = max_count.unwrap_or(config.behavior.max_branches.unwrap_or(10));
-            let deleted = provider.cleanup_old_branches(max).await?;
+            let max = max_count.unwrap_or(config.behavior.max_workspaces.unwrap_or(10));
+            let deleted = provider.cleanup_old_workspaces(max).await?;
 
             if json_output {
                 println!(
@@ -4460,81 +4521,81 @@ async fn handle_service_provider_command(
                     }))?
                 );
             } else if deleted.is_empty() {
-                println!("No branches to clean up on service '{}'", resolved_name);
+                println!("No workspaces to clean up on service '{}'", resolved_name);
             } else {
                 println!(
-                    "Cleaned up {} branches on '{}': {}",
+                    "Cleaned up {} workspaces on '{}': {}",
                     deleted.len(),
                     resolved_name,
                     deleted.join(", ")
                 );
             }
         }
-        ServiceCommands::Start { branch_name } => {
+        ServiceCommands::Start { workspace_name } => {
             if !provider.supports_lifecycle() {
                 anyhow::bail!(
                     "Service '{}' does not support start/stop lifecycle",
                     provider.provider_name()
                 );
             }
-            provider.start_branch(&branch_name).await?;
+            provider.start_workspace(&workspace_name).await?;
             if json_output {
                 println!(
                     "{}",
                     serde_json::to_string(&serde_json::json!({
                         "status": "ok",
-                        "started": branch_name
+                        "started": workspace_name
                     }))?
                 );
             } else {
-                println!("Started branch: {}", branch_name);
+                println!("Started workspace: {}", workspace_name);
             }
         }
-        ServiceCommands::Stop { branch_name } => {
+        ServiceCommands::Stop { workspace_name } => {
             if !provider.supports_lifecycle() {
                 anyhow::bail!(
                     "Service '{}' does not support start/stop lifecycle",
                     provider.provider_name()
                 );
             }
-            provider.stop_branch(&branch_name).await?;
+            provider.stop_workspace(&workspace_name).await?;
             if json_output {
                 println!(
                     "{}",
                     serde_json::to_string(&serde_json::json!({
                         "status": "ok",
-                        "stopped": branch_name
+                        "stopped": workspace_name
                     }))?
                 );
             } else {
-                println!("Stopped branch: {}", branch_name);
+                println!("Stopped workspace: {}", workspace_name);
             }
         }
-        ServiceCommands::Reset { branch_name } => {
+        ServiceCommands::Reset { workspace_name } => {
             if !provider.supports_lifecycle() {
                 anyhow::bail!(
                     "Service '{}' does not support reset",
                     provider.provider_name()
                 );
             }
-            provider.reset_branch(&branch_name).await?;
+            provider.reset_workspace(&workspace_name).await?;
             if json_output {
                 println!(
                     "{}",
                     serde_json::to_string(&serde_json::json!({
                         "status": "ok",
-                        "reset": branch_name
+                        "reset": workspace_name
                     }))?
                 );
             } else {
-                println!("Reset branch: {}", branch_name);
+                println!("Reset workspace: {}", workspace_name);
             }
         }
         ServiceCommands::Connection {
-            branch_name,
+            workspace_name,
             format,
         } => {
-            let conn = provider.get_connection_info(&branch_name).await?;
+            let conn = provider.get_connection_info(&workspace_name).await?;
             // Global --json flag overrides --format
             let fmt = if json_output {
                 "json"
@@ -4578,7 +4639,7 @@ async fn handle_service_provider_command(
             }
 
             let preview = provider.destroy_preview().await?;
-            let (project_name, branch_names) = match preview {
+            let (project_name, workspace_names) = match preview {
                 Some(p) => p,
                 None => {
                     if json_output {
@@ -4608,11 +4669,11 @@ async fn handle_service_provider_command(
 
                 println!("This will permanently destroy the following:");
                 println!("  Project: {}", project_name);
-                if branch_names.is_empty() {
+                if workspace_names.is_empty() {
                     println!("  Branches: (none)");
                 } else {
-                    println!("  Branches ({}):", branch_names.len());
-                    for name in &branch_names {
+                    println!("  Branches ({}):", workspace_names.len());
+                    for name in &workspace_names {
                         println!("    - {}", name);
                     }
                 }
@@ -4662,7 +4723,7 @@ async fn handle_service_provider_command(
                 );
             } else {
                 println!(
-                    "Destroyed project '{}' and {} branch(es)",
+                    "Destroyed project '{}' and {} workspace(es)",
                     project_name,
                     destroyed.len()
                 );
@@ -4671,13 +4732,16 @@ async fn handle_service_provider_command(
                 }
             }
         }
-        ServiceCommands::Logs { branch_name, tail } => {
-            let output = provider.logs(&branch_name, tail).await?;
+        ServiceCommands::Logs {
+            workspace_name,
+            tail,
+        } => {
+            let output = provider.logs(&workspace_name, tail).await?;
             if json_output {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
-                        "branch": branch_name,
+                        "workspace": workspace_name,
                         "logs": output,
                     }))?
                 );
@@ -4685,17 +4749,20 @@ async fn handle_service_provider_command(
                 print!("{output}");
             }
         }
-        ServiceCommands::Seed { branch_name, from } => {
+        ServiceCommands::Seed {
+            workspace_name,
+            from,
+        } => {
             if !json_output {
-                println!("Seeding branch '{}' from '{}'...", branch_name, from);
+                println!("Seeding workspace '{}' from '{}'...", workspace_name, from);
             }
-            provider.seed_from_source(&branch_name, &from).await?;
+            provider.seed_from_source(&workspace_name, &from).await?;
             if json_output {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "status": "ok",
-                        "seeded": branch_name,
+                        "seeded": workspace_name,
                         "from": from,
                     }))?
                 );
@@ -4720,10 +4787,10 @@ async fn handle_top_level_status(
 ) -> Result<()> {
     // Show VCS info
     let vcs_info = vcs::detect_vcs_provider(".").ok().and_then(|vcs| {
-        let branch = vcs.current_branch().ok()?;
+        let workspace = vcs.current_workspace().ok()?;
         Some(serde_json::json!({
             "provider": vcs.provider_name(),
-            "branch": branch,
+            "workspace": workspace,
         }))
     });
 
@@ -4732,7 +4799,7 @@ async fn handle_top_level_status(
         let Some(context_branch) = context.context_branch.as_deref() else {
             return false;
         };
-        let normalized_cwd = config.get_normalized_branch_name(cwd);
+        let normalized_cwd = config.get_normalized_workspace_name(cwd);
         context.source == BranchContextSource::EnvOverride
             && context_branch != cwd
             && context_branch != normalized_cwd
@@ -4745,12 +4812,12 @@ async fn handle_top_level_status(
         if json_output {
             let mut services_map = serde_json::Map::new();
             for named in &all_providers {
-                let branches = named.provider.list_branches().await.unwrap_or_default();
-                let running = branches
+                let workspaces = named.provider.list_workspaces().await.unwrap_or_default();
+                let running = workspaces
                     .iter()
                     .filter(|b| b.state.as_deref() == Some("running"))
                     .count();
-                let stopped = branches
+                let stopped = workspaces
                     .iter()
                     .filter(|b| b.state.as_deref() == Some("stopped"))
                     .count();
@@ -4758,7 +4825,7 @@ async fn handle_top_level_status(
                     named.name.clone(),
                     serde_json::json!({
                         "provider": named.provider.provider_name(),
-                        "total_branches": branches.len(),
+                        "total_branches": workspaces.len(),
                         "running": running,
                         "stopped": stopped,
                     }),
@@ -4780,32 +4847,32 @@ async fn handle_top_level_status(
         } else {
             if let Some(ref info) = vcs_info {
                 println!(
-                    "VCS: {} (branch: {})",
+                    "VCS: {} (workspace: {})",
                     info["provider"].as_str().unwrap_or("unknown"),
-                    info["branch"].as_str().unwrap_or("unknown")
+                    info["workspace"].as_str().unwrap_or("unknown")
                 );
                 if let Some(context_branch) = context.context_branch.as_deref() {
-                    let cwd = info["branch"].as_str().unwrap_or("unknown");
+                    let cwd = info["workspace"].as_str().unwrap_or("unknown");
                     if context_differs_from_cwd(cwd) {
-                        println!("Devflow context branch: {}", context_branch);
+                        println!("Devflow context workspace: {}", context_branch);
                     }
                 }
                 println!();
             }
             for named in &all_providers {
-                let branches = named.provider.list_branches().await.unwrap_or_default();
-                let running = branches
+                let workspaces = named.provider.list_workspaces().await.unwrap_or_default();
+                let running = workspaces
                     .iter()
                     .filter(|b| b.state.as_deref() == Some("running"))
                     .count();
-                let stopped = branches
+                let stopped = workspaces
                     .iter()
                     .filter(|b| b.state.as_deref() == Some("stopped"))
                     .count();
                 println!("[{}] ({}):", named.name, named.provider.provider_name());
                 println!(
                     "  Branches: {} total ({} running, {} stopped)",
-                    branches.len(),
+                    workspaces.len(),
                     running,
                     stopped
                 );
@@ -4815,12 +4882,12 @@ async fn handle_top_level_status(
         // Single service or no services — try to resolve, fall back gracefully
         match services::factory::resolve_provider(config, database_name).await {
             Ok(named) => {
-                let branches = named.provider.list_branches().await.unwrap_or_default();
-                let running = branches
+                let workspaces = named.provider.list_workspaces().await.unwrap_or_default();
+                let running = workspaces
                     .iter()
                     .filter(|b| b.state.as_deref() == Some("running"))
                     .count();
-                let stopped = branches
+                let stopped = workspaces
                     .iter()
                     .filter(|b| b.state.as_deref() == Some("stopped"))
                     .count();
@@ -4839,7 +4906,7 @@ async fn handle_top_level_status(
                             "service": {
                                 "name": named.name,
                                 "provider": named.provider.provider_name(),
-                                "total_branches": branches.len(),
+                                "total_branches": workspaces.len(),
                                 "running": running,
                                 "stopped": stopped,
                             },
@@ -4848,20 +4915,20 @@ async fn handle_top_level_status(
                 } else {
                     if let Some(ref info) = vcs_info {
                         println!(
-                            "VCS: {} (branch: {})",
+                            "VCS: {} (workspace: {})",
                             info["provider"].as_str().unwrap_or("unknown"),
-                            info["branch"].as_str().unwrap_or("unknown")
+                            info["workspace"].as_str().unwrap_or("unknown")
                         );
                         if let Some(context_branch) = context.context_branch.as_deref() {
-                            let cwd = info["branch"].as_str().unwrap_or("unknown");
+                            let cwd = info["workspace"].as_str().unwrap_or("unknown");
                             if context_differs_from_cwd(cwd) {
-                                println!("Devflow context branch: {}", context_branch);
+                                println!("Devflow context workspace: {}", context_branch);
                             }
                         }
                         println!();
                     } else if let Some(context_branch) = context.context_branch.as_deref() {
                         if context.source == BranchContextSource::EnvOverride {
-                            println!("Devflow context branch: {}", context_branch);
+                            println!("Devflow context workspace: {}", context_branch);
                             println!();
                         }
                     }
@@ -4872,7 +4939,7 @@ async fn handle_top_level_status(
                     );
                     println!(
                         "  Branches: {} total ({} running, {} stopped)",
-                        branches.len(),
+                        workspaces.len(),
                         running,
                         stopped
                     );
@@ -4897,20 +4964,20 @@ async fn handle_top_level_status(
                 } else {
                     if let Some(ref info) = vcs_info {
                         println!(
-                            "VCS: {} (branch: {})",
+                            "VCS: {} (workspace: {})",
                             info["provider"].as_str().unwrap_or("unknown"),
-                            info["branch"].as_str().unwrap_or("unknown")
+                            info["workspace"].as_str().unwrap_or("unknown")
                         );
                         if let Some(context_branch) = context.context_branch.as_deref() {
-                            let cwd = info["branch"].as_str().unwrap_or("unknown");
+                            let cwd = info["workspace"].as_str().unwrap_or("unknown");
                             if context_differs_from_cwd(cwd) {
-                                println!("Devflow context branch: {}", context_branch);
+                                println!("Devflow context workspace: {}", context_branch);
                             }
                         }
                         println!();
                     } else if let Some(context_branch) = context.context_branch.as_deref() {
                         if context.source == BranchContextSource::EnvOverride {
-                            println!("Devflow context branch: {}", context_branch);
+                            println!("Devflow context workspace: {}", context_branch);
                             println!();
                         }
                     }
@@ -4947,7 +5014,7 @@ async fn handle_multi_service_aggregation(
             log::warn!("Failed to create service providers: {}", e);
             match aggregation {
                 ServiceAggregation::List => {
-                    // Show branch registry info without service data
+                    // Show workspace registry info without service data
                     if json_output {
                         let enriched = enrich_branch_list_json(&[], config, config_path);
                         println!("{}", serde_json::to_string_pretty(&enriched)?);
@@ -5003,22 +5070,22 @@ async fn handle_multi_service_aggregation(
 
     match aggregation {
         ServiceAggregation::List => {
-            // Gather all service branches from all services
-            let mut all_service_branches: Vec<services::BranchInfo> = Vec::new();
+            // Gather all service workspaces from all services
+            let mut all_service_branches: Vec<services::WorkspaceInfo> = Vec::new();
             if json_output {
                 let mut map = serde_json::Map::new();
                 for named in &all_providers {
-                    let branches = named.provider.list_branches().await.unwrap_or_default();
+                    let workspaces = named.provider.list_workspaces().await.unwrap_or_default();
                     map.insert(
                         named.name.clone(),
-                        enrich_branch_list_json(&branches, config, &config_path),
+                        enrich_branch_list_json(&workspaces, config, &config_path),
                     );
                 }
                 println!("{}", serde_json::to_string_pretty(&map)?);
             } else {
                 for named in &all_providers {
-                    let branches = named.provider.list_branches().await.unwrap_or_default();
-                    all_service_branches.extend(branches);
+                    let workspaces = named.provider.list_workspaces().await.unwrap_or_default();
+                    all_service_branches.extend(workspaces);
                     println!("[{}] ({}):", named.name, named.provider.provider_name());
                 }
                 print_enriched_branch_list(&all_service_branches, config, &config_path);
@@ -5029,12 +5096,12 @@ async fn handle_multi_service_aggregation(
             if json_output {
                 let mut map = serde_json::Map::new();
                 for named in &all_providers {
-                    let branches = named.provider.list_branches().await.unwrap_or_default();
-                    let running = branches
+                    let workspaces = named.provider.list_workspaces().await.unwrap_or_default();
+                    let running = workspaces
                         .iter()
                         .filter(|b| b.state.as_deref() == Some("running"))
                         .count();
-                    let stopped = branches
+                    let stopped = workspaces
                         .iter()
                         .filter(|b| b.state.as_deref() == Some("stopped"))
                         .count();
@@ -5042,7 +5109,7 @@ async fn handle_multi_service_aggregation(
 
                     let mut status = serde_json::json!({
                         "provider": named.provider.provider_name(),
-                        "total_branches": branches.len(),
+                        "total_branches": workspaces.len(),
                         "running": running,
                         "stopped": stopped,
                         "supports_lifecycle": named.provider.supports_lifecycle(),
@@ -5061,12 +5128,12 @@ async fn handle_multi_service_aggregation(
                 println!("{}", serde_json::to_string_pretty(&map)?);
             } else {
                 for named in &all_providers {
-                    let branches = named.provider.list_branches().await.unwrap_or_default();
-                    let running = branches
+                    let workspaces = named.provider.list_workspaces().await.unwrap_or_default();
+                    let running = workspaces
                         .iter()
                         .filter(|b| b.state.as_deref() == Some("running"))
                         .count();
-                    let stopped = branches
+                    let stopped = workspaces
                         .iter()
                         .filter(|b| b.state.as_deref() == Some("stopped"))
                         .count();
@@ -5084,7 +5151,7 @@ async fn handle_multi_service_aggregation(
                     }
                     println!(
                         "  Branches: {} total ({} running, {} stopped)",
-                        branches.len(),
+                        workspaces.len(),
                         running,
                         stopped
                     );
@@ -5137,14 +5204,14 @@ async fn handle_multi_service_aggregation(
                     let caps = named.provider.capabilities();
                     println!("[{}] ({})", named.name, named.provider.provider_name());
                     println!(
-                        "  lifecycle={} logs={} seed={} destroy={} cleanup={} template_from_time={} max_branch_name_length={}",
+                        "  lifecycle={} logs={} seed={} destroy={} cleanup={} template_from_time={} max_workspace_name_length={}",
                         if caps.lifecycle { "yes" } else { "no" },
                         if caps.logs { "yes" } else { "no" },
                         if caps.seed_from_source { "yes" } else { "no" },
                         if caps.destroy_project { "yes" } else { "no" },
                         if caps.cleanup { "yes" } else { "no" },
                         if caps.template_from_time { "yes" } else { "no" },
-                        caps.max_branch_name_length,
+                        caps.max_workspace_name_length,
                     );
                     println!();
                 }
@@ -5155,7 +5222,7 @@ async fn handle_multi_service_aggregation(
     Ok(())
 }
 
-/// Handle Create/Delete across all auto-branch services when no specific --service is given.
+/// Handle Create/Delete across all auto-workspace services when no specific --service is given.
 async fn handle_orchestrated_mutation(
     cmd: ServiceCommands,
     config: &Config,
@@ -5163,9 +5230,12 @@ async fn handle_orchestrated_mutation(
     non_interactive: bool,
 ) -> Result<()> {
     match cmd {
-        ServiceCommands::Create { branch_name, from } => {
+        ServiceCommands::Create {
+            workspace_name,
+            from,
+        } => {
             let results =
-                services::factory::orchestrate_create(config, &branch_name, from.as_deref())
+                services::factory::orchestrate_create(config, &workspace_name, from.as_deref())
                     .await?;
             let success_count = results.iter().filter(|r| r.success).count();
             let fail_count = results.iter().filter(|r| !r.success).count();
@@ -5185,7 +5255,7 @@ async fn handle_orchestrated_mutation(
                     .collect();
                 json_payload = Some(serde_json::json!({
                     "operation": "create",
-                    "branch": branch_name,
+                    "workspace": workspace_name,
                     "ok": fail_count == 0,
                     "succeeded": success_count,
                     "failed": fail_count,
@@ -5207,7 +5277,7 @@ async fn handle_orchestrated_mutation(
 
                 if fail_count > 0 {
                     eprintln!(
-                        "\nCreated branch on {}/{} services ({} failed)",
+                        "\nCreated workspace on {}/{} services ({} failed)",
                         success_count,
                         results.len(),
                         fail_count
@@ -5220,8 +5290,8 @@ async fn handle_orchestrated_mutation(
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 }
                 anyhow::bail!(
-                    "Failed to create branch '{}' on {}/{} service(s)",
-                    branch_name,
+                    "Failed to create workspace '{}' on {}/{} service(s)",
+                    workspace_name,
                     fail_count,
                     results.len()
                 );
@@ -5230,7 +5300,7 @@ async fn handle_orchestrated_mutation(
             // Run hooks after all services are created
             run_hooks(
                 config,
-                &branch_name,
+                &workspace_name,
                 HookPhase::PostServiceCreate,
                 json_output,
                 non_interactive,
@@ -5241,8 +5311,8 @@ async fn handle_orchestrated_mutation(
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             }
         }
-        ServiceCommands::Delete { branch_name } => {
-            let results = services::factory::orchestrate_delete(config, &branch_name).await?;
+        ServiceCommands::Delete { workspace_name } => {
+            let results = services::factory::orchestrate_delete(config, &workspace_name).await?;
             let success_count = results.iter().filter(|r| r.success).count();
             let fail_count = results.iter().filter(|r| !r.success).count();
 
@@ -5261,7 +5331,7 @@ async fn handle_orchestrated_mutation(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "operation": "delete",
-                        "branch": branch_name,
+                        "workspace": workspace_name,
                         "ok": fail_count == 0,
                         "succeeded": success_count,
                         "failed": fail_count,
@@ -5279,7 +5349,7 @@ async fn handle_orchestrated_mutation(
 
                 if fail_count > 0 {
                     eprintln!(
-                        "\nDeleted branch on {}/{} services ({} failed)",
+                        "\nDeleted workspace on {}/{} services ({} failed)",
                         success_count,
                         results.len(),
                         fail_count
@@ -5289,8 +5359,8 @@ async fn handle_orchestrated_mutation(
 
             if fail_count > 0 {
                 anyhow::bail!(
-                    "Failed to delete branch '{}' on {}/{} service(s)",
-                    branch_name,
+                    "Failed to delete workspace '{}' on {}/{} service(s)",
+                    workspace_name,
                     fail_count,
                     results.len()
                 );
@@ -5361,8 +5431,8 @@ fn run_doctor_pre_checks(config: &Config, config_path: &Option<std::path::PathBu
                             suffix
                         );
                         for wt in stale.iter().take(5) {
-                            let branch = wt.branch.as_deref().unwrap_or("<unknown>");
-                            println!("         - {} -> {}", branch, wt.path.display());
+                            let workspace = wt.workspace.as_deref().unwrap_or("<unknown>");
+                            println!("         - {} -> {}", workspace, wt.path.display());
                         }
                     }
                 }
@@ -5378,37 +5448,40 @@ fn run_doctor_pre_checks(config: &Config, config_path: &Option<std::path::PathBu
         match LocalStateManager::new() {
             Ok(state) => {
                 let missing: Vec<_> = state
-                    .get_branches(path)
+                    .get_workspaces(path)
                     .into_iter()
                     .filter_map(|b| b.worktree_path.map(|p| (b.name, p)))
                     .filter(|(_, p)| !std::path::Path::new(p).exists())
                     .collect();
 
                 if missing.is_empty() {
-                    println!("  [OK] Branch registry paths: clean");
+                    println!("  [OK] Workspace registry paths: clean");
                 } else {
                     let suffix = if missing.len() == 1 { "y" } else { "ies" };
                     println!(
-                        "  [WARN] Branch registry paths: {} stale entr{}",
+                        "  [WARN] Workspace registry paths: {} stale entr{}",
                         missing.len(),
                         suffix
                     );
-                    for (branch, wt_path) in missing.iter().take(5) {
-                        println!("         - {} -> {}", branch, wt_path);
+                    for (workspace, wt_path) in missing.iter().take(5) {
+                        println!("         - {} -> {}", workspace, wt_path);
                     }
                 }
             }
             Err(e) => {
-                println!("  [WARN] Branch registry paths: inspection failed ({})", e);
+                println!(
+                    "  [WARN] Workspace registry paths: inspection failed ({})",
+                    e
+                );
             }
         }
     }
 
-    // Branch filter regex
-    if let Some(ref regex_pattern) = config.git.branch_filter_regex {
+    // Workspace filter regex
+    if let Some(ref regex_pattern) = config.git.workspace_filter_regex {
         match regex::Regex::new(regex_pattern) {
-            Ok(_) => println!("  [OK] Branch filter regex: valid"),
-            Err(e) => println!("  [FAIL] Branch filter regex: {}", e),
+            Ok(_) => println!("  [OK] Workspace filter regex: valid"),
+            Err(e) => println!("  [FAIL] Workspace filter regex: {}", e),
         }
     }
 
@@ -5497,7 +5570,7 @@ async fn handle_worktree_setup(
     // Copy files from main worktree
     copy_worktree_files(config, main_dir.to_str().unwrap_or(""))?;
 
-    // Run normal git-hook logic to create/switch service branches
+    // Run normal git-hook logic to create/switch service workspaces
     handle_git_hook(config, config_path, false, None).await?;
 
     Ok(())
@@ -5518,22 +5591,22 @@ async fn handle_git_hook(
 
     let vcs_repo = vcs::detect_vcs_provider(".")?;
 
-    if let Some(current_git_branch) = vcs_repo.current_branch()? {
-        log::info!("Git hook triggered for branch: {}", current_git_branch);
+    if let Some(current_git_branch) = vcs_repo.current_workspace()? {
+        log::info!("Git hook triggered for workspace: {}", current_git_branch);
 
-        // Check if this branch should trigger a switch
-        if config.should_switch_on_branch(&current_git_branch) {
-            // If switching to main git branch, use main database
-            if current_git_branch == config.git.main_branch {
+        // Check if this workspace should trigger a switch
+        if config.should_switch_on_workspace(&current_git_branch) {
+            // If switching to main git workspace, use main database
+            if current_git_branch == config.git.main_workspace {
                 handle_switch_to_main(config, config_path, false, false, false, true).await?;
             } else {
-                // For other branches, check if we should create them and switch
-                if config.should_create_branch(&current_git_branch) {
+                // For other workspaces, check if we should create them and switch
+                if config.should_create_workspace(&current_git_branch) {
                     handle_switch_command(
                         config,
                         &current_git_branch,
                         config_path,
-                        false, // create — branch already exists from git
+                        false, // create — workspace already exists from git
                         None,  // from
                         false, // no_services
                         false, // no_verify
@@ -5543,14 +5616,14 @@ async fn handle_git_hook(
                     .await?;
                 } else {
                     log::info!(
-                        "Git branch {} configured not to create service branches",
+                        "Git workspace {} configured not to create service workspaces",
                         current_git_branch
                     );
                 }
             }
         } else {
             log::info!(
-                "Git branch {} filtered out by auto_switch configuration",
+                "Git workspace {} filtered out by auto_switch configuration",
                 current_git_branch
             );
         }
@@ -5563,38 +5636,40 @@ async fn handle_interactive_switch(
     config: &Config,
     config_path: &Option<std::path::PathBuf>,
 ) -> Result<()> {
-    let mut branch_names = std::collections::BTreeSet::new();
-    let mut vcs_branch_names = std::collections::HashSet::new();
+    let mut workspace_names = std::collections::BTreeSet::new();
+    let mut vcs_workspace_names = std::collections::HashSet::new();
 
-    // 1) VCS branches (authoritative source)
+    // 1) VCS workspaces (authoritative source)
     if let Ok(vcs_repo) = vcs::detect_vcs_provider(".") {
-        if let Ok(vcs_branches) = vcs_repo.list_branches() {
-            for branch in vcs_branches {
-                vcs_branch_names.insert(branch.name.clone());
-                branch_names.insert(branch.name);
+        if let Ok(vcs_branches) = vcs_repo.list_workspaces() {
+            for workspace in vcs_branches {
+                vcs_workspace_names.insert(workspace.name.clone());
+                workspace_names.insert(workspace.name);
             }
         }
     }
 
-    // 2) Devflow branch registry
+    // 2) Devflow workspace registry
     if let Some(path) = config_path.as_ref() {
         if let Ok(state) = LocalStateManager::new() {
-            for branch in state.get_branches(path) {
-                if vcs_branch_names.is_empty() || vcs_branch_names.contains(&branch.name) {
-                    branch_names.insert(branch.name);
+            for workspace in state.get_workspaces(path) {
+                if vcs_workspace_names.is_empty() || vcs_workspace_names.contains(&workspace.name) {
+                    workspace_names.insert(workspace.name);
                 }
             }
         }
     }
 
-    // 3) Service branches (best effort)
+    // 3) Service workspaces (best effort)
     if !config.resolve_services().is_empty() {
         if let Ok(providers) = services::factory::create_all_providers(config).await {
             for named in providers {
-                if let Ok(service_branches) = named.provider.list_branches().await {
-                    for branch in service_branches {
-                        if vcs_branch_names.is_empty() || vcs_branch_names.contains(&branch.name) {
-                            branch_names.insert(branch.name);
+                if let Ok(service_branches) = named.provider.list_workspaces().await {
+                    for workspace in service_branches {
+                        if vcs_workspace_names.is_empty()
+                            || vcs_workspace_names.contains(&workspace.name)
+                        {
+                            workspace_names.insert(workspace.name);
                         }
                     }
                 }
@@ -5602,35 +5677,35 @@ async fn handle_interactive_switch(
         }
     }
 
-    // Include configured main branch when visible in VCS (or if VCS probing failed).
-    if vcs_branch_names.is_empty() || vcs_branch_names.contains(&config.git.main_branch) {
-        branch_names.insert(config.git.main_branch.clone());
+    // Include configured main workspace when visible in VCS (or if VCS probing failed).
+    if vcs_workspace_names.is_empty() || vcs_workspace_names.contains(&config.git.main_workspace) {
+        workspace_names.insert(config.git.main_workspace.clone());
     }
 
     let context = resolve_branch_context(config);
     let current_git = context.cwd_branch.clone();
 
-    // Create branch items with display info
-    let mut branch_items: Vec<BranchItem> = branch_names
+    // Create workspace items with display info
+    let mut branch_items: Vec<BranchItem> = workspace_names
         .iter()
-        .map(|branch| {
-            let is_cwd = current_git.as_deref() == Some(branch.as_str());
+        .map(|workspace| {
+            let is_cwd = current_git.as_deref() == Some(workspace.as_str());
             let is_context =
-                context_matches_branch(config, context.context_branch.as_deref(), branch);
+                context_matches_branch(config, context.context_branch.as_deref(), workspace);
 
             BranchItem {
-                name: branch.clone(),
-                display_name: branch.clone(),
+                name: workspace.clone(),
+                display_name: workspace.clone(),
                 is_cwd,
                 is_context,
             }
         })
         .collect();
 
-    // Add a "Create new branch" option at the end
+    // Add a "Create new workspace" option at the end
     branch_items.push(BranchItem {
         name: "__create_new__".to_string(),
-        display_name: "+ Create new branch".to_string(),
+        display_name: "+ Create new workspace".to_string(),
         is_cwd: false,
         is_context: false,
     });
@@ -5639,14 +5714,14 @@ async fn handle_interactive_switch(
     match run_interactive_selector(branch_items) {
         Ok(selected_branch) => {
             if selected_branch == "__create_new__" {
-                // Prompt for a new branch name
-                let new_name = inquire::Text::new("New branch name:")
-                    .with_help_message("Enter the name for the new branch")
+                // Prompt for a new workspace name
+                let new_name = inquire::Text::new("New workspace name:")
+                    .with_help_message("Enter the name for the new workspace")
                     .prompt()
-                    .context("Failed to read branch name")?;
+                    .context("Failed to read workspace name")?;
                 let new_name = new_name.trim().to_string();
                 if new_name.is_empty() {
-                    anyhow::bail!("Branch name cannot be empty");
+                    anyhow::bail!("Workspace name cannot be empty");
                 }
                 handle_switch_command(
                     config,
@@ -5660,7 +5735,7 @@ async fn handle_interactive_switch(
                     false, // non_interactive
                 )
                 .await?;
-            } else if selected_branch == config.git.main_branch {
+            } else if selected_branch == config.git.main_workspace {
                 handle_switch_to_main(config, config_path, false, false, false, false).await?;
             } else {
                 handle_switch_command(
@@ -5686,7 +5761,7 @@ async fn handle_interactive_switch(
             }
             _ => {
                 println!("Interactive mode failed: {}", e);
-                println!("Try using: devflow switch <branch-name> or devflow switch --template");
+                println!("Try using: devflow switch <workspace-name> or devflow switch --template");
             }
         },
     }
@@ -5707,7 +5782,7 @@ fn run_interactive_selector(items: Vec<BranchItem>) -> Result<String, inquire::I
 
     if items.is_empty() {
         return Err(inquire::InquireError::InvalidConfiguration(
-            "No branches available".to_string(),
+            "No workspaces available".to_string(),
         ));
     }
 
@@ -5727,13 +5802,13 @@ fn run_interactive_selector(items: Vec<BranchItem>) -> Result<String, inquire::I
         })
         .collect();
 
-    // Prefer context branch as default; fall back to cwd branch.
+    // Prefer context workspace as default; fall back to cwd workspace.
     let default = items
         .iter()
         .position(|item| item.is_context)
         .or_else(|| items.iter().position(|item| item.is_cwd));
 
-    let mut select = Select::new("Select a branch to switch to:", options.clone())
+    let mut select = Select::new("Select a workspace to switch to:", options.clone())
         .with_help_message(
         "Use arrow keys to navigate, type to filter, Enter to select, Esc to cancel (*=context+cwd)",
     );
@@ -5745,7 +5820,7 @@ fn run_interactive_selector(items: Vec<BranchItem>) -> Result<String, inquire::I
     // Run the selector
     let selected_display = select.prompt()?;
 
-    // Find the corresponding branch name
+    // Find the corresponding workspace name
     let selected_index = options
         .iter()
         .position(|opt| opt == &selected_display)
@@ -5765,7 +5840,7 @@ struct LinkServiceResult {
 
 #[derive(Debug, Clone)]
 struct LinkBranchResult {
-    branch: String,
+    workspace: String,
     parent: Option<String>,
     worktree_path: Option<String>,
     service_results: Vec<LinkServiceResult>,
@@ -5775,23 +5850,23 @@ struct LinkBranchResult {
 async fn link_branch_internal(
     config: &Config,
     config_path: &Option<PathBuf>,
-    branch_name: &str,
+    workspace_name: &str,
     from: Option<&str>,
     non_interactive: bool,
 ) -> Result<LinkBranchResult> {
     let _ = non_interactive;
-    ensure_default_branch_registered(config, config_path)?;
+    ensure_default_workspace_registered(config, config_path)?;
 
-    let normalized_branch = config.get_normalized_branch_name(branch_name);
-    let normalized_main = config.get_normalized_branch_name(&config.git.main_branch);
+    let normalized_branch = config.get_normalized_workspace_name(workspace_name);
+    let normalized_main = config.get_normalized_workspace_name(&config.git.main_workspace);
 
     let vcs_repo = vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
-    if !vcs_repo.branch_exists(branch_name)? {
+    if !vcs_repo.workspace_exists(workspace_name)? {
         anyhow::bail!(
-            "Branch '{}' does not exist in {}. Create/switch it first, then run `devflow link {}`.",
-            branch_name,
+            "Workspace '{}' does not exist in {}. Create/switch it first, then run `devflow link {}`.",
+            workspace_name,
             vcs_repo.provider_name(),
-            branch_name
+            workspace_name
         );
     }
 
@@ -5800,35 +5875,35 @@ async fn link_branch_internal(
         .and_then(|path| {
             LocalStateManager::new()
                 .ok()
-                .and_then(|state| state.get_branch(path, &normalized_branch))
+                .and_then(|state| state.get_workspace(path, &normalized_branch))
         })
         .and_then(|b| b.parent);
 
     let mut parent = from
-        .map(|p| config.get_normalized_branch_name(p))
+        .map(|p| config.get_normalized_workspace_name(p))
         .or(existing_parent);
 
     if parent.is_none() && normalized_branch != normalized_main {
         parent = Some(normalized_main.clone());
     }
 
-    if let Some(ref parent_branch) = parent {
-        if parent_branch != &normalized_main
-            && !linked_branch_exists(config, config_path, parent_branch)
+    if let Some(ref parent_workspace) = parent {
+        if parent_workspace != &normalized_main
+            && !linked_workspace_exists(config, config_path, parent_workspace)
         {
             anyhow::bail!(
                 "Parent '{}' is not linked in devflow. Run `devflow link {}` first.",
-                parent_branch,
-                parent_branch
+                parent_workspace,
+                parent_workspace
             );
         }
-        if parent_branch == &normalized_main {
-            ensure_default_branch_registered(config, config_path)?;
+        if parent_workspace == &normalized_main {
+            ensure_default_workspace_registered(config, config_path)?;
         }
     }
 
     let worktree_path = vcs_repo
-        .worktree_path(branch_name)?
+        .worktree_path(workspace_name)?
         .map(|p| p.display().to_string())
         .or_else(|| {
             if normalized_branch == normalized_main {
@@ -5840,10 +5915,10 @@ async fn link_branch_internal(
             }
         });
 
-    register_branch_in_state(
+    register_workspace_in_state(
         config,
         config_path,
-        branch_name,
+        workspace_name,
         parent.as_deref(),
         worktree_path.clone(),
         None,
@@ -5869,7 +5944,7 @@ async fn link_branch_internal(
     }
 
     Ok(LinkBranchResult {
-        branch: normalized_branch,
+        workspace: normalized_branch,
         parent,
         worktree_path,
         service_results,
@@ -5880,13 +5955,13 @@ async fn link_branch_internal(
 async fn handle_link_command(
     config: &Config,
     config_path: &Option<PathBuf>,
-    branch_name: &str,
+    workspace_name: &str,
     from: Option<&str>,
     json_output: bool,
     non_interactive: bool,
 ) -> Result<()> {
     let linked =
-        link_branch_internal(config, config_path, branch_name, from, non_interactive).await?;
+        link_branch_internal(config, config_path, workspace_name, from, non_interactive).await?;
 
     if json_output {
         let service_results: Vec<serde_json::Value> = linked
@@ -5905,7 +5980,7 @@ async fn handle_link_command(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "status": if linked.services_failed == 0 { "ok" } else { "error" },
-                "branch": linked.branch,
+                "workspace": linked.workspace,
                 "parent": linked.parent,
                 "worktree_path": linked.worktree_path,
                 "services_failed": linked.services_failed,
@@ -5913,7 +5988,7 @@ async fn handle_link_command(
             }))?
         );
     } else {
-        println!("Linked devflow branch: {}", linked.branch);
+        println!("Linked devflow workspace: {}", linked.workspace);
         if let Some(parent) = linked.parent.as_deref() {
             println!("  Parent: {}", parent);
         }
@@ -5936,8 +6011,8 @@ async fn handle_link_command(
 
     if linked.services_failed > 0 {
         anyhow::bail!(
-            "Linked branch '{}' but failed on {}/{} service(s)",
-            linked.branch,
+            "Linked workspace '{}' but failed on {}/{} service(s)",
+            linked.workspace,
             linked.services_failed,
             linked.service_results.len()
         );
@@ -5949,7 +6024,7 @@ async fn handle_link_command(
 async fn resolve_parent_for_branch_creation(
     config: &Config,
     config_path: &Option<PathBuf>,
-    target_branch: &str,
+    target_workspace: &str,
     requested_parent: Option<&str>,
     context: &BranchContext,
     json_output: bool,
@@ -5963,42 +6038,42 @@ async fn resolve_parent_for_branch_creation(
         return Ok(None);
     };
 
-    let target_normalized = config.get_normalized_branch_name(target_branch);
-    let parent_normalized = config.get_normalized_branch_name(parent_name);
+    let target_normalized = config.get_normalized_workspace_name(target_workspace);
+    let parent_normalized = config.get_normalized_workspace_name(parent_name);
     if parent_normalized == target_normalized {
         anyhow::bail!(
-            "Parent branch '{}' resolves to the target branch '{}'. Choose a different --from value.",
+            "Parent workspace '{}' resolves to the target workspace '{}'. Choose a different --from value.",
             parent_name,
-            target_branch
+            target_workspace
         );
     }
 
-    // If we have no project config path, we cannot enforce branch-link checks.
+    // If we have no project config path, we cannot enforce workspace-link checks.
     if config_path.is_none() {
         return Ok(parent);
     }
 
-    if linked_branch_exists(config, config_path, parent_name) {
+    if linked_workspace_exists(config, config_path, parent_name) {
         return Ok(parent);
     }
 
     if json_output || non_interactive {
         anyhow::bail!(
-            "Parent branch '{}' is not linked in devflow. Run `devflow link {}` first.",
+            "Parent workspace '{}' is not linked in devflow. Run `devflow link {}` first.",
             parent_name,
             parent_name
         );
     }
 
-    let default_branch = config.git.main_branch.clone();
+    let default_workspace = config.git.main_workspace.clone();
     let options = vec![
         format!("Link '{}' now (recommended)", parent_name),
-        format!("Use default branch '{}' as parent", default_branch),
+        format!("Use default workspace '{}' as parent", default_workspace),
         "Cancel".to_string(),
     ];
 
     let choice = inquire::Select::new(
-        "Parent branch is not linked in devflow. Choose how to proceed:",
+        "Parent workspace is not linked in devflow. Choose how to proceed:",
         options,
     )
     .with_starting_cursor(0)
@@ -6017,25 +6092,25 @@ async fn resolve_parent_for_branch_creation(
         return Ok(parent);
     }
 
-    if choice.starts_with("Use default branch") {
-        if !linked_branch_exists(config, config_path, &default_branch) {
-            match link_branch_internal(config, config_path, &default_branch, None, false).await {
+    if choice.starts_with("Use default workspace") {
+        if !linked_workspace_exists(config, config_path, &default_workspace) {
+            match link_branch_internal(config, config_path, &default_workspace, None, false).await {
                 Ok(linked) if linked.services_failed == 0 => {}
                 Ok(linked) => {
                     anyhow::bail!(
-                        "Linked default branch '{}' but failed on {}/{} service(s)",
-                        default_branch,
+                        "Linked default workspace '{}' but failed on {}/{} service(s)",
+                        default_workspace,
                         linked.services_failed,
                         linked.service_results.len()
                     );
                 }
                 Err(_) => {
-                    // Fallback for repos where the default branch is not materialized yet.
-                    ensure_default_branch_registered(config, config_path)?;
+                    // Fallback for repos where the default workspace is not materialized yet.
+                    ensure_default_workspace_registered(config, config_path)?;
                 }
             }
         }
-        parent = Some(default_branch);
+        parent = Some(default_workspace);
         return Ok(parent);
     }
 
@@ -6045,7 +6120,7 @@ async fn resolve_parent_for_branch_creation(
 #[allow(clippy::too_many_arguments)]
 async fn handle_switch_command(
     config: &Config,
-    branch_name: &str,
+    workspace_name: &str,
     config_path: &Option<std::path::PathBuf>,
     create: bool,
     from: Option<&str>,
@@ -6054,8 +6129,8 @@ async fn handle_switch_command(
     json_output: bool,
     non_interactive: bool,
 ) -> Result<()> {
-    if let Err(e) = ensure_default_branch_registered(config, config_path) {
-        log::warn!("Failed to ensure default branch registration: {}", e);
+    if let Err(e) = ensure_default_workspace_registered(config, config_path) {
+        log::warn!("Failed to ensure default workspace registration: {}", e);
     }
 
     let worktree_enabled = config.worktree.as_ref().is_some_and(|wt| wt.enabled);
@@ -6073,8 +6148,8 @@ async fn handle_switch_command(
     if worktree_enabled {
         let vcs_repo = vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
 
-        // Check if a worktree already exists for this branch
-        let existing_path = vcs_repo.worktree_path(branch_name)?;
+        // Check if a worktree already exists for this workspace
+        let existing_path = vcs_repo.worktree_path(workspace_name)?;
 
         if let Some(wt_path) = existing_path {
             let wt_path = resolve_cd_target(&wt_path)?;
@@ -6090,35 +6165,32 @@ async fn handle_switch_command(
             worktree_path = Some(wt_path.display().to_string());
         } else {
             // Resolve worktree path from template
-            let repo_name = std::env::current_dir()
-                .ok()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                .unwrap_or_else(|| "repo".to_string());
+            let repo_name = worktree_template_repo_name(config);
+            let normalized_workspace = config.get_normalized_workspace_name(workspace_name);
             let path_template = config
                 .worktree
                 .as_ref()
                 .map(|wt| wt.path_template.as_str())
-                .unwrap_or("../{repo}.{branch}");
-            let wt_path_str = path_template
-                .replace("{repo}", &repo_name)
-                .replace("{branch}", branch_name);
+                .unwrap_or("../{repo}.{workspace}");
+            let wt_path_str =
+                apply_worktree_path_template(path_template, &repo_name, &normalized_workspace);
             let wt_path = resolve_cd_target(&PathBuf::from(&wt_path_str))?;
 
-            // Create branch only when explicitly requested
-            let branch_exists = vcs_repo.branch_exists(branch_name)?;
-            if !branch_exists {
+            // Create workspace only when explicitly requested
+            let workspace_exists = vcs_repo.workspace_exists(workspace_name)?;
+            if !workspace_exists {
                 if !create {
                     anyhow::bail!(
-                        "Branch '{}' does not exist. Use `devflow switch -c {}` to create it.",
-                        branch_name,
-                        branch_name
+                        "Workspace '{}' does not exist. Use `devflow switch -c {}` to create it.",
+                        workspace_name,
+                        workspace_name
                     );
                 }
 
                 let parent = resolve_parent_for_branch_creation(
                     config,
                     config_path,
-                    branch_name,
+                    workspace_name,
                     from,
                     &context,
                     json_output,
@@ -6128,32 +6200,38 @@ async fn handle_switch_command(
 
                 if !json_output {
                     println!(
-                        "Creating branch '{}' (parent: {})",
-                        branch_name,
+                        "Creating workspace '{}' (parent: {})",
+                        workspace_name,
                         parent.as_deref().unwrap_or("HEAD")
                     );
                 }
                 vcs_repo
-                    .create_branch(branch_name, parent.as_deref())
+                    .create_workspace(workspace_name, parent.as_deref())
                     .with_context(|| {
                         format!(
-                            "Failed to create branch '{}' before worktree creation",
-                            branch_name
+                            "Failed to create workspace '{}' before worktree creation",
+                            workspace_name
                         )
                     })?;
                 branch_created = true;
                 parent_for_new_branch = parent;
             } else if create && !json_output {
-                println!("Branch '{}' already exists; switching to it", branch_name);
+                println!(
+                    "Workspace '{}' already exists; switching to it",
+                    workspace_name
+                );
             }
 
             if !json_output {
                 println!("Creating worktree at: {}", wt_path.display());
             }
             let wt_result = vcs_repo
-                .create_worktree(branch_name, &wt_path)
+                .create_worktree(workspace_name, &wt_path)
                 .with_context(|| {
-                    format!("Failed to create worktree for branch '{}'", branch_name)
+                    format!(
+                        "Failed to create worktree for workspace '{}'",
+                        workspace_name
+                    )
                 })?;
 
             // Copy files if configured
@@ -6162,7 +6240,7 @@ async fn handle_switch_command(
 
                 // Copy explicitly listed files.
                 // When CoW was used, these already exist as clones — overwrite with
-                // independent copies so they can diverge between branches.
+                // independent copies so they can diverge between workspaces.
                 for file in &wt_config.copy_files {
                     let src = main_dir.join(file);
                     let dst = wt_path.join(file);
@@ -6227,7 +6305,7 @@ async fn handle_switch_command(
                 };
                 println!(
                     "Created worktree for '{}' at {}{}",
-                    branch_name,
+                    workspace_name,
                     wt_path_for_output.display(),
                     cow_hint,
                 );
@@ -6245,20 +6323,20 @@ async fn handle_switch_command(
     } else {
         // ── Classic mode (no worktrees) ────────────────────────────────
         let vcs_repo = vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
-        let branch_exists = vcs_repo.branch_exists(branch_name)?;
-        if !branch_exists {
+        let workspace_exists = vcs_repo.workspace_exists(workspace_name)?;
+        if !workspace_exists {
             if !create {
                 anyhow::bail!(
-                    "Branch '{}' does not exist. Use `devflow switch -c {}` to create it.",
-                    branch_name,
-                    branch_name
+                    "Workspace '{}' does not exist. Use `devflow switch -c {}` to create it.",
+                    workspace_name,
+                    workspace_name
                 );
             }
 
             let parent = resolve_parent_for_branch_creation(
                 config,
                 config_path,
-                branch_name,
+                workspace_name,
                 from,
                 &context,
                 json_output,
@@ -6268,26 +6346,29 @@ async fn handle_switch_command(
 
             if !json_output {
                 println!(
-                    "Creating branch '{}' (parent: {})",
-                    branch_name,
+                    "Creating workspace '{}' (parent: {})",
+                    workspace_name,
                     parent.as_deref().unwrap_or("HEAD")
                 );
             }
-            vcs_repo.create_branch(branch_name, parent.as_deref())?;
+            vcs_repo.create_workspace(workspace_name, parent.as_deref())?;
             branch_created = true;
             parent_for_new_branch = parent;
         } else if create && !json_output {
-            println!("Branch '{}' already exists; switching to it", branch_name);
+            println!(
+                "Workspace '{}' already exists; switching to it",
+                workspace_name
+            );
         }
-        // Switch the working directory to the target branch
+        // Switch the working directory to the target workspace
         if !json_output {
-            println!("Checking out branch: {}", branch_name);
+            println!("Checking out workspace: {}", workspace_name);
         }
-        vcs_repo.checkout_branch(branch_name)?;
+        vcs_repo.checkout_workspace(workspace_name)?;
     }
 
-    // ── Branch registration (unconditional — independent of services) ──
-    let normalized_branch = config.get_normalized_branch_name(branch_name);
+    // ── Workspace registration (unconditional — independent of services) ──
+    let normalized_branch = config.get_normalized_workspace_name(workspace_name);
     let parent_for_registry = if branch_created {
         parent_for_new_branch.as_deref()
     } else {
@@ -6298,37 +6379,37 @@ async fn handle_switch_command(
     } else {
         None
     };
-    if let Err(e) = register_branch_in_state(
+    if let Err(e) = register_workspace_in_state(
         config,
         config_path,
-        branch_name,
+        workspace_name,
         parent_for_registry,
         worktree_path.clone(),
         cow_used_for_registry,
     ) {
-        log::warn!("Failed to register branch in devflow registry: {}", e);
+        log::warn!("Failed to register workspace in devflow registry: {}", e);
     }
 
-    // ── Service branching (orchestrated across all auto_branch services) ──
+    // ── Service branching (orchestrated across all auto_workspace services) ──
     if !no_services {
         // Check if any services are configured before attempting service branching
         let has_services = !config.resolve_services().is_empty();
 
         if has_services {
             if !json_output {
-                println!("Switching service branches: {}", normalized_branch);
+                println!("Switching service workspaces: {}", normalized_branch);
             }
 
-            // Orchestrate switch across all auto-branch services
+            // Orchestrate switch across all auto-workspace services
             let service_parent = if branch_created {
                 parent_for_new_branch
                     .as_deref()
-                    .map(|p| config.get_normalized_branch_name(p))
+                    .map(|p| config.get_normalized_workspace_name(p))
             } else {
                 config_path.as_ref().and_then(|path| {
                     LocalStateManager::new()
                         .ok()
-                        .and_then(|state| state.get_branch(path, &normalized_branch))
+                        .and_then(|state| state.get_workspace(path, &normalized_branch))
                         .and_then(|b| b.parent)
                 })
             };
@@ -6354,11 +6435,11 @@ async fn handle_switch_command(
                     })
                     .collect();
                 json_summary = Some(serde_json::json!({
-                    "branch": normalized_branch,
+                    "workspace": normalized_branch,
                     "parent": if branch_created {
                         parent_for_new_branch
                             .as_deref()
-                            .map(|p| config.get_normalized_branch_name(p))
+                            .map(|p| config.get_normalized_workspace_name(p))
                     } else {
                         None
                     },
@@ -6380,12 +6461,12 @@ async fn handle_switch_command(
 
                 if success_count > 0 && fail_count == 0 {
                     println!(
-                        "Switched to service branch: {} ({} service(s))",
+                        "Switched to service workspace: {} ({} service(s))",
                         normalized_branch, success_count
                     );
                 } else if success_count > 0 {
                     println!(
-                        "Switched to service branch: {} ({}/{} service(s), {} failed)",
+                        "Switched to service workspace: {} ({}/{} service(s), {} failed)",
                         normalized_branch,
                         success_count,
                         results.len(),
@@ -6393,7 +6474,7 @@ async fn handle_switch_command(
                     );
                 } else if !results.is_empty() {
                     println!(
-                        "Warning: Failed to switch service branches on all {} service(s)",
+                        "Warning: Failed to switch service workspaces on all {} service(s)",
                         results.len()
                     );
                 }
@@ -6404,7 +6485,7 @@ async fn handle_switch_command(
                     println!("{}", serde_json::to_string_pretty(&summary)?);
                 }
                 anyhow::bail!(
-                    "Failed to switch service branches on {}/{} service(s)",
+                    "Failed to switch service workspaces on {}/{} service(s)",
                     fail_count,
                     results.len()
                 );
@@ -6413,11 +6494,11 @@ async fn handle_switch_command(
             // No services configured — VCS switch already done above
             if json_output {
                 json_summary = Some(serde_json::json!({
-                    "branch": normalized_branch,
+                    "workspace": normalized_branch,
                     "parent": if branch_created {
                         parent_for_new_branch
                             .as_deref()
-                            .map(|p| config.get_normalized_branch_name(p))
+                            .map(|p| config.get_normalized_workspace_name(p))
                     } else {
                         None
                     },
@@ -6428,22 +6509,22 @@ async fn handle_switch_command(
                 }));
             } else {
                 if worktree_enabled {
-                    println!("Selected branch/worktree: {}", normalized_branch);
+                    println!("Selected workspace/worktree: {}", normalized_branch);
                 } else {
-                    println!("Switched git branch: {}", normalized_branch);
+                    println!("Switched git workspace: {}", normalized_branch);
                 }
                 println!("  (no services configured — use 'devflow service add' to add one)");
             }
         }
     } else {
-        // Services skipped (--no-services) — branch registration already done above
+        // Services skipped (--no-services) — workspace registration already done above
         if json_output {
             json_summary = Some(serde_json::json!({
-                "branch": normalized_branch,
+                "workspace": normalized_branch,
                 "parent": if branch_created {
                     parent_for_new_branch
                         .as_deref()
-                        .map(|p| config.get_normalized_branch_name(p))
+                        .map(|p| config.get_normalized_workspace_name(p))
                 } else {
                     None
                 },
@@ -6455,12 +6536,12 @@ async fn handle_switch_command(
         } else {
             if worktree_enabled {
                 println!(
-                    "Selected branch/worktree (services skipped): {}",
+                    "Selected workspace/worktree (services skipped): {}",
                     normalized_branch
                 );
             } else {
                 println!(
-                    "Switched git branch (services skipped): {}",
+                    "Switched git workspace (services skipped): {}",
                     normalized_branch
                 );
             }
@@ -6494,31 +6575,31 @@ async fn handle_switch_to_main(
     no_verify: bool,
     non_interactive: bool,
 ) -> Result<()> {
-    let main_branch = &config.git.main_branch;
+    let main_workspace = &config.git.main_workspace;
     let shell_integration = shell_integration_enabled();
 
-    if let Err(e) = ensure_default_branch_registered(config, config_path) {
-        log::warn!("Failed to ensure default branch registration: {}", e);
+    if let Err(e) = ensure_default_workspace_registered(config, config_path) {
+        log::warn!("Failed to ensure default workspace registration: {}", e);
     }
 
     if !json_output {
-        println!("Switching to main branch: {}", main_branch);
+        println!("Switching to main workspace: {}", main_workspace);
     }
 
-    // ── Switch the git branch / worktree ───────────────────────────────
+    // ── Switch the git workspace / worktree ───────────────────────────────
     let worktree_enabled = config.worktree.as_ref().is_some_and(|wt| wt.enabled);
     let mut worktree_path: Option<String> = None;
 
     if worktree_enabled {
         let vcs_repo = vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
         let target_path = vcs_repo
-            .worktree_path(main_branch)?
+            .worktree_path(main_workspace)?
             .or_else(|| vcs_repo.main_worktree_dir());
 
         if let Some(wt_path) = target_path {
             // If we're already in the target directory, ensure main is checked out now.
             if std::env::current_dir().ok().as_deref() == Some(wt_path.as_path()) {
-                vcs_repo.checkout_branch(main_branch)?;
+                vcs_repo.checkout_workspace(main_workspace)?;
             }
 
             if !json_output {
@@ -6530,23 +6611,26 @@ async fn handle_switch_to_main(
             }
             worktree_path = Some(wt_path.display().to_string());
         } else {
-            vcs_repo.checkout_branch(main_branch)?;
+            vcs_repo.checkout_workspace(main_workspace)?;
         }
     } else {
-        // Classic mode — switch the working directory to the main branch
+        // Classic mode — switch the working directory to the main workspace
         let vcs_repo = vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
-        vcs_repo.checkout_branch(main_branch)?;
+        vcs_repo.checkout_workspace(main_workspace)?;
     }
 
-    if let Err(e) = register_branch_in_state(
+    if let Err(e) = register_workspace_in_state(
         config,
         config_path,
-        main_branch,
+        main_workspace,
         None,
         worktree_path.clone(),
         None,
     ) {
-        log::warn!("Failed to register main branch in devflow registry: {}", e);
+        log::warn!(
+            "Failed to register main workspace in devflow registry: {}",
+            e
+        );
     }
 
     // ── Switch services to main ────────────────────────────────────────
@@ -6556,18 +6640,18 @@ async fn handle_switch_to_main(
     if no_services {
         if json_output {
             json_summary = Some(serde_json::json!({
-                "branch": main_branch,
+                "workspace": main_workspace,
                 "worktree_path": worktree_path,
                 "services_skipped": true,
             }));
         } else {
             println!(
-                "Switched to main branch (services skipped): {}",
-                main_branch
+                "Switched to main workspace (services skipped): {}",
+                main_workspace
             );
         }
     } else if has_services {
-        let results = services::factory::orchestrate_switch(config, main_branch, None).await?;
+        let results = services::factory::orchestrate_switch(config, main_workspace, None).await?;
         let success_count = results.iter().filter(|r| r.success).count();
         let fail_count = results.iter().filter(|r| !r.success).count();
 
@@ -6583,7 +6667,7 @@ async fn handle_switch_to_main(
                 })
                 .collect();
             json_summary = Some(serde_json::json!({
-                "branch": main_branch,
+                "workspace": main_workspace,
                 "worktree_path": worktree_path,
                 "services_switched": success_count,
                 "services_failed": fail_count,
@@ -6591,13 +6675,13 @@ async fn handle_switch_to_main(
             }));
         } else if fail_count == 0 {
             println!(
-                "Switched to main branch: {} ({} service(s))",
-                main_branch, success_count
+                "Switched to main workspace: {} ({} service(s))",
+                main_workspace, success_count
             );
         } else {
             println!(
-                "Switched to main branch: {} ({}/{} service(s), {} failed)",
-                main_branch,
+                "Switched to main workspace: {} ({}/{} service(s), {} failed)",
+                main_workspace,
                 success_count,
                 results.len(),
                 fail_count
@@ -6618,12 +6702,12 @@ async fn handle_switch_to_main(
         // No services configured
         if json_output {
             json_summary = Some(serde_json::json!({
-                "branch": main_branch,
+                "workspace": main_workspace,
                 "worktree_path": worktree_path,
                 "services": "none_configured",
             }));
         } else {
-            println!("Switched to main branch: {}", main_branch);
+            println!("Switched to main workspace: {}", main_workspace);
             println!("  (no services configured — use 'devflow service add' to add one)");
         }
     }
@@ -6632,7 +6716,7 @@ async fn handle_switch_to_main(
     if !no_verify {
         run_hooks(
             config,
-            main_branch,
+            main_workspace,
             HookPhase::PostSwitch,
             json_output,
             non_interactive,
@@ -6649,7 +6733,7 @@ async fn handle_switch_to_main(
 
 async fn handle_remove_command(
     config: &Config,
-    branch_name: &str,
+    workspace_name: &str,
     force: bool,
     keep_services: bool,
     config_path: &Option<std::path::PathBuf>,
@@ -6660,18 +6744,18 @@ async fn handle_remove_command(
     // (e.g. service-only cleanup in a plain directory with .devflow.yml).
     let vcs_repo = vcs::detect_vcs_provider(".").ok();
 
-    // Safety check: don't remove main branch
-    if branch_name == config.git.main_branch {
-        anyhow::bail!("Cannot remove the main branch '{}'", branch_name);
+    // Safety check: don't remove main workspace
+    if workspace_name == config.git.main_workspace {
+        anyhow::bail!("Cannot remove the main workspace '{}'", workspace_name);
     }
 
-    // Safety check: don't remove the currently checked-out branch
+    // Safety check: don't remove the currently checked-out workspace
     if let Some(ref repo) = vcs_repo {
-        if let Ok(Some(current)) = repo.current_branch() {
-            if current == branch_name {
+        if let Ok(Some(current)) = repo.current_workspace() {
+            if current == workspace_name {
                 anyhow::bail!(
-                    "Cannot remove branch '{}' because it is currently checked out. Switch to another branch first.",
-                    branch_name
+                    "Cannot remove workspace '{}' because it is currently checked out. Switch to another workspace first.",
+                    workspace_name
                 );
             }
         }
@@ -6684,15 +6768,15 @@ async fn handle_remove_command(
         }
         println!("This will remove:");
         if vcs_repo.is_some() {
-            println!("  - VCS branch: {}", branch_name);
+            println!("  - VCS workspace: {}", workspace_name);
         }
         if let Some(ref repo) = vcs_repo {
-            if repo.worktree_path(branch_name)?.is_some() {
+            if repo.worktree_path(workspace_name)?.is_some() {
                 println!("  - Worktree directory");
             }
         }
         if !keep_services {
-            println!("  - Associated service branches");
+            println!("  - Associated service workspaces");
         }
         print!("Continue? [y/N] ");
         use std::io::Write;
@@ -6714,7 +6798,7 @@ async fn handle_remove_command(
 
     // 1. Remove worktree (if VCS is available and worktree exists)
     if let Some(ref repo) = vcs_repo {
-        if let Some(wt_path) = repo.worktree_path(branch_name)? {
+        if let Some(wt_path) = repo.worktree_path(workspace_name)? {
             worktree_path_str = Some(wt_path.display().to_string());
             if !json_output {
                 println!("Removing worktree at: {}", wt_path.display());
@@ -6736,11 +6820,11 @@ async fn handle_remove_command(
         }
     }
 
-    // 2. Delete service branches (unless --keep-services)
+    // 2. Delete service workspaces (unless --keep-services)
     if !keep_services {
-        let normalized = config.get_normalized_branch_name(branch_name);
+        let normalized = config.get_normalized_workspace_name(workspace_name);
         if !json_output {
-            println!("Deleting service branches for: {}", normalized);
+            println!("Deleting service workspaces for: {}", normalized);
         }
 
         let results = services::factory::orchestrate_delete(config, &normalized).await?;
@@ -6763,31 +6847,34 @@ async fn handle_remove_command(
         }
     }
 
-    // 3. Delete the VCS branch (if VCS is available)
+    // 3. Delete the VCS workspace (if VCS is available)
     if let Some(ref repo) = vcs_repo {
         if !json_output {
-            println!("Deleting branch: {}", branch_name);
+            println!("Deleting workspace: {}", workspace_name);
         }
-        if let Err(e) = repo.delete_branch(branch_name) {
-            log::warn!("Failed to delete branch '{}': {}", branch_name, e);
+        if let Err(e) = repo.delete_workspace(workspace_name) {
+            log::warn!("Failed to delete workspace '{}': {}", workspace_name, e);
             branch_delete_error = Some(e.to_string());
             if !json_output {
-                println!("Warning: Failed to delete branch: {}", e);
+                println!("Warning: Failed to delete workspace: {}", e);
             }
         } else {
             branch_deleted = true;
             if !json_output {
-                println!("Branch deleted: {}", branch_name);
+                println!("Workspace deleted: {}", workspace_name);
             }
         }
     }
 
-    // 4. Unregister the branch from local devflow registry
+    // 4. Unregister the workspace from local devflow registry
     if let Some(ref path) = config_path {
         if let Ok(mut state) = LocalStateManager::new() {
-            let normalized = config.get_normalized_branch_name(branch_name);
-            if let Err(e) = state.unregister_branch(path, &normalized) {
-                log::warn!("Failed to unregister branch from devflow registry: {}", e);
+            let normalized = config.get_normalized_workspace_name(workspace_name);
+            if let Err(e) = state.unregister_workspace(path, &normalized) {
+                log::warn!(
+                    "Failed to unregister workspace from devflow registry: {}",
+                    e
+                );
             }
         }
     }
@@ -6797,7 +6884,7 @@ async fn handle_remove_command(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "status": if service_failures == 0 && branch_delete_error.is_none() { "ok" } else { "error" },
-                "branch": branch_name,
+                "workspace": workspace_name,
                 "branch_deleted": branch_deleted,
                 "branch_delete_error": branch_delete_error.clone(),
                 "worktree_removed": worktree_removed,
@@ -6808,21 +6895,28 @@ async fn handle_remove_command(
             }))?
         );
     } else if service_failures == 0 && branch_delete_error.is_none() {
-        println!("Branch '{}' removed successfully.", branch_name);
+        println!("Workspace '{}' removed successfully.", workspace_name);
     } else {
-        println!("Branch '{}' removal completed with errors.", branch_name);
+        println!(
+            "Workspace '{}' removal completed with errors.",
+            workspace_name
+        );
     }
 
     if service_failures > 0 {
         anyhow::bail!(
-            "Failed to remove service branches on {}/{} service(s)",
+            "Failed to remove service workspaces on {}/{} service(s)",
             service_failures,
             service_results.len()
         );
     }
 
     if let Some(error) = branch_delete_error {
-        anyhow::bail!("Failed to delete VCS branch '{}': {}", branch_name, error);
+        anyhow::bail!(
+            "Failed to delete VCS workspace '{}': {}",
+            workspace_name,
+            error
+        );
     }
 
     Ok(())
@@ -6831,10 +6925,10 @@ async fn handle_remove_command(
 /// Handle `devflow destroy` — tear down the entire devflow project.
 ///
 /// This is the inverse of `devflow init`. It removes:
-///   1. All service data (containers, databases, branches) via destroy_project()
+///   1. All service data (containers, databases, workspaces) via destroy_project()
 ///   2. Git worktrees created by devflow
 ///   3. VCS hooks installed by devflow
-///   4. Branch registry and local state for this project
+///   4. Workspace registry and local state for this project
 ///   5. Hook approvals for this project
 ///   6. Configuration files (.devflow.yml, .devflow.local.yml)
 async fn handle_destroy_project(
@@ -6894,7 +6988,7 @@ async fn handle_destroy_project(
         if !service_configs.is_empty() {
             println!("  Services ({}):", service_configs.len());
             for svc in &service_configs {
-                println!("    - {} (all branches and data)", svc.name);
+                println!("    - {} (all workspaces and data)", svc.name);
             }
         } else {
             println!("  Services: none configured");
@@ -6911,7 +7005,7 @@ async fn handle_destroy_project(
             println!("  VCS hooks: will be uninstalled");
         }
 
-        println!("  Branch registry: will be cleared");
+        println!("  Workspace registry: will be cleared");
 
         if config_file_path.exists() {
             println!("  Config: {} (will be deleted)", config_file_path.display());
@@ -6952,18 +7046,18 @@ async fn handle_destroy_project(
             Ok(provider) => {
                 if provider.supports_destroy() {
                     match provider.destroy_project().await {
-                        Ok(branches) => {
+                        Ok(workspaces) => {
                             if !json_output {
                                 println!(
-                                    "  Destroyed '{}': {} branch(es) removed",
+                                    "  Destroyed '{}': {} workspace(es) removed",
                                     svc_config.name,
-                                    branches.len()
+                                    workspaces.len()
                                 );
                             }
                             destroyed_services.push(serde_json::json!({
                                 "service": svc_config.name,
                                 "success": true,
-                                "branches_destroyed": branches,
+                                "workspaces_destroyed": workspaces,
                             }));
                         }
                         Err(e) => {
@@ -6982,15 +7076,15 @@ async fn handle_destroy_project(
                         }
                     }
                 } else {
-                    // Provider doesn't support destroy — try deleting all branches individually
-                    match provider.list_branches().await {
-                        Ok(branches) => {
+                    // Provider doesn't support destroy — try deleting all workspaces individually
+                    match provider.list_workspaces().await {
+                        Ok(workspaces) => {
                             let mut deleted = 0;
-                            for branch in &branches {
-                                if let Err(e) = provider.delete_branch(&branch.name).await {
+                            for workspace in &workspaces {
+                                if let Err(e) = provider.delete_workspace(&workspace.name).await {
                                     log::warn!(
-                                        "Failed to delete branch '{}' on '{}': {}",
-                                        branch.name,
+                                        "Failed to delete workspace '{}' on '{}': {}",
+                                        workspace.name,
                                         svc_config.name,
                                         e
                                     );
@@ -7000,9 +7094,9 @@ async fn handle_destroy_project(
                             }
                             if !json_output {
                                 println!(
-                                    "  Deleted {}/{} branch(es) from '{}'",
+                                    "  Deleted {}/{} workspace(es) from '{}'",
                                     deleted,
-                                    branches.len(),
+                                    workspaces.len(),
                                     svc_config.name
                                 );
                             }
@@ -7014,7 +7108,7 @@ async fn handle_destroy_project(
                         }
                         Err(e) => {
                             log::warn!(
-                                "Failed to list branches for service '{}': {}",
+                                "Failed to list workspaces for service '{}': {}",
                                 svc_config.name,
                                 e
                             );
@@ -7095,7 +7189,7 @@ async fn handle_destroy_project(
         }
     }
 
-    // 4. Clear local state (branch registry, services, current branch)
+    // 4. Clear local state (workspace registry, services, current workspace)
     if let Some(ref path) = config_path {
         if let Ok(mut state_mgr) = LocalStateManager::new() {
             if let Err(e) = state_mgr.remove_project(path) {
@@ -7106,7 +7200,7 @@ async fn handle_destroy_project(
             } else {
                 state_cleared = true;
                 if !json_output {
-                    println!("Cleared project state and branch registry.");
+                    println!("Cleared project state and workspace registry.");
                 }
             }
         }
@@ -7201,41 +7295,41 @@ async fn handle_merge_command(
 
     let initial_dir = std::env::current_dir().context("Failed to get current directory")?;
 
-    // Determine source branch (current branch)
+    // Determine source workspace (current workspace)
     let source = vcs_repo
-        .current_branch()?
-        .ok_or_else(|| anyhow::anyhow!("Could not determine current branch (detached HEAD?)"))?;
+        .current_workspace()?
+        .ok_or_else(|| anyhow::anyhow!("Could not determine current workspace (detached HEAD?)"))?;
 
-    // Determine target branch
-    let target_branch = target.unwrap_or(&config.git.main_branch);
+    // Determine target workspace
+    let target_workspace = target.unwrap_or(&config.git.main_workspace);
 
-    if !vcs_repo.branch_exists(target_branch)? {
+    if !vcs_repo.workspace_exists(target_workspace)? {
         anyhow::bail!(
-            "Target branch '{}' does not exist. Run 'devflow list' to see available branches.",
-            target_branch
+            "Target workspace '{}' does not exist. Run 'devflow list' to see available workspaces.",
+            target_workspace
         );
     }
 
-    if source == target_branch {
-        anyhow::bail!("Source and target branch are the same: '{}'", source);
+    if source == target_workspace {
+        anyhow::bail!("Source and target workspace are the same: '{}'", source);
     }
 
-    // If a dedicated worktree already exists for the target branch, perform the
-    // merge there to avoid checking out a branch that may be locked elsewhere.
+    // If a dedicated worktree already exists for the target workspace, perform the
+    // merge there to avoid checking out a workspace that may be locked elsewhere.
     let merge_dir = vcs_repo
-        .worktree_path(target_branch)?
+        .worktree_path(target_workspace)?
         .unwrap_or_else(|| initial_dir.clone());
 
     if dry_run {
         if json_output {
-            let normalized = config.get_normalized_branch_name(&source);
+            let normalized = config.get_normalized_workspace_name(&source);
             let has_worktree = vcs_repo.worktree_path(&source)?.is_some();
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "dry_run": true,
                     "source": source,
-                    "target": target_branch,
+                    "target": target_workspace,
                     "merge_directory": merge_dir,
                     "cleanup": cleanup,
                     "has_worktree": has_worktree,
@@ -7245,10 +7339,10 @@ async fn handle_merge_command(
         } else {
             println!("Merge plan:");
             println!("  Source: {}", source);
-            println!("  Target: {}", target_branch);
+            println!("  Target: {}", target_workspace);
             if cleanup {
                 println!(
-                    "  Cleanup: will delete source branch, worktree, and service branches after merge"
+                    "  Cleanup: will delete source workspace, worktree, and service workspaces after merge"
                 );
             }
             println!("\n[dry-run] No changes made.");
@@ -7259,27 +7353,29 @@ async fn handle_merge_command(
     if !json_output {
         println!("Merge plan:");
         println!("  Source: {}", source);
-        println!("  Target: {}", target_branch);
+        println!("  Target: {}", target_workspace);
         if cleanup {
             println!(
-                "  Cleanup: will delete source branch, worktree, and service branches after merge"
+                "  Cleanup: will delete source workspace, worktree, and service workspaces after merge"
             );
         }
     }
 
     // Perform the merge using git CLI (git2 merge is complex; shelling out is more reliable)
     if merge_dir == initial_dir {
-        // Merge in the current worktree, so we must first move to target branch.
-        vcs_repo.checkout_branch(target_branch).with_context(|| {
-            format!(
-                "Failed to switch to target branch '{}' before merge",
-                target_branch
-            )
-        })?;
+        // Merge in the current worktree, so we must first move to target workspace.
+        vcs_repo
+            .checkout_workspace(target_workspace)
+            .with_context(|| {
+                format!(
+                    "Failed to switch to target workspace '{}' before merge",
+                    target_workspace
+                )
+            })?;
     }
 
     if !json_output {
-        println!("\nMerging '{}' into '{}'...", source, target_branch);
+        println!("\nMerging '{}' into '{}'...", source, target_workspace);
         if merge_dir != initial_dir {
             println!("Using target worktree: {}", merge_dir.display());
         }
@@ -7307,7 +7403,7 @@ async fn handle_merge_command(
     // Cleanup if requested
     if cleanup {
         if !json_output {
-            println!("\nCleaning up source branch '{}'...", source);
+            println!("\nCleaning up source workspace '{}'...", source);
         }
 
         let mut worktree_removed = false;
@@ -7341,10 +7437,10 @@ async fn handle_merge_command(
             }
         }
 
-        // Delete VCS branch
-        // If this invocation is still on the source branch, detach first so the
-        // branch becomes deletable.
-        if let Ok(Some(current)) = vcs_repo.current_branch() {
+        // Delete VCS workspace
+        // If this invocation is still on the source workspace, detach first so the
+        // workspace becomes deletable.
+        if let Ok(Some(current)) = vcs_repo.current_workspace() {
             if current == source {
                 let detach_status = tokio::process::Command::new("git")
                     .args(["checkout", "--detach"])
@@ -7355,14 +7451,14 @@ async fn handle_merge_command(
                     Ok(s) if s.success() => {}
                     Ok(s) => {
                         log::warn!(
-                            "Failed to detach HEAD before deleting branch '{}': exit code {:?}",
+                            "Failed to detach HEAD before deleting workspace '{}': exit code {:?}",
                             source,
                             s.code()
                         );
                     }
                     Err(e) => {
                         log::warn!(
-                            "Failed to detach HEAD before deleting branch '{}': {}",
+                            "Failed to detach HEAD before deleting workspace '{}': {}",
                             source,
                             e
                         );
@@ -7371,20 +7467,20 @@ async fn handle_merge_command(
             }
         }
 
-        if let Err(e) = vcs_repo.delete_branch(&source) {
-            log::warn!("Failed to delete branch '{}': {}", source, e);
+        if let Err(e) = vcs_repo.delete_workspace(&source) {
+            log::warn!("Failed to delete workspace '{}': {}", source, e);
             if !json_output {
-                println!("Warning: Failed to delete branch: {}", e);
+                println!("Warning: Failed to delete workspace: {}", e);
             }
         } else {
             branch_deleted = true;
             if !json_output {
-                println!("Deleted branch: {}", source);
+                println!("Deleted workspace: {}", source);
             }
         }
 
-        // Delete service branches across all auto-branch services
-        let normalized = config.get_normalized_branch_name(&source);
+        // Delete service workspaces across all auto-workspace services
+        let normalized = config.get_normalized_workspace_name(&source);
         let results = services::factory::orchestrate_delete(config, &normalized).await;
         match results {
             Ok(results) => {
@@ -7404,9 +7500,9 @@ async fn handle_merge_command(
                 }
             }
             Err(e) => {
-                log::warn!("Failed to delete service branches: {}", e);
+                log::warn!("Failed to delete service workspaces: {}", e);
                 if !json_output {
-                    println!("Warning: Failed to delete service branches: {}", e);
+                    println!("Warning: Failed to delete service workspaces: {}", e);
                 }
             }
         }
@@ -7428,7 +7524,7 @@ async fn handle_merge_command(
             serde_json::to_string_pretty(&serde_json::json!({
                 "status": "ok",
                 "source": source,
-                "target": target_branch,
+                "target": target_workspace,
                 "cleanup": cleanup_result,
             }))?
         );
@@ -7455,31 +7551,31 @@ fn show_effective_config(effective_config: &EffectiveConfig) -> Result<()> {
         println!("  ✅ Git hooks are enabled");
     }
 
-    if effective_config.is_current_branch_disabled() {
-        println!("  ❌ Current branch operations are DISABLED");
+    if effective_config.is_current_workspace_disabled() {
+        println!("  ❌ Current workspace operations are DISABLED");
     } else {
-        println!("  ✅ Current branch operations are enabled");
+        println!("  ✅ Current workspace operations are enabled");
     }
 
-    // Check if current git branch is disabled
-    match effective_config.check_current_git_branch_disabled() {
-        Ok(true) => println!("  ❌ Current Git branch is DISABLED"),
+    // Check if current git workspace is disabled
+    match effective_config.check_current_git_workspace_disabled() {
+        Ok(true) => println!("  ❌ Current Git workspace is DISABLED"),
         Ok(false) => {
             if let Ok(vcs_repo) = vcs::detect_vcs_provider(".") {
-                if let Ok(Some(branch)) = vcs_repo.current_branch() {
+                if let Ok(Some(workspace)) = vcs_repo.current_workspace() {
                     println!(
-                        "  ✅ Current {} branch '{}' is enabled",
+                        "  ✅ Current {} workspace '{}' is enabled",
                         vcs_repo.provider_name(),
-                        branch
+                        workspace
                     );
                 } else {
-                    println!("  ⚠️  Could not determine current branch");
+                    println!("  ⚠️  Could not determine current workspace");
                 }
             } else {
                 println!("  ⚠️  Not in a VCS repository");
             }
         }
-        Err(e) => println!("  ⚠️  Error checking current branch: {}", e),
+        Err(e) => println!("  ⚠️  Error checking current workspace: {}", e),
     }
 
     println!();
@@ -7490,11 +7586,11 @@ fn show_effective_config(effective_config: &EffectiveConfig) -> Result<()> {
         || effective_config.env_config.skip_hooks.is_some()
         || effective_config.env_config.auto_create.is_some()
         || effective_config.env_config.auto_switch.is_some()
-        || effective_config.env_config.branch_filter_regex.is_some()
-        || effective_config.env_config.disabled_branches.is_some()
+        || effective_config.env_config.workspace_filter_regex.is_some()
+        || effective_config.env_config.disabled_workspaces.is_some()
         || effective_config
             .env_config
-            .current_branch_disabled
+            .current_workspace_disabled
             .is_some()
         || effective_config.env_config.database_host.is_some()
         || effective_config.env_config.database_port.is_some()
@@ -7517,13 +7613,13 @@ fn show_effective_config(effective_config: &EffectiveConfig) -> Result<()> {
         if let Some(auto_switch) = effective_config.env_config.auto_switch {
             println!("  DEVFLOW_AUTO_SWITCH: {}", auto_switch);
         }
-        if let Some(ref regex) = effective_config.env_config.branch_filter_regex {
+        if let Some(ref regex) = effective_config.env_config.workspace_filter_regex {
             println!("  DEVFLOW_BRANCH_FILTER_REGEX: {}", regex);
         }
-        if let Some(ref branches) = effective_config.env_config.disabled_branches {
-            println!("  DEVFLOW_DISABLED_BRANCHES: {}", branches.join(","));
+        if let Some(ref workspaces) = effective_config.env_config.disabled_workspaces {
+            println!("  DEVFLOW_DISABLED_BRANCHES: {}", workspaces.join(","));
         }
-        if let Some(current_disabled) = effective_config.env_config.current_branch_disabled {
+        if let Some(current_disabled) = effective_config.env_config.current_workspace_disabled {
             println!("  DEVFLOW_CURRENT_BRANCH_DISABLED: {}", current_disabled);
         }
         if let Some(ref host) = effective_config.env_config.database_host {
@@ -7550,7 +7646,7 @@ fn show_effective_config(effective_config: &EffectiveConfig) -> Result<()> {
     if let Some(ref local_config) = effective_config.local_config {
         println!("  ✅ Local config file found (.devflow.local.yml)");
         if local_config.disabled.is_some()
-            || local_config.disabled_branches.is_some()
+            || local_config.disabled_workspaces.is_some()
             || local_config.database.is_some()
             || local_config.git.is_some()
             || local_config.behavior.is_some()
@@ -7790,20 +7886,20 @@ async fn handle_agent_command(
 ) -> Result<()> {
     match action {
         AgentCommands::Start {
-            branch,
+            workspace,
             command,
             prompt,
             dry_run,
         } => {
             let agent_config = config.agent.as_ref();
             let prefix = agent_config
-                .map(|a| a.branch_prefix.as_str())
+                .map(|a| a.workspace_prefix.as_str())
                 .unwrap_or("agent/");
 
-            let branch_name = if branch.starts_with(prefix) {
-                branch.clone()
+            let workspace_name = if workspace.starts_with(prefix) {
+                workspace.clone()
             } else {
-                format!("{}{}", prefix, branch)
+                format!("{}{}", prefix, workspace)
             };
 
             let agent_cmd = command
@@ -7818,13 +7914,13 @@ async fn handle_agent_command(
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&serde_json::json!({
-                            "branch": branch_name,
+                            "workspace": workspace_name,
                             "agent_command": agent_cmd,
                             "prompt": prompt_str,
                         }))?
                     );
                 } else {
-                    println!("Would create branch: {}", branch_name);
+                    println!("Would create workspace: {}", workspace_name);
                     println!("Would launch agent:  {}", agent_cmd);
                     if !prompt_str.is_empty() {
                         println!("With prompt:         {}", prompt_str);
@@ -7833,18 +7929,18 @@ async fn handle_agent_command(
                 return Ok(());
             }
 
-            // 1. Create the isolated branch + worktree via the switch handler
+            // 1. Create the isolated workspace + worktree via the switch handler
             if !json_output {
-                println!("Creating isolated branch: {}", branch_name);
+                println!("Creating isolated workspace: {}", workspace_name);
             }
             handle_switch_command(
                 config,
-                &branch_name,
+                &workspace_name,
                 config_path,
                 true,  // create
                 None,  // from (defaults to current)
                 false, // no_services
-                true,  // no_verify (agent branches skip hooks)
+                true,  // no_verify (agent workspaces skip hooks)
                 json_output,
                 true, // non_interactive
             )
@@ -7853,12 +7949,12 @@ async fn handle_agent_command(
             // 2. Record agent metadata in state
             if let Some(ref path) = config_path {
                 if let Ok(mut state) = LocalStateManager::new() {
-                    let normalized = config.get_normalized_branch_name(&branch_name);
-                    if let Some(mut branch_state) = state.get_branch(path, &normalized) {
+                    let normalized = config.get_normalized_workspace_name(&workspace_name);
+                    if let Some(mut branch_state) = state.get_workspace(path, &normalized) {
                         branch_state.agent_tool = Some(agent_cmd.clone());
                         branch_state.agent_status = Some("running".to_string());
                         branch_state.agent_started_at = Some(chrono::Utc::now());
-                        if let Err(e) = state.register_branch(path, branch_state) {
+                        if let Err(e) = state.register_workspace(path, branch_state) {
                             log::warn!("Failed to record agent state: {}", e);
                         }
                     }
@@ -7868,7 +7964,7 @@ async fn handle_agent_command(
             // 3. Resolve the worktree path for the agent to work in
             let work_dir = vcs::detect_vcs_provider(".")
                 .ok()
-                .and_then(|repo| repo.worktree_path(&branch_name).ok().flatten())
+                .and_then(|repo| repo.worktree_path(&workspace_name).ok().flatten())
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
             // 4. Build the launch command with proper shell escaping
@@ -7893,7 +7989,7 @@ async fn handle_agent_command(
                 .unwrap_or(false);
 
             if has_tmux {
-                let session_name = branch_name.replace('/', "-");
+                let session_name = workspace_name.replace('/', "-");
                 if !json_output {
                     println!("Launching agent in tmux session: {}", session_name);
                 }
@@ -7922,7 +8018,7 @@ async fn handle_agent_command(
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&serde_json::json!({
-                            "branch": branch_name,
+                            "workspace": workspace_name,
                             "agent_command": agent_cmd,
                             "tmux_session": session_name,
                             "worktree": work_dir.display().to_string(),
@@ -7947,7 +8043,7 @@ async fn handle_agent_command(
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&serde_json::json!({
-                            "branch": branch_name,
+                            "workspace": workspace_name,
                             "agent_command": agent_cmd,
                             "exit_code": agent_status.code(),
                             "worktree": work_dir.display().to_string(),
@@ -7962,14 +8058,14 @@ async fn handle_agent_command(
         AgentCommands::Status => {
             let state_manager = LocalStateManager::new()?;
             if let Some(ref path) = config_path {
-                let branches = state_manager.get_branches(path);
+                let workspaces = state_manager.get_workspaces(path);
                 let agent_prefix = config
                     .agent
                     .as_ref()
-                    .map(|a| a.branch_prefix.as_str())
+                    .map(|a| a.workspace_prefix.as_str())
                     .unwrap_or("agent/");
 
-                let agent_branches: Vec<_> = branches
+                let agent_branches: Vec<_> = workspaces
                     .iter()
                     .filter(|b| b.name.starts_with(agent_prefix))
                     .collect();
@@ -7979,7 +8075,7 @@ async fn handle_agent_command(
                         .iter()
                         .map(|b| {
                             serde_json::json!({
-                                "branch": b.name,
+                                "workspace": b.name,
                                 "created_at": b.created_at.to_rfc3339(),
                                 "worktree_path": b.worktree_path,
                                 "agent_tool": b.agent_tool,
@@ -7989,7 +8085,7 @@ async fn handle_agent_command(
                         .collect();
                     println!("{}", serde_json::to_string_pretty(&items)?);
                 } else if agent_branches.is_empty() {
-                    println!("No active agent branches.");
+                    println!("No active agent workspaces.");
                 } else {
                     println!("Agent Branches:");
                     for b in agent_branches {
@@ -8010,13 +8106,13 @@ async fn handle_agent_command(
             Ok(())
         }
 
-        AgentCommands::Context { format, branch } => {
-            let branch_name = if let Some(b) = branch {
+        AgentCommands::Context { format, workspace } => {
+            let workspace_name = if let Some(b) = workspace {
                 b
             } else {
                 match vcs::detect_vcs_provider(".") {
                     Ok(vcs_repo) => vcs_repo
-                        .current_branch()
+                        .current_workspace()
                         .ok()
                         .flatten()
                         .unwrap_or_else(|| "unknown".to_string()),
@@ -8025,8 +8121,18 @@ async fn handle_agent_command(
             };
 
             let fmt = if json_output { "json" } else { format.as_str() };
-            let output =
-                devflow_core::agent::generate_agent_context(config, &branch_name, fmt).await?;
+            let project_dir = config_path
+                .as_ref()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from("."));
+            let output = devflow_core::agent::generate_agent_context(
+                config,
+                &project_dir,
+                &workspace_name,
+                fmt,
+            )
+            .await?;
             println!("{}", output);
             Ok(())
         }
@@ -8362,10 +8468,10 @@ async fn handle_gc_command(
                     "project_path": o.project_path,
                     "sources": o.sources,
                     "sqlite_project_id": o.sqlite_project_id,
-                    "sqlite_branch_count": o.sqlite_branch_count,
+                    "sqlite_workspace_count": o.sqlite_workspace_count,
                     "container_names": o.container_names,
                     "local_state_service_count": o.local_state_service_count,
-                    "local_state_branch_count": o.local_state_branch_count,
+                    "local_state_workspace_count": o.local_state_workspace_count,
                 })
             })
             .collect();
@@ -8451,11 +8557,11 @@ async fn handle_gc_command(
             if let Some(ref path) = orphan.project_path {
                 println!("     Path: {} (missing)", path);
             }
-            if orphan.sqlite_branch_count > 0 {
+            if orphan.sqlite_workspace_count > 0 {
                 println!(
-                    "     SQLite: {} branch{}",
-                    orphan.sqlite_branch_count,
-                    if orphan.sqlite_branch_count == 1 {
+                    "     SQLite: {} workspace{}",
+                    orphan.sqlite_workspace_count,
+                    if orphan.sqlite_workspace_count == 1 {
                         ""
                     } else {
                         "es"
@@ -8473,17 +8579,17 @@ async fn handle_gc_command(
                     }
                 );
             }
-            if orphan.local_state_service_count > 0 || orphan.local_state_branch_count > 0 {
+            if orphan.local_state_service_count > 0 || orphan.local_state_workspace_count > 0 {
                 println!(
-                    "     Local state: {} service{}, {} branch{}",
+                    "     Local state: {} service{}, {} workspace{}",
                     orphan.local_state_service_count,
                     if orphan.local_state_service_count == 1 {
                         ""
                     } else {
                         "s"
                     },
-                    orphan.local_state_branch_count,
-                    if orphan.local_state_branch_count == 1 {
+                    orphan.local_state_workspace_count,
+                    if orphan.local_state_workspace_count == 1 {
                         ""
                     } else {
                         "es"
@@ -8578,8 +8684,8 @@ async fn handle_gc_command(
         .iter()
         .map(|o| {
             let mut details = Vec::new();
-            if o.sqlite_branch_count > 0 {
-                details.push(format!("{} sqlite branches", o.sqlite_branch_count));
+            if o.sqlite_workspace_count > 0 {
+                details.push(format!("{} sqlite workspaces", o.sqlite_workspace_count));
             }
             if !o.container_names.is_empty() {
                 details.push(format!("{} containers", o.container_names.len()));

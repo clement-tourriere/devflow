@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::cow_worktree;
-use super::{BranchInfo, VcsProvider, WorktreeCreateResult, WorktreeInfo};
+use super::{VcsProvider, WorkspaceInfo, WorktreeCreateResult, WorktreeInfo};
 
 pub struct GitRepository {
     repo: Repository,
@@ -24,7 +24,7 @@ impl GitRepository {
         let repo =
             Repository::init(path.as_ref()).context("Failed to initialize Git repository")?;
 
-        // Point HEAD at refs/heads/main so the default branch is always "main",
+        // Point HEAD at refs/heads/main so the default workspace is always "main",
         // regardless of the user's `init.defaultBranch` git setting.
         repo.set_head("refs/heads/main")
             .or_else(|_| {
@@ -34,17 +34,17 @@ impl GitRepository {
                     "HEAD",
                     "refs/heads/main",
                     true,
-                    "devflow: set default branch to main",
+                    "devflow: set default workspace to main",
                 )
                 .map(|_| ())
             })
-            .context("Failed to set default branch to main")?;
+            .context("Failed to set default workspace to main")?;
 
         let git_repo = GitRepository { repo };
 
-        // Create an initial empty commit so that the "main" branch actually
+        // Create an initial empty commit so that the "main" workspace actually
         // exists.  Without this the repo stays in "unborn HEAD" state and
-        // git reports zero branches, which breaks list/tui/switch.
+        // git reports zero workspaces, which breaks list/tui/switch.
         git_repo.create_initial_commit()?;
 
         Ok(git_repo)
@@ -63,14 +63,14 @@ impl GitRepository {
                 .peel_to_commit()
                 .context("HEAD does not point to a commit"),
             Err(e) if e.code() == ErrorCode::UnbornBranch => {
-                log::info!("Unborn branch detected — creating initial empty commit");
+                log::info!("Unborn workspace detected — creating initial empty commit");
                 self.create_initial_commit()
             }
             Err(e) => Err(e).context("Failed to get HEAD"),
         }
     }
 
-    /// Create an initial empty commit on the current unborn branch.
+    /// Create an initial empty commit on the current unborn workspace.
     fn create_initial_commit(&self) -> Result<git2::Commit<'_>> {
         let sig = self
             .repo
@@ -106,24 +106,25 @@ impl GitRepository {
             .context("Failed to find newly created commit")
     }
 
-    pub fn get_current_branch(&self) -> Result<Option<String>> {
+    pub fn get_current_workspace(&self) -> Result<Option<String>> {
         match self.repo.head() {
             Ok(head) => {
-                if let Some(branch_name) = head.shorthand() {
-                    Ok(Some(branch_name.to_string()))
+                if let Some(workspace_name) = head.shorthand() {
+                    Ok(Some(workspace_name.to_string()))
                 } else {
                     Ok(None)
                 }
             }
             Err(e) if e.code() == ErrorCode::UnbornBranch => {
-                // HEAD exists but points to a branch with no commits.
-                // Read the symbolic target of HEAD to get the branch name.
+                // HEAD exists but points to a workspace with no commits.
+                // Read the symbolic target of HEAD to get the workspace name.
                 match self.repo.find_reference("HEAD") {
                     Ok(head_ref) => {
                         if let Some(target) = head_ref.symbolic_target() {
                             // target is e.g. "refs/heads/main"
-                            let branch_name = target.strip_prefix("refs/heads/").unwrap_or(target);
-                            Ok(Some(branch_name.to_string()))
+                            let workspace_name =
+                                target.strip_prefix("refs/heads/").unwrap_or(target);
+                            Ok(Some(workspace_name.to_string()))
                         } else {
                             Ok(None)
                         }
@@ -135,52 +136,61 @@ impl GitRepository {
         }
     }
 
-    pub fn branch_exists(&self, branch_name: &str) -> Result<bool> {
-        match self.repo.find_branch(branch_name, git2::BranchType::Local) {
+    pub fn workspace_exists(&self, workspace_name: &str) -> Result<bool> {
+        match self
+            .repo
+            .find_branch(workspace_name, git2::BranchType::Local)
+        {
             Ok(_) => Ok(true),
             Err(e) => {
                 if e.code() == git2::ErrorCode::NotFound {
                     Ok(false)
                 } else {
-                    Err(anyhow::anyhow!("Error checking branch: {}", e))
+                    Err(anyhow::anyhow!("Error checking workspace: {}", e))
                 }
             }
         }
     }
 
-    pub fn detect_main_branch(&self) -> Result<Option<String>> {
-        // Strategy 1: Check for remote's default branch (most reliable)
-        if let Some(main_branch) = self.get_remote_default_branch()? {
-            log::debug!("Found remote default branch: {}", main_branch);
-            return Ok(Some(main_branch));
+    pub fn detect_main_workspace(&self) -> Result<Option<String>> {
+        // Strategy 1: Check for remote's default workspace (most reliable)
+        if let Some(main_workspace) = self.get_remote_default_workspace()? {
+            log::debug!("Found remote default workspace: {}", main_workspace);
+            return Ok(Some(main_workspace));
         }
 
-        // Strategy 2: Check common main branch names that exist locally
-        let common_main_branches = vec!["main", "master", "develop", "development"];
-        for branch_name in common_main_branches {
-            if self.branch_exists(branch_name)? {
-                log::debug!("Found local main branch: {}", branch_name);
-                return Ok(Some(branch_name.to_string()));
+        // Strategy 2: Check common main workspace names that exist locally
+        let common_main_workspacees = vec!["main", "master", "develop", "development"];
+        for workspace_name in common_main_workspacees {
+            if self.workspace_exists(workspace_name)? {
+                log::debug!("Found local main workspace: {}", workspace_name);
+                return Ok(Some(workspace_name.to_string()));
             }
         }
 
-        // Strategy 3: Find the local branch that tracks a remote main branch
-        if let Some(main_branch) = self.find_local_tracking_main_branch()? {
-            log::debug!("Found local branch tracking remote main: {}", main_branch);
-            return Ok(Some(main_branch));
+        // Strategy 3: Find the local workspace that tracks a remote main workspace
+        if let Some(main_workspace) = self.find_local_tracking_main_workspace()? {
+            log::debug!(
+                "Found local workspace tracking remote main: {}",
+                main_workspace
+            );
+            return Ok(Some(main_workspace));
         }
 
-        // Strategy 4: Use current branch as last resort (original behavior)
-        if let Some(current_branch) = self.get_current_branch()? {
-            log::debug!("Using current branch as fallback main: {}", current_branch);
-            return Ok(Some(current_branch));
+        // Strategy 4: Use current workspace as last resort (original behavior)
+        if let Some(current_workspace) = self.get_current_workspace()? {
+            log::debug!(
+                "Using current workspace as fallback main: {}",
+                current_workspace
+            );
+            return Ok(Some(current_workspace));
         }
 
         Ok(None)
     }
 
-    fn get_remote_default_branch(&self) -> Result<Option<String>> {
-        // Try to get the default branch from the remote
+    fn get_remote_default_workspace(&self) -> Result<Option<String>> {
+        // Try to get the default workspace from the remote
         let mut found_default = None;
 
         // Get all remotes
@@ -201,11 +211,11 @@ impl GitRepository {
                 let head_ref = format!("refs/remotes/{}/HEAD", remote_name);
                 if let Ok(reference) = self.repo.find_reference(&head_ref) {
                     if let Some(target) = reference.symbolic_target() {
-                        // Extract branch name from refs/remotes/origin/main -> main
+                        // Extract workspace name from refs/remotes/origin/main -> main
                         let prefix = format!("refs/remotes/{}/", remote_name);
                         if target.starts_with(&prefix) {
-                            let branch_name = target.strip_prefix(&prefix).unwrap();
-                            found_default = Some(branch_name.to_string());
+                            let workspace_name = target.strip_prefix(&prefix).unwrap();
+                            found_default = Some(workspace_name.to_string());
                             break;
                         }
                     }
@@ -216,19 +226,19 @@ impl GitRepository {
         Ok(found_default)
     }
 
-    fn find_local_tracking_main_branch(&self) -> Result<Option<String>> {
-        let branches = self.repo.branches(Some(git2::BranchType::Local))?;
+    fn find_local_tracking_main_workspace(&self) -> Result<Option<String>> {
+        let workspaces = self.repo.branches(Some(git2::BranchType::Local))?;
 
-        for branch_result in branches {
-            let (branch, _) = branch_result?;
-            if let Some(branch_name) = branch.name()? {
-                // Check if this branch tracks a remote main/master branch
-                if let Ok(upstream) = branch.upstream() {
+        for branch_result in workspaces {
+            let (workspace, _) = branch_result?;
+            if let Some(workspace_name) = workspace.name()? {
+                // Check if this workspace tracks a remote main/master workspace
+                if let Ok(upstream) = workspace.upstream() {
                     if let Some(upstream_name) = upstream.name()? {
-                        // Check if upstream is a main branch (contains main, master, etc.)
+                        // Check if upstream is a main workspace (contains main, master, etc.)
                         let upstream_lower = upstream_name.to_lowercase();
                         if upstream_lower.contains("main") || upstream_lower.contains("master") {
-                            return Ok(Some(branch_name.to_string()));
+                            return Ok(Some(workspace_name.to_string()));
                         }
                     }
                 }
@@ -240,31 +250,31 @@ impl GitRepository {
 
     #[allow(dead_code)]
     pub fn get_all_branches(&self) -> Result<Vec<String>> {
-        let branches = self
+        let workspaces = self
             .repo
             .branches(Some(git2::BranchType::Local))
-            .context("Failed to get branches")?;
+            .context("Failed to get workspaces")?;
 
-        let mut branch_names = Vec::new();
-        for branch in branches {
-            let (branch, _) = branch.context("Failed to get branch")?;
-            if let Some(name) = branch.name()? {
-                branch_names.push(name.to_string());
+        let mut workspace_names = Vec::new();
+        for workspace in workspaces {
+            let (workspace, _) = workspace.context("Failed to get workspace")?;
+            if let Some(name) = workspace.name()? {
+                workspace_names.push(name.to_string());
             }
         }
 
-        Ok(branch_names)
+        Ok(workspace_names)
     }
 
     fn generate_hook_script(&self) -> String {
         r#"#!/bin/sh
 # devflow auto-generated hook
-# This hook automatically creates service branches when switching Git branches
+# This hook automatically creates service workspaces when switching Git workspaces
 
-# For post-checkout hook, check if this is a branch checkout (not file checkout)
-# Parameters: $1=previous HEAD, $2=new HEAD, $3=checkout type (1=branch, 0=file)
+# For post-checkout hook, check if this is a workspace checkout (not file checkout)
+# Parameters: $1=previous HEAD, $2=new HEAD, $3=checkout type (1=workspace, 0=file)
 if [ "$3" = "0" ]; then
-    # This is a file checkout, not a branch checkout - skip devflow execution
+    # This is a file checkout, not a workspace checkout - skip devflow execution
     exit 0
 fi
 
@@ -281,21 +291,21 @@ if [ "$GIT_DIR" != "$GIT_COMMON_DIR" ]; then
     exit 0
 fi
 
-# Regular checkout: skip if same branch
+# Regular checkout: skip if same workspace
 PREV_BRANCH=$(git reflog | awk 'NR==1{ print $6; exit }')
 NEW_BRANCH=$(git reflog | awk 'NR==1{ print $8; exit }')
 
 if [ "$PREV_BRANCH" = "$NEW_BRANCH" ]; then
-    # This is the same branch checkout - skip devflow execution
+    # This is the same workspace checkout - skip devflow execution
     exit 0
 fi
 
 # Check if devflow is available
 if command -v devflow >/dev/null 2>&1; then
-    # Run devflow git-hook command to handle branch creation
+    # Run devflow git-hook command to handle workspace creation
     devflow git-hook
 else
-    echo "devflow not found in PATH, skipping service branch creation"
+    echo "devflow not found in PATH, skipping service workspace creation"
 fi
 "#
         .to_string()
@@ -347,38 +357,38 @@ fi
         self.repo.commondir().parent().map(|p| p.to_path_buf())
     }
 
-    /// Sanitize a branch name into a valid worktree name for git.
+    /// Sanitize a workspace name into a valid worktree name for git.
     /// Replaces `/` with `-` since worktree names are used as directory components.
-    fn worktree_name_for_branch(branch: &str) -> String {
-        branch.replace('/', "-")
+    fn worktree_name_for_branch(workspace: &str) -> String {
+        workspace.replace('/', "-")
     }
 }
 
 // ─── VcsProvider implementation ────────────────────────────────────────────
 
 impl VcsProvider for GitRepository {
-    fn current_branch(&self) -> Result<Option<String>> {
-        self.get_current_branch()
+    fn current_workspace(&self) -> Result<Option<String>> {
+        self.get_current_workspace()
     }
 
-    fn default_branch(&self) -> Result<Option<String>> {
-        self.detect_main_branch()
+    fn default_workspace(&self) -> Result<Option<String>> {
+        self.detect_main_workspace()
     }
 
-    fn list_branches(&self) -> Result<Vec<BranchInfo>> {
-        let current = self.get_current_branch()?;
-        let default = self.detect_main_branch()?;
+    fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
+        let current = self.get_current_workspace()?;
+        let default = self.detect_main_workspace()?;
 
-        let branches = self
+        let workspaces = self
             .repo
             .branches(Some(git2::BranchType::Local))
-            .context("Failed to list branches")?;
+            .context("Failed to list workspaces")?;
 
         let mut result = Vec::new();
-        for branch_result in branches {
-            let (branch, _) = branch_result?;
-            if let Some(name) = branch.name()? {
-                result.push(BranchInfo {
+        for branch_result in workspaces {
+            let (workspace, _) = branch_result?;
+            if let Some(name) = workspace.name()? {
+                result.push(WorkspaceInfo {
                     name: name.to_string(),
                     is_current: current.as_deref() == Some(name),
                     is_default: default.as_deref() == Some(name),
@@ -389,13 +399,13 @@ impl VcsProvider for GitRepository {
         Ok(result)
     }
 
-    fn create_branch(&self, name: &str, base: Option<&str>) -> Result<()> {
+    fn create_workspace(&self, name: &str, base: Option<&str>) -> Result<()> {
         // Resolve the base commit
         let base_commit = if let Some(base_name) = base {
             let obj = self
                 .repo
                 .revparse_single(base_name)
-                .with_context(|| format!("Failed to find base branch '{}'", base_name))?;
+                .with_context(|| format!("Failed to find base workspace '{}'", base_name))?;
             obj.peel_to_commit()
                 .context("Base reference is not a commit")?
         } else {
@@ -405,45 +415,45 @@ impl VcsProvider for GitRepository {
 
         self.repo
             .branch(name, &base_commit, false)
-            .with_context(|| format!("Failed to create branch '{}'", name))?;
+            .with_context(|| format!("Failed to create workspace '{}'", name))?;
 
         Ok(())
     }
 
-    fn delete_branch(&self, name: &str) -> Result<()> {
-        let mut branch = self
+    fn delete_workspace(&self, name: &str) -> Result<()> {
+        let mut workspace = self
             .repo
             .find_branch(name, git2::BranchType::Local)
             .with_context(|| {
                 format!(
-                    "Branch '{}' not found. Run 'devflow list' to see available branches.",
+                    "Workspace '{}' not found. Run 'devflow list' to see available workspaces.",
                     name
                 )
             })?;
-        branch
+        workspace
             .delete()
-            .with_context(|| format!("Failed to delete branch '{}'", name))?;
+            .with_context(|| format!("Failed to delete workspace '{}'", name))?;
         Ok(())
     }
 
-    fn branch_exists(&self, name: &str) -> Result<bool> {
-        self.branch_exists(name)
+    fn workspace_exists(&self, name: &str) -> Result<bool> {
+        self.workspace_exists(name)
     }
 
-    fn checkout_branch(&self, name: &str) -> Result<()> {
-        let branch = self
+    fn checkout_workspace(&self, name: &str) -> Result<()> {
+        let workspace = self
             .repo
             .find_branch(name, git2::BranchType::Local)
             .with_context(|| {
                 format!(
-                    "Branch '{}' not found. Run 'devflow list' to see available branches.",
+                    "Workspace '{}' not found. Run 'devflow list' to see available workspaces.",
                     name
                 )
             })?;
-        let reference = branch.into_reference();
+        let reference = workspace.into_reference();
         let commit = reference
             .peel_to_commit()
-            .context("Branch does not point to a commit")?;
+            .context("Workspace does not point to a commit")?;
         let tree = commit.tree().context("Failed to get tree from commit")?;
 
         self.repo
@@ -451,14 +461,14 @@ impl VcsProvider for GitRepository {
                 tree.as_object(),
                 Some(git2::build::CheckoutBuilder::new().safe()),
             )
-            .with_context(|| format!("Failed to checkout tree for branch '{}'", name))?;
+            .with_context(|| format!("Failed to checkout tree for workspace '{}'", name))?;
 
         let refname = reference
             .name()
-            .ok_or_else(|| anyhow::anyhow!("Branch reference has invalid UTF-8 name"))?;
+            .ok_or_else(|| anyhow::anyhow!("Workspace reference has invalid UTF-8 name"))?;
         self.repo
             .set_head(refname)
-            .with_context(|| format!("Failed to set HEAD to branch '{}'", name))?;
+            .with_context(|| format!("Failed to set HEAD to workspace '{}'", name))?;
 
         Ok(())
     }
@@ -475,7 +485,7 @@ impl VcsProvider for GitRepository {
         let mut result = Vec::new();
 
         // Add the main worktree
-        let current_branch = self.get_current_branch()?;
+        let current_workspace = self.get_current_workspace()?;
         let repo_root = self
             .repo
             .workdir()
@@ -484,7 +494,7 @@ impl VcsProvider for GitRepository {
 
         result.push(WorktreeInfo {
             path: repo_root,
-            branch: current_branch,
+            workspace: current_workspace,
             is_main: true,
             is_locked: false,
         });
@@ -498,7 +508,7 @@ impl VcsProvider for GitRepository {
             if let Ok(wt) = self.repo.find_worktree(name) {
                 let wt_path = wt.path().to_path_buf();
 
-                // Get branch for this worktree by opening the repo at that path
+                // Get workspace for this worktree by opening the repo at that path
                 let wt_branch = if let Ok(wt_repo) = Repository::open(&wt_path) {
                     if let Ok(head) = wt_repo.head() {
                         head.shorthand().map(|s| s.to_string())
@@ -513,7 +523,7 @@ impl VcsProvider for GitRepository {
 
                 result.push(WorktreeInfo {
                     path: wt_path,
-                    branch: wt_branch,
+                    workspace: wt_branch,
                     is_main: false,
                     is_locked,
                 });
@@ -523,8 +533,8 @@ impl VcsProvider for GitRepository {
         Ok(result)
     }
 
-    fn create_worktree(&self, branch: &str, path: &Path) -> Result<WorktreeCreateResult> {
-        let wt_name = Self::worktree_name_for_branch(branch);
+    fn create_worktree(&self, workspace: &str, path: &Path) -> Result<WorktreeCreateResult> {
+        let wt_name = Self::worktree_name_for_branch(workspace);
 
         // If stale worktree metadata exists for this name (path removed on disk),
         // prune it first so creation can proceed.
@@ -549,17 +559,17 @@ impl VcsProvider for GitRepository {
             }
         }
 
-        // Check if the branch already exists
-        let branch_exists = self.branch_exists(branch)?;
+        // Check if the workspace already exists
+        let workspace_exists = self.workspace_exists(workspace)?;
 
-        // If the branch doesn't exist yet, create it from HEAD so both the CoW
+        // If the workspace doesn't exist yet, create it from HEAD so both the CoW
         // fast path and the git2 fallback can reference it.
         // On unborn repos this auto-creates an initial empty commit.
-        if !branch_exists {
+        if !workspace_exists {
             let head_commit = self.head_commit_or_init()?;
             self.repo
-                .branch(branch, &head_commit, false)
-                .with_context(|| format!("Failed to create branch '{}'", branch))?;
+                .branch(workspace, &head_commit, false)
+                .with_context(|| format!("Failed to create workspace '{}'", workspace))?;
         }
 
         // ── CoW fast path ──────────────────────────────────────────────
@@ -567,11 +577,11 @@ impl VcsProvider for GitRepository {
         // This avoids a full checkout by registering the worktree with
         // --no-checkout and then copying files with Copy-on-Write.
         let source_dir = self.get_repo_root();
-        match cow_worktree::create_cow_worktree(source_dir, path, branch) {
+        match cow_worktree::create_cow_worktree(source_dir, path, workspace) {
             Ok(true) => {
                 log::info!(
                     "Created worktree for '{}' at '{}' using Copy-on-Write",
-                    branch,
+                    workspace,
                     path.display()
                 );
                 return Ok(WorktreeCreateResult { cow_used: true });
@@ -587,8 +597,8 @@ impl VcsProvider for GitRepository {
         // ── Standard git2 worktree path ────────────────────────────────
         let branch_ref = self
             .repo
-            .find_branch(branch, git2::BranchType::Local)
-            .with_context(|| format!("Branch '{}' not found", branch))?;
+            .find_branch(workspace, git2::BranchType::Local)
+            .with_context(|| format!("Workspace '{}' not found", workspace))?;
         let reference = branch_ref.into_reference();
 
         let mut opts = WorktreeAddOptions::new();
@@ -631,7 +641,7 @@ impl VcsProvider for GitRepository {
         anyhow::bail!("No worktree found at path '{}'", path.display());
     }
 
-    fn worktree_path(&self, branch: &str) -> Result<Option<PathBuf>> {
+    fn worktree_path(&self, workspace: &str) -> Result<Option<PathBuf>> {
         let worktree_names = self.repo.worktrees().context("Failed to list worktrees")?;
 
         for wt_name in worktree_names.iter() {
@@ -639,10 +649,10 @@ impl VcsProvider for GitRepository {
 
             if let Ok(wt) = self.repo.find_worktree(name) {
                 let wt_path = wt.path().to_path_buf();
-                // Check if this worktree has the target branch checked out
+                // Check if this worktree has the target workspace checked out
                 if let Ok(wt_repo) = Repository::open(&wt_path) {
                     if let Ok(head) = wt_repo.head() {
-                        if head.shorthand() == Some(branch) {
+                        if head.shorthand() == Some(workspace) {
                             return Ok(Some(wt_path));
                         }
                     }
@@ -650,9 +660,9 @@ impl VcsProvider for GitRepository {
             }
         }
 
-        // Also check if the main worktree has this branch
-        if let Some(current) = self.get_current_branch()? {
-            if current == branch {
+        // Also check if the main worktree has this workspace
+        if let Some(current) = self.get_current_workspace()? {
+            if current == workspace {
                 let main_path = self
                     .repo
                     .workdir()

@@ -16,16 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Copy-on-Write worktrees** — Worktree directories are cloned using APFS/ZFS/Btrfs/XFS reflinks for near-instant creation.
 - **Hook approval system** — Hooks require user approval before first execution; approvals persist across sessions.
 - **`devflow capabilities`** — Machine-readable automation contract for AI agents and CI pipelines.
-- **`devflow cleanup`** — Remove old service branches, keeping the most recent N.
-- **`devflow remove`** — Comprehensive cleanup: deletes Git branch, worktree, and all associated service branches.
-- **`devflow merge`** — Merge current branch into target with optional cleanup of source branch.
-- **`devflow seed`** — Seed branches from PostgreSQL URLs, local dump files, or S3 objects.
-- **`devflow logs`** — Show container logs for local backend branches.
+- **`devflow cleanup`** — Remove old service workspaces, keeping the most recent N.
+- **`devflow remove`** — Comprehensive cleanup: deletes Git workspace, worktree, and all associated service workspaces.
+- **`devflow merge`** — Merge current workspace into target with optional cleanup of source workspace.
+- **`devflow seed`** — Seed workspaces from PostgreSQL URLs, local dump files, or S3 objects.
+- **`devflow logs`** — Show container logs for local backend workspaces.
 - **`devflow config -v`** — Show effective configuration with precedence details.
 - **Shell integration** — `eval "$(devflow shell-init)"` for automatic `cd` into worktrees after switch.
 - **Docker Compose auto-detection** — `devflow init` reads `docker-compose.yml` to pre-fill PostgreSQL config.
-- **Branch filter regex** — `git.branch_filter_regex` and `DEVFLOW_BRANCH_FILTER_REGEX` to limit which branches get service environments.
-- **`devflow switch --execute`** — Run a command after switching branches.
+- **Workspace filter regex** — `git.workspace_filter_regex` and `DEVFLOW_BRANCH_FILTER_REGEX` to limit which workspaces get service environments.
+- **`devflow switch --execute`** — Run a command after switching workspaces.
 - **`devflow switch --dry-run`** — Simulate switching without performing operations.
 - **15 hook lifecycle phases** — Including `pre-service-create`, `post-service-create`, `pre-service-delete`, `post-service-delete`, `post-service-switch`.
 - **MiniJinja template engine** for hooks with custom filters: `sanitize`, `sanitize_db`, `hash_port`.
@@ -59,5 +59,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release as `pgbranch`.
 - Single PostgreSQL backend with Docker container management.
-- Basic branch create/delete/switch lifecycle.
+- Basic workspace create/delete/switch lifecycle.
 - Git hook installation for automatic branching on checkout.

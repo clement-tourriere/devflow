@@ -7,14 +7,14 @@ export interface ProjectDetail {
   name: string;
   path: string;
   has_config: boolean;
-  current_branch: string | null;
+  current_workspace: string | null;
   service_count: number;
-  branch_count: number;
+  workspace_count: number;
   worktree_enabled: boolean;
   vcs_type: string | null;
 }
 
-export interface BranchEntry {
+export interface WorkspaceEntry {
   name: string;
   is_current: boolean;
   is_default: boolean;
@@ -26,8 +26,8 @@ export interface BranchEntry {
   agent_status: string | null;
 }
 
-export interface BranchesResponse {
-  branches: BranchEntry[];
+export interface WorkspacesResponse {
+  workspaces: WorkspaceEntry[];
   current: string | null;
 }
 
@@ -35,19 +35,19 @@ export interface ServiceEntry {
   name: string;
   service_type: string;
   provider_type: string;
-  auto_branch: boolean;
+  auto_workspace: boolean;
 }
 
-export interface ServiceBranchStatus {
+export interface ServiceWorkspaceStatus {
   service_name: string;
-  branch_name: string;
+  workspace_name: string;
   state: string | null;
 }
 
-export interface ServiceBranchInfo {
+export interface ServiceWorkspaceInfo {
   name: string;
   created_at: string | null;
-  parent_branch: string | null;
+  parent_workspace: string | null;
   database_name: string;
   state: string | null;
 }
@@ -83,11 +83,13 @@ export interface OrchestrationResult {
   message: string;
 }
 
-export interface CreateBranchResult {
+export interface CreateWorkspaceResult {
   services: OrchestrationResult[];
   worktree_path: string | null;
   cow_used: boolean;
 }
+
+export type WorkspaceCreationMode = "default" | "worktree" | "branch";
 
 export interface HookPhaseEntry {
   phase: string;
@@ -98,6 +100,11 @@ export interface HookInfo {
   name: string;
   command: string;
   is_extended: boolean;
+}
+
+export interface VcsHooksActionResult {
+  installed: boolean;
+  detail: string;
 }
 
 export interface ProxyStatus {
@@ -115,7 +122,7 @@ export interface ContainerEntry {
   port: number;
   project: string | null;
   service: string | null;
-  branch: string | null;
+  workspace: string | null;
   https_url: string;
 }
 
@@ -130,7 +137,7 @@ export interface AddServiceRequest {
   name: string;
   service_type: string;
   provider_type: string;
-  auto_branch?: boolean;
+  auto_workspace?: boolean;
   image?: string;
   seed_from?: string;
 }
@@ -160,7 +167,7 @@ export interface DestroyResult {
 export interface ServiceDestroyResult {
   name: string;
   success: boolean;
-  branches_destroyed: string[];
+  workspaces_destroyed: string[];
   error: string | null;
 }
 
@@ -169,10 +176,10 @@ export interface OrphanProjectEntry {
   project_path: string | null;
   sources: string[];
   sqlite_project_id: string | null;
-  sqlite_branch_count: number;
+  sqlite_workspace_count: number;
   container_names: string[];
   local_state_service_count: number;
-  local_state_branch_count: number;
+  local_state_workspace_count: number;
 }
 
 export interface OrphanCleanupResult {
@@ -193,7 +200,7 @@ export interface TerminalSessionInfo {
   id: string;
   label: string;
   project_path: string | null;
-  branch_name: string | null;
+  workspace_name: string | null;
   service_name: string | null;
   working_directory: string;
   status: "Running" | "Exited";

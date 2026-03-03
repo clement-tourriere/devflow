@@ -1,13 +1,13 @@
 use super::docker::{ContainerStatus, DockerRuntime};
-use super::model::{Branch, BranchState};
+use super::model::{BranchState, Workspace};
 
 /// Determine state changes needed by checking Docker container states.
 /// Returns a list of (branch_id, new_state) pairs.
 pub async fn compute_state_changes(
     runtime: &DockerRuntime,
-    branches: Vec<Branch>,
+    workspaces: Vec<Workspace>,
 ) -> Vec<(String, BranchState)> {
-    if branches.is_empty() {
+    if workspaces.is_empty() {
         return vec![];
     }
 
@@ -16,11 +16,11 @@ pub async fn compute_state_changes(
 
     if !doctor.available {
         log::warn!(
-            "Docker unavailable during reconciliation: {}; normalizing provisioning branches only",
+            "Docker unavailable during reconciliation: {}; normalizing provisioning workspaces only",
             doctor.detail
         );
 
-        return branches
+        return workspaces
             .into_iter()
             .filter(|b| b.state == BranchState::Provisioning)
             .map(|b| (b.id, BranchState::Stopped))
@@ -28,16 +28,16 @@ pub async fn compute_state_changes(
     }
 
     let mut changes = vec![];
-    for branch in branches {
-        let next_state = match runtime.container_status(&branch.container_name).await {
+    for workspace in workspaces {
+        let next_state = match runtime.container_status(&workspace.container_name).await {
             Ok(ContainerStatus::Running) => BranchState::Running,
             Ok(ContainerStatus::Paused) => {
-                match runtime.unpause_branch(&branch.container_name).await {
+                match runtime.unpause_branch(&workspace.container_name).await {
                     Ok(()) => BranchState::Running,
                     Err(err) => {
                         log::warn!(
                             "Failed to unpause container '{}' during reconciliation: {}",
-                            branch.container_name,
+                            workspace.container_name,
                             err
                         );
                         BranchState::Failed
@@ -47,7 +47,7 @@ pub async fn compute_state_changes(
             Ok(ContainerStatus::Exited)
             | Ok(ContainerStatus::NotFound)
             | Ok(ContainerStatus::Other(_)) => {
-                if std::path::Path::new(&branch.data_dir).exists() {
+                if std::path::Path::new(&workspace.data_dir).exists() {
                     BranchState::Stopped
                 } else {
                     BranchState::Failed
@@ -56,14 +56,14 @@ pub async fn compute_state_changes(
             Err(err) => {
                 log::warn!(
                     "Failed to inspect container '{}' while reconciling: {}; leaving state unchanged",
-                    branch.container_name, err
+                    workspace.container_name, err
                 );
                 continue;
             }
         };
 
-        if next_state != branch.state {
-            changes.push((branch.id, next_state));
+        if next_state != workspace.state {
+            changes.push((workspace.id, next_state));
         }
     }
 

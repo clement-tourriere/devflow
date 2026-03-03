@@ -18,10 +18,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BranchInfo {
+pub struct WorkspaceInfo {
     pub name: String,
     pub created_at: Option<DateTime<Utc>>,
-    pub parent_branch: Option<String>,
+    pub parent_workspace: Option<String>,
     pub database_name: String,
     #[serde(default)]
     pub state: Option<String>,
@@ -52,7 +52,7 @@ pub struct ServiceCapabilities {
     pub cleanup: bool,
     pub seed_from_source: bool,
     pub template_from_time: bool,
-    pub max_branch_name_length: usize,
+    pub max_workspace_name_length: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,18 +73,18 @@ pub struct DoctorCheck {
 #[allow(dead_code)]
 pub trait ServiceProvider: Send + Sync {
     // Core branching operations
-    async fn create_branch(
+    async fn create_workspace(
         &self,
-        branch_name: &str,
-        from_branch: Option<&str>,
-    ) -> Result<BranchInfo>;
-    async fn delete_branch(&self, branch_name: &str) -> Result<()>;
-    async fn list_branches(&self) -> Result<Vec<BranchInfo>>;
-    async fn branch_exists(&self, branch_name: &str) -> Result<bool>;
-    async fn switch_to_branch(&self, branch_name: &str) -> Result<BranchInfo>;
+        workspace_name: &str,
+        from_workspace: Option<&str>,
+    ) -> Result<WorkspaceInfo>;
+    async fn delete_workspace(&self, workspace_name: &str) -> Result<()>;
+    async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>>;
+    async fn workspace_exists(&self, workspace_name: &str) -> Result<bool>;
+    async fn switch_to_branch(&self, workspace_name: &str) -> Result<WorkspaceInfo>;
 
     // Connection information
-    async fn get_connection_info(&self, branch_name: &str) -> Result<ConnectionInfo>;
+    async fn get_connection_info(&self, workspace_name: &str) -> Result<ConnectionInfo>;
 
     // Backend-specific capabilities
     fn supports_cleanup(&self) -> bool {
@@ -93,18 +93,18 @@ pub trait ServiceProvider: Send + Sync {
     fn supports_template_from_time(&self) -> bool {
         false
     }
-    fn max_branch_name_length(&self) -> usize {
+    fn max_workspace_name_length(&self) -> usize {
         63
     }
 
     // Lifecycle management (for local provider with Docker containers)
-    async fn start_branch(&self, _branch_name: &str) -> Result<()> {
+    async fn start_workspace(&self, _workspace_name: &str) -> Result<()> {
         Ok(())
     }
-    async fn stop_branch(&self, _branch_name: &str) -> Result<()> {
+    async fn stop_workspace(&self, _workspace_name: &str) -> Result<()> {
         Ok(())
     }
-    async fn reset_branch(&self, _branch_name: &str) -> Result<()> {
+    async fn reset_workspace(&self, _workspace_name: &str) -> Result<()> {
         Ok(())
     }
     fn supports_lifecycle(&self) -> bool {
@@ -112,13 +112,13 @@ pub trait ServiceProvider: Send + Sync {
     }
 
     // Cleanup
-    async fn cleanup_old_branches(&self, max_count: usize) -> Result<Vec<String>> {
+    async fn cleanup_old_workspaces(&self, max_count: usize) -> Result<Vec<String>> {
         if !self.supports_cleanup() {
             return Ok(vec![]);
         }
 
-        let branches = self.list_branches().await?;
-        let mut sorted_branches: Vec<_> = branches
+        let workspaces = self.list_workspaces().await?;
+        let mut sorted_branches: Vec<_> = workspaces
             .into_iter()
             .filter(|b| b.name != "main" && b.name != "master")
             .collect();
@@ -127,10 +127,10 @@ pub trait ServiceProvider: Send + Sync {
 
         let mut deleted = Vec::new();
         if sorted_branches.len() > max_count {
-            for branch in sorted_branches.into_iter().skip(max_count) {
-                match self.delete_branch(&branch.name).await {
-                    Ok(_) => deleted.push(branch.name),
-                    Err(e) => log::warn!("Failed to delete branch {}: {}", branch.name, e),
+            for workspace in sorted_branches.into_iter().skip(max_count) {
+                match self.delete_workspace(&workspace.name).await {
+                    Ok(_) => deleted.push(workspace.name),
+                    Err(e) => log::warn!("Failed to delete workspace {}: {}", workspace.name, e),
                 }
             }
         }
@@ -150,7 +150,7 @@ pub trait ServiceProvider: Send + Sync {
     }
 
     // Data seeding
-    async fn seed_from_source(&self, _branch_name: &str, _source: &str) -> Result<()> {
+    async fn seed_from_source(&self, _workspace_name: &str, _source: &str) -> Result<()> {
         anyhow::bail!("This provider does not support seeding from external sources")
     }
 
@@ -171,7 +171,7 @@ pub trait ServiceProvider: Send + Sync {
     }
 
     // Container logs (for Docker-based providers)
-    async fn logs(&self, _branch_name: &str, _tail: Option<usize>) -> Result<String> {
+    async fn logs(&self, _workspace_name: &str, _tail: Option<usize>) -> Result<String> {
         anyhow::bail!("This provider does not support logs (not a local Docker provider)")
     }
 
@@ -187,7 +187,7 @@ pub trait ServiceProvider: Send + Sync {
             cleanup: self.supports_cleanup(),
             seed_from_source: false,
             template_from_time: self.supports_template_from_time(),
-            max_branch_name_length: self.max_branch_name_length(),
+            max_workspace_name_length: self.max_workspace_name_length(),
         }
     }
 }

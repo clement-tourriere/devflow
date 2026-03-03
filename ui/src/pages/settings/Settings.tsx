@@ -202,8 +202,8 @@ function Settings() {
                   </td>
                   <td style={{ color: "var(--text-secondary)", fontSize: 12 }}>
                     {[
-                      o.sqlite_branch_count > 0 &&
-                        `${o.sqlite_branch_count} db branch${o.sqlite_branch_count !== 1 ? "es" : ""}`,
+                      o.sqlite_workspace_count > 0 &&
+                        `${o.sqlite_workspace_count} db workspace${o.sqlite_workspace_count !== 1 ? "es" : ""}`,
                       o.container_names.length > 0 &&
                         `${o.container_names.length} container${o.container_names.length !== 1 ? "s" : ""}`,
                       o.local_state_service_count > 0 &&

@@ -2,24 +2,26 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   ProjectEntry,
   ProjectDetail,
-  BranchesResponse,
+  WorkspacesResponse,
   ServiceEntry,
-  ServiceBranchStatus,
-  ServiceBranchInfo,
+  ServiceWorkspaceStatus,
+  ServiceWorkspaceInfo,
   AddServiceRequest,
   HookPhaseEntry,
+  VcsHooksActionResult,
   ProxyStatus,
   ContainerEntry,
   CertificateStatus,
   AppSettings,
   OrchestrationResult,
-  CreateBranchResult,
+  CreateWorkspaceResult,
   DestroyResult,
   DoctorReport,
   OrphanProjectEntry,
   OrphanCleanupResult,
   VcsInfo,
   TerminalSessionInfo,
+  WorkspaceCreationMode,
 } from "../types";
 
 // Projects
@@ -40,32 +42,34 @@ export const detectVcsInfo = (path: string) =>
   invoke<VcsInfo>("detect_vcs_info", { path });
 
 // Branches
-export const listBranches = (projectPath: string) =>
-  invoke<BranchesResponse>("list_branches", { projectPath });
+export const listWorkspaces = (projectPath: string) =>
+  invoke<WorkspacesResponse>("list_workspaces", { projectPath });
 export const getConnectionInfo = (
   projectPath: string,
-  branchName: string,
+  workspaceName: string,
   serviceName?: string
 ) =>
   invoke<Record<string, unknown>>("get_connection_info", {
     projectPath,
-    branchName,
+    workspaceName,
     serviceName,
   });
-export const createBranch = (
+export const createWorkspace = (
   projectPath: string,
-  branchName: string,
-  fromBranch?: string
+  workspaceName: string,
+  fromWorkspace?: string,
+  creationMode?: WorkspaceCreationMode
 ) =>
-  invoke<CreateBranchResult>("create_branch", {
+  invoke<CreateWorkspaceResult>("create_workspace", {
     projectPath,
-    branchName,
-    fromBranch,
+    workspaceName,
+    fromWorkspace,
+    creationMode,
   });
-export const deleteBranch = (projectPath: string, branchName: string) =>
-  invoke<OrchestrationResult[]>("delete_branch", {
+export const deleteWorkspace = (projectPath: string, workspaceName: string) =>
+  invoke<OrchestrationResult[]>("delete_workspace", {
     projectPath,
-    branchName,
+    workspaceName,
   });
 
 // Services
@@ -76,46 +80,46 @@ export const listServices = (projectPath: string) =>
 export const startService = (
   projectPath: string,
   serviceName: string,
-  branchName: string
-) => invoke<void>("start_service", { projectPath, serviceName, branchName });
+  workspaceName: string
+) => invoke<void>("start_service", { projectPath, serviceName, workspaceName });
 export const stopService = (
   projectPath: string,
   serviceName: string,
-  branchName: string
-) => invoke<void>("stop_service", { projectPath, serviceName, branchName });
+  workspaceName: string
+) => invoke<void>("stop_service", { projectPath, serviceName, workspaceName });
 export const runDoctor = (projectPath: string) =>
   invoke<DoctorReport>("run_doctor", { projectPath });
 export const getServiceLogs = (
   projectPath: string,
   serviceName: string,
-  branchName: string
+  workspaceName: string
 ) =>
   invoke<string>("get_service_logs", {
     projectPath,
     serviceName,
-    branchName,
+    workspaceName,
   });
 export const resetService = (
   projectPath: string,
   serviceName: string,
-  branchName: string
+  workspaceName: string
 ) =>
-  invoke<void>("reset_service", { projectPath, serviceName, branchName });
+  invoke<void>("reset_service", { projectPath, serviceName, workspaceName });
 export const getServiceStatus = (
   projectPath: string,
   serviceName: string,
-  branchName: string
+  workspaceName: string
 ) =>
-  invoke<ServiceBranchStatus>("get_service_status", {
+  invoke<ServiceWorkspaceStatus>("get_service_status", {
     projectPath,
     serviceName,
-    branchName,
+    workspaceName,
   });
-export const listServiceBranches = (
+export const listServiceWorkspaces = (
   projectPath: string,
   serviceName: string
 ) =>
-  invoke<ServiceBranchInfo[]>("list_service_branches", {
+  invoke<ServiceWorkspaceInfo[]>("list_service_branches", {
     projectPath,
     serviceName,
   });
@@ -126,16 +130,20 @@ export const listHooks = (projectPath: string) =>
 export const renderTemplate = (
   projectPath: string,
   template: string,
-  branchName?: string
-) => invoke<string>("render_template", { projectPath, template, branchName });
+  workspaceName?: string
+) => invoke<string>("render_template", { projectPath, template, workspaceName });
 export const getHookVariables = (
   projectPath: string,
-  branchName?: string
+  workspaceName?: string
 ) =>
   invoke<Record<string, unknown>>("get_hook_variables", {
     projectPath,
-    branchName,
+    workspaceName,
   });
+export const installVcsHooks = (projectPath: string) =>
+  invoke<VcsHooksActionResult>("install_vcs_hooks", { projectPath });
+export const uninstallVcsHooks = (projectPath: string) =>
+  invoke<VcsHooksActionResult>("uninstall_vcs_hooks", { projectPath });
 
 // Proxy
 export const startProxy = () => invoke<ProxyStatus>("start_proxy");
@@ -176,12 +184,12 @@ export const saveSettings = (settings: AppSettings) =>
 // Terminal
 export const createTerminal = (
   projectPath?: string,
-  branchName?: string,
+  workspaceName?: string,
   serviceName?: string
 ) =>
   invoke<TerminalSessionInfo>("create_terminal", {
     projectPath,
-    branchName,
+    workspaceName,
     serviceName,
   });
 export const listTerminals = () =>

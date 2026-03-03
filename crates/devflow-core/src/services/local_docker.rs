@@ -32,7 +32,7 @@ pub fn sanitize_name_component(input: &str) -> String {
     trimmed
 }
 
-pub fn service_branch_prefix(project_name: &str, service_name: &str) -> String {
+pub fn service_workspace_prefix(project_name: &str, service_name: &str) -> String {
     format!(
         "devflow-{}-{}-",
         sanitize_name_component(project_name),

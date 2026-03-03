@@ -40,8 +40,8 @@ pub struct OrphanInfo {
     // ── SQLite details ──
     /// Project row id in the SQLite `projects` table, if present.
     pub sqlite_project_id: Option<String>,
-    /// Number of branches tracked in SQLite.
-    pub sqlite_branch_count: usize,
+    /// Number of workspaces tracked in SQLite.
+    pub sqlite_workspace_count: usize,
 
     // ── Docker details ──
     /// Docker container names belonging to this project.
@@ -50,8 +50,8 @@ pub struct OrphanInfo {
     // ── Local state details ──
     /// Number of services registered in local state YAML.
     pub local_state_service_count: usize,
-    /// Number of branches registered in local state YAML.
-    pub local_state_branch_count: usize,
+    /// Number of workspaces registered in local state YAML.
+    pub local_state_workspace_count: usize,
 }
 
 /// Result of cleaning up a single orphaned project.
@@ -95,8 +95,8 @@ pub async fn detect_orphans() -> Result<Vec<OrphanInfo>> {
                 .as_ref()
                 .map(|s| s.len())
                 .unwrap_or(0);
-            let branch_count = project_state
-                .branches
+            let workspace_count = project_state
+                .workspaces
                 .as_ref()
                 .map(|b| b.len())
                 .unwrap_or(0);
@@ -106,16 +106,16 @@ pub async fn detect_orphans() -> Result<Vec<OrphanInfo>> {
                 project_path: Some(project_key.clone()),
                 sources: Vec::new(),
                 sqlite_project_id: None,
-                sqlite_branch_count: 0,
+                sqlite_workspace_count: 0,
                 container_names: Vec::new(),
                 local_state_service_count: 0,
-                local_state_branch_count: 0,
+                local_state_workspace_count: 0,
             });
             if !entry.sources.contains(&OrphanSource::LocalState) {
                 entry.sources.push(OrphanSource::LocalState);
             }
             entry.local_state_service_count = service_count;
-            entry.local_state_branch_count = branch_count;
+            entry.local_state_workspace_count = workspace_count;
         }
     }
 
@@ -173,7 +173,10 @@ pub async fn detect_orphans() -> Result<Vec<OrphanInfo>> {
                         }
                     }
 
-                    let branch_count = store.list_branches(&proj.id).map(|b| b.len()).unwrap_or(0);
+                    let workspace_count = store
+                        .list_workspaces(&proj.id)
+                        .map(|b| b.len())
+                        .unwrap_or(0);
 
                     let entry = orphans
                         .entry(proj.name.clone())
@@ -182,16 +185,16 @@ pub async fn detect_orphans() -> Result<Vec<OrphanInfo>> {
                             project_path: proj.project_path.clone(),
                             sources: Vec::new(),
                             sqlite_project_id: None,
-                            sqlite_branch_count: 0,
+                            sqlite_workspace_count: 0,
                             container_names: Vec::new(),
                             local_state_service_count: 0,
-                            local_state_branch_count: 0,
+                            local_state_workspace_count: 0,
                         });
                     if !entry.sources.contains(&OrphanSource::Sqlite) {
                         entry.sources.push(OrphanSource::Sqlite);
                     }
                     entry.sqlite_project_id = Some(proj.id.clone());
-                    entry.sqlite_branch_count = branch_count;
+                    entry.sqlite_workspace_count = workspace_count;
                     // Populate project_path from SQLite if not already set from local state
                     if entry.project_path.is_none() {
                         entry.project_path = proj.project_path.clone();
@@ -252,10 +255,10 @@ pub async fn detect_orphans() -> Result<Vec<OrphanInfo>> {
                         project_path: None,
                         sources: Vec::new(),
                         sqlite_project_id: None,
-                        sqlite_branch_count: 0,
+                        sqlite_workspace_count: 0,
                         container_names: Vec::new(),
                         local_state_service_count: 0,
-                        local_state_branch_count: 0,
+                        local_state_workspace_count: 0,
                     });
                 if !entry.sources.contains(&OrphanSource::Docker) {
                     entry.sources.push(OrphanSource::Docker);
@@ -316,21 +319,21 @@ pub async fn cleanup_orphan(orphan: &OrphanInfo) -> CleanupResult {
         }
     }
 
-    // 2. Delete SQLite project + branches + data dirs ─────────────────
+    // 2. Delete SQLite project + workspaces + data dirs ─────────────────
     #[cfg(feature = "service-local")]
     {
         if let Some(ref project_id) = orphan.sqlite_project_id {
             if let Ok(store) = open_sqlite_store() {
-                // First, clean up data directories for each branch
-                if let Ok(branches) = store.list_branches(project_id) {
-                    for branch in &branches {
-                        let data_path = Path::new(&branch.data_dir);
+                // First, clean up data directories for each workspace
+                if let Ok(workspaces) = store.list_workspaces(project_id) {
+                    for workspace in &workspaces {
+                        let data_path = Path::new(&workspace.data_dir);
                         if data_path.exists() {
                             match std::fs::remove_dir_all(data_path) {
                                 Ok(_) => result.data_dirs_removed += 1,
                                 Err(e) => result.errors.push(format!(
                                     "Failed to remove data dir '{}': {}",
-                                    branch.data_dir, e
+                                    workspace.data_dir, e
                                 )),
                             }
                         }
@@ -351,7 +354,7 @@ pub async fn cleanup_orphan(orphan: &OrphanInfo) -> CleanupResult {
                     }
                 }
 
-                // Delete SQLite rows (CASCADE handles branches)
+                // Delete SQLite rows (CASCADE handles workspaces)
                 match store.delete_project(project_id) {
                     Ok(_) => result.sqlite_rows_deleted = true,
                     Err(e) => result
@@ -447,7 +450,7 @@ async fn list_devflow_containers() -> Result<Vec<(String, String)>> {
         if let Some(names) = &container.names {
             for name in names {
                 let clean_name = name.trim_start_matches('/');
-                // Container naming convention: devflow-{project}-{service}-{branch}
+                // Container naming convention: devflow-{project}-{service}-{workspace}
                 if let Some(rest) = clean_name.strip_prefix("devflow-") {
                     // Extract the project name (first segment before the next dash that
                     // starts the service name). We can't perfectly parse this since names

@@ -20,7 +20,7 @@ pub struct ContainerEntry {
     pub port: u16,
     pub project: Option<String>,
     pub service: Option<String>,
-    pub branch: Option<String>,
+    pub workspace: Option<String>,
     pub https_url: String,
 }
 
@@ -133,7 +133,7 @@ pub async fn list_containers() -> Result<Vec<ContainerEntry>, String> {
                 port: target.port,
                 project: target.project,
                 service: target.service,
-                branch: target.branch,
+                workspace: target.workspace,
             });
         }
     }

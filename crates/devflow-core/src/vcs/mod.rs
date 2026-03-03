@@ -10,14 +10,14 @@ use std::path::{Path, PathBuf};
 pub use git::GitRepository;
 pub use jj::JjRepository;
 
-/// Information about a single branch.
+/// Information about a single workspace.
 #[derive(Debug, Clone)]
-pub struct BranchInfo {
-    /// Branch name (e.g. "feature/auth")
+pub struct WorkspaceInfo {
+    /// Workspace name (e.g. "feature/auth")
     pub name: String,
-    /// Whether this is the currently checked-out branch
+    /// Whether this is the currently checked-out workspace
     pub is_current: bool,
-    /// Whether this branch is the default/main branch
+    /// Whether this workspace is the default/main workspace
     pub is_default: bool,
 }
 
@@ -33,8 +33,8 @@ pub struct WorktreeCreateResult {
 pub struct WorktreeInfo {
     /// Filesystem path to the worktree
     pub path: PathBuf,
-    /// Branch checked out in this worktree (None for detached HEAD)
-    pub branch: Option<String>,
+    /// Workspace checked out in this worktree (None for detached HEAD)
+    pub workspace: Option<String>,
     /// Whether this is the main (bare) worktree
     #[allow(dead_code)]
     pub is_main: bool,
@@ -49,26 +49,29 @@ pub struct WorktreeInfo {
 /// via `JjRepository`.
 #[allow(dead_code)]
 pub trait VcsProvider: Send {
-    // ── Branch operations ──────────────────────────────────────────
-    fn current_branch(&self) -> Result<Option<String>>;
-    fn default_branch(&self) -> Result<Option<String>>;
-    fn list_branches(&self) -> Result<Vec<BranchInfo>>;
-    fn create_branch(&self, name: &str, base: Option<&str>) -> Result<()>;
-    fn delete_branch(&self, name: &str) -> Result<()>;
-    fn branch_exists(&self, name: &str) -> Result<bool>;
+    // ── Workspace operations ──────────────────────────────────────────
+    fn current_workspace(&self) -> Result<Option<String>>;
+    fn default_workspace(&self) -> Result<Option<String>>;
+    fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>>;
+    fn create_workspace(&self, name: &str, base: Option<&str>) -> Result<()>;
+    fn delete_workspace(&self, name: &str) -> Result<()>;
+    fn workspace_exists(&self, name: &str) -> Result<bool>;
 
-    /// Checkout/switch to an existing branch (classic mode, no worktrees).
-    fn checkout_branch(&self, _name: &str) -> Result<()> {
-        anyhow::bail!("{} does not support checkout_branch", self.provider_name())
+    /// Checkout/switch to an existing workspace (classic mode, no worktrees).
+    fn checkout_workspace(&self, _name: &str) -> Result<()> {
+        anyhow::bail!(
+            "{} does not support checkout_workspace",
+            self.provider_name()
+        )
     }
 
     // ── Worktree operations ────────────────────────────────────────
     fn supports_worktrees(&self) -> bool;
     fn is_worktree(&self) -> bool;
     fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>>;
-    fn create_worktree(&self, branch: &str, path: &Path) -> Result<WorktreeCreateResult>;
+    fn create_worktree(&self, workspace: &str, path: &Path) -> Result<WorktreeCreateResult>;
     fn remove_worktree(&self, path: &Path) -> Result<()>;
-    fn worktree_path(&self, branch: &str) -> Result<Option<PathBuf>>;
+    fn worktree_path(&self, workspace: &str) -> Result<Option<PathBuf>>;
     fn main_worktree_dir(&self) -> Option<PathBuf>;
 
     // ── Hooks ──────────────────────────────────────────────────────
@@ -116,8 +119,8 @@ pub trait VcsProvider: Send {
         )
     }
 
-    /// Ensure the repository has at least one commit so the default branch
-    /// is materialised and `list_branches` returns it.
+    /// Ensure the repository has at least one commit so the default workspace
+    /// is materialised and `list_workspaces` returns it.
     ///
     /// This is a no-op when the repo already has commits.  For git it
     /// creates an empty "Initial commit (devflow)" on an unborn HEAD.

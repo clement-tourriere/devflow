@@ -2,10 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    workspaces: [main]
     tags: ['v*']
   pull_request:
-    branches: [main]
+    workspaces: [main]
 
 env:
   CARGO_TERM_COLOR: always

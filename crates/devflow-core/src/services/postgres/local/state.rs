@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Context;
 use rusqlite::Connection;
 
-use super::model::{now_epoch_millis, Branch, BranchState, Project, StorageDriver};
+use super::model::{now_epoch_millis, BranchState, Project, StorageDriver, Workspace};
 
 #[derive(Debug)]
 pub struct NewProject {
@@ -19,7 +19,7 @@ pub struct NewBranch {
     pub id: String,
     pub project_id: String,
     pub name: String,
-    pub parent_branch_id: Option<String>,
+    pub parent_workspace_id: Option<String>,
     pub state: BranchState,
     pub data_dir: String,
     pub container_name: String,
@@ -56,11 +56,11 @@ impl Store {
               created_at INTEGER NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS branches (
+            CREATE TABLE IF NOT EXISTS workspaces (
               id TEXT PRIMARY KEY,
               project_id TEXT NOT NULL,
               name TEXT NOT NULL,
-              parent_branch_id TEXT NULL,
+              parent_workspace_id TEXT NULL,
               state TEXT NOT NULL,
               data_dir TEXT NOT NULL,
               container_name TEXT NOT NULL,
@@ -69,7 +69,7 @@ impl Store {
               created_at INTEGER NOT NULL,
               UNIQUE(project_id, name),
               FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
-              FOREIGN KEY(parent_branch_id) REFERENCES branches(id) ON DELETE SET NULL
+              FOREIGN KEY(parent_workspace_id) REFERENCES workspaces(id) ON DELETE SET NULL
             );
             "#,
             )
@@ -83,7 +83,7 @@ impl Store {
         )?;
         ensure_column(&self.conn, "projects", "storage_config", "TEXT NULL")?;
         ensure_column(&self.conn, "projects", "project_path", "TEXT NULL")?;
-        ensure_column(&self.conn, "branches", "storage_metadata", "TEXT NULL")?;
+        ensure_column(&self.conn, "workspaces", "storage_metadata", "TEXT NULL")?;
 
         Ok(())
     }
@@ -160,17 +160,17 @@ impl Store {
     pub fn next_port(&self) -> anyhow::Result<u16> {
         let max_port: Option<u16> = self
             .conn
-            .query_row("SELECT MAX(port) FROM branches", [], |row| row.get(0))
-            .context("failed to compute next branch port")?;
+            .query_row("SELECT MAX(port) FROM workspaces", [], |row| row.get(0))
+            .context("failed to compute next workspace port")?;
 
         Ok(max_port.map(|v| v.saturating_add(1)).unwrap_or(55432))
     }
 
-    pub fn list_branches(&self, project_id: &str) -> anyhow::Result<Vec<Branch>> {
+    pub fn list_workspaces(&self, project_id: &str) -> anyhow::Result<Vec<Workspace>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, project_id, name, parent_branch_id, state, data_dir, container_name, port, storage_metadata, created_at
-            FROM branches
+            SELECT id, project_id, name, parent_workspace_id, state, data_dir, container_name, port, storage_metadata, created_at
+            FROM workspaces
             WHERE project_id = ?1
             ORDER BY created_at DESC
             "#,
@@ -178,38 +178,38 @@ impl Store {
 
         let rows = stmt.query_map([project_id], map_branch_row)?;
         rows.collect::<Result<Vec<_>, _>>()
-            .context("failed to list branches")
+            .context("failed to list workspaces")
     }
 
     #[allow(dead_code)]
-    pub fn list_all_branches(&self) -> anyhow::Result<Vec<Branch>> {
+    pub fn list_all_branches(&self) -> anyhow::Result<Vec<Workspace>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, project_id, name, parent_branch_id, state, data_dir, container_name, port, storage_metadata, created_at
-            FROM branches
+            SELECT id, project_id, name, parent_workspace_id, state, data_dir, container_name, port, storage_metadata, created_at
+            FROM workspaces
             ORDER BY created_at DESC
             "#,
         )?;
 
         let rows = stmt.query_map([], map_branch_row)?;
         rows.collect::<Result<Vec<_>, _>>()
-            .context("failed to list all branches")
+            .context("failed to list all workspaces")
     }
 
-    pub fn get_branch_by_name(
+    pub fn get_workspace_by_name(
         &self,
         project_id: &str,
-        branch_name: &str,
-    ) -> anyhow::Result<Option<Branch>> {
+        workspace_name: &str,
+    ) -> anyhow::Result<Option<Workspace>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, project_id, name, parent_branch_id, state, data_dir, container_name, port, storage_metadata, created_at
-            FROM branches
+            SELECT id, project_id, name, parent_workspace_id, state, data_dir, container_name, port, storage_metadata, created_at
+            FROM workspaces
             WHERE project_id = ?1 AND name = ?2
             "#,
         )?;
 
-        let mut rows = stmt.query(rusqlite::params![project_id, branch_name])?;
+        let mut rows = stmt.query(rusqlite::params![project_id, workspace_name])?;
         if let Some(row) = rows.next()? {
             return Ok(Some(map_branch_row(row)?));
         }
@@ -217,26 +217,26 @@ impl Store {
         Ok(None)
     }
 
-    pub fn create_branch(&self, input: NewBranch) -> anyhow::Result<Branch> {
+    pub fn create_workspace(&self, input: NewBranch) -> anyhow::Result<Workspace> {
         let created_at = now_epoch_millis();
 
         self.conn.execute(
             r#"
-            INSERT INTO branches(id, project_id, name, parent_branch_id, state, data_dir, container_name, port, storage_metadata, created_at)
+            INSERT INTO workspaces(id, project_id, name, parent_workspace_id, state, data_dir, container_name, port, storage_metadata, created_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             "#,
             rusqlite::params![
-                input.id, input.project_id, input.name, input.parent_branch_id,
+                input.id, input.project_id, input.name, input.parent_workspace_id,
                 input.state.as_str(), input.data_dir, input.container_name, input.port,
                 input.storage_metadata, created_at,
             ],
-        ).context("failed to insert branch")?;
+        ).context("failed to insert workspace")?;
 
-        Ok(Branch {
+        Ok(Workspace {
             id: input.id,
             project_id: input.project_id,
             name: input.name,
-            parent_branch_id: input.parent_branch_id,
+            parent_workspace_id: input.parent_workspace_id,
             state: input.state,
             data_dir: input.data_dir,
             container_name: input.container_name,
@@ -249,10 +249,10 @@ impl Store {
     pub fn update_branch_state(&self, branch_id: &str, state: BranchState) -> anyhow::Result<()> {
         self.conn
             .execute(
-                "UPDATE branches SET state = ?1 WHERE id = ?2",
+                "UPDATE workspaces SET state = ?1 WHERE id = ?2",
                 rusqlite::params![state.as_str(), branch_id],
             )
-            .context("failed to update branch state")?;
+            .context("failed to update workspace state")?;
         Ok(())
     }
 
@@ -263,22 +263,22 @@ impl Store {
     ) -> anyhow::Result<()> {
         self.conn
             .execute(
-                "UPDATE branches SET storage_metadata = ?1 WHERE id = ?2",
+                "UPDATE workspaces SET storage_metadata = ?1 WHERE id = ?2",
                 rusqlite::params![storage_metadata, branch_id],
             )
-            .context("failed to update branch storage metadata")?;
+            .context("failed to update workspace storage metadata")?;
         Ok(())
     }
 
-    pub fn delete_branch(&self, branch_id: &str) -> anyhow::Result<()> {
+    pub fn delete_workspace(&self, branch_id: &str) -> anyhow::Result<()> {
         self.conn
-            .execute("DELETE FROM branches WHERE id = ?1", [branch_id])
-            .context("failed to delete branch")?;
+            .execute("DELETE FROM workspaces WHERE id = ?1", [branch_id])
+            .context("failed to delete workspace")?;
         Ok(())
     }
 
     pub fn delete_project(&self, project_id: &str) -> anyhow::Result<()> {
-        // ON DELETE CASCADE auto-removes all branch rows
+        // ON DELETE CASCADE auto-removes all workspace rows
         self.conn
             .execute("DELETE FROM projects WHERE id = ?1", [project_id])
             .context("failed to delete project")?;
@@ -297,15 +297,15 @@ impl Store {
     }
 }
 
-fn map_branch_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Branch> {
+fn map_branch_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workspace> {
     let state_text: String = row.get(4)?;
     let state = BranchState::from_str(&state_text).unwrap_or(BranchState::Failed);
 
-    Ok(Branch {
+    Ok(Workspace {
         id: row.get(0)?,
         project_id: row.get(1)?,
         name: row.get(2)?,
-        parent_branch_id: row.get(3)?,
+        parent_workspace_id: row.get(3)?,
         state,
         data_dir: row.get(5)?,
         container_name: row.get(6)?,

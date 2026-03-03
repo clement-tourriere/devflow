@@ -8,8 +8,8 @@
 //! **Request** (written to plugin stdin):
 //! ```json
 //! {
-//!   "method": "create_branch",
-//!   "params": { "branch_name": "feature-xyz", "from_branch": "main" },
+//!   "method": "create_workspace",
+//!   "params": { "workspace_name": "feature-xyz", "from_workspace": "main" },
 //!   "config": { ... },
 //!   "service_name": "my-redis"
 //! }
@@ -38,7 +38,7 @@ use tokio::process::Command;
 
 use crate::config::PluginConfig;
 use crate::services::{
-    BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceProvider,
+    ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceProvider, WorkspaceInfo,
 };
 
 /// A service provider that delegates to an external plugin executable.
@@ -218,74 +218,95 @@ impl PluginProvider {
 
 #[async_trait]
 impl ServiceProvider for PluginProvider {
-    async fn create_branch(
+    async fn create_workspace(
         &self,
-        branch_name: &str,
-        from_branch: Option<&str>,
-    ) -> Result<BranchInfo> {
+        workspace_name: &str,
+        from_workspace: Option<&str>,
+    ) -> Result<WorkspaceInfo> {
         let result = self
             .invoke(
-                "create_branch",
+                "create_workspace",
                 json!({
-                    "branch_name": branch_name,
-                    "from_branch": from_branch,
+                    "workspace_name": workspace_name,
+                    "from_workspace": from_workspace,
                 }),
             )
             .await?;
-        serde_json::from_value(result).context("Failed to parse BranchInfo from plugin response")
+        serde_json::from_value(result).context("Failed to parse WorkspaceInfo from plugin response")
     }
 
-    async fn delete_branch(&self, branch_name: &str) -> Result<()> {
-        self.invoke("delete_branch", json!({ "branch_name": branch_name }))
-            .await?;
+    async fn delete_workspace(&self, workspace_name: &str) -> Result<()> {
+        self.invoke(
+            "delete_workspace",
+            json!({ "workspace_name": workspace_name }),
+        )
+        .await?;
         Ok(())
     }
 
-    async fn list_branches(&self) -> Result<Vec<BranchInfo>> {
-        let result = self.invoke("list_branches", json!({})).await?;
+    async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
+        let result = self.invoke("list_workspaces", json!({})).await?;
         serde_json::from_value(result)
-            .context("Failed to parse Vec<BranchInfo> from plugin response")
+            .context("Failed to parse Vec<WorkspaceInfo> from plugin response")
     }
 
-    async fn branch_exists(&self, branch_name: &str) -> Result<bool> {
+    async fn workspace_exists(&self, workspace_name: &str) -> Result<bool> {
         let result = self
-            .invoke("branch_exists", json!({ "branch_name": branch_name }))
+            .invoke(
+                "workspace_exists",
+                json!({ "workspace_name": workspace_name }),
+            )
             .await?;
         result
             .as_bool()
-            .ok_or_else(|| anyhow::anyhow!("Plugin did not return a boolean for branch_exists"))
+            .ok_or_else(|| anyhow::anyhow!("Plugin did not return a boolean for workspace_exists"))
     }
 
-    async fn switch_to_branch(&self, branch_name: &str) -> Result<BranchInfo> {
+    async fn switch_to_branch(&self, workspace_name: &str) -> Result<WorkspaceInfo> {
         let result = self
-            .invoke("switch_to_branch", json!({ "branch_name": branch_name }))
+            .invoke(
+                "switch_to_branch",
+                json!({ "workspace_name": workspace_name }),
+            )
             .await?;
-        serde_json::from_value(result).context("Failed to parse BranchInfo from plugin response")
+        serde_json::from_value(result).context("Failed to parse WorkspaceInfo from plugin response")
     }
 
-    async fn get_connection_info(&self, branch_name: &str) -> Result<ConnectionInfo> {
+    async fn get_connection_info(&self, workspace_name: &str) -> Result<ConnectionInfo> {
         let result = self
-            .invoke("get_connection_info", json!({ "branch_name": branch_name }))
+            .invoke(
+                "get_connection_info",
+                json!({ "workspace_name": workspace_name }),
+            )
             .await?;
         serde_json::from_value(result)
             .context("Failed to parse ConnectionInfo from plugin response")
     }
 
-    async fn start_branch(&self, branch_name: &str) -> Result<()> {
-        self.invoke("start_branch", json!({ "branch_name": branch_name }))
-            .await?;
+    async fn start_workspace(&self, workspace_name: &str) -> Result<()> {
+        self.invoke(
+            "start_workspace",
+            json!({ "workspace_name": workspace_name }),
+        )
+        .await?;
         Ok(())
     }
 
-    async fn stop_branch(&self, branch_name: &str) -> Result<()> {
-        self.invoke("stop_branch", json!({ "branch_name": branch_name }))
-            .await?;
+    async fn stop_workspace(&self, workspace_name: &str) -> Result<()> {
+        self.invoke(
+            "stop_workspace",
+            json!({ "workspace_name": workspace_name }),
+        )
+        .await?;
         Ok(())
     }
 
-    async fn reset_branch(&self, branch_name: &str) -> Result<()> {
-        self.invoke("reset_branch", json!({ "branch_name": branch_name }))
-            .await?;
+    async fn reset_workspace(&self, workspace_name: &str) -> Result<()> {
+        self.invoke(
+            "reset_workspace",
+            json!({ "workspace_name": workspace_name }),
+        )
+        .await?;
         Ok(())
     }
 
@@ -295,9 +316,9 @@ impl ServiceProvider for PluginProvider {
         true
     }
 
-    async fn cleanup_old_branches(&self, max_count: usize) -> Result<Vec<String>> {
+    async fn cleanup_old_workspaces(&self, max_count: usize) -> Result<Vec<String>> {
         let result = self
-            .invoke("cleanup_old_branches", json!({ "max_count": max_count }))
+            .invoke("cleanup_old_workspaces", json!({ "max_count": max_count }))
             .await?;
         serde_json::from_value(result).context("Failed to parse Vec<String> from plugin response")
     }

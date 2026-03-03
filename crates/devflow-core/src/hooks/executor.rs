@@ -504,9 +504,9 @@ mod tests {
 
     fn basic_context() -> HookContext {
         HookContext {
-            branch: "feature/test".to_string(),
+            workspace: "feature/test".to_string(),
             repo: "myapp".to_string(),
-            default_branch: "main".to_string(),
+            default_workspace: "main".to_string(),
             ..Default::default()
         }
     }
@@ -528,7 +528,7 @@ mod tests {
         let mut phase_hooks = IndexMap::new();
         phase_hooks.insert(
             "greet".to_string(),
-            HookEntry::Simple("echo hello {{ branch }}".to_string()),
+            HookEntry::Simple("echo hello {{ workspace }}".to_string()),
         );
         hooks.insert(HookPhase::PostCreate, phase_hooks);
 

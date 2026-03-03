@@ -7,13 +7,13 @@ import {
   closeTerminal as closeTerminalInvoke,
   listTerminals,
   listProjects,
-  listBranches,
+  listWorkspaces,
   listServices,
   getSettings,
 } from "../utils/invoke";
 import type {
   AppSettings,
-  BranchEntry,
+  WorkspaceEntry,
   ProjectEntry,
   ServiceEntry,
   TerminalExitEvent,
@@ -30,7 +30,7 @@ interface TerminalPanelProps {
   onToggle: () => void;
   pendingTerminal: {
     projectPath?: string;
-    branchName?: string;
+    workspaceName?: string;
     serviceName?: string;
   } | null;
   onPendingTerminalHandled: () => void;
@@ -66,7 +66,7 @@ function TerminalPanel({
   const [showLauncher, setShowLauncher] = useState(false);
   const [launcherProjects, setLauncherProjects] = useState<ProjectEntry[]>([]);
   const [launcherProjectPath, setLauncherProjectPath] = useState("");
-  const [launcherBranches, setLauncherBranches] = useState<BranchEntry[]>([]);
+  const [launcherBranches, setLauncherBranches] = useState<WorkspaceEntry[]>([]);
   const [launcherBranchName, setLauncherBranchName] = useState("");
   const [launcherServices, setLauncherServices] = useState<ServiceEntry[]>([]);
   const [launcherServiceName, setLauncherServiceName] = useState("");
@@ -92,8 +92,8 @@ function TerminalPanel({
   const filteredBranches = useMemo(() => {
     const query = launcherBranchFilter.trim().toLowerCase();
     if (!query) return launcherBranches;
-    return launcherBranches.filter((branch) =>
-      branch.name.toLowerCase().includes(query)
+    return launcherBranches.filter((workspace) =>
+      workspace.name.toLowerCase().includes(query)
     );
   }, [launcherBranches, launcherBranchFilter]);
 
@@ -213,9 +213,9 @@ function TerminalPanel({
   }, []);
 
   const handleCreateTargetedTab = useCallback(
-    async (projectPath?: string, branchName?: string, serviceName?: string) => {
+    async (projectPath?: string, workspaceName?: string, serviceName?: string) => {
       try {
-        const session = await createTerminalInvoke(projectPath, branchName, serviceName);
+        const session = await createTerminalInvoke(projectPath, workspaceName, serviceName);
         setTabs((prev) => [...prev, session]);
         setActiveTabId(session.id);
       } catch (e) {
@@ -232,7 +232,7 @@ function TerminalPanel({
     const open = async () => {
       await handleCreateTargetedTab(
         pendingTerminal.projectPath,
-        pendingTerminal.branchName,
+        pendingTerminal.workspaceName,
         pendingTerminal.serviceName
       );
       onPendingTerminalHandled();
@@ -283,20 +283,20 @@ function TerminalPanel({
     setLauncherError(null);
 
     Promise.all([
-      listBranches(launcherProjectPath),
+      listWorkspaces(launcherProjectPath),
       listServices(launcherProjectPath),
     ])
       .then(([branchResponse, services]) => {
         if (cancelled) return;
 
-        const branches = branchResponse.branches;
-        setLauncherBranches(branches);
+        const workspaces = branchResponse.workspaces;
+        setLauncherBranches(workspaces);
         setLauncherServices(services);
 
         setLauncherBranchName((prev) => {
-          if (prev && branches.some((b) => b.name === prev)) return prev;
-          const defaultBranch = branches.find((b) => b.is_default);
-          return defaultBranch?.name ?? branches[0]?.name ?? "";
+          if (prev && workspaces.some((b) => b.name === prev)) return prev;
+          const defaultBranch = workspaces.find((b) => b.is_default);
+          return defaultBranch?.name ?? workspaces[0]?.name ?? "";
         });
 
         setLauncherServiceName((prev) =>
@@ -309,7 +309,7 @@ function TerminalPanel({
         setLauncherBranchName("");
         setLauncherServices([]);
         setLauncherServiceName("");
-        setLauncherError(`Failed to load branch targets: ${e}`);
+        setLauncherError(`Failed to load workspace targets: ${e}`);
       })
       .finally(() => {
         if (!cancelled) setLauncherLoadingTargets(false);
@@ -331,7 +331,7 @@ function TerminalPanel({
   useEffect(() => {
     if (!showLauncher) return;
     if (filteredBranches.length === 0) return;
-    if (!filteredBranches.some((branch) => branch.name === launcherBranchName)) {
+    if (!filteredBranches.some((workspace) => workspace.name === launcherBranchName)) {
       setLauncherBranchName(filteredBranches[0].name);
     }
   }, [showLauncher, filteredBranches, launcherBranchName]);
@@ -349,7 +349,7 @@ function TerminalPanel({
       return;
     }
     if (!launcherBranchName) {
-      setLauncherError("Choose a branch first.");
+      setLauncherError("Choose a workspace first.");
       return;
     }
 
@@ -469,7 +469,7 @@ function TerminalPanel({
             <button
               className="terminal-panel-add"
               onClick={openLauncher}
-              title="Open branch terminal"
+              title="Open workspace terminal"
             >
               +
             </button>
@@ -532,7 +532,7 @@ function TerminalPanel({
               <p>No terminals open</p>
               <div className="flex gap-2">
                 <button className="btn btn-primary" onClick={openLauncher}>
-                  Open Branch Terminal
+                  Open Workspace Terminal
                 </button>
                 <button className="btn" onClick={handleCreateTab}>
                   New Shell
@@ -556,7 +556,7 @@ function TerminalPanel({
       <Modal
         open={showLauncher}
         onClose={() => setShowLauncher(false)}
-        title="Open Branch Terminal"
+        title="Open Workspace Terminal"
         width={680}
       >
         {launcherLoadingProjects ? (
@@ -565,10 +565,10 @@ function TerminalPanel({
           <div className="terminal-launcher">
             <div className="terminal-launcher-intro">
               <div className="terminal-launcher-intro-title">
-                Focus your terminal on one branch
+                Focus your terminal on one workspace
               </div>
               <div className="terminal-launcher-intro-subtitle">
-                Pick a project, choose a branch, and optionally attach a service
+                Pick a project, choose a workspace, and optionally attach a service
                 environment.
               </div>
             </div>
@@ -611,7 +611,7 @@ function TerminalPanel({
 
               <div className="terminal-launcher-field">
                 <div className="terminal-launcher-field-head">
-                  <span>Branch</span>
+                  <span>Workspace</span>
                   <span className="terminal-launcher-count">
                     {filteredBranches.length}/{launcherBranches.length}
                   </span>
@@ -619,7 +619,7 @@ function TerminalPanel({
                 <input
                   type="text"
                   className="terminal-launcher-filter"
-                  placeholder="Filter branches"
+                  placeholder="Filter workspaces"
                   value={launcherBranchFilter}
                   onChange={(e) => setLauncherBranchFilter(e.target.value)}
                   disabled={launcherLoadingTargets}
@@ -631,14 +631,14 @@ function TerminalPanel({
                   disabled={launcherLoadingTargets || filteredBranches.length === 0}
                 >
                   {launcherLoadingTargets ? (
-                    <option value="">Loading branches...</option>
+                    <option value="">Loading workspaces...</option>
                   ) : filteredBranches.length === 0 ? (
-                    <option value="">No branch matches filter</option>
+                    <option value="">No workspace matches filter</option>
                   ) : (
-                    filteredBranches.map((branch) => (
-                      <option key={branch.name} value={branch.name}>
-                        {branch.name}
-                        {branch.is_default ? "  * default" : ""}
+                    filteredBranches.map((workspace) => (
+                      <option key={workspace.name} value={workspace.name}>
+                        {workspace.name}
+                        {workspace.is_default ? "  * default" : ""}
                       </option>
                     ))
                   )}
@@ -682,7 +682,7 @@ function TerminalPanel({
                 <span className="mono">{previewLabel}</span>
               </div>
               <div className="terminal-launcher-preview-row">
-                <span>Branch</span>
+                <span>Workspace</span>
                 <span className="mono">{launcherBranchName || "-"}</span>
               </div>
               <div className="terminal-launcher-preview-row">

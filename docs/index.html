@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>devflow — Universal Development Environment Branching Tool</title>
-<meta name="description" content="Isolated dev environments for every Git branch — automatically. Worktrees, databases, caches, and stateful services that sync with your Git workflow.">
+<meta name="description" content="Isolated dev environments for every Git workspace — automatically. Worktrees, databases, caches, and stateful services that sync with your Git workflow.">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" id="hljs-light">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" id="hljs-dark" disabled>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
@@ -584,7 +584,7 @@ hr {
     <div class="nav-group">Getting Started</div>
     <a href="#getting-started">Quick Start</a>
     <a href="#installation" class="nav-sub">Installation</a>
-    <a href="#first-branch" class="nav-sub">Your First Branch</a>
+    <a href="#first-workspace" class="nav-sub">Your First Workspace</a>
     <a href="#shell-integration" class="nav-sub">Shell Integration</a>
     <a href="#existing-project" class="nav-sub">Existing Project</a>
     <a href="#mise" class="nav-sub">Using mise</a>
@@ -630,10 +630,10 @@ hr {
 
 <!-- ===== HERO ===== -->
 <section class="hero" id="hero">
-  <h1>Isolated dev environments for<br>every Git branch &mdash; <span>automatically</span>.</h1>
+  <h1>Isolated dev environments for<br>every Git workspace &mdash; <span>automatically</span>.</h1>
   <p class="tagline">
-    devflow gives each Git branch its own worktree, databases, caches, and stateful services.
-    Branch your entire development environment with a single command.
+    devflow gives each Git workspace its own worktree, databases, caches, and stateful services.
+    Workspace your entire development environment with a single command.
   </p>
 
   <div class="hero-features">
@@ -643,7 +643,7 @@ hr {
     </div>
     <div class="hero-feature">
       <div class="icon green">&#9889;</div>
-      <div><strong>Instant</strong><br>Copy-on-Write cloning &mdash; branch a 50GB database in seconds</div>
+      <div><strong>Instant</strong><br>Copy-on-Write cloning &mdash; workspace a 50GB database in seconds</div>
     </div>
     <div class="hero-feature">
       <div class="icon purple">&#9733;</div>
@@ -675,7 +675,7 @@ hr {
 <section class="section" id="getting-started">
   <h2><span class="number">01</span> Getting Started</h2>
   <p class="section-desc">
-    Get from zero to isolated branch environments in minutes. This section covers installation, your first branch, and automatic Git integration.
+    Get from zero to isolated workspace environments in minutes. This section covers installation, your first workspace, and automatic Git integration.
   </p>
 
   <h3 id="getting-started-scenarios">Three common starting points</h3>
@@ -702,10 +702,10 @@ devflow install-hooks</code></pre>
 
     <div class="step">
       <h4>Add a service with or without seed data</h4>
-<pre><code class="language-bash"># No seed (fresh main branch data)
+<pre><code class="language-bash"># No seed (fresh main workspace data)
 devflow service add app-db --provider local --service-type postgres
 
-# Seed main branch from a dump
+# Seed main workspace from a dump
 devflow service add app-db --provider local --service-type postgres --from ./backup.sql
 
 # Seed from a running PostgreSQL instance
@@ -757,9 +757,9 @@ devflow setup-zfs --pool-name mypool # Custom name</code></pre>
 <pre><code class="language-bash">devflow --help
 devflow doctor</code></pre>
 
-  <!-- First Branch -->
-  <h3 id="first-branch">Your First Branch</h3>
-  <p>Here's a complete walkthrough from project initialization to your first isolated development branch environment.</p>
+  <!-- First Workspace -->
+  <h3 id="first-workspace">Your First Workspace</h3>
+  <p>Here's a complete walkthrough from project initialization to your first isolated development workspace environment.</p>
 
   <div class="steps">
     <div class="step">
@@ -779,7 +779,7 @@ devflow service add app-db --provider local --service-type postgres</code></pre>
     </div>
 
     <div class="step">
-      <h4>Create a feature branch</h4>
+      <h4>Create a feature workspace</h4>
       <p>Create and switch explicitly with devflow, or use Git checkout if hooks are installed.</p>
 <pre><code class="language-bash"># Git-native flow
 git checkout -b feature/auth
@@ -791,7 +791,7 @@ devflow switch -c feature/auth</code></pre>
 
     <div class="step">
       <h4>Check the status</h4>
-<pre><code class="language-bash"># See all branches
+<pre><code class="language-bash"># See all workspaces
 devflow list
 
 # Show project status
@@ -806,7 +806,7 @@ devflow connection feature/auth --format json   # {"host": "...", ...}</code></p
     <div class="step">
       <h4>Develop in isolation</h4>
       <p>Make schema changes, run migrations, insert test data &mdash; everything is isolated. Switch back to main and your original database state is untouched.</p>
-<pre><code class="language-bash"># Run migrations on the feature branch database
+<pre><code class="language-bash"># Run migrations on the feature workspace database
 npm run migrate
 
 # Switch back to main — database switches automatically
@@ -818,10 +818,10 @@ devflow status</code></pre>
 
     <div class="step">
       <h4>Clean up when done</h4>
-<pre><code class="language-bash"># Delete just the service branch (keeps the Git branch/worktree)
+<pre><code class="language-bash"># Delete just the service workspace (keeps the Git workspace/worktree)
 devflow service delete feature/auth
 
-# Or remove everything: Git branch + worktree + services
+# Or remove everything: Git workspace + worktree + services
 devflow remove feature/auth</code></pre>
     </div>
   </div>
@@ -847,7 +847,7 @@ eval "$(devflow shell-init)"</code></pre>
   <!-- Existing Project -->
   <h3 id="existing-project">Adding devflow to an Existing Project</h3>
   <p>
-    Already have a project with a running database? devflow can adopt it. Here's how to add branch-isolated services to an existing codebase.
+    Already have a project with a running database? devflow can adopt it. Here's how to add workspace-isolated services to an existing codebase.
   </p>
 
   <div class="steps">
@@ -857,7 +857,7 @@ eval "$(devflow shell-init)"</code></pre>
 <pre><code class="language-bash">cd ~/my-existing-project
 devflow init
 devflow service add app-db --provider local --service-type postgres</code></pre>
-      <p>This creates a <code>.devflow.yml</code> config file and starts a fresh "main" service branch. If you already have a <code>.devflow.yml</code>, use <code>--force</code> to overwrite:</p>
+      <p>This creates a <code>.devflow.yml</code> config file and starts a fresh "main" service workspace. If you already have a <code>.devflow.yml</code>, use <code>--force</code> to overwrite:</p>
 <pre><code class="language-bash">devflow init --force</code></pre>
     </div>
 
@@ -872,7 +872,7 @@ devflow service add app-db --provider local --service-type postgres --from ./bac
 
 # Or seed from an S3 backup
 devflow service add app-db --provider local --service-type postgres --from s3://my-backups/postgres/latest.dump</code></pre>
-      <p>Every branch created from main will automatically inherit this data via Copy-on-Write &mdash; no extra copies needed.</p>
+      <p>Every workspace created from main will automatically inherit this data via Copy-on-Write &mdash; no extra copies needed.</p>
     </div>
 
     <div class="step">
@@ -912,11 +912,11 @@ eval $(devflow connection main --format env)
 
     <div class="step">
       <h4>Start branching</h4>
-      <p>You're set. Create a feature branch and devflow handles the rest:</p>
+      <p>You're set. Create a feature workspace and devflow handles the rest:</p>
 <pre><code class="language-bash">git checkout -b feature/new-schema
 # → devflow automatically creates an isolated database clone
 
-# Run your migrations safely — they only affect this branch
+# Run your migrations safely — they only affect this workspace
 npm run migrate   # or: python manage.py migrate / rails db:migrate
 
 # Switch back — main database is untouched
@@ -974,7 +974,7 @@ eval "$(mise activate bash)"   # or zsh/fish</code></pre>
 <section class="section" id="core-concepts">
   <h2><span class="number">02</span> Core Concepts</h2>
   <p class="section-desc">
-    Understand how devflow branches your development environment and the architecture behind instant, isolated environment branching.
+    Understand how devflow workspaces your development environment and the architecture behind instant, isolated environment branching.
   </p>
 
   <h3>How Branching Works</h3>
@@ -990,7 +990,7 @@ eval "$(mise activate bash)"   # or zsh/fish</code></pre>
                       │              │                                   │
                       │  ┌────────┐  │  ┌────────────────────────────┐  │
                       │  │  Git   │  │  │    ServiceProvider trait     │  │
-                      │  │ branch │  │  │  (create/delete/switch/     │  │
+                      │  │ workspace │  │  │  (create/delete/switch/     │  │
                       │  │   +    │  │  │   connect/start/stop)       │  │
                       │  │worktree│  │  ├───────┬───────┬────────────┤  │
                       │  ├────────┤  │  │Postgre│Click- │MySQL/      │  │
@@ -1012,14 +1012,14 @@ eval "$(mise activate bash)"   # or zsh/fish</code></pre>
   <p>The core loop is simple:</p>
   <ol>
     <li><strong>Git checkout</strong> triggers the <code>post-checkout</code> hook</li>
-    <li>The hook calls <code>devflow git-hook</code>, which detects the branch change</li>
-    <li>devflow orchestrates across all configured providers &mdash; creating or switching service branches</li>
+    <li>The hook calls <code>devflow git-hook</code>, which detects the workspace change</li>
+    <li>devflow orchestrates across all configured providers &mdash; creating or switching service workspaces</li>
     <li>Lifecycle hooks fire (e.g., update <code>.env</code>, run migrations)</li>
     <li>If worktrees are enabled, the shell wrapper <code>cd</code>s you into the right directory</li>
   </ol>
 
   <h3 id="cow-storage">Copy-on-Write Storage</h3>
-  <p>When you create a branch with the local Docker provider, devflow clones the entire data directory from the parent. With Copy-on-Write filesystems, this clone is <strong>near-instant</strong> and uses <strong>almost no extra disk space</strong>. Only blocks that change after the clone are duplicated.</p>
+  <p>When you create a workspace with the local Docker provider, devflow clones the entire data directory from the parent. With Copy-on-Write filesystems, this clone is <strong>near-instant</strong> and uses <strong>almost no extra disk space</strong>. Only blocks that change after the clone are duplicated.</p>
 
   <table>
     <thead>
@@ -1074,12 +1074,12 @@ eval "$(mise activate bash)"   # or zsh/fish</code></pre>
 <pre><code class="language-bash"># devflow creates a ZFS dataset per project
 # zfs list shows something like:
 devflow/myapp           # project dataset
-devflow/myapp@main      # snapshot of main branch
+devflow/myapp@main      # snapshot of main workspace
 devflow/myapp/feature   # clone from snapshot (instant, zero-copy)</code></pre>
   <p>The <code>devflow setup-zfs</code> command creates a file-backed ZFS pool &mdash; no spare disk required. During <code>devflow init</code> on Linux, devflow auto-detects ZFS tools and offers to create the pool for you.</p>
 
   <h3 id="service-lifecycle">Service Lifecycle</h3>
-  <p>Each local service branch goes through these states:</p>
+  <p>Each local service workspace goes through these states:</p>
 
   <div class="diagram">  Provisioning ──▶ Running ──▶ Stopped ──▶ (deleted)
        │              │            │
@@ -1159,11 +1159,11 @@ services:
 # Git Integration
 # ============================================
 git:
-  auto_create_on_branch: true          # Create service branches on git checkout
-  auto_switch_on_branch: true          # Switch services on git checkout
-  main_branch: main                    # Main git branch (auto-detected on init)
-  branch_filter_regex: "^feature/.*"  # Regex — only branch for matching patterns
-  exclude_branches:                    # Never create service branches for these
+  auto_create_on_workspace: true          # Create service workspaces on git checkout
+  auto_switch_on_workspace: true          # Switch services on git checkout
+  main_workspace: main                    # Main git workspace (auto-detected on init)
+  workspace_filter_regex: "^feature/.*"  # Regex — only workspace for matching patterns
+  exclude_workspaces:                    # Never create service workspaces for these
     - main
     - master
     - develop
@@ -1172,9 +1172,9 @@ git:
 # Behavior
 # ============================================
 behavior:
-  auto_cleanup: false                  # Auto-cleanup old branches when max reached
-  max_branches: 10                     # Max branches before cleanup triggers
-  naming_strategy: prefix              # How service branch names are derived
+  auto_cleanup: false                  # Auto-cleanup old workspaces when max reached
+  max_workspaces: 10                     # Max workspaces before cleanup triggers
+  naming_strategy: prefix              # How service workspace names are derived
                                        #   prefix  → devflow_feature_auth
                                        #   suffix  → feature_auth_devflow
                                        #   replace → feature_auth
@@ -1186,7 +1186,7 @@ services:
   - name: app-db                       # Unique name for this service
     type: local                        # Provider type
     service_type: postgres             # Service type
-    auto_branch: true                  # Branch this service with git (default: true)
+    auto_workspace: true                  # Workspace this service with git (default: true)
     default: true                      # Default target for -s flag
     local:
       image: postgres:17
@@ -1194,7 +1194,7 @@ services:
   - name: analytics
     type: local
     service_type: clickhouse
-    auto_branch: true
+    auto_workspace: true
     clickhouse:
       image: clickhouse/clickhouse-server:latest
       port_range_start: 59000          # HTTP port (native = HTTP + 877)
@@ -1205,7 +1205,7 @@ services:
   - name: app-mysql
     type: local
     service_type: mysql
-    auto_branch: true
+    auto_workspace: true
     mysql:
       image: mysql:8                   # Docker image
       port_range_start: 53306          # First port to try
@@ -1218,7 +1218,7 @@ services:
   - name: cache
     type: local
     service_type: generic
-    auto_branch: false                 # Shared across all branches
+    auto_workspace: false                 # Shared across all workspaces
     generic:
       image: redis:7-alpine            # Any Docker image
       port_mapping: "6379:6379"        # host:container port mapping
@@ -1233,7 +1233,7 @@ services:
   - name: cloud-db
     type: neon
     service_type: postgres
-    auto_branch: true
+    auto_workspace: true
     neon:
       api_key: ${NEON_API_KEY}         # Supports ${ENV_VAR} interpolation
       project_id: ${NEON_PROJECT_ID}
@@ -1242,7 +1242,7 @@ services:
   - name: staging-db
     type: dblab
     service_type: postgres
-    auto_branch: true
+    auto_workspace: true
     dblab:
       api_url: https://dblab.example.com
       auth_token: ${DBLAB_TOKEN}
@@ -1250,7 +1250,7 @@ services:
   - name: xata-db
     type: xata
     service_type: postgres
-    auto_branch: true
+    auto_workspace: true
     xata:
       api_key: ${XATA_API_KEY}
       organization_id: my-org
@@ -1260,7 +1260,7 @@ services:
   - name: custom-service
     type: local
     service_type: plugin
-    auto_branch: true
+    auto_workspace: true
     plugin:
       name: my-plugin                  # Resolved as devflow-plugin-my-plugin on PATH
       # path: /usr/local/bin/my-plugin # Or use an explicit path
@@ -1273,8 +1273,8 @@ services:
 # Worktree Configuration
 # ============================================
 worktree:
-  enabled: true                        # Create Git worktrees per branch
-  path_template: "../{repo}.{branch}"  # Where worktrees are created
+  enabled: true                        # Create Git worktrees per workspace
+  path_template: "../{repo}.{workspace}"  # Where worktrees are created
   copy_files:                          # Files to copy into new worktrees
     - .env.local
     - .env
@@ -1321,7 +1321,7 @@ commit:
 # ============================================
 agent:
   command: claude                       # Default agent tool
-  branch_prefix: "agent/"              # Prefix for agent branches</code></pre>
+  workspace_prefix: "agent/"              # Prefix for agent workspaces</code></pre>
 
   <div class="callout callout-warning">
     <span class="callout-icon">&#9888;</span>
@@ -1334,8 +1334,8 @@ agent:
   api_key: ${NEON_API_KEY}        # Resolved at runtime from environment
   project_id: ${NEON_PROJECT_ID}</code></pre>
 
-  <h3>Branch Name Sanitization</h3>
-  <p>devflow automatically sanitizes Git branch names for use as database identifiers:</p>
+  <h3>Workspace Name Sanitization</h3>
+  <p>devflow automatically sanitizes Git workspace names for use as database identifiers:</p>
   <ul>
     <li>Converted to lowercase</li>
     <li>Non-alphanumeric characters replaced with <code>_</code></li>
@@ -1354,11 +1354,11 @@ agent:
     <tbody>
       <tr><td><code>DEVFLOW_DISABLED</code></td><td>Completely disable devflow</td><td><code>false</code></td></tr>
       <tr><td><code>DEVFLOW_SKIP_HOOKS</code></td><td>Skip Git hook execution</td><td><code>false</code></td></tr>
-      <tr><td><code>DEVFLOW_AUTO_CREATE</code></td><td>Override <code>auto_create_on_branch</code></td><td>config value</td></tr>
-      <tr><td><code>DEVFLOW_AUTO_SWITCH</code></td><td>Override <code>auto_switch_on_branch</code></td><td>config value</td></tr>
-      <tr><td><code>DEVFLOW_BRANCH_FILTER_REGEX</code></td><td>Override branch filter regex</td><td>config value</td></tr>
-      <tr><td><code>DEVFLOW_DISABLED_BRANCHES</code></td><td>Comma-separated branches to skip</td><td>&mdash;</td></tr>
-      <tr><td><code>DEVFLOW_CURRENT_BRANCH_DISABLED</code></td><td>Disable for current branch only</td><td><code>false</code></td></tr>
+      <tr><td><code>DEVFLOW_AUTO_CREATE</code></td><td>Override <code>auto_create_on_workspace</code></td><td>config value</td></tr>
+      <tr><td><code>DEVFLOW_AUTO_SWITCH</code></td><td>Override <code>auto_switch_on_workspace</code></td><td>config value</td></tr>
+      <tr><td><code>DEVFLOW_BRANCH_FILTER_REGEX</code></td><td>Override workspace filter regex</td><td>config value</td></tr>
+      <tr><td><code>DEVFLOW_DISABLED_BRANCHES</code></td><td>Comma-separated workspaces to skip</td><td>&mdash;</td></tr>
+      <tr><td><code>DEVFLOW_CURRENT_BRANCH_DISABLED</code></td><td>Disable for current workspace only</td><td><code>false</code></td></tr>
       <tr><td><code>DEVFLOW_DATABASE_HOST</code></td><td>Override database host</td><td><code>localhost</code></td></tr>
       <tr><td><code>DEVFLOW_DATABASE_PORT</code></td><td>Override database port</td><td><code>5432</code></td></tr>
       <tr><td><code>DEVFLOW_DATABASE_USER</code></td><td>Override database user</td><td><code>postgres</code></td></tr>
@@ -1370,7 +1370,7 @@ agent:
       <tr><td><code>DEVFLOW_LLM_MODEL</code></td><td>LLM model name</td><td><code>gpt-4o-mini</code></td></tr>
       <tr><td><code>DEVFLOW_COMMIT_COMMAND</code></td><td>External CLI for commit messages (e.g., <code>claude -p</code>)</td><td>&mdash;</td></tr>
       <tr><td><code>DEVFLOW_AGENT_COMMAND</code></td><td>Default agent command (e.g., <code>claude</code>, <code>codex</code>)</td><td><code>claude</code></td></tr>
-      <tr><td><code>DEVFLOW_CONTEXT_BRANCH</code></td><td>Override current branch context (for CI)</td><td>auto-detected</td></tr>
+      <tr><td><code>DEVFLOW_CONTEXT_BRANCH</code></td><td>Override current workspace context (for CI)</td><td>auto-detected</td></tr>
     </tbody>
   </table>
 </section>
@@ -1381,7 +1381,7 @@ agent:
 <section class="section" id="providers">
   <h2><span class="number">04</span> Providers</h2>
   <p class="section-desc">
-    Providers define <em>where</em> and <em>how</em> your service branches run. From local Docker containers to cloud APIs to custom plugins, devflow supports a range of deployment targets.
+    Providers define <em>where</em> and <em>how</em> your service workspaces run. From local Docker containers to cloud APIs to custom plugins, devflow supports a range of deployment targets.
   </p>
 
   <div class="card-grid">
@@ -1403,7 +1403,7 @@ agent:
     </div>
     <div class="card">
       <h4><span class="badge badge-purple">xata</span> Xata</h4>
-      <p>Xata's managed Postgres with branch support.</p>
+      <p>Xata's managed Postgres with workspace support.</p>
     </div>
     <div class="card">
       <h4><span class="badge badge-orange">plugin</span> Plugin</h4>
@@ -1413,7 +1413,7 @@ agent:
 
   <!-- Local Docker -->
   <h3 id="provider-local">Local Docker Provider</h3>
-  <p>The default and most feature-rich provider. Each branch gets its own Docker container with bind-mounted data. Copy-on-Write storage makes branching near-instant.</p>
+  <p>The default and most feature-rich provider. Each workspace gets its own Docker container with bind-mounted data. Copy-on-Write storage makes branching near-instant.</p>
 
   <h4>PostgreSQL (Local)</h4>
 <pre><code class="language-yaml">services:
@@ -1429,28 +1429,28 @@ agent:
       postgres_db: myapp           # Default database
       data_root: ~/.local/share/devflow  # Data directory root
       storage: auto                # auto | zfs | apfs | reflink | copy</code></pre>
-  <p>Containers are named <code>devflow-{project}-{branch}</code>. Each gets a unique port, so multiple branches can run simultaneously.</p>
+  <p>Containers are named <code>devflow-{project}-{workspace}</code>. Each gets a unique port, so multiple workspaces can run simultaneously.</p>
 
   <h4>ClickHouse (Local)</h4>
 <pre><code class="language-yaml">services:
   - name: analytics
     type: local
     service_type: clickhouse
-    auto_branch: true
+    auto_workspace: true
     clickhouse:
       image: clickhouse/clickhouse-server:latest
       port_range_start: 59000    # HTTP port; native port = HTTP + 877
       data_root: ~/.local/share/devflow
       user: default              # ClickHouse user
       password: ""               # ClickHouse password</code></pre>
-  <p>Containers are named <code>devflow-ch-{service}-{branch}</code>. Two consecutive ports are allocated (HTTP + native protocol).</p>
+  <p>Containers are named <code>devflow-ch-{service}-{workspace}</code>. Two consecutive ports are allocated (HTTP + native protocol).</p>
 
   <h4>MySQL / MariaDB (Local)</h4>
 <pre><code class="language-yaml">services:
   - name: app-mysql
     type: local
     service_type: mysql
-    auto_branch: true
+    auto_workspace: true
     mysql:
       image: mysql:8             # Or mariadb:11
       port_range_start: 53306
@@ -1459,14 +1459,14 @@ agent:
       database: myapp            # Default database
       user: dev                  # Application user
       password: dev              # Application password</code></pre>
-  <p>Containers are named <code>devflow-mysql-{service}-{branch}</code>.</p>
+  <p>Containers are named <code>devflow-mysql-{service}-{workspace}</code>.</p>
 
   <h4>Generic Docker (Any Image)</h4>
 <pre><code class="language-yaml">services:
   - name: cache
     type: local
     service_type: generic
-    auto_branch: false           # Shared across branches (no data cloning)
+    auto_workspace: false           # Shared across workspaces (no data cloning)
     generic:
       image: redis:7-alpine
       port_mapping: "6379:6379"  # Explicit host:container mapping
@@ -1476,7 +1476,7 @@ agent:
         - "/tmp/redis-data:/data"
       command: "redis-server --save 60 1"
       healthcheck: "redis-cli ping"</code></pre>
-  <p>Containers are named <code>devflow-{service}-{branch}</code>. The generic provider does <strong>not</strong> support data cloning from parent branches &mdash; set <code>auto_branch: false</code> to share a single instance across branches, or <code>true</code> for separate empty containers per branch.</p>
+  <p>Containers are named <code>devflow-{service}-{workspace}</code>. The generic provider does <strong>not</strong> support data cloning from parent workspaces &mdash; set <code>auto_workspace: false</code> to share a single instance across workspaces, or <code>true</code> for separate empty containers per workspace.</p>
 
   <div class="callout callout-info">
     <span class="callout-icon">&#9432;</span>
@@ -1497,8 +1497,8 @@ database:
   port: 5432
   user: postgres
   password: mypassword
-  template_database: template0   # Template for new branches
-  database_prefix: devflow       # Branch databases are named {prefix}_{branch}</code></pre>
+  template_database: template0   # Template for new workspaces
+  database_prefix: devflow       # Workspace databases are named {prefix}_{workspace}</code></pre>
 
   <div class="callout callout-warning">
     <span class="callout-icon">&#9888;</span>
@@ -1512,13 +1512,13 @@ database:
   - name: cloud-db
     type: neon
     service_type: postgres
-    auto_branch: true
+    auto_workspace: true
     neon:
       api_key: ${NEON_API_KEY}
       project_id: ${NEON_PROJECT_ID}
       base_url: https://console.neon.tech/api/v2  # Default</code></pre>
 
-  <p>Neon supports <strong>point-in-time branching</strong> &mdash; you can create a branch from a specific timestamp, not just the current state.</p>
+  <p>Neon supports <strong>point-in-time branching</strong> &mdash; you can create a workspace from a specific timestamp, not just the current state.</p>
 
   <!-- DBLab -->
   <h3 id="provider-dblab">DBLab</h3>
@@ -1527,19 +1527,19 @@ database:
   - name: staging-db
     type: dblab
     service_type: postgres
-    auto_branch: true
+    auto_workspace: true
     dblab:
       api_url: https://dblab.example.com
       auth_token: ${DBLAB_TOKEN}</code></pre>
 
   <!-- Xata -->
   <h3 id="provider-xata">Xata</h3>
-  <p>Xata provides managed PostgreSQL with branch support through their platform API.</p>
+  <p>Xata provides managed PostgreSQL with workspace support through their platform API.</p>
 <pre><code class="language-yaml">services:
   - name: xata-db
     type: xata
     service_type: postgres
-    auto_branch: true
+    auto_workspace: true
     xata:
       api_key: ${XATA_API_KEY}
       organization_id: my-org
@@ -1555,7 +1555,7 @@ database:
   - name: custom-service
     type: local
     service_type: plugin
-    auto_branch: true
+    auto_workspace: true
     plugin:
       name: my-plugin              # Resolved as devflow-plugin-my-plugin on PATH
       # path: /usr/local/bin/my-plugin  # Or explicit path
@@ -1569,10 +1569,10 @@ database:
 
   <p><strong>Request format:</strong></p>
 <pre><code class="language-json">{
-  "method": "create_branch",
+  "method": "create_workspace",
   "params": {
-    "branch_name": "feature-auth",
-    "from_branch": "main"
+    "workspace_name": "feature-auth",
+    "from_workspace": "main"
   },
   "config": {
     "region": "us-east-1",
@@ -1596,7 +1596,7 @@ database:
   <p><strong>Response format (error):</strong></p>
 <pre><code class="language-json">{
   "ok": false,
-  "error": "Failed to create branch: quota exceeded"
+  "error": "Failed to create workspace: quota exceeded"
 }</code></pre>
 
   <h4>Required Methods</h4>
@@ -1605,12 +1605,12 @@ database:
       <tr><th>Method</th><th>Params</th><th>Expected Result</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>create_branch</code></td><td><code>branch_name</code>, <code>from_branch</code></td><td>ConnectionInfo</td></tr>
-      <tr><td><code>delete_branch</code></td><td><code>branch_name</code></td><td><code>{}</code></td></tr>
-      <tr><td><code>list_branches</code></td><td>&mdash;</td><td><code>[{name, created_at}]</code></td></tr>
-      <tr><td><code>branch_exists</code></td><td><code>branch_name</code></td><td><code>{exists: bool}</code></td></tr>
-      <tr><td><code>switch_to_branch</code></td><td><code>branch_name</code></td><td>ConnectionInfo</td></tr>
-      <tr><td><code>get_connection_info</code></td><td><code>branch_name</code></td><td>ConnectionInfo</td></tr>
+      <tr><td><code>create_workspace</code></td><td><code>workspace_name</code>, <code>from_workspace</code></td><td>ConnectionInfo</td></tr>
+      <tr><td><code>delete_workspace</code></td><td><code>workspace_name</code></td><td><code>{}</code></td></tr>
+      <tr><td><code>list_workspaces</code></td><td>&mdash;</td><td><code>[{name, created_at}]</code></td></tr>
+      <tr><td><code>workspace_exists</code></td><td><code>workspace_name</code></td><td><code>{exists: bool}</code></td></tr>
+      <tr><td><code>switch_to_branch</code></td><td><code>workspace_name</code></td><td>ConnectionInfo</td></tr>
+      <tr><td><code>get_connection_info</code></td><td><code>workspace_name</code></td><td>ConnectionInfo</td></tr>
       <tr><td><code>doctor</code></td><td>&mdash;</td><td><code>{healthy: bool, messages: [...]}</code></td></tr>
     </tbody>
   </table>
@@ -1633,7 +1633,7 @@ devflow plugin check my-plugin</code></pre>
 <section class="section" id="services">
   <h2><span class="number">05</span> Services</h2>
   <p class="section-desc">
-    Services are the stateful resources (databases, caches, queues) that devflow branches alongside your Git workflow. One project can manage many services simultaneously.
+    Services are the stateful resources (databases, caches, queues) that devflow workspaces alongside your Git workflow. One project can manage many services simultaneously.
   </p>
 
   <h3>Single vs. Multi-Service</h3>
@@ -1653,7 +1653,7 @@ services:
   - name: app-db
     type: local
     service_type: postgres
-    auto_branch: true
+    auto_workspace: true
     default: true
     local:
       image: postgres:17
@@ -1661,24 +1661,24 @@ services:
   - name: cache
     type: local
     service_type: generic
-    auto_branch: false         # Shared — not branched per git branch
+    auto_workspace: false         # Shared — not branched per git workspace
     generic:
       image: redis:7-alpine
       port_mapping: "6379:6379"</code></pre>
 
-  <h3>auto_branch and default</h3>
+  <h3>auto_workspace and default</h3>
   <table>
     <thead>
       <tr><th>Flag</th><th>Description</th></tr>
     </thead>
     <tbody>
       <tr>
-        <td><code>auto_branch: true</code></td>
-        <td>This service is automatically branched when you create/switch/delete Git branches. Set to <code>false</code> to share a single instance across all branches (e.g., Redis cache).</td>
+        <td><code>auto_workspace: true</code></td>
+        <td>This service is automatically branched when you create/switch/delete Git workspaces. Set to <code>false</code> to share a single instance across all workspaces (e.g., Redis cache).</td>
       </tr>
       <tr>
         <td><code>default: true</code></td>
-        <td>When you run <code>devflow connection &lt;branch&gt;</code> without <code>-s</code>, this is the service whose connection info is shown. Only one service should be marked as default.</td>
+        <td>When you run <code>devflow connection &lt;workspace&gt;</code> without <code>-s</code>, this is the service whose connection info is shown. Only one service should be marked as default.</td>
       </tr>
     </tbody>
   </table>
@@ -1695,7 +1695,7 @@ devflow service start feature/auth -s app-db
 devflow service seed feature/auth -s app-db --from dump.sql</code></pre>
 
   <h3>Multi-Provider Orchestration</h3>
-  <p>When you run <code>devflow service create</code>, <code>switch</code>, or <code>service delete</code>, devflow orchestrates across <strong>all</strong> services with <code>auto_branch: true</code>. Operations are performed sequentially with <strong>partial failure tolerance</strong> &mdash; if one provider fails, the others continue.</p>
+  <p>When you run <code>devflow service create</code>, <code>switch</code>, or <code>service delete</code>, devflow orchestrates across <strong>all</strong> services with <code>auto_workspace: true</code>. Operations are performed sequentially with <strong>partial failure tolerance</strong> &mdash; if one provider fails, the others continue.</p>
 
   <h3>Connection Info Formats</h3>
 <pre><code class="language-bash"># URI format (default)
@@ -1722,7 +1722,7 @@ devflow connection feature/auth --format json
 <section class="section" id="worktrees">
   <h2><span class="number">06</span> Worktrees</h2>
   <p class="section-desc">
-    Git worktrees let you have multiple branches checked out simultaneously in different directories. devflow manages worktrees automatically and integrates them with service branching.
+    Git worktrees let you have multiple workspaces checked out simultaneously in different directories. devflow manages worktrees automatically and integrates them with service branching.
   </p>
 
   <h3>Why Worktrees?</h3>
@@ -1736,7 +1736,7 @@ devflow connection feature/auth --format json
   <h3>Configuration</h3>
 <pre><code class="language-yaml">worktree:
   enabled: true
-  path_template: "../{repo}.{branch}"  # Where worktrees are created
+  path_template: "../{repo}.{workspace}"  # Where worktrees are created
   copy_files:                          # Files to copy into new worktrees
     - .env.local
     - .env
@@ -1750,25 +1750,25 @@ devflow connection feature/auth --format json
     </thead>
     <tbody>
       <tr><td><code>{repo}</code></td><td>Repository directory name</td><td><code>my-project</code></td></tr>
-      <tr><td><code>{branch}</code></td><td>Branch name (slashes become dashes)</td><td><code>feature-auth</code></td></tr>
+      <tr><td><code>{workspace}</code></td><td>Workspace name (slashes become dashes)</td><td><code>feature-auth</code></td></tr>
     </tbody>
   </table>
 
-  <p>With the default template <code>../&#123;repo&#125;.&#123;branch&#125;</code>, branch <code>feature/auth</code> of repo <code>my-project</code> creates a worktree at <code>../my-project.feature-auth/</code>.</p>
+  <p>With the default template <code>../&#123;repo&#125;.&#123;workspace&#125;</code>, workspace <code>feature/auth</code> of repo <code>my-project</code> creates a worktree at <code>../my-project.feature-auth/</code>.</p>
 
   <h3>The Switch Command</h3>
   <p><code>devflow switch</code> is the primary command for working with worktrees. It handles Git checkout, worktree creation, service switching, and hook execution in one step.</p>
 
-<pre><code class="language-bash"># Interactive picker — fuzzy search across all branches
+<pre><code class="language-bash"># Interactive picker — fuzzy search across all workspaces
 devflow switch
 
-# Switch to an existing branch
+# Switch to an existing workspace
 devflow switch feature/auth
 
-# Create a new branch and switch to it
+# Create a new workspace and switch to it
 devflow switch -c feature/payment
 
-# Create from a specific base branch
+# Create from a specific base workspace
 devflow switch -c feature/payment -b develop
 
 # Switch without touching services
@@ -1790,7 +1790,7 @@ eval "$(devflow shell-init)"</code></pre>
   <p>If you manually created a worktree (e.g., via <code>git worktree add</code>), you can retroactively set up devflow:</p>
 <pre><code class="language-bash"># In the worktree directory
 devflow worktree-setup</code></pre>
-  <p>This copies config files from the main worktree and creates the corresponding service branch.</p>
+  <p>This copies config files from the main worktree and creates the corresponding service workspace.</p>
 
   <h3>Example: Full Worktree Workflow</h3>
 <pre><code class="language-bash"># Enable shell integration (one-time setup in ~/.zshrc)
@@ -1799,14 +1799,14 @@ eval "$(devflow shell-init)"
 # Start a new feature — creates worktree + isolated service environment
 devflow switch -c feature/auth
 # → Created worktree at ../my-project.feature-auth
-# → Created service branch feature/auth
+# → Created service workspace feature/auth
 # → cd ../my-project.feature-auth
 
 # Work on the feature...
 npm run migrate
 npm test
 
-# Jump to another branch for a PR review (without losing your work)
+# Jump to another workspace for a PR review (without losing your work)
 devflow switch -c fix/login-bug
 # → Created worktree at ../my-project.fix-login-bug
 # → cd ../my-project.fix-login-bug
@@ -1815,9 +1815,9 @@ devflow switch -c fix/login-bug
 devflow switch feature/auth
 # → cd ../my-project.feature-auth
 
-# Interactive picker for when you forget branch names
+# Interactive picker for when you forget workspace names
 devflow switch
-# → Shows fuzzy search across all branches</code></pre>
+# → Shows fuzzy search across all workspaces</code></pre>
 </section>
 
 <!-- ================================================================== -->
@@ -1826,7 +1826,7 @@ devflow switch
 <section class="section" id="hooks">
   <h2><span class="number">07</span> Hooks</h2>
   <p class="section-desc">
-    Lifecycle hooks are MiniJinja-templated commands that run at specific phases of the branch lifecycle. Use them to run migrations, update <code>.env</code> files, restart services, or run tests.
+    Lifecycle hooks are MiniJinja-templated commands that run at specific phases of the workspace lifecycle. Use them to run migrations, update <code>.env</code> files, restart services, or run tests.
   </p>
 
   <h3>All Hook Phases</h3>
@@ -1835,21 +1835,21 @@ devflow switch
       <tr><th>Phase</th><th>Fires When...</th><th>Blocking?</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>pre-switch</code></td><td>Before switching to a branch</td><td>Yes</td></tr>
-      <tr><td><code>post-create</code></td><td>After creating a new branch</td><td>Yes</td></tr>
-      <tr><td><code>post-start</code></td><td>After starting a stopped branch</td><td>No</td></tr>
-      <tr><td><code>post-switch</code></td><td>After switching to a branch</td><td>No</td></tr>
-      <tr><td><code>pre-remove</code></td><td>Before removing a branch</td><td>Yes</td></tr>
-      <tr><td><code>post-remove</code></td><td>After removing a branch</td><td>No</td></tr>
+      <tr><td><code>pre-switch</code></td><td>Before switching to a workspace</td><td>Yes</td></tr>
+      <tr><td><code>post-create</code></td><td>After creating a new workspace</td><td>Yes</td></tr>
+      <tr><td><code>post-start</code></td><td>After starting a stopped workspace</td><td>No</td></tr>
+      <tr><td><code>post-switch</code></td><td>After switching to a workspace</td><td>No</td></tr>
+      <tr><td><code>pre-remove</code></td><td>Before removing a workspace</td><td>Yes</td></tr>
+      <tr><td><code>post-remove</code></td><td>After removing a workspace</td><td>No</td></tr>
       <tr><td><code>pre-commit</code></td><td>Before committing (Git pre-commit hook)</td><td>Yes</td></tr>
-      <tr><td><code>pre-merge</code></td><td>Before merging branches</td><td>Yes</td></tr>
+      <tr><td><code>pre-merge</code></td><td>Before merging workspaces</td><td>Yes</td></tr>
       <tr><td><code>post-merge</code></td><td>After merging (Git post-merge hook)</td><td>No</td></tr>
       <tr><td><code>post-rewrite</code></td><td>After rebase/amend (Git post-rewrite hook)</td><td>No</td></tr>
-      <tr><td><code>pre-service-create</code></td><td>Before creating a service branch</td><td>Yes</td></tr>
-      <tr><td><code>post-service-create</code></td><td>After creating a service branch</td><td>No</td></tr>
-      <tr><td><code>pre-service-delete</code></td><td>Before deleting a service branch</td><td>Yes</td></tr>
-      <tr><td><code>post-service-delete</code></td><td>After deleting a service branch</td><td>No</td></tr>
-      <tr><td><code>post-service-switch</code></td><td>After switching a service branch</td><td>No</td></tr>
+      <tr><td><code>pre-service-create</code></td><td>Before creating a service workspace</td><td>Yes</td></tr>
+      <tr><td><code>post-service-create</code></td><td>After creating a service workspace</td><td>No</td></tr>
+      <tr><td><code>pre-service-delete</code></td><td>Before deleting a service workspace</td><td>Yes</td></tr>
+      <tr><td><code>post-service-delete</code></td><td>After deleting a service workspace</td><td>No</td></tr>
+      <tr><td><code>post-service-switch</code></td><td>After switching a service workspace</td><td>No</td></tr>
     </tbody>
   </table>
 
@@ -1887,13 +1887,13 @@ devflow switch
       <tr><th>Variable</th><th>Description</th><th>Example</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>{{ branch }}</code></td><td>Current Git branch name</td><td><code>feature/auth</code></td></tr>
+      <tr><td><code>{{ workspace }}</code></td><td>Current Git workspace name</td><td><code>feature/auth</code></td></tr>
       <tr><td><code>{{ repo }}</code></td><td>Repository directory name</td><td><code>my-project</code></td></tr>
       <tr><td><code>{{ worktree_path }}</code></td><td>Worktree path (if enabled)</td><td><code>../my-project.feature-auth</code></td></tr>
-      <tr><td><code>{{ default_branch }}</code></td><td>Default branch</td><td><code>main</code></td></tr>
+      <tr><td><code>{{ default_workspace }}</code></td><td>Default workspace</td><td><code>main</code></td></tr>
       <tr><td><code>{{ commit }}</code></td><td>HEAD commit SHA</td><td><code>a1b2c3d</code></td></tr>
-      <tr><td><code>{{ target }}</code></td><td>Target branch (merge hooks)</td><td><code>main</code></td></tr>
-      <tr><td><code>{{ base }}</code></td><td>Base/parent branch (create hooks)</td><td><code>main</code></td></tr>
+      <tr><td><code>{{ target }}</code></td><td>Target workspace (merge hooks)</td><td><code>main</code></td></tr>
+      <tr><td><code>{{ base }}</code></td><td>Base/parent workspace (create hooks)</td><td><code>main</code></td></tr>
       <tr><td><code>{{ service.&lt;name&gt;.host }}</code></td><td>Service host</td><td><code>localhost</code></td></tr>
       <tr><td><code>{{ service.&lt;name&gt;.port }}</code></td><td>Service port</td><td><code>55433</code></td></tr>
       <tr><td><code>{{ service.&lt;name&gt;.database }}</code></td><td>Database name</td><td><code>myapp</code></td></tr>
@@ -1917,37 +1917,37 @@ devflow switch
       <tr>
         <td><code>sanitize</code></td>
         <td>Replace <code>/</code> and <code>\</code> with <code>-</code></td>
-        <td><code>{{ branch | sanitize }}</code> &rarr; <code>feature-auth</code></td>
+        <td><code>{{ workspace | sanitize }}</code> &rarr; <code>feature-auth</code></td>
       </tr>
       <tr>
         <td><code>sanitize_db</code></td>
         <td>Database-safe identifier (max 63 chars, hash suffix)</td>
-        <td><code>{{ branch | sanitize_db }}</code> &rarr; <code>feature_auth</code></td>
+        <td><code>{{ workspace | sanitize_db }}</code> &rarr; <code>feature_auth</code></td>
       </tr>
       <tr>
         <td><code>hash_port</code></td>
         <td>Deterministic port in range 10000&ndash;19999</td>
-        <td><code>{{ branch | hash_port }}</code> &rarr; <code>14523</code></td>
+        <td><code>{{ workspace | hash_port }}</code> &rarr; <code>14523</code></td>
       </tr>
       <tr>
         <td><code>lower</code></td>
         <td>Lowercase</td>
-        <td><code>{{ branch | lower }}</code></td>
+        <td><code>{{ workspace | lower }}</code></td>
       </tr>
       <tr>
         <td><code>upper</code></td>
         <td>Uppercase</td>
-        <td><code>{{ branch | upper }}</code></td>
+        <td><code>{{ workspace | upper }}</code></td>
       </tr>
       <tr>
         <td><code>replace</code></td>
         <td>String replacement</td>
-        <td><code>{{ branch | replace("/", "-") }}</code></td>
+        <td><code>{{ workspace | replace("/", "-") }}</code></td>
       </tr>
       <tr>
         <td><code>truncate</code></td>
         <td>Truncate to N characters</td>
-        <td><code>{{ branch | truncate(20) }}</code></td>
+        <td><code>{{ workspace | truncate(20) }}</code></td>
       </tr>
     </tbody>
   </table>
@@ -1983,7 +1983,7 @@ devflow switch
     # Custom shell condition
     run-if-staging:
       command: "npm run seed:staging"
-      condition: "test '{{ branch }}' = 'staging'"</code></pre>
+      condition: "test '{{ workspace }}' = 'staging'"</code></pre>
 
   <h3>Hook Approval System</h3>
   <p>For security, hooks from <code>.devflow.yml</code> require user approval before running for the first time. This prevents unexpected commands from executing via Git hooks. In <code>--non-interactive</code> mode, unapproved hooks fail instead of prompting.</p>
@@ -2016,8 +2016,8 @@ devflow hook run post-create
 # Run a specific named hook
 devflow hook run post-create migrate
 
-# Run hooks for a different branch
-devflow hook run post-create --branch feature/auth</code></pre>
+# Run hooks for a different workspace
+devflow hook run post-create --workspace feature/auth</code></pre>
 
   <h3>Complete Hook Example</h3>
 <pre><code class="language-yaml">hooks:
@@ -2046,7 +2046,7 @@ devflow hook run post-create --branch feature/auth</code></pre>
       continue_on_error: false
 
   post-switch:
-    # Update .env on every branch switch
+    # Update .env on every workspace switch
     update-env:
       command: |
         cat > .env.local << EOF
@@ -2065,15 +2065,15 @@ devflow hook run post-create --branch feature/auth</code></pre>
       continue_on_error: false
 
   post-start:
-    # Start dev server on a deterministic port per branch
+    # Start dev server on a deterministic port per workspace
     dev-server:
-      command: "npm run dev -- --port {{ branch | hash_port }}"
+      command: "npm run dev -- --port {{ workspace | hash_port }}"
       background: true
 
   post-remove:
     # Custom cleanup
     cleanup:
-      command: "docker stop {{ repo }}-{{ branch | sanitize }}-* 2>/dev/null || true"
+      command: "docker stop {{ repo }}-{{ workspace | sanitize }}-* 2>/dev/null || true"
       continue_on_error: true</code></pre>
 </section>
 
@@ -2083,7 +2083,7 @@ devflow hook run post-create --branch feature/auth</code></pre>
 <section class="section" id="seeding">
   <h2><span class="number">08</span> Seeding</h2>
   <p class="section-desc">
-    Seed your branches with data from production dumps, live databases, or S3 backups. Seeding works during initialization or at any time after branch creation.
+    Seed your workspaces with data from production dumps, live databases, or S3 backups. Seeding works during initialization or at any time after workspace creation.
   </p>
 
   <h3>Seed Sources</h3>
@@ -2104,7 +2104,7 @@ devflow hook run post-create --branch feature/auth</code></pre>
   </div>
 
   <h3>Seeding During Service Setup</h3>
-<pre><code class="language-bash"># Seed main branch from a local dump
+<pre><code class="language-bash"># Seed main workspace from a local dump
 devflow service add app-db --provider local --service-type postgres --from /path/to/dump.sql
 
 # Seed from a live database
@@ -2113,7 +2113,7 @@ devflow service add app-db --provider local --service-type postgres --from postg
 # Seed from S3
 devflow service add app-db --provider local --service-type postgres --from s3://my-bucket/backups/latest.dump</code></pre>
 
-  <h3>Seeding an Existing Branch</h3>
+  <h3>Seeding an Existing Workspace</h3>
 <pre><code class="language-bash"># Seed from a local file
 devflow service seed main --from dump.sql
 
@@ -2187,7 +2187,7 @@ devflow service seed main -s app-db --from dump.sql</code></pre>
     </div>
     <div class="card">
       <h4><code>examples/agent-*.sh</code></h4>
-      <p>Ready-to-use scripts: <code>agent-bootstrap.sh</code> for idempotent repo setup and <code>agent-task.sh</code> for task-scoped branch environments.</p>
+      <p>Ready-to-use scripts: <code>agent-bootstrap.sh</code> for idempotent repo setup and <code>agent-task.sh</code> for task-scoped workspace environments.</p>
     </div>
   </div>
 
@@ -2196,7 +2196,7 @@ devflow service seed main -s app-db --from dump.sql</code></pre>
 
   <div class="diagram">    ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
     │  Bootstrap   │ ──▶ │    Create    │ ──▶ │     Work     │ ──▶ │   Cleanup    │
-    │              │     │   Branch     │     │              │     │              │
+    │              │     │   Workspace     │     │              │     │              │
     │ devflow init │     │  + Get Conn  │     │ Agent runs   │     │  devflow     │
     │ install-hooks│     │  devflow     │     │ migrations,  │     │  delete      │
     │ (idempotent) │     │  switch/     │     │ tests, code  │     │              │
@@ -2288,7 +2288,7 @@ export DEVFLOW_LLM_MODEL="llama3.1"</code></pre>
   <h3>JSON Output Mode</h3>
   <p>All core commands support <code>--json</code> for structured output, making devflow trivially scriptable from any language or agent framework.</p>
 
-<pre><code class="language-bash"># Create a branch and get structured output
+<pre><code class="language-bash"># Create a workspace and get structured output
 devflow --json create feature/auth
 # → {"name": "feature/auth", "state": "running", ...}
 
@@ -2296,13 +2296,13 @@ devflow --json create feature/auth
 devflow --json connection feature/auth
 # → {"host": "localhost", "port": 55433, "database": "myapp", ...}
 
-# List all branches as JSON
+# List all workspaces as JSON
 devflow --json list
 # → [{"name": "main", "status": "running"}, ...]
 
 # Status as JSON
 devflow --json status
-# → {"project": "myapp", "current_branch": "main", "services": [...]}</code></pre>
+# → {"project": "myapp", "current_workspace": "main", "services": [...]}</code></pre>
 
   <h4>Automation Capabilities</h4>
   <p>Use this command to detect machine-facing guarantees at runtime:</p>
@@ -2412,7 +2412,7 @@ jobs:
       <tr><th>Hook</th><th>Purpose</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>post-checkout</code></td><td>Auto-create/switch service branches on <code>git checkout</code></td></tr>
+      <tr><td><code>post-checkout</code></td><td>Auto-create/switch service workspaces on <code>git checkout</code></td></tr>
       <tr><td><code>post-merge</code></td><td>Run post-merge lifecycle hooks after <code>git merge</code></td></tr>
       <tr><td><code>pre-commit</code></td><td>Run pre-commit lifecycle hooks before <code>git commit</code></td></tr>
       <tr><td><code>post-rewrite</code></td><td>Run post-rewrite hooks after <code>git rebase</code> / <code>git commit --amend</code></td></tr>
@@ -2424,13 +2424,13 @@ jobs:
   <h4>Worktree-Aware Hooks</h4>
   <p>The post-checkout hook is worktree-aware. It detects whether the checkout happened in the main worktree or a linked worktree (via <code>git rev-parse --git-dir</code> vs <code>--git-common-dir</code>) and passes the appropriate flags to devflow.</p>
 
-  <h4>Main Branch Detection</h4>
-  <p>devflow auto-detects the main branch using this priority:</p>
+  <h4>Main Workspace Detection</h4>
+  <p>devflow auto-detects the main workspace using this priority:</p>
   <ol>
     <li>Remote HEAD reference (<code>origin/HEAD</code>)</li>
     <li>Common names: <code>main</code>, <code>master</code>, <code>develop</code></li>
-    <li>Tracking branch of the current branch</li>
-    <li>Current branch (fallback)</li>
+    <li>Tracking workspace of the current workspace</li>
+    <li>Current workspace (fallback)</li>
   </ol>
 
   <h3>Jujutsu (jj) Support</h3>
@@ -2490,7 +2490,7 @@ devflow init myapp --name app           # Explicit project name
 devflow init myapp --force              # Overwrite existing config</code></pre>
 
   <h4><code>devflow service add &lt;name&gt;</code></h4>
-  <p>Add and configure a service provider. Use <code>--from</code> to seed main-branch service data.</p>
+  <p>Add and configure a service provider. Use <code>--from</code> to seed main-workspace service data.</p>
 <pre><code class="language-bash">devflow service add app-db --provider local --service-type postgres
 devflow service add app-db --provider local --service-type postgres --from ./backup.sql
 devflow service add app-db --provider local --service-type postgres --from postgresql://user:pass@host:5432/db</code></pre>
@@ -2514,7 +2514,7 @@ eval "$(devflow shell-init zsh)"         # Zsh
 devflow shell-init fish | source         # Fish</code></pre>
 
   <h4><code>devflow tui</code></h4>
-  <p>Launch the interactive terminal UI dashboard. Provides a rich overview of branches, services, and worktrees with keyboard-driven navigation.</p>
+  <p>Launch the interactive terminal UI dashboard. Provides a rich overview of workspaces, services, and worktrees with keyboard-driven navigation.</p>
 
   <h4><code>devflow setup-zfs</code></h4>
   <p>Create a file-backed ZFS pool for Copy-on-Write storage (Linux only).</p>
@@ -2527,12 +2527,12 @@ devflow setup-zfs --pool-name mypool     # Custom pool name</code></pre>
 
   <hr>
 
-  <h3>Branch Management</h3>
+  <h3>Workspace Management</h3>
 
-  <h4><code>devflow switch [branch]</code></h4>
-  <p>Switch to an existing branch/worktree. Use <code>-c</code> to create before switching.</p>
+  <h4><code>devflow switch [workspace]</code></h4>
+  <p>Switch to an existing workspace/worktree. Use <code>-c</code> to create before switching.</p>
 <pre><code class="language-bash">devflow switch                           # Interactive fuzzy picker
-devflow switch feature/auth              # Switch to existing branch/worktree
+devflow switch feature/auth              # Switch to existing workspace/worktree
 devflow switch -c feature/new            # Create and switch
 devflow switch -c feature/new --from develop  # Create from specific parent
 devflow switch feature/auth -x "npm ci"  # Run command after switch
@@ -2541,77 +2541,77 @@ devflow switch feature/auth --no-verify  # Skip hooks
 devflow switch --template                # Switch to main/template
 devflow switch feature/auth --dry-run    # Preview what would happen</code></pre>
 
-  <h4><code>devflow link &lt;branch&gt;</code></h4>
-  <p>Link an existing VCS branch into the devflow registry (and materialize service branches if configured).</p>
+  <h4><code>devflow link &lt;workspace&gt;</code></h4>
+  <p>Link an existing VCS workspace into the devflow registry (and materialize service workspaces if configured).</p>
 <pre><code class="language-bash">devflow link feature/auth
 devflow link feature/auth --from main</code></pre>
 
-  <h4><code>devflow service create &lt;branch&gt;</code></h4>
-  <p>Create service branch(es) only (without switching VCS/worktree).</p>
+  <h4><code>devflow service create &lt;workspace&gt;</code></h4>
+  <p>Create service workspace(es) only (without switching VCS/worktree).</p>
 <pre><code class="language-bash">devflow service create feature/auth
 devflow service create feature/auth --from develop</code></pre>
 
-  <h4><code>devflow service delete &lt;branch&gt;</code></h4>
-  <p>Delete service branch(es) only. Keeps the Git branch and worktree.</p>
+  <h4><code>devflow service delete &lt;workspace&gt;</code></h4>
+  <p>Delete service workspace(es) only. Keeps the Git workspace and worktree.</p>
 <pre><code class="language-bash">devflow service delete feature/auth</code></pre>
 
-  <h4><code>devflow remove &lt;branch&gt;</code></h4>
-  <p>Full cleanup: deletes the Git branch, worktree, and all service branches.</p>
+  <h4><code>devflow remove &lt;workspace&gt;</code></h4>
+  <p>Full cleanup: deletes the Git workspace, worktree, and all service workspaces.</p>
 <pre><code class="language-bash">devflow remove feature/auth
 devflow remove feature/auth --force       # Skip confirmation
-devflow remove feature/auth --keep-services  # Keep service branches</code></pre>
+devflow remove feature/auth --keep-services  # Keep service workspaces</code></pre>
 
   <h4><code>devflow list</code></h4>
-  <p>List all branches with enriched status (Git branch + worktree + service status across all providers).</p>
+  <p>List all workspaces with enriched status (Git workspace + worktree + service status across all providers).</p>
 
   <h4><code>devflow graph</code></h4>
-  <p>Render the full environment graph: branch tree with service status, worktree paths, and provider info.</p>
+  <p>Render the full environment graph: workspace tree with service status, worktree paths, and provider info.</p>
 <pre><code class="language-bash">devflow graph
 devflow --json graph</code></pre>
 
   <h4><code>devflow merge [target]</code></h4>
-  <p>Merge the current branch into the target (defaults to main).</p>
+  <p>Merge the current workspace into the target (defaults to main).</p>
 <pre><code class="language-bash">devflow merge                            # Merge into main
 devflow merge develop                    # Merge into develop
-devflow merge --cleanup                  # Delete source branch after merge
+devflow merge --cleanup                  # Delete source workspace after merge
 devflow merge --dry-run                  # Preview the merge</code></pre>
 
   <h4><code>devflow cleanup</code></h4>
-  <p>Alias for <code>devflow service cleanup</code>. Remove old service branches, keeping the most recent N.</p>
-<pre><code class="language-bash">devflow cleanup                          # Use max_branches from config
+  <p>Alias for <code>devflow service cleanup</code>. Remove old service workspaces, keeping the most recent N.</p>
+<pre><code class="language-bash">devflow cleanup                          # Use max_workspaces from config
 devflow cleanup --max-count 5            # Keep only 5 most recent</code></pre>
 
   <h4><code>devflow service cleanup</code></h4>
-  <p>Clean old branches for a specific service target.</p>
+  <p>Clean old workspaces for a specific service target.</p>
 <pre><code class="language-bash">devflow service cleanup
 devflow service cleanup --max-count 5</code></pre>
 
   <hr>
 
-  <h3>Branch Lifecycle (Local Provider)</h3>
+  <h3>Workspace Lifecycle (Local Provider)</h3>
 
-  <h4><code>devflow service start &lt;branch&gt;</code></h4>
+  <h4><code>devflow service start &lt;workspace&gt;</code></h4>
   <p>Start a stopped container.</p>
 
-  <h4><code>devflow service stop &lt;branch&gt;</code></h4>
+  <h4><code>devflow service stop &lt;workspace&gt;</code></h4>
   <p>Stop a running container (preserves data).</p>
 
-  <h4><code>devflow service reset &lt;branch&gt;</code></h4>
-  <p>Reset branch data to the state of the parent branch.</p>
+  <h4><code>devflow service reset &lt;workspace&gt;</code></h4>
+  <p>Reset workspace data to the state of the parent workspace.</p>
 
   <h4><code>devflow service destroy</code></h4>
-  <p>Destroy all branches and data for a service.</p>
+  <p>Destroy all workspaces and data for a service.</p>
 <pre><code class="language-bash">devflow service destroy                   # With confirmation prompt
 devflow service destroy --force           # Skip confirmation</code></pre>
   <p>In <code>--json</code> or <code>--non-interactive</code> mode, <code>--force</code> is required.</p>
 
-  <h4><code>devflow service seed &lt;branch&gt; --from &lt;source&gt;</code></h4>
-  <p>Seed a branch from a PostgreSQL URL, file, or S3 object.</p>
+  <h4><code>devflow service seed &lt;workspace&gt; --from &lt;source&gt;</code></h4>
+  <p>Seed a workspace from a PostgreSQL URL, file, or S3 object.</p>
 <pre><code class="language-bash">devflow service seed main --from dump.sql
 devflow service seed main --from postgresql://user:pass@host/db
 devflow service seed main --from s3://bucket/path/to/dump.sql</code></pre>
 
-  <h4><code>devflow service logs &lt;branch&gt;</code></h4>
+  <h4><code>devflow service logs &lt;workspace&gt;</code></h4>
   <p>Show Docker container logs.</p>
 <pre><code class="language-bash">devflow service logs feature/auth                # Last 100 lines (default)
 devflow service logs feature/auth --tail 50      # Last 50 lines</code></pre>
@@ -2633,8 +2633,8 @@ devflow --json capabilities</code></pre>
 <pre><code class="language-bash">devflow service capabilities
 devflow --json service capabilities</code></pre>
 
-  <h4><code>devflow connection &lt;branch&gt;</code></h4>
-  <p>Show connection info for a branch.</p>
+  <h4><code>devflow connection &lt;workspace&gt;</code></h4>
+  <p>Show connection info for a workspace.</p>
 <pre><code class="language-bash">devflow connection feature/auth              # URI (default)
 devflow connection feature/auth --format env # Env vars (DATABASE_URL=...)
 devflow connection feature/auth --format json # JSON object
@@ -2657,19 +2657,19 @@ devflow commit --ai --dry-run            # Preview AI message</code></pre>
   <h3>AI Agents</h3>
 
   <h4><code>devflow agent start &lt;task&gt;</code></h4>
-  <p>Start an AI agent in a new isolated branch.</p>
+  <p>Start an AI agent in a new isolated workspace.</p>
 <pre><code class="language-bash">devflow agent start fix-login -- 'Fix the login timeout bug'
 devflow agent start fix-login --command codex
 devflow agent start fix-login --dry-run  # Preview without executing</code></pre>
 
   <h4><code>devflow agent status</code></h4>
-  <p>Show agent status across all branches.</p>
+  <p>Show agent status across all workspaces.</p>
 
   <h4><code>devflow agent context</code></h4>
-  <p>Output project context (branch info, services, connections) for AI agents.</p>
+  <p>Output project context (workspace info, services, connections) for AI agents.</p>
 <pre><code class="language-bash">devflow agent context                    # Markdown format
 devflow agent context --format json      # JSON format
-devflow agent context --branch feat/x    # Specific branch</code></pre>
+devflow agent context --workspace feat/x    # Specific workspace</code></pre>
 
   <h4><code>devflow agent skill</code></h4>
   <p>Generate project-specific skills/rules for AI tools.</p>
@@ -2692,16 +2692,16 @@ devflow agent skill --target opencode    # AGENTS.md</code></pre>
   <p>Manually run hooks for a specific phase.</p>
 <pre><code class="language-bash">devflow hook run post-create              # All post-create hooks
 devflow hook run post-create migrate      # Just the "migrate" hook
-devflow hook run post-create --branch feat/x  # For a different branch</code></pre>
+devflow hook run post-create --workspace feat/x  # For a different workspace</code></pre>
 
   <h4><code>devflow hook explain &lt;phase&gt;</code></h4>
   <p>Explain what a hook phase does and show configured hooks for it.</p>
 
   <h4><code>devflow hook vars</code></h4>
-  <p>Show all template variables available for the current branch.</p>
+  <p>Show all template variables available for the current workspace.</p>
 
   <h4><code>devflow hook render &lt;template&gt;</code></h4>
-  <p>Render a MiniJinja template string against the current branch context.</p>
+  <p>Render a MiniJinja template string against the current workspace context.</p>
 <pre><code class="language-bash">devflow hook render "DATABASE_URL={{ service['app-db'].url }}"</code></pre>
 
   <h4><code>devflow hook approvals</code></h4>
@@ -2729,7 +2729,7 @@ devflow plugin init my-plugin --lang python  # Python scaffold</code></pre>
   <h3>Worktree</h3>
 
   <h4><code>devflow worktree-setup</code></h4>
-  <p>Set up devflow in an existing Git worktree (copy files, create service branches).</p>
+  <p>Set up devflow in an existing Git worktree (copy files, create service workspaces).</p>
 </section>
 
 <!-- ================================================================== -->
@@ -2769,14 +2769,14 @@ hooks:
   <h3>Django Project</h3>
 <pre><code class="language-yaml"># .devflow.yml
 git:
-  auto_create_on_branch: true
-  auto_switch_on_branch: true
-  main_branch: main
-  exclude_branches: [main, master, develop]
+  auto_create_on_workspace: true
+  auto_switch_on_workspace: true
+  main_workspace: main
+  exclude_workspaces: [main, master, develop]
 
 behavior:
   auto_cleanup: true
-  max_branches: 5
+  max_workspaces: 5
 
 services:
   - name: app-db
@@ -2840,20 +2840,20 @@ hooks:
   <h3>Multi-Service: PostgreSQL + ClickHouse + Redis</h3>
 <pre><code class="language-yaml"># .devflow.yml — Full-stack application
 git:
-  auto_create_on_branch: true
-  auto_switch_on_branch: true
-  main_branch: main
-  exclude_branches: [main, master, develop]
+  auto_create_on_workspace: true
+  auto_switch_on_workspace: true
+  main_workspace: main
+  exclude_workspaces: [main, master, develop]
 
 behavior:
   auto_cleanup: true
-  max_branches: 10
+  max_workspaces: 10
 
 services:
   - name: app-db
     type: local
     service_type: postgres
-    auto_branch: true
+    auto_workspace: true
     default: true
     local:
       image: postgres:17
@@ -2861,21 +2861,21 @@ services:
   - name: analytics
     type: local
     service_type: clickhouse
-    auto_branch: true
+    auto_workspace: true
     clickhouse:
       image: clickhouse/clickhouse-server:latest
 
   - name: cache
     type: local
     service_type: generic
-    auto_branch: false               # Shared across branches
+    auto_workspace: false               # Shared across workspaces
     generic:
       image: redis:7-alpine
       port_mapping: "6379:6379"
 
 worktree:
   enabled: true
-  path_template: "../{repo}.{branch}"
+  path_template: "../{repo}.{workspace}"
   copy_files: [.env.local, .env]
   copy_ignored: true
 
@@ -2911,7 +2911,7 @@ services:
   - name: cloud-db
     type: neon
     service_type: postgres
-    auto_branch: true
+    auto_workspace: true
     default: true
     neon:
       api_key: ${NEON_API_KEY}
@@ -2933,7 +2933,7 @@ devflow init myapp
 devflow service add mydb --provider neon --service-type postgres
 devflow install-hooks
 
-# Now every git checkout creates a Neon branch
+# Now every git checkout creates a Neon workspace
 git checkout -b feature/auth</code></pre>
 
   <h3>Plugin Provider: Custom Bash Plugin</h3>
@@ -2947,22 +2947,22 @@ set -euo pipefail
 REQUEST=$(cat)
 METHOD=$(echo "$REQUEST" | jq -r '.method')
 PARAMS=$(echo "$REQUEST" | jq -r '.params // {}')
-BRANCH=$(echo "$PARAMS" | jq -r '.branch_name // ""')
+BRANCH=$(echo "$PARAMS" | jq -r '.workspace_name // ""')
 
 case "$METHOD" in
-  create_branch)
+  create_workspace)
     cp "main.db" "${BRANCH}.db" 2>/dev/null || touch "${BRANCH}.db"
     echo '{"ok": true, "result": {"host": "localhost", "database": "'"${BRANCH}.db"'"}}'
     ;;
-  delete_branch)
+  delete_workspace)
     rm -f "${BRANCH}.db"
     echo '{"ok": true, "result": {}}'
     ;;
-  list_branches)
+  list_workspaces)
     BRANCHES=$(ls *.db 2>/dev/null | sed 's/.db$//' | jq -R . | jq -s 'map({name: .})')
     echo '{"ok": true, "result": '"$BRANCHES"'}'
     ;;
-  branch_exists)
+  workspace_exists)
     if [ -f "${BRANCH}.db" ]; then
       echo '{"ok": true, "result": {"exists": true}}'
     else
@@ -2988,7 +2988,7 @@ services:
   - name: custom-db
     type: local
     service_type: plugin
-    auto_branch: true
+    auto_workspace: true
     plugin:
       name: my-custom               # Finds devflow-plugin-my-custom on PATH
       timeout: 10</code></pre>
@@ -3001,9 +3001,9 @@ devflow service add app-db --provider local --service-type postgres --from postg
 # Or seed later
 devflow service seed main --from s3://my-company-backups/postgres/nightly-latest.dump
 
-# Every branch created from main inherits the seeded data via CoW
+# Every workspace created from main inherits the seeded data via CoW
 git checkout -b feature/auth
-# → Database is an instant copy of the seeded main branch</code></pre>
+# → Database is an instant copy of the seeded main workspace</code></pre>
 
   <h3>AI Agent Sandboxing</h3>
 <pre><code class="language-bash">#!/bin/bash
@@ -3014,7 +3014,7 @@ TASKS=("fix-login-bug" "add-user-search" "optimize-queries")
 
 for TASK in "${TASKS[@]}"; do
   (
-    # Create isolated branch
+    # Create isolated workspace
     devflow --json --non-interactive switch -c "agent/$TASK" --no-verify
 
     # Get connection string
@@ -3038,7 +3038,7 @@ echo "All agent tasks completed."</code></pre>
 # Morning: start a new feature
 devflow switch -c feature/user-profiles
 # → Creates worktree at ../my-app.feature-user-profiles
-# → Creates an isolated development branch environment (CoW clone)
+# → Creates an isolated development workspace environment (CoW clone)
 # → Copies .env.local, runs npm ci, runs migrations
 
 # Make schema changes, add data, iterate...
@@ -3048,7 +3048,7 @@ npm test
 # Afternoon: review a teammate's PR
 devflow switch feature/payment-v2
 # → Switches to their worktree + service environment
-# → Your feature branch's database is untouched
+# → Your feature workspace's database is untouched
 npm test
 devflow service logs feature/payment-v2  # Check if anything went wrong
 
@@ -3059,7 +3059,7 @@ devflow switch feature/user-profiles
 # Done? Merge and clean up
 devflow merge --cleanup
 # → Merges into main
-# → Deletes the feature branch, worktree, and service branches</code></pre>
+# → Deletes the feature workspace, worktree, and service workspaces</code></pre>
 </section>
 
 <!-- ================================================================== -->
@@ -3079,7 +3079,7 @@ devflow merge --cleanup
     <li>Config file exists and is valid</li>
     <li>You're in a Git/jj repository</li>
     <li>Git hooks are installed</li>
-    <li>Branch filter regex is valid</li>
+    <li>Workspace filter regex is valid</li>
     <li>Docker is running and accessible</li>
     <li>Storage driver is available (APFS/ZFS/reflink)</li>
     <li>Provider-specific connectivity (database connections, API endpoints)</li>
@@ -3099,8 +3099,8 @@ newgrp docker
 <pre><code class="language-yaml">local:
   port_range_start: 60000  # Start from a higher range</code></pre>
 
-  <h4>Service branch already exists</h4>
-<pre><code class="language-bash"># Delete the service branch and recreate
+  <h4>Service workspace already exists</h4>
+<pre><code class="language-bash"># Delete the service workspace and recreate
 devflow service delete feature/auth
 devflow service create feature/auth</code></pre>
 
@@ -3108,15 +3108,15 @@ devflow service create feature/auth</code></pre>
 <pre><code class="language-bash"># Check container logs
 devflow service logs feature/auth
 
-# Reset the branch data
+# Reset the workspace data
 devflow service reset feature/auth
 
 # Nuclear option: destroy everything and reinitialize
 devflow destroy --force
 devflow init myapp</code></pre>
 
-  <h4>"Cannot remove current branch" or "Cannot remove main branch"</h4>
-  <p>Switch to a different branch first:</p>
+  <h4>"Cannot remove current workspace" or "Cannot remove main workspace"</h4>
+  <p>Switch to a different workspace first:</p>
 <pre><code class="language-bash">git checkout main
 devflow remove feature/auth</code></pre>
 
@@ -3149,10 +3149,10 @@ DEVFLOW_DISABLED=true git checkout feature/auth
 # Disable for the current session
 export DEVFLOW_DISABLED=true
 
-# Disable for specific branches
+# Disable for specific workspaces
 export DEVFLOW_DISABLED_BRANCHES=main,release/*
 
-# Disable just the current branch
+# Disable just the current workspace
 export DEVFLOW_CURRENT_BRANCH_DISABLED=true
 
 # Skip hooks only
@@ -3164,7 +3164,7 @@ export DEVFLOW_SKIP_HOOKS=true</code></pre>
       <tr><th>Path</th><th>Contents</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>~/.config/devflow/local_state.yml</code></td><td>Project state (services, current branch per project)</td></tr>
+      <tr><td><code>~/.config/devflow/local_state.yml</code></td><td>Project state (services, current workspace per project)</td></tr>
       <tr><td><code>~/.config/devflow/hook_approvals.yml</code></td><td>Hook approval records</td></tr>
       <tr><td><code>~/.local/share/devflow/</code></td><td>Default data root for container volumes</td></tr>
       <tr><td><code>.devflow.yml</code></td><td>Project config (committed)</td></tr>
@@ -3195,7 +3195,7 @@ rm -rf ~/.local/share/devflow/</code></pre>
     <strong>devflow</strong> v0.4.0 &mdash; MIT License &mdash;
     <a href="https://github.com/clement-tourriere/devflow">GitHub</a>
   </p>
-  <p class="text-muted">Isolated dev environments for every Git branch &mdash; automatically.</p>
+  <p class="text-muted">Isolated dev environments for every Git workspace &mdash; automatically.</p>
 </div>
 
 </div><!-- /.main -->

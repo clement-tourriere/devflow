@@ -15,16 +15,17 @@ use crate::tui::action::*;
 use crate::tui::theme;
 
 const TEMPLATE_VARIABLES: &[(&str, &str)] = &[
-    ("{{ branch }}", "Current branch name"),
+    ("{{ workspace }}", "Current workspace name"),
+    ("{{ name }}", "Project name from config.name"),
     ("{{ repo }}", "Repository directory name"),
     (
         "{{ worktree_path }}",
         "Current worktree path (if available)",
     ),
-    ("{{ default_branch }}", "Default branch (main/master)"),
+    ("{{ default_workspace }}", "Default workspace (main/master)"),
     ("{{ commit }}", "Current commit SHA when available"),
-    ("{{ target }}", "Merge target branch for merge hooks"),
-    ("{{ base }}", "Parent/base branch for create hooks"),
+    ("{{ target }}", "Merge target workspace for merge hooks"),
+    ("{{ base }}", "Parent/base workspace for create hooks"),
     ("{{ service['db'].url }}", "Service connection URL"),
     ("{{ service['db'].host }}", "Service host"),
     ("{{ service['db'].port }}", "Service port"),
@@ -34,7 +35,7 @@ const TEMPLATE_VARIABLES: &[(&str, &str)] = &[
 ];
 
 const TEMPLATE_FILTERS: &[(&str, &str)] = &[
-    ("sanitize", "Make path/shell-safe branch slugs"),
+    ("sanitize", "Make path/shell-safe workspace slugs"),
     ("sanitize_db", "Make DB-safe identifiers"),
     ("hash_port", "Stable pseudo-random port (10000-19999)"),
     ("lower", "Lowercase text"),

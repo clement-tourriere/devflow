@@ -2,7 +2,7 @@
 
 ## Problem
 
-1. **`devflow list` shows flat branches** — `print_enriched_branch_list` (cli.rs:1137) never reads the branch registry and has no parent-child logic. The TUI has full tree rendering but the CLI list does not.
+1. **`devflow list` shows flat workspaces** — `print_enriched_branch_list` (cli.rs:1137) never reads the workspace registry and has no parent-child logic. The TUI has full tree rendering but the CLI list does not.
 
 2. **`devflow switch` doesn't cd into worktree** — This is by design (a child process can't change parent shell's cwd). The `DEVFLOW_CD=` protocol requires `eval "$(devflow shell-init)"` in `.zshrc`, but `devflow init` doesn't mention this.
 
@@ -19,11 +19,11 @@ Delete the entire `#[allow(dead_code)]` function `print_branch_tree`. It's super
 Replace the flat list with a tree renderer that:
 
 - **Signature change**: Add `config_path: &Option<PathBuf>` parameter
-- **Load branch registry**: Use `LocalStateManager::new()` + `get_branches(path)` to get `HashMap<String, Option<String>>` (name -> parent)
-- **Build parent map**: From registry parents (primary) and service-level parents (fallback), filtering to only parents that exist in the known branch set
+- **Load workspace registry**: Use `LocalStateManager::new()` + `get_workspaces(path)` to get `HashMap<String, Option<String>>` (name -> parent)
+- **Build parent map**: From registry parents (primary) and service-level parents (fallback), filtering to only parents that exist in the known workspace set
 - **Build children map**: `HashMap<&str, Vec<&str>>` from the parent map, sort children alphabetically
 - **Find roots**: Branches with no parent or parent not in the known set
-- **Sort roots**: Default branch first, then current, then alphabetical
+- **Sort roots**: Default workspace first, then current, then alphabetical
 - **DFS tree print**: Recursive `print_node()` that renders with box-drawing chars (`├─`, `└─`, `│`), keeping the existing enrichment (current `*` marker, service state, worktree path)
 
 For root nodes: `* main  [service: running, worktree: /path]`
@@ -33,12 +33,12 @@ For nested:     `  │  └─ feature-a-sub  [worktree: /path]`
 Full replacement code:
 
 ```rust
-/// Print an enriched branch list as a tree, showing git branches, worktree paths, and service status.
+/// Print an enriched workspace list as a tree, showing git workspaces, worktree paths, and service status.
 ///
 /// Unifies information from the VCS provider, the service provider, and the
-/// branch registry (for parent-child relationships) into a single tree view.
+/// workspace registry (for parent-child relationships) into a single tree view.
 fn print_enriched_branch_list(
-    service_branches: &[services::BranchInfo],
+    service_branches: &[services::WorkspaceInfo],
     config: &Config,
     config_path: &Option<PathBuf>,
 ) {
@@ -46,9 +46,9 @@ fn print_enriched_branch_list(
 
     // Gather VCS + worktree info
     let vcs_provider = vcs::detect_vcs_provider(".").ok();
-    let git_branches: Vec<crate::vcs::BranchInfo> = vcs_provider
+    let git_branches: Vec<crate::vcs::WorkspaceInfo> = vcs_provider
         .as_ref()
-        .and_then(|r| r.list_branches().ok())
+        .and_then(|r| r.list_workspaces().ok())
         .unwrap_or_default();
     let worktrees: Vec<crate::vcs::WorktreeInfo> = vcs_provider
         .as_ref()
@@ -56,24 +56,24 @@ fn print_enriched_branch_list(
         .unwrap_or_default();
     let current_git = vcs_provider
         .as_ref()
-        .and_then(|r| r.current_branch().ok().flatten());
+        .and_then(|r| r.current_workspace().ok().flatten());
 
-    // Build a set of service branch names for quick lookup
+    // Build a set of service workspace names for quick lookup
     let service_names: HashSet<&str> = service_branches.iter().map(|b| b.name.as_str()).collect();
 
-    // Build a worktree lookup: branch name -> path
+    // Build a worktree lookup: workspace name -> path
     let wt_lookup: HashMap<String, PathBuf> = worktrees
         .iter()
-        .filter_map(|wt| wt.branch.as_ref().map(|b| (b.clone(), wt.path.clone())))
+        .filter_map(|wt| wt.workspace.as_ref().map(|b| (b.clone(), wt.path.clone())))
         .collect();
 
-    // Load the branch registry for parent-child info
+    // Load the workspace registry for parent-child info
     let registry: HashMap<String, Option<String>> = config_path
         .as_ref()
         .and_then(|path| {
             LocalStateManager::new().ok().map(|state| {
                 state
-                    .get_branches(path)
+                    .get_workspaces(path)
                     .into_iter()
                     .map(|b| (b.name, b.parent))
                     .collect()
@@ -81,7 +81,7 @@ fn print_enriched_branch_list(
         })
         .unwrap_or_default();
 
-    // Collect all branch names (union of git branches + service branches)
+    // Collect all workspace names (union of git workspaces + service workspaces)
     let mut all_names: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
 
@@ -107,7 +107,7 @@ fn print_enriched_branch_list(
     let mut parent_map: HashMap<&str, &str> = HashMap::new();
 
     for sb in service_branches {
-        if let Some(ref parent) = sb.parent_branch {
+        if let Some(ref parent) = sb.parent_workspace {
             if seen.contains(parent.as_str()) {
                 parent_map.insert(sb.name.as_str(), parent.as_str());
             }
@@ -138,7 +138,7 @@ fn print_enriched_branch_list(
         .map(|s| s.as_str())
         .collect();
 
-    // Sort roots: default branch first, then current, then alphabetical
+    // Sort roots: default workspace first, then current, then alphabetical
     roots.sort_by(|a, b| {
         let a_default = git_branches.iter().any(|gb| gb.name == *a && gb.is_default);
         let b_default = git_branches.iter().any(|gb| gb.name == *b && gb.is_default);
@@ -160,16 +160,16 @@ fn print_enriched_branch_list(
         connector: &str,
         children_map: &HashMap<&str, Vec<&str>>,
         current_git: &Option<String>,
-        service_branches: &[services::BranchInfo],
+        service_branches: &[services::WorkspaceInfo],
         service_names: &HashSet<&str>,
         wt_lookup: &HashMap<String, PathBuf>,
         config: &Config,
-        git_branches: &[crate::vcs::BranchInfo],
+        git_branches: &[crate::vcs::WorkspaceInfo],
     ) {
         let is_current = current_git.as_deref() == Some(name);
         let marker = if is_current { "* " } else { "  " };
 
-        let normalized = config.get_normalized_branch_name(name);
+        let normalized = config.get_normalized_workspace_name(name);
         let has_service =
             service_names.contains(normalized.as_str()) || service_names.contains(name);
 
@@ -253,11 +253,11 @@ fn print_enriched_branch_list(
 
 #### Change 3: Update `enrich_branch_list_json` (line 1225)
 
-Add `config_path: &Option<PathBuf>` parameter. Load the branch registry and add a `"parent"` field at the top level of each entry (from the registry, falling back to service parent):
+Add `config_path: &Option<PathBuf>` parameter. Load the workspace registry and add a `"parent"` field at the top level of each entry (from the registry, falling back to service parent):
 
 ```rust
 fn enrich_branch_list_json(
-    service_branches: &[services::BranchInfo],
+    service_branches: &[services::WorkspaceInfo],
     config: &Config,
     config_path: &Option<PathBuf>,
 ) -> serde_json::Value {
@@ -266,13 +266,13 @@ fn enrich_branch_list_json(
 After the existing `wt_lookup` and `service_map` setup, add:
 
 ```rust
-    // Load the branch registry for parent info
+    // Load the workspace registry for parent info
     let registry: std::collections::HashMap<String, Option<String>> = config_path
         .as_ref()
         .and_then(|path| {
             LocalStateManager::new().ok().map(|state| {
                 state
-                    .get_branches(path)
+                    .get_workspaces(path)
                     .into_iter()
                     .map(|b| (b.name, b.parent))
                     .collect()
@@ -288,7 +288,7 @@ Then in the per-entry loop, after the worktree field, add:
         let parent = registry
             .get(name.as_str())
             .and_then(|p| p.clone())
-            .or_else(|| sb.and_then(|s| s.parent_branch.clone()));
+            .or_else(|| sb.and_then(|s| s.parent_workspace.clone()));
         if let Some(parent_name) = parent {
             entry["parent"] = serde_json::Value::String(parent_name);
         }
@@ -298,20 +298,20 @@ Then in the per-entry loop, after the worktree field, add:
 
 Change:
 ```rust
-print_enriched_branch_list(&branches, config);
+print_enriched_branch_list(&workspaces, config);
 ```
 To:
 ```rust
-print_enriched_branch_list(&branches, config, &config_path);
+print_enriched_branch_list(&workspaces, config, &config_path);
 ```
 
 And change:
 ```rust
-let enriched = enrich_branch_list_json(&branches, config);
+let enriched = enrich_branch_list_json(&workspaces, config);
 ```
 To:
 ```rust
-let enriched = enrich_branch_list_json(&branches, config, &config_path);
+let enriched = enrich_branch_list_json(&workspaces, config, &config_path);
 ```
 
 #### Change 5: Update `handle_multi_service_aggregation` call site
@@ -354,4 +354,4 @@ Next steps:
 
 1. `cargo build` — must compile clean
 2. `cargo test` — all 45 tests must pass
-3. Manual test: `devflow init` in fresh repo, create branch with `devflow switch`, run `devflow list` to confirm tree output
+3. Manual test: `devflow init` in fresh repo, create workspace with `devflow switch`, run `devflow list` to confirm tree output

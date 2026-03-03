@@ -19,7 +19,7 @@ struct TerminalExitEvent {
 
 /// Build environment variables for a terminal session by gathering
 /// connection info from all configured services.
-async fn build_service_env(project_path: &str, branch_name: &str) -> HashMap<String, String> {
+async fn build_service_env(project_path: &str, workspace_name: &str) -> HashMap<String, String> {
     let mut env = HashMap::new();
 
     let config_path = Path::new(project_path).join(".devflow.yml");
@@ -43,7 +43,7 @@ async fn build_service_env(project_path: &str, branch_name: &str) -> HashMap<Str
                 Err(_) => continue,
             };
 
-        let info = match provider.get_connection_info(branch_name).await {
+        let info = match provider.get_connection_info(workspace_name).await {
             Ok(i) => i,
             Err(_) => continue,
         };
@@ -79,16 +79,17 @@ pub async fn create_terminal(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     project_path: Option<String>,
-    branch_name: Option<String>,
+    workspace_name: Option<String>,
     service_name: Option<String>,
 ) -> Result<TerminalSessionInfo, String> {
     // Determine working directory
-    let working_dir = if let (Some(ref pp), Some(ref branch)) = (&project_path, &branch_name) {
-        // Try to find worktree path for this branch
+    let working_dir = if let (Some(ref pp), Some(ref workspace)) = (&project_path, &workspace_name)
+    {
+        // Try to find worktree path for this workspace
         let vcs = devflow_core::vcs::detect_vcs_provider(pp).ok();
         let worktree_path = vcs
             .as_ref()
-            .and_then(|v| v.worktree_path(branch).ok().flatten());
+            .and_then(|v| v.worktree_path(workspace).ok().flatten());
         worktree_path
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| pp.clone())
@@ -103,29 +104,29 @@ pub async fn create_terminal(
 
     // Build environment
     let mut env = HashMap::new();
-    if let Some(ref branch) = branch_name {
-        env.insert("DEVFLOW_BRANCH".to_string(), branch.clone());
+    if let Some(ref workspace) = workspace_name {
+        env.insert("DEVFLOW_BRANCH".to_string(), workspace.clone());
     }
     if let Some(ref pp) = project_path {
         env.insert("DEVFLOW_PROJECT".to_string(), pp.clone());
     }
 
     // Inject service connection info
-    if let (Some(ref pp), Some(ref branch)) = (&project_path, &branch_name) {
-        let service_env = build_service_env(pp, branch).await;
+    if let (Some(ref pp), Some(ref workspace)) = (&project_path, &workspace_name) {
+        let service_env = build_service_env(pp, workspace).await;
         env.extend(service_env);
     }
 
     // Build label
-    let label = if let (Some(ref pp), Some(ref branch)) = (&project_path, &branch_name) {
+    let label = if let (Some(ref pp), Some(ref workspace)) = (&project_path, &workspace_name) {
         let project_name = Path::new(pp)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "project".to_string());
         if let Some(ref svc) = service_name {
-            format!("{}:{}/{}", svc, project_name, branch)
+            format!("{}:{}/{}", svc, project_name, workspace)
         } else {
-            format!("{}/{}", project_name, branch)
+            format!("{}/{}", project_name, workspace)
         }
     } else if let Some(ref pp) = project_path {
         Path::new(pp)
@@ -148,7 +149,7 @@ pub async fn create_terminal(
     let metadata = SessionMetadata {
         label: label.clone(),
         project_path: project_path.clone(),
-        branch_name: branch_name.clone(),
+        workspace_name: workspace_name.clone(),
         service_name: service_name.clone(),
     };
 

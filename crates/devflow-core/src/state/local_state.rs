@@ -14,11 +14,11 @@ pub struct LocalState {
     pub projects: HashMap<String, ProjectState>,
 }
 
-/// A devflow branch — an abstraction above git branches.
+/// A devflow workspace — an abstraction above git workspaces.
 /// Tracks parent-child relationships, worktree paths, and creation time
 /// independently of the VCS provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DevflowBranch {
+pub struct DevflowWorkspace {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
@@ -28,7 +28,7 @@ pub struct DevflowBranch {
     /// Whether Copy-on-Write (APFS clone / reflink) was used for the worktree.
     #[serde(default)]
     pub cow_used: bool,
-    /// AI agent tool used for this branch (e.g., "claude", "codex").
+    /// AI agent tool used for this workspace (e.g., "claude", "codex").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_tool: Option<String>,
     /// Agent status marker (e.g., "running", "idle", "done").
@@ -44,9 +44,9 @@ pub struct ProjectState {
     pub last_updated: chrono::DateTime<chrono::Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub services: Option<Vec<NamedServiceConfig>>,
-    /// Registry of devflow branches tracked for this project.
+    /// Registry of devflow workspaces tracked for this project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branches: Option<Vec<DevflowBranch>>,
+    pub workspaces: Option<Vec<DevflowWorkspace>>,
 }
 
 pub struct LocalStateManager {
@@ -145,12 +145,12 @@ impl LocalStateManager {
         })?;
 
         let existing = self.state.projects.get(&project_key);
-        let existing_branches = existing.and_then(|p| p.branches.clone());
+        let existing_branches = existing.and_then(|p| p.workspaces.clone());
 
         let project_state = ProjectState {
             last_updated: chrono::Utc::now(),
             services: Some(services),
-            branches: existing_branches,
+            workspaces: existing_branches,
         };
 
         self.state.projects.insert(project_key, project_state);
@@ -174,7 +174,7 @@ impl LocalStateManager {
         })?;
 
         let existing = self.state.projects.get(&project_key);
-        let existing_branches = existing.and_then(|p| p.branches.clone());
+        let existing_branches = existing.and_then(|p| p.workspaces.clone());
         let mut services = existing
             .and_then(|p| p.services.clone())
             .unwrap_or_default();
@@ -199,7 +199,7 @@ impl LocalStateManager {
         let project_state = ProjectState {
             last_updated: chrono::Utc::now(),
             services: Some(services),
-            branches: existing_branches,
+            workspaces: existing_branches,
         };
 
         self.state.projects.insert(project_key, project_state);
@@ -228,7 +228,7 @@ impl LocalStateManager {
         Ok(())
     }
 
-    /// Remove an entire project from the local state (branch registry + services).
+    /// Remove an entire project from the local state (workspace registry + services).
     pub fn remove_project(&mut self, project_path: &Path) -> Result<()> {
         self.refresh_state()?;
 
@@ -263,26 +263,30 @@ impl LocalStateManager {
         self.state.projects.clone()
     }
 
-    // ── Branch registry CRUD ────────────────────────────────────────
+    // ── Workspace registry CRUD ────────────────────────────────────────
 
-    /// Get all registered devflow branches for a project.
-    pub fn get_branches(&self, project_path: &Path) -> Vec<DevflowBranch> {
+    /// Get all registered devflow workspaces for a project.
+    pub fn get_workspaces(&self, project_path: &Path) -> Vec<DevflowWorkspace> {
         self.get_project_key(project_path)
             .and_then(|key| self.state.projects.get(&key))
-            .and_then(|p| p.branches.clone())
+            .and_then(|p| p.workspaces.clone())
             .unwrap_or_default()
     }
 
-    /// Look up a single registered branch by name.
-    pub fn get_branch(&self, project_path: &Path, name: &str) -> Option<DevflowBranch> {
-        self.get_branches(project_path)
+    /// Look up a single registered workspace by name.
+    pub fn get_workspace(&self, project_path: &Path, name: &str) -> Option<DevflowWorkspace> {
+        self.get_workspaces(project_path)
             .into_iter()
             .find(|b| b.name == name)
     }
 
-    /// Register (upsert) a devflow branch in the registry.
-    /// If a branch with the same name exists, it is updated.
-    pub fn register_branch(&mut self, project_path: &Path, branch: DevflowBranch) -> Result<()> {
+    /// Register (upsert) a devflow workspace in the registry.
+    /// If a workspace with the same name exists, it is updated.
+    pub fn register_workspace(
+        &mut self,
+        project_path: &Path,
+        workspace: DevflowWorkspace,
+    ) -> Result<()> {
         self.refresh_state()?;
 
         let project_key = self.get_project_key(project_path).ok_or_else(|| {
@@ -299,15 +303,15 @@ impl LocalStateManager {
             .or_insert_with(|| ProjectState {
                 last_updated: chrono::Utc::now(),
                 services: None,
-                branches: None,
+                workspaces: None,
             });
 
-        let branches = project.branches.get_or_insert_with(Vec::new);
+        let workspaces = project.workspaces.get_or_insert_with(Vec::new);
 
-        if let Some(pos) = branches.iter().position(|b| b.name == branch.name) {
-            branches[pos] = branch;
+        if let Some(pos) = workspaces.iter().position(|b| b.name == workspace.name) {
+            workspaces[pos] = workspace;
         } else {
-            branches.push(branch);
+            workspaces.push(workspace);
         }
 
         project.last_updated = chrono::Utc::now();
@@ -322,62 +326,66 @@ impl LocalStateManager {
     // `_by_dir` variants accept the **project directory** and append
     // `.devflow.yml` internally, eliminating a common source of bugs.
 
-    /// Get all registered devflow branches for a project directory.
-    pub fn get_branches_by_dir(&self, project_dir: &Path) -> Vec<DevflowBranch> {
-        self.get_branches(&project_dir.join(".devflow.yml"))
+    /// Get all registered devflow workspaces for a project directory.
+    pub fn get_workspaces_by_dir(&self, project_dir: &Path) -> Vec<DevflowWorkspace> {
+        self.get_workspaces(&project_dir.join(".devflow.yml"))
     }
 
-    /// Look up a single registered branch by name (project directory variant).
-    pub fn get_branch_by_dir(&self, project_dir: &Path, name: &str) -> Option<DevflowBranch> {
-        self.get_branch(&project_dir.join(".devflow.yml"), name)
+    /// Look up a single registered workspace by name (project directory variant).
+    pub fn get_workspace_by_dir(&self, project_dir: &Path, name: &str) -> Option<DevflowWorkspace> {
+        self.get_workspace(&project_dir.join(".devflow.yml"), name)
     }
 
-    /// Register (upsert) a devflow branch (project directory variant).
-    pub fn register_branch_by_dir(
+    /// Register (upsert) a devflow workspace (project directory variant).
+    pub fn register_workspace_by_dir(
         &mut self,
         project_dir: &Path,
-        branch: DevflowBranch,
+        workspace: DevflowWorkspace,
     ) -> Result<()> {
-        self.register_branch(&project_dir.join(".devflow.yml"), branch)
+        self.register_workspace(&project_dir.join(".devflow.yml"), workspace)
     }
 
-    /// Remove a branch from the registry by name (project directory variant).
-    pub fn unregister_branch_by_dir(&mut self, project_dir: &Path, name: &str) -> Result<()> {
-        self.unregister_branch(&project_dir.join(".devflow.yml"), name)
+    /// Remove a workspace from the registry by name (project directory variant).
+    pub fn unregister_workspace_by_dir(&mut self, project_dir: &Path, name: &str) -> Result<()> {
+        self.unregister_workspace(&project_dir.join(".devflow.yml"), name)
     }
 
-    /// Get project branches, initializing the default branch when empty.
+    /// Get project workspaces, initializing the default workspace when empty.
     ///
-    /// This is the common branch-loading path used by CLI/TUI/GUI so all
+    /// This is the common workspace-loading path used by CLI/TUI/GUI so all
     /// surfaces share the same bootstrap behavior.
-    pub fn get_or_init_branches_by_dir(
+    pub fn get_or_init_workspaces_by_dir(
         &mut self,
         project_dir: &Path,
-        main_branch: &str,
-    ) -> Result<Vec<DevflowBranch>> {
-        let branches = self.get_branches_by_dir(project_dir);
-        if !branches.is_empty() {
-            return Ok(branches);
+        main_workspace: &str,
+    ) -> Result<Vec<DevflowWorkspace>> {
+        let workspaces = self.get_workspaces_by_dir(project_dir);
+        if !workspaces.is_empty() {
+            return Ok(workspaces);
         }
 
-        self.ensure_default_branch(project_dir, main_branch)?;
-        Ok(self.get_branches_by_dir(project_dir))
+        self.ensure_default_workspace(project_dir, main_workspace)?;
+        Ok(self.get_workspaces_by_dir(project_dir))
     }
 
-    /// Ensure a default devflow branch exists for this project.
+    /// Ensure a default devflow workspace exists for this project.
     ///
-    /// If the branch registry is empty, registers `main_branch` as the
-    /// default branch with `created_at = now` and no parent.  This is the
+    /// If the workspace registry is empty, registers `main_workspace` as the
+    /// default workspace with `created_at = now` and no parent.  This is the
     /// auto-migration path for projects created before the registry existed.
-    pub fn ensure_default_branch(&mut self, project_dir: &Path, main_branch: &str) -> Result<()> {
+    pub fn ensure_default_workspace(
+        &mut self,
+        project_dir: &Path,
+        main_workspace: &str,
+    ) -> Result<()> {
         let config_path = project_dir.join(".devflow.yml");
-        let existing = self.get_branches(&config_path);
+        let existing = self.get_workspaces(&config_path);
         if !existing.is_empty() {
             return Ok(());
         }
 
-        let branch = DevflowBranch {
-            name: main_branch.to_string(),
+        let workspace = DevflowWorkspace {
+            name: main_workspace.to_string(),
             parent: None,
             worktree_path: None,
             created_at: chrono::Utc::now(),
@@ -387,11 +395,11 @@ impl LocalStateManager {
             agent_started_at: None,
         };
 
-        self.register_branch(&config_path, branch)
+        self.register_workspace(&config_path, workspace)
     }
 
-    /// Remove a branch from the registry by name.
-    pub fn unregister_branch(&mut self, project_path: &Path, name: &str) -> Result<()> {
+    /// Remove a workspace from the registry by name.
+    pub fn unregister_workspace(&mut self, project_path: &Path, name: &str) -> Result<()> {
         self.refresh_state()?;
 
         let project_key = self.get_project_key(project_path).ok_or_else(|| {
@@ -402,8 +410,8 @@ impl LocalStateManager {
         })?;
 
         if let Some(project) = self.state.projects.get_mut(&project_key) {
-            if let Some(ref mut branches) = project.branches {
-                branches.retain(|b| b.name != name);
+            if let Some(ref mut workspaces) = project.workspaces {
+                workspaces.retain(|b| b.name != name);
             }
             project.last_updated = chrono::Utc::now();
             self.save_state()?;

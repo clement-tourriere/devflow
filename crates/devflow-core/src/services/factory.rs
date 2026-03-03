@@ -332,10 +332,10 @@ async fn create_provider_default(config: &Config) -> Result<Box<dyn ServiceProvi
     }
 }
 
-/// Instantiate only services with `auto_branch: true`.
+/// Instantiate only services with `auto_workspace: true`.
 ///
 /// These are the services that should be automatically branched when a git
-/// branch is created/switched/deleted.
+/// workspace is created/switched/deleted.
 /// If no services are configured, returns an empty list.
 pub async fn create_auto_branch_providers(config: &Config) -> Result<Vec<NamedService>> {
     config.validate_services()?;
@@ -346,7 +346,7 @@ pub async fn create_auto_branch_providers(config: &Config) -> Result<Vec<NamedSe
         return Ok(Vec::new());
     }
 
-    let auto_configs: Vec<_> = named_configs.iter().filter(|c| c.auto_branch).collect();
+    let auto_configs: Vec<_> = named_configs.iter().filter(|c| c.auto_workspace).collect();
 
     if auto_configs.is_empty() {
         return Ok(vec![]);
@@ -370,34 +370,38 @@ pub struct OrchestrationResult {
     pub service_name: String,
     pub success: bool,
     pub message: String,
-    pub branch_info: Option<super::BranchInfo>,
+    pub branch_info: Option<super::WorkspaceInfo>,
 }
 
-/// Create a branch across all auto-branch services.
+/// Create a workspace across all auto-workspace services.
 ///
-/// Iterates over all services with `auto_branch: true` and calls
-/// `create_branch()` on each. Collects results with partial failure
+/// Iterates over all services with `auto_workspace: true` and calls
+/// `create_workspace()` on each. Collects results with partial failure
 /// tolerance — one service failing doesn't prevent others from succeeding.
 pub async fn orchestrate_create(
     config: &Config,
-    branch_name: &str,
-    from_branch: Option<&str>,
+    workspace_name: &str,
+    from_workspace: Option<&str>,
 ) -> Result<Vec<OrchestrationResult>> {
     let providers = create_auto_branch_providers(config).await?;
     let mut results = Vec::with_capacity(providers.len());
 
     for named in &providers {
-        let result = match named.provider.create_branch(branch_name, from_branch).await {
+        let result = match named
+            .provider
+            .create_workspace(workspace_name, from_workspace)
+            .await
+        {
             Ok(info) => OrchestrationResult {
                 service_name: named.name.clone(),
                 success: true,
-                message: format!("Created branch '{}' on {}", branch_name, named.name),
+                message: format!("Created workspace '{}' on {}", workspace_name, named.name),
                 branch_info: Some(info),
             },
             Err(e) => OrchestrationResult {
                 service_name: named.name.clone(),
                 success: false,
-                message: format!("Failed to create branch on {}: {}", named.name, e),
+                message: format!("Failed to create workspace on {}: {}", named.name, e),
                 branch_info: None,
             },
         };
@@ -407,26 +411,29 @@ pub async fn orchestrate_create(
     Ok(results)
 }
 
-/// Delete a branch across all auto-branch services.
+/// Delete a workspace across all auto-workspace services.
 ///
-/// Iterates over all services with `auto_branch: true` and calls
-/// `delete_branch()` on each. Partial failures are tolerated.
+/// Iterates over all services with `auto_workspace: true` and calls
+/// `delete_workspace()` on each. Partial failures are tolerated.
 pub async fn orchestrate_delete(
     config: &Config,
-    branch_name: &str,
+    workspace_name: &str,
 ) -> Result<Vec<OrchestrationResult>> {
     let providers = create_auto_branch_providers(config).await?;
     let mut results = Vec::with_capacity(providers.len());
 
     for named in &providers {
-        // Skip services that don't have this branch
-        let has_branch = match named.provider.branch_exists(branch_name).await {
+        // Skip services that don't have this workspace
+        let has_branch = match named.provider.workspace_exists(workspace_name).await {
             Ok(v) => v,
             Err(e) => {
                 results.push(OrchestrationResult {
                     service_name: named.name.clone(),
                     success: false,
-                    message: format!("Failed to check branch existence on {}: {}", named.name, e),
+                    message: format!(
+                        "Failed to check workspace existence on {}: {}",
+                        named.name, e
+                    ),
                     branch_info: None,
                 });
                 continue;
@@ -438,25 +445,25 @@ pub async fn orchestrate_delete(
                 service_name: named.name.clone(),
                 success: true,
                 message: format!(
-                    "Branch '{}' not found on {} (skipped)",
-                    branch_name, named.name
+                    "Workspace '{}' not found on {} (skipped)",
+                    workspace_name, named.name
                 ),
                 branch_info: None,
             });
             continue;
         }
 
-        let result = match named.provider.delete_branch(branch_name).await {
+        let result = match named.provider.delete_workspace(workspace_name).await {
             Ok(_) => OrchestrationResult {
                 service_name: named.name.clone(),
                 success: true,
-                message: format!("Deleted branch '{}' on {}", branch_name, named.name),
+                message: format!("Deleted workspace '{}' on {}", workspace_name, named.name),
                 branch_info: None,
             },
             Err(e) => OrchestrationResult {
                 service_name: named.name.clone(),
                 success: false,
-                message: format!("Failed to delete branch on {}: {}", named.name, e),
+                message: format!("Failed to delete workspace on {}: {}", named.name, e),
                 branch_info: None,
             },
         };
@@ -466,30 +473,33 @@ pub async fn orchestrate_delete(
     Ok(results)
 }
 
-/// Switch to a branch across all auto-branch services.
+/// Switch to a workspace across all auto-workspace services.
 ///
-/// For each service with `auto_branch: true`:
-/// 1. If the branch doesn't exist, create it
-/// 2. Switch to the branch
+/// For each service with `auto_workspace: true`:
+/// 1. If the workspace doesn't exist, create it
+/// 2. Switch to the workspace
 ///
 /// Partial failures are tolerated.
 pub async fn orchestrate_switch(
     config: &Config,
-    branch_name: &str,
-    from_branch: Option<&str>,
+    workspace_name: &str,
+    from_workspace: Option<&str>,
 ) -> Result<Vec<OrchestrationResult>> {
     let providers = create_auto_branch_providers(config).await?;
     let mut results = Vec::with_capacity(providers.len());
 
     for named in &providers {
-        // Check if branch already exists
-        let exists = match named.provider.branch_exists(branch_name).await {
+        // Check if workspace already exists
+        let exists = match named.provider.workspace_exists(workspace_name).await {
             Ok(v) => v,
             Err(e) => {
                 results.push(OrchestrationResult {
                     service_name: named.name.clone(),
                     success: false,
-                    message: format!("Failed to check branch existence on {}: {}", named.name, e),
+                    message: format!(
+                        "Failed to check workspace existence on {}: {}",
+                        named.name, e
+                    ),
                     branch_info: None,
                 });
                 continue;
@@ -497,37 +507,44 @@ pub async fn orchestrate_switch(
         };
 
         let result = if !exists {
-            // Create the branch first
-            match named.provider.create_branch(branch_name, from_branch).await {
+            // Create the workspace first
+            match named
+                .provider
+                .create_workspace(workspace_name, from_workspace)
+                .await
+            {
                 Ok(info) => OrchestrationResult {
                     service_name: named.name.clone(),
                     success: true,
                     message: format!(
-                        "Created and switched to branch '{}' on {}",
-                        branch_name, named.name
+                        "Created and switched to workspace '{}' on {}",
+                        workspace_name, named.name
                     ),
                     branch_info: Some(info),
                 },
                 Err(e) => OrchestrationResult {
                     service_name: named.name.clone(),
                     success: false,
-                    message: format!("Failed to create branch on {}: {}", named.name, e),
+                    message: format!("Failed to create workspace on {}: {}", named.name, e),
                     branch_info: None,
                 },
             }
         } else {
-            // Branch exists, just switch
-            match named.provider.switch_to_branch(branch_name).await {
+            // Workspace exists, just switch
+            match named.provider.switch_to_branch(workspace_name).await {
                 Ok(info) => OrchestrationResult {
                     service_name: named.name.clone(),
                     success: true,
-                    message: format!("Switched to branch '{}' on {}", branch_name, named.name),
+                    message: format!(
+                        "Switched to workspace '{}' on {}",
+                        workspace_name, named.name
+                    ),
                     branch_info: Some(info),
                 },
                 Err(e) => OrchestrationResult {
                     service_name: named.name.clone(),
                     success: false,
-                    message: format!("Failed to switch branch on {}: {}", named.name, e),
+                    message: format!("Failed to switch workspace on {}: {}", named.name, e),
                     branch_info: None,
                 },
             }
@@ -538,29 +555,29 @@ pub async fn orchestrate_switch(
     Ok(results)
 }
 
-/// Get connection info from all services for a given branch.
+/// Get connection info from all services for a given workspace.
 ///
 /// Returns a map of service_name -> ConnectionInfo. Used by the hook context
 /// builder to populate per-service template variables.
 ///
-/// Queries ALL configured services (not just auto-branch ones) so hooks can
+/// Queries ALL configured services (not just auto-workspace ones) so hooks can
 /// reference any service.  Services that fail to return connection info for
-/// the given branch are silently skipped.
+/// the given workspace are silently skipped.
 pub async fn get_all_connection_info(
     config: &Config,
-    branch_name: &str,
+    workspace_name: &str,
 ) -> Result<Vec<(String, super::ConnectionInfo)>> {
     let providers = create_all_providers(config).await?;
     let mut results = Vec::with_capacity(providers.len());
 
     for named in &providers {
-        match named.provider.get_connection_info(branch_name).await {
+        match named.provider.get_connection_info(workspace_name).await {
             Ok(info) => results.push((named.name.clone(), info)),
             Err(e) => {
                 log::debug!(
-                    "Could not get connection info for {} on branch '{}': {}",
+                    "Could not get connection info for {} on workspace '{}': {}",
                     named.name,
-                    branch_name,
+                    workspace_name,
                     e
                 );
             }

@@ -10,6 +10,7 @@ pub use template::TemplateEngine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::path::Path;
 use std::str::FromStr;
 
 pub use indexmap::IndexMap;
@@ -167,22 +168,24 @@ pub type HooksConfig = IndexMap<HookPhase, IndexMap<String, HookEntry>>;
 /// Context variables available to hook templates.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct HookContext {
-    /// Current branch name
-    pub branch: String,
+    /// Current workspace name
+    pub workspace: String,
+    /// Project name from config (`name`) or project directory fallback.
+    pub name: String,
     /// Repository directory name
     pub repo: String,
     /// Worktree path (if in a worktree)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
-    /// Default branch (main/master)
-    pub default_branch: String,
+    /// Default workspace (main/master)
+    pub default_workspace: String,
     /// HEAD commit SHA
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
-    /// Target branch (for merge hooks)
+    /// Target workspace (for merge hooks)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
-    /// Base branch (for creation hooks)
+    /// Base workspace (for creation hooks)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
     /// Service connection info, keyed by service name.
@@ -204,27 +207,40 @@ pub struct ServiceContext {
     pub url: String,
 }
 
-/// Build a `HookContext` for the given config and branch.
+/// Build a `HookContext` for the given config and workspace.
 ///
 /// Populates service connection info from all configured services.
-pub async fn build_hook_context(config: &crate::config::Config, branch_name: &str) -> HookContext {
-    let db_name = config.get_database_name(branch_name);
-    let repo = std::env::current_dir()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-        .unwrap_or_default();
+pub async fn build_hook_context(
+    config: &crate::config::Config,
+    project_dir: &Path,
+    workspace_name: &str,
+) -> HookContext {
+    let db_name = config.get_database_name(workspace_name);
+    let canonical_project_dir = project_dir
+        .canonicalize()
+        .unwrap_or_else(|_| project_dir.to_path_buf());
+
+    let repo = canonical_project_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "default".to_string());
+
+    let name = config
+        .name
+        .as_ref()
+        .filter(|n| !n.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| repo.clone());
 
     // Detect worktree path if we're inside a VCS worktree
-    let worktree_path = crate::vcs::detect_vcs_provider(".")
+    let worktree_path = crate::vcs::detect_vcs_provider(&canonical_project_dir)
         .ok()
         .and_then(|vcs_repo| {
             if vcs_repo.is_worktree() {
-                std::env::current_dir()
-                    .ok()
-                    .map(|p| p.to_string_lossy().to_string())
+                Some(canonical_project_dir.to_string_lossy().to_string())
             } else {
                 vcs_repo
-                    .worktree_path(branch_name)
+                    .worktree_path(workspace_name)
                     .ok()
                     .flatten()
                     .map(|p| p.to_string_lossy().to_string())
@@ -235,7 +251,7 @@ pub async fn build_hook_context(config: &crate::config::Config, branch_name: &st
     let mut service = HashMap::new();
 
     if let Ok(conn_infos) =
-        crate::services::factory::get_all_connection_info(config, branch_name).await
+        crate::services::factory::get_all_connection_info(config, workspace_name).await
     {
         for (name, info) in conn_infos {
             let url = info
@@ -285,10 +301,11 @@ pub async fn build_hook_context(config: &crate::config::Config, branch_name: &st
     }
 
     HookContext {
-        branch: branch_name.to_string(),
+        workspace: workspace_name.to_string(),
+        name,
         repo,
         worktree_path,
-        default_branch: config.git.main_branch.clone(),
+        default_workspace: config.git.main_workspace.clone(),
         commit: None,
         target: None,
         base: None,

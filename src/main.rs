@@ -18,14 +18,14 @@ use cli::Commands;
 
 {usage-heading} {usage}
 
-Branch Management:
-  list                List all branches (with service + worktree status)
-  graph               Render full environment graph (branch tree + services)
-  link                Link an existing VCS branch into devflow
-  switch              Switch to an existing branch/worktree (use -c to create)
-  remove              Remove a branch, its worktree, and associated service branches
-  merge               Merge current branch into target (with optional cleanup)
-  cleanup             Clean up old service branches (alias for service cleanup)
+Workspace Management:
+  list                List all workspaces (with service + worktree status)
+  graph               Render full environment graph (workspace tree + services)
+  link                Link an existing VCS workspace into devflow
+  switch              Switch to an existing workspace/worktree (use -c to create)
+  remove              Remove a workspace, its worktree, and associated service workspaces
+  merge               Merge current workspace into target (with optional cleanup)
+  cleanup             Clean up old service workspaces (alias for service cleanup)
 
 Services:
   service add         Add a new service provider
@@ -33,16 +33,16 @@ Services:
   service list        List configured services
   service status      Show service status
   service capabilities Show service capability matrix
-  service create      Create a new service branch
-  service delete      Delete a service branch
-  service cleanup     Clean up old branches for a service
-  service start       Start a stopped branch container (local provider)
-  service stop        Stop a running branch container (local provider)
-  service reset       Reset a branch to its parent state (local provider)
-  service destroy     Destroy all branches and data for a service
-  service connection  Show connection info for a service branch
-  service logs        Show container logs for a branch
-  service seed        Seed a branch from an external source
+  service create      Create a new service workspace
+  service delete      Delete a service workspace
+  service cleanup     Clean up old workspaces for a service
+  service start       Start a stopped workspace container (local provider)
+  service stop        Stop a running workspace container (local provider)
+  service reset       Reset a workspace to its parent state (local provider)
+  service destroy     Destroy all workspaces and data for a service
+  service connection  Show connection info for a service workspace
+  service logs        Show container logs for a workspace
+  service seed        Seed a workspace from an external source
 
 Top-level Aliases:
   connection          Show connection info (alias for 'service connection')
@@ -56,7 +56,7 @@ Setup & Config:
   destroy             Tear down the entire devflow project (inverse of init)
   config              Show current configuration (-v for precedence details)
   doctor              Run diagnostics and check system health
-  install-hooks       Install Git hooks (auto branch/switch on checkout)
+  install-hooks       Install Git hooks (auto workspace/switch on checkout)
   uninstall-hooks     Uninstall Git hooks
   shell-init          Print shell integration script (enables worktree cd)
   worktree-setup      Set up devflow in a Git worktree
@@ -73,9 +73,9 @@ Extensibility:
   plugin                Manage plugin services (list, check, init)
 
 AI Agents:
-  agent start         Start an AI agent in a new isolated branch
-  agent status        Show agent status across all branches
-  agent context       Output project context for current branch
+  agent start         Start an AI agent in a new isolated workspace
+  agent status        Show agent status across all workspaces
+  agent context       Output project context for current workspace
   agent skill         Generate AI tool skills/rules for this project
   agent docs          Generate AGENTS.md for this project
 

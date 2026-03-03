@@ -2,7 +2,7 @@ import { createContext, useContext, useState, useCallback } from "react";
 
 interface TerminalRequest {
   projectPath?: string;
-  branchName?: string;
+  workspaceName?: string;
   serviceName?: string;
 }
 

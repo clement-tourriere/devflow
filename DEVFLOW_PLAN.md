@@ -19,7 +19,7 @@
 │              │                                                  │
 │  ┌────────┐  │  ┌─────────────────────────────────────────┐     │
 │  │  Git   │  │  │           ServiceBackend                │     │
-│  │ branch │  │  │  (trait: create/delete/switch/connect)  │     │
+│  │ workspace │  │  │  (trait: create/delete/switch/connect)  │     │
 │  │  +     │  │  ├─────────┬──────────┬──────────┬────────┤     │
 │  │worktree│  │  │Postgres │ClickHouse│  MySQL   │Generic │     │
 │  ├────────┤  │  │(local,  │(local,   │(local,   │Docker  │     │
@@ -33,7 +33,7 @@
 │  (.devflow.yml / .devflow.toml / .devflow.local.yml / env vars) │
 ├─────────────────────────────────────────────────────────────────┤
 │                    State Management                              │
-│  (SQLite: projects, branches, services, hook approvals)         │
+│  (SQLite: projects, workspaces, services, hook approvals)         │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -69,18 +69,18 @@
 // src/vcs/mod.rs
 #[async_trait]
 pub trait VcsProvider: Send + Sync {
-    fn current_branch(&self) -> Result<String>;
-    fn default_branch(&self) -> Result<String>;
-    fn list_branches(&self) -> Result<Vec<BranchRef>>;
-    fn create_branch(&self, name: &str, base: Option<&str>) -> Result<()>;
-    fn delete_branch(&self, name: &str) -> Result<()>;
+    fn current_workspace(&self) -> Result<String>;
+    fn default_workspace(&self) -> Result<String>;
+    fn list_workspaces(&self) -> Result<Vec<BranchRef>>;
+    fn create_workspace(&self, name: &str, base: Option<&str>) -> Result<()>;
+    fn delete_workspace(&self, name: &str) -> Result<()>;
 
     // Worktree support
     fn supports_worktrees(&self) -> bool;
     fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>>;
-    fn create_worktree(&self, branch: &str, path: &Path) -> Result<()>;
+    fn create_worktree(&self, workspace: &str, path: &Path) -> Result<()>;
     fn remove_worktree(&self, path: &Path) -> Result<()>;
-    fn worktree_path(&self, branch: &str) -> Result<Option<PathBuf>>;
+    fn worktree_path(&self, workspace: &str) -> Result<Option<PathBuf>>;
 
     // Hooks
     fn install_hooks(&self, hooks_dir: &Path) -> Result<()>;
@@ -100,23 +100,23 @@ pub trait ServiceBackend: Send + Sync {
     fn backend_name(&self) -> &'static str;
     fn display_name(&self) -> String;
 
-    async fn create_branch(&self, branch_name: &str, from_branch: Option<&str>) -> Result<ServiceBranchInfo>;
-    async fn delete_branch(&self, branch_name: &str) -> Result<()>;
-    async fn list_branches(&self) -> Result<Vec<ServiceBranchInfo>>;
-    async fn branch_exists(&self, branch_name: &str) -> Result<bool>;
-    async fn switch_to_branch(&self, branch_name: &str) -> Result<ServiceBranchInfo>;
-    async fn get_connection_info(&self, branch_name: &str) -> Result<ConnectionInfo>;
+    async fn create_workspace(&self, workspace_name: &str, from_workspace: Option<&str>) -> Result<ServiceWorkspaceInfo>;
+    async fn delete_workspace(&self, workspace_name: &str) -> Result<()>;
+    async fn list_workspaces(&self) -> Result<Vec<ServiceWorkspaceInfo>>;
+    async fn workspace_exists(&self, workspace_name: &str) -> Result<bool>;
+    async fn switch_to_branch(&self, workspace_name: &str) -> Result<ServiceWorkspaceInfo>;
+    async fn get_connection_info(&self, workspace_name: &str) -> Result<ConnectionInfo>;
 
-    async fn start_branch(&self, branch_name: &str) -> Result<()> { Ok(()) }
-    async fn stop_branch(&self, branch_name: &str) -> Result<()> { Ok(()) }
-    async fn reset_branch(&self, branch_name: &str) -> Result<()> { Ok(()) }
+    async fn start_workspace(&self, workspace_name: &str) -> Result<()> { Ok(()) }
+    async fn stop_workspace(&self, workspace_name: &str) -> Result<()> { Ok(()) }
+    async fn reset_workspace(&self, workspace_name: &str) -> Result<()> { Ok(()) }
     fn supports_lifecycle(&self) -> bool { false }
 
     async fn doctor(&self) -> Result<DoctorReport>;
     async fn test_connection(&self) -> Result<()>;
-    async fn cleanup_old_branches(&self, max_count: usize) -> Result<Vec<String>>;
+    async fn cleanup_old_workspaces(&self, max_count: usize) -> Result<Vec<String>>;
 
-    async fn seed_from_source(&self, branch_name: &str, source: &str) -> Result<()> {
+    async fn seed_from_source(&self, workspace_name: &str, source: &str) -> Result<()> {
         Err(anyhow!("Seeding not supported for this service"))
     }
 }
@@ -156,10 +156,10 @@ pub enum HookPhase {
 
 | Variable | Description |
 |----------|-------------|
-| `{{ branch }}` | Current branch name |
+| `{{ workspace }}` | Current workspace name |
 | `{{ repo }}` | Repository directory name |
 | `{{ worktree_path }}` | Worktree path |
-| `{{ default_branch }}` | Default branch (main/master) |
+| `{{ default_workspace }}` | Default workspace (main/master) |
 | `{{ service.<name>.host }}` | Service connection host |
 | `{{ service.<name>.port }}` | Service connection port |
 | `{{ service.<name>.database }}` | Database name |
@@ -167,8 +167,8 @@ pub enum HookPhase {
 | `{{ service.<name>.password }}` | Service password |
 | `{{ service.<name>.url }}` | Full connection URL |
 | `{{ commit }}` | HEAD commit SHA |
-| `{{ target }}` | Target branch (merge hooks) |
-| `{{ base }}` | Base branch (creation hooks) |
+| `{{ target }}` | Target workspace (merge hooks) |
+| `{{ base }}` | Base workspace (creation hooks) |
 
 #### Filters
 
@@ -184,15 +184,15 @@ pub enum HookPhase {
 # All sections are optional — an empty file is valid.
 
 git:
-  auto_create_on_branch: true
-  auto_switch_on_branch: true
-  main_branch: main
-  branch_filter_regex: "^feature/.*"
-  exclude_branches: [main, master]
+  auto_create_on_workspace: true
+  auto_switch_on_workspace: true
+  main_workspace: main
+  workspace_filter_regex: "^feature/.*"
+  exclude_workspaces: [main, master]
 
 behavior:
   auto_cleanup: true
-  max_branches: 10
+  max_workspaces: 10
   naming_strategy: prefix
 
 # Multi-provider setup
@@ -200,7 +200,7 @@ services:
   - name: app-db
     type: local
     service_type: postgres
-    auto_branch: true
+    auto_workspace: true
     default: true
     local:
       image: postgres:17
@@ -211,21 +211,21 @@ services:
   - name: analytics-db
     type: local
     service_type: clickhouse
-    auto_branch: true
+    auto_workspace: true
     clickhouse:
       image: clickhouse/clickhouse-server:latest
 
   - name: legacy-db
     type: local
     service_type: mysql
-    auto_branch: true
+    auto_workspace: true
     mysql:
       image: mysql:8
 
   - name: cache
     type: local
     service_type: generic
-    auto_branch: false
+    auto_workspace: false
     generic:
       image: redis:7-alpine
       port_mapping: "6379:6379"
@@ -235,14 +235,14 @@ services:
   - name: cloud-db
     type: neon
     service_type: postgres
-    auto_branch: true
+    auto_workspace: true
     neon:
       api_key: ${NEON_API_KEY}
       project_id: ${NEON_PROJECT_ID}
 
 worktree:
   enabled: true
-  path_template: "../{repo}.{branch}"
+  path_template: "../{repo}.{workspace}"
   copy_files: [".env.local"]
   copy_ignored: true
 
@@ -257,14 +257,14 @@ hooks:
       EOF
 
   post-start:
-    dev-server: "npm run dev -- --port {{ branch | hash_port }}"
+    dev-server: "npm run dev -- --port {{ workspace | hash_port }}"
 
   pre-merge:
     test: "npm test"
     lint: "npm run lint"
 
   post-remove:
-    cleanup: "docker stop {{ repo }}-{{ branch | sanitize }}-* 2>/dev/null || true"
+    cleanup: "docker stop {{ repo }}-{{ workspace | sanitize }}-* 2>/dev/null || true"
 ```
 
 ## CLI Commands
@@ -272,24 +272,24 @@ hooks:
 ```
 devflow (df)
 ├── init                     # Initialize project (.devflow.yml)
-├── switch [branch]          # Switch branch/worktree (create if needed)
-│   ├── --create (-c)        # Create new branch
-│   ├── --base (-b)          # Base branch
+├── switch [workspace]          # Switch workspace/worktree (create if needed)
+│   ├── --create (-c)        # Create new workspace
+│   ├── --base (-b)          # Base workspace
 │   ├── --execute (-x)       # Run command after switch
 │   ├── --no-services        # Skip service branching
 │   └── --no-verify          # Skip hooks
-├── list                     # List branches with service status
-├── remove [branch]          # Remove branch/worktree + service branches
+├── list                     # List workspaces with service status
+├── remove [workspace]          # Remove workspace/worktree + service workspaces
 ├── merge [target]           # Merge workflow
-├── status                   # Detailed status of current branch
+├── status                   # Detailed status of current workspace
 │
 ├── service                  # Service management
 │   ├── list                 # List all configured services
-│   ├── create [branch]      # Create service branch(es)
-│   ├── delete [branch]      # Delete service branch(es)
-│   ├── start [branch]       # Start service (local providers)
-│   ├── stop [branch]        # Stop service
-│   ├── reset [branch]       # Reset to parent state
+│   ├── create [workspace]      # Create service workspace(es)
+│   ├── delete [workspace]      # Delete service workspace(es)
+│   ├── start [workspace]       # Start service (local providers)
+│   ├── stop [workspace]        # Stop service
+│   ├── reset [workspace]       # Reset to parent state
 │   ├── connection [service] # Show connection info
 │   ├── seed [service]       # Seed from source
 │   ├── destroy [--force]    # Remove all containers and data
@@ -340,7 +340,7 @@ src/
 │   │   │   ├── mod.rs      # LocalBackend (Docker + CoW)
 │   │   │   ├── docker.rs   # DockerRuntime
 │   │   │   ├── state.rs    # SQLite Store
-│   │   │   ├── model.rs    # Project, Branch, StorageBackend, BranchState
+│   │   │   ├── model.rs    # Project, Workspace, StorageBackend, BranchState
 │   │   │   ├── seed.rs     # Seeding
 │   │   │   ├── reconcile.rs
 │   │   │   └── storage/

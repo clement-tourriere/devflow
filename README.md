@@ -1,12 +1,12 @@
 # devflow
 
-Isolated dev environments for every Git branch — automatically.
+Isolated dev environments for every Git workspace — automatically.
 
 > **[Full Documentation](docs/index.html)** | **[AI Agent Guide](AGENTS.md)** | **[Changelog](CHANGELOG.md)**
 
 ## What It Does
 
-devflow gives each Git branch its own isolated development environment: worktrees, databases, caches, and any stateful service. When you `git checkout feature-auth`, devflow automatically creates (or switches to) a dedicated worktree and spins up PostgreSQL, ClickHouse, MySQL, or Redis instances that belong to that branch. Data is cloned from the parent branch using Copy-on-Write, so branching is near-instant and uses almost no extra disk space.
+devflow gives each Git workspace its own isolated development environment: worktrees, databases, caches, and any stateful service. When you `git checkout feature-auth`, devflow automatically creates (or switches to) a dedicated worktree and spins up PostgreSQL, ClickHouse, MySQL, or Redis instances that belong to that workspace. Data is cloned from the parent workspace using Copy-on-Write, so branching is near-instant and uses almost no extra disk space.
 
 It works in five modes:
 - **Local** — Docker containers with CoW storage (APFS, ZFS, Btrfs, XFS)
@@ -17,7 +17,7 @@ It works in five modes:
 
 It also includes a **native reverse proxy** that auto-discovers Docker containers and serves them via HTTPS `*.localhost` domains with auto-generated certificates, and a **desktop GUI** (Tauri 2 + React) for managing everything graphically.
 
-Copy-on-Write storage (APFS, ZFS, Btrfs, XFS) is also applied to worktree directories, making branch switching fast and space-efficient.
+Copy-on-Write storage (APFS, ZFS, Btrfs, XFS) is also applied to worktree directories, making workspace switching fast and space-efficient.
 
 ## Install
 
@@ -53,7 +53,7 @@ devflow connection feature/auth
 devflow connection feature/auth --format env    # DATABASE_URL=...
 ```
 
-That's it. Your feature branch now has its own database. Schema changes, test data, and migrations are completely isolated from main.
+That's it. Your feature workspace now has its own database. Schema changes, test data, and migrations are completely isolated from main.
 
 ### Common Getting Started Scenarios
 
@@ -84,13 +84,13 @@ devflow install-hooks
 # No seed (fresh main data)
 devflow service add app-db --provider local --service-type postgres
 
-# Seed main branch from a dump
+# Seed main workspace from a dump
 devflow service add app-db --provider local --service-type postgres --from ./backup.sql
 
-# Seed main branch from a running PostgreSQL instance
+# Seed main workspace from a running PostgreSQL instance
 devflow service add app-db --provider local --service-type postgres --from postgresql://user:pass@localhost:5432/myapp
 
-# Seed main branch from S3
+# Seed main workspace from S3
 devflow service add app-db --provider local --service-type postgres --from s3://my-bucket/backups/latest.dump
 
 # Get connection info for your app
@@ -101,7 +101,7 @@ With shell integration enabled (`eval "$(devflow shell-init)"`), commands that
 emit `DEVFLOW_CD=...` auto-`cd` your shell (for example `init`, `switch`, and
 TUI open with `o`).
 
-Every branch created from main inherits seeded data via Copy-on-Write. See the [full documentation](docs/index.html#existing-project) for a detailed walkthrough including local overrides with `.devflow.local.yml`.
+Every workspace created from main inherits seeded data via Copy-on-Write. See the [full documentation](docs/index.html#existing-project) for a detailed walkthrough including local overrides with `.devflow.local.yml`.
 
 ### Using mise
 
@@ -120,10 +120,10 @@ mise run gui:build    # Build production GUI bundle
 
 ### Local Backend
 
-1. `devflow init` creates `.devflow.yml` and configures branch/worktree behavior
-2. `devflow service add app-db ...` registers a service and provisions main-branch service state
-3. `devflow switch -c feature-auth` creates the branch environment (and worktree when enabled)
-4. `devflow service delete feature-auth` removes service data for that branch (`devflow remove` removes git branch + worktree + services)
+1. `devflow init` creates `.devflow.yml` and configures workspace/worktree behavior
+2. `devflow service add app-db ...` registers a service and provisions main-workspace service state
+3. `devflow switch -c feature-auth` creates the workspace environment (and worktree when enabled)
+4. `devflow service delete feature-auth` removes service data for that workspace (`devflow remove` removes git workspace + worktree + services)
 
 **Copy-on-Write storage** makes step 2 near-instant regardless of database size. Only changed blocks are duplicated:
 
@@ -137,11 +137,11 @@ mise run gui:build    # Build production GUI bundle
 
 ### Template Backend
 
-Uses PostgreSQL's built-in `CREATE DATABASE ... WITH TEMPLATE` for server-side copies. No Docker required, but branches share the same PostgreSQL instance and the template database must have no active connections during branching.
+Uses PostgreSQL's built-in `CREATE DATABASE ... WITH TEMPLATE` for server-side copies. No Docker required, but workspaces share the same PostgreSQL instance and the template database must have no active connections during branching.
 
 ### Cloud Backends
 
-Neon, DBLab, and Xata backends use their respective APIs to manage branches remotely. Configure with API keys in `.devflow.yml`.
+Neon, DBLab, and Xata backends use their respective APIs to manage workspaces remotely. Configure with API keys in `.devflow.yml`.
 
 ### Plugin Backend
 
@@ -160,7 +160,7 @@ services:
   - name: app-db
     type: local
     service_type: postgres
-    auto_branch: true               # Branch this service with git
+    auto_workspace: true               # Workspace this service with git
     default: true                   # Default target for -s flag
     local:
       image: postgres:17
@@ -168,14 +168,14 @@ services:
   - name: analytics
     type: local
     service_type: clickhouse
-    auto_branch: true
+    auto_workspace: true
     clickhouse:
       image: clickhouse/clickhouse-server:latest
 
   - name: cache
     type: local
     service_type: generic
-    auto_branch: false              # Shared across branches
+    auto_workspace: false              # Shared across workspaces
     generic:
       image: redis:7-alpine
       port_mapping: "6379:6379"
@@ -185,11 +185,11 @@ services:
 
 ```yaml
 git:
-  auto_create_on_branch: true       # Create service branches on git checkout
-  auto_switch_on_branch: true       # Switch services on git checkout
-  main_branch: main                 # Main git branch (auto-detected on init)
-  branch_filter_regex: "^feature/.*"  # Only branch for matching patterns
-  exclude_branches:                 # Never create branches for these
+  auto_create_on_workspace: true       # Create service workspaces on git checkout
+  auto_switch_on_workspace: true       # Switch services on git checkout
+  main_workspace: main                 # Main git workspace (auto-detected on init)
+  workspace_filter_regex: "^feature/.*"  # Only workspace for matching patterns
+  exclude_workspaces:                 # Never create workspaces for these
     - main
     - master
     - develop
@@ -199,8 +199,8 @@ git:
 
 ```yaml
 behavior:
-  auto_cleanup: false               # Auto-cleanup old branches
-  max_branches: 10                  # Max branches before cleanup
+  auto_cleanup: false               # Auto-cleanup old workspaces
+  max_workspaces: 10                  # Max workspaces before cleanup
   naming_strategy: prefix           # prefix, suffix, or replace
 ```
 
@@ -209,7 +209,7 @@ behavior:
 ```yaml
 worktree:
   enabled: true
-  path_template: "../{repo}.{branch}"
+  path_template: "../{repo}.{workspace}"
   copy_files: [".env.local", ".env"]
   copy_ignored: true                # Copy files even if gitignored
 ```
@@ -219,7 +219,7 @@ worktree:
 ```yaml
 agent:
   command: claude                    # Default agent command (claude, codex, etc.)
-  branch_prefix: "agent/"           # Prefix for agent-created branches
+  workspace_prefix: "agent/"           # Prefix for agent-created workspaces
   auto_context: true                # Provide project context on launch
 ```
 
@@ -252,11 +252,11 @@ Highest to lowest precedence:
 ```bash
 DEVFLOW_DISABLED=true                # Completely disable devflow
 DEVFLOW_SKIP_HOOKS=true              # Skip Git hook execution
-DEVFLOW_AUTO_CREATE=false            # Override auto_create_on_branch
-DEVFLOW_AUTO_SWITCH=false            # Override auto_switch_on_branch
-DEVFLOW_BRANCH_FILTER_REGEX=...      # Override branch filtering
-DEVFLOW_DISABLED_BRANCHES=main,release/*  # Disable for specific branches
-DEVFLOW_CURRENT_BRANCH_DISABLED=true # Disable for current branch only
+DEVFLOW_AUTO_CREATE=false            # Override auto_create_on_workspace
+DEVFLOW_AUTO_SWITCH=false            # Override auto_switch_on_workspace
+DEVFLOW_BRANCH_FILTER_REGEX=...      # Override workspace filtering
+DEVFLOW_DISABLED_BRANCHES=main,release/*  # Disable for specific workspaces
+DEVFLOW_CURRENT_BRANCH_DISABLED=true # Disable for current workspace only
 DEVFLOW_DATABASE_HOST=...            # Override database host
 DEVFLOW_DATABASE_PORT=...            # Override database port
 DEVFLOW_DATABASE_USER=...            # Override database user
@@ -272,21 +272,21 @@ DEVFLOW_AGENT_COMMAND=...            # Default agent command (e.g., "claude", "c
 
 ## CLI Reference
 
-### Branch Management
+### Workspace Management
 
 ```bash
-devflow switch -c <branch>               # Create + switch (parent = context branch)
-devflow switch -c <branch> --from <p>    # Create from explicit parent
-devflow link <branch>                    # Link an existing VCS branch into devflow
-devflow service create <branch>          # Create service branch only
-devflow service delete <branch>          # Delete service branch only
-devflow service cleanup --max-count 5    # Cleanup old branches for a service
-devflow remove <branch>                  # Remove branch + worktree + all services
-devflow list                             # List all branches (tree view)
+devflow switch -c <workspace>               # Create + switch (parent = context workspace)
+devflow switch -c <workspace> --from <p>    # Create from explicit parent
+devflow link <workspace>                    # Link an existing VCS workspace into devflow
+devflow service create <workspace>          # Create service workspace only
+devflow service delete <workspace>          # Delete service workspace only
+devflow service cleanup --max-count 5    # Cleanup old workspaces for a service
+devflow remove <workspace>                  # Remove workspace + worktree + all services
+devflow list                             # List all workspaces (tree view)
 devflow graph                            # Full environment graph (human view)
 devflow --json graph                     # Full environment graph (machine view)
 devflow switch                           # Interactive switch with fuzzy search
-devflow switch <branch>                  # Switch to an existing branch/worktree
+devflow switch <workspace>                  # Switch to an existing workspace/worktree
 devflow switch --template                # Switch to main/template
 devflow cleanup --max-count 5            # Alias for `devflow service cleanup`
 ```
@@ -294,20 +294,20 @@ devflow cleanup --max-count 5            # Alias for `devflow service cleanup`
 ### Lifecycle (Local Backend)
 
 ```bash
-devflow service start <branch>           # Start a stopped container
-devflow service stop <branch>            # Stop a running container
-devflow service reset <branch>           # Reset branch data to parent state
+devflow service start <workspace>           # Start a stopped container
+devflow service stop <workspace>            # Stop a running container
+devflow service reset <workspace>           # Reset workspace data to parent state
 devflow service destroy                  # Remove all data for a service
 devflow service destroy --force          # Skip confirmation
-devflow service seed <branch> --from <source>  # Seed from PostgreSQL URL, file, or s3://
-devflow service logs <branch>            # Show container logs (last 100 lines)
-devflow service logs <branch> --tail 50  # Show last 50 lines
+devflow service seed <workspace> --from <source>  # Seed from PostgreSQL URL, file, or s3://
+devflow service logs <workspace>            # Show container logs (last 100 lines)
+devflow service logs <workspace> --tail 50  # Show last 50 lines
 ```
 
 ### VCS
 
 ```bash
-devflow merge <target>                   # Merge current branch into target
+devflow merge <target>                   # Merge current workspace into target
 devflow commit                           # Commit staged changes
 devflow commit --ai                      # AI-generated commit message
 devflow commit --ai --edit               # AI-generated, then edit in $EDITOR
@@ -317,13 +317,13 @@ devflow commit --ai --edit               # AI-generated, then edit in $EDITOR
 
 ```bash
 devflow agent start <task> [--command <cmd>] [--dry-run] [-- <prompt>...]
-                                         # Start an AI agent in a new branch
+                                         # Start an AI agent in a new workspace
 devflow agent start fix-login -- 'Fix the login timeout bug'
 devflow agent start fix-login --command codex
-devflow agent status                     # Show agent status across all branches
-devflow agent context                    # Output project context for current branch
+devflow agent status                     # Show agent status across all workspaces
+devflow agent context                    # Output project context for current workspace
 devflow agent context --format json      # JSON format
-devflow agent context --branch feature/x # Specific branch
+devflow agent context --workspace feature/x # Specific workspace
 devflow agent skill                      # Generate skills/rules for all AI tools
 devflow agent skill --target claude      # Claude Code only (.claude/skills/)
 devflow agent skill --target cursor      # Cursor only (.cursor/rules/)
@@ -340,9 +340,9 @@ devflow config -v                        # Config with precedence details
 devflow doctor                           # System health check
 devflow capabilities                     # Automation contract summary
 devflow service capabilities             # Service provider capability matrix
-devflow connection <branch>              # Connection URI (default)
-devflow connection <branch> --format env # Environment variables
-devflow connection <branch> --format json # JSON object
+devflow connection <workspace>              # Connection URI (default)
+devflow connection <workspace> --format env # Environment variables
+devflow connection <workspace> --format json # JSON object
 ```
 
 ### Context Override
@@ -351,8 +351,8 @@ devflow connection <branch> --format json # JSON object
 DEVFLOW_CONTEXT_BRANCH=release_1_0 devflow switch -c hotfix_patch
 ```
 
-When set, `DEVFLOW_CONTEXT_BRANCH` defines the devflow context branch used as
-the default parent for branch creation.
+When set, `DEVFLOW_CONTEXT_BRANCH` defines the devflow context workspace used as
+the default parent for workspace creation.
 
 ### TUI Dashboard
 
@@ -362,9 +362,9 @@ devflow tui
 
 The TUI now includes:
 
-- **Environments**: tree view with parent/child branches, service states, focused-service actions, start/stop-all shortcuts, and `o` to open a branch/worktree and exit.
+- **Environments**: tree view with parent/child workspaces, service states, focused-service actions, start/stop-all shortcuts, and `o` to open a workspace/worktree and exit.
 - **System**: consolidated config, hooks (with template variable/filter reference + scaffold snippets), and doctor panels.
-- **Logs**: service/branch picker with filter support and keyboard-driven navigation.
+- **Logs**: service/workspace picker with filter support and keyboard-driven navigation.
 
 ### Reverse Proxy
 
@@ -386,7 +386,7 @@ The proxy auto-discovers running Docker containers and serves them over HTTPS vi
 |---|---|
 | Standalone | `container_name.localhost` |
 | Compose service | `service.project.localhost` |
-| devflow service | `service.branch.project.localhost` |
+| devflow service | `service.workspace.project.localhost` |
 | Custom label | value of `devproxy.domain` label |
 
 Certificates are auto-generated using a local CA. Run `devflow proxy trust install` once to trust the CA system-wide (no more `-k` flag with curl).
@@ -399,13 +399,13 @@ mise run gui:build                       # Build production GUI bundle
 mise run gui:install                     # Install frontend dependencies only
 ```
 
-The desktop GUI provides a graphical interface for managing projects, branches, services, hooks, proxy, and configuration. It runs as a native Tauri 2 app with a React frontend.
+The desktop GUI provides a graphical interface for managing projects, workspaces, services, hooks, proxy, and configuration. It runs as a native Tauri 2 app with a React frontend.
 
 **Requirements:** [bun](https://bun.sh) (or Node.js 18+) and the [Tauri CLI](https://v2.tauri.app/start/prerequisites/) (`cargo install tauri-cli`).
 
 **Features:**
 - Dashboard with project overview and proxy status
-- Branch management with worktree info
+- Workspace management with worktree info
 - Service start/stop and diagnostics
 - Hook inspector with MiniJinja template live preview
 - Proxy start/stop, container table with HTTPS links, one-click CA install
@@ -438,7 +438,7 @@ devflow hook show                        # Show all configured hooks
 devflow hook show <phase>                # Show hooks for a phase
 devflow hook run <phase>                 # Run hooks manually
 devflow hook explain <phase>             # Explain what a hook phase does
-devflow hook vars                        # Show all template variables for current branch
+devflow hook vars                        # Show all template variables for current workspace
 devflow hook render <template>           # Render a MiniJinja template string
 devflow hook approvals                   # List approved hooks
 devflow hook approvals clear             # Clear all approvals
@@ -464,7 +464,7 @@ devflow shell-init fish | source         # Fish (~/.config/fish/config.fish)
 
 This creates a `devflow` shell wrapper that automatically `cd`s when devflow
 emits `DEVFLOW_CD=...` (for example after `devflow switch`, `devflow init <dir>`,
-or opening a branch/worktree from the TUI with `o`).
+or opening a workspace/worktree from the TUI with `o`).
 
 ### Global Flags
 
@@ -509,27 +509,27 @@ Hooks are executed in definition order (deterministic, using ordered maps).
 
 | Phase | Fires when... |
 |---|---|
-| `pre-switch` | Before switching to a branch |
-| `post-create` | After creating a new branch |
-| `post-start` | After starting a stopped branch |
-| `post-switch` | After switching to a branch |
-| `pre-remove` | Before removing a branch |
-| `post-remove` | After removing a branch |
+| `pre-switch` | Before switching to a workspace |
+| `post-create` | After creating a new workspace |
+| `post-start` | After starting a stopped workspace |
+| `post-switch` | After switching to a workspace |
+| `pre-remove` | Before removing a workspace |
+| `post-remove` | After removing a workspace |
 | `pre-commit` | Before committing (Git pre-commit hook) |
-| `pre-merge` | Before merging branches |
+| `pre-merge` | Before merging workspaces |
 | `post-merge` | After merging (Git post-merge hook) |
 | `post-rewrite` | After rebase/amend (Git post-rewrite hook) |
-| `pre-service-create` | Before creating a service branch |
-| `post-service-create` | After creating a service branch |
-| `pre-service-delete` | Before deleting a service branch |
-| `post-service-delete` | After deleting a service branch |
-| `post-service-switch` | After switching a service branch |
+| `pre-service-create` | Before creating a service workspace |
+| `post-service-create` | After creating a service workspace |
+| `pre-service-delete` | Before deleting a service workspace |
+| `post-service-delete` | After deleting a service workspace |
+| `post-service-switch` | After switching a service workspace |
 
 ### Git Hooks Installed
 
 `devflow install-hooks` installs four Git hooks:
 
-- **post-checkout** — auto-create/switch service branches on `git checkout`
+- **post-checkout** — auto-create/switch service workspaces on `git checkout`
 - **post-merge** — run post-merge hooks after `git merge`
 - **pre-commit** — run pre-commit hooks before `git commit`
 - **post-rewrite** — run post-rewrite hooks after `git rebase` or `git commit --amend`
@@ -538,13 +538,13 @@ Hooks are executed in definition order (deterministic, using ordered maps).
 
 | Variable | Description |
 |---|---|
-| `{{ branch }}` | Current Git branch name |
+| `{{ workspace }}` | Current Git workspace name |
 | `{{ repo }}` | Repository directory name |
 | `{{ worktree_path }}` | Worktree path (if enabled) |
-| `{{ default_branch }}` | Default branch (main/master) |
+| `{{ default_workspace }}` | Default workspace (main/master) |
 | `{{ commit }}` | HEAD commit SHA (when available) |
-| `{{ target }}` | Merge target branch (merge hooks) |
-| `{{ base }}` | Parent/base branch (create hooks) |
+| `{{ target }}` | Merge target workspace (merge hooks) |
+| `{{ base }}` | Parent/base workspace (create hooks) |
 | `{{ service['<name>'].host }}` | Service host |
 | `{{ service['<name>'].port }}` | Service port |
 | `{{ service['<name>'].database }}` | Database name |
@@ -566,7 +566,7 @@ Example configuration files are in the [`examples/`](examples/) directory:
 - [`multi-service.devflow.yml`](examples/multi-service.devflow.yml) — PostgreSQL + ClickHouse + Redis services with lifecycle hooks and worktrees
 - [`django.devflow.yml`](examples/django.devflow.yml) — Django project with migrations and Docker Compose restart
 - [`agent-bootstrap.sh`](examples/agent-bootstrap.sh) — Idempotent repository bootstrap for agents/CI
-- [`agent-task.sh`](examples/agent-task.sh) — Task-scoped branch environment setup for agents
+- [`agent-task.sh`](examples/agent-task.sh) — Task-scoped workspace environment setup for agents
 
 ### Node.js / Express
 
@@ -598,7 +598,7 @@ devflow service add app-db --provider local --service-type postgres --from /path
 devflow service add app-db --provider local --service-type postgres --from postgresql://readonly:pass@replica:5432/mydb
 devflow service add app-db --provider local --service-type postgres --from s3://my-bucket/backups/latest.dump
 
-# Re-seed an existing branch
+# Re-seed an existing workspace
 devflow service seed main --from dump.sql
 devflow service seed feature/auth --from postgresql://...
 ```
@@ -611,7 +611,7 @@ devflow service seed feature/auth --from postgresql://...
 
 # Option A: Use devflow agent commands (recommended)
 devflow agent start task-42 -- 'Fix the login timeout bug'
-devflow agent status                     # Check agent branches
+devflow agent status                     # Check agent workspaces
 devflow agent context                    # Get project context
 
 # Option B: Manual workflow
@@ -620,7 +620,7 @@ devflow --json --non-interactive switch -c agent-task-42 --no-verify
 # Get connection info
 CONN=$(devflow --json connection agent-task-42 | jq -r '.connection_string')
 
-# Agent works against an isolated development branch environment...
+# Agent works against an isolated development workspace environment...
 
 # Reset to clean state if needed
 devflow --json --non-interactive service reset agent-task-42
@@ -663,7 +663,7 @@ For a full agent-oriented workflow, see `AGENTS.md`.
 3. **Develop:** make schema changes, test migrations — everything is isolated
 4. **Switch context:** `git checkout main` — automatically switches back to main services
 5. **Review a PR:** `git checkout feature/other` — services are created/switched automatically
-6. **Interactive switch:** `devflow switch` — fuzzy search across all branches
+6. **Interactive switch:** `devflow switch` — fuzzy search across all workspaces
 
 ### PR Review Workflow
 
@@ -695,8 +695,8 @@ devflow --json --non-interactive remove "$BRANCH" --force
 ## Use Cases
 
 - **Migration testing** — test schema migrations in isolation before merging
-- **Feature development** — each feature branch gets its own database state
-- **PR review** — switch to any branch and have the correct service state
+- **Feature development** — each feature workspace gets its own database state
+- **PR review** — switch to any workspace and have the correct service state
 - **AI agent sandboxing** — give each agent task isolated services with programmatic access
 - **CI/CD preview environments** — spin up per-PR services, destroy on merge
 - **Data migration testing** — seed from production, test migrations, reset, iterate

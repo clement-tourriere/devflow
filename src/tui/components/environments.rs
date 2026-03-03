@@ -20,7 +20,7 @@ use crate::tui::theme;
 /// A flattened tree row ready for rendering.
 #[derive(Debug, Clone)]
 struct TreeRow {
-    branch: EnrichedBranch,
+    workspace: EnrichedBranch,
     depth: usize,
     /// Whether this node is the last child at its level.
     is_last_sibling: bool,
@@ -63,16 +63,16 @@ impl EnvironmentsComponent {
         self.loading = false;
         self.rebuild_tree();
         self.normalize_service_focus();
-        // Try to select current branch
-        if let Some(idx) = self.tree_rows.iter().position(|r| r.branch.is_current) {
+        // Try to select current workspace
+        if let Some(idx) = self.tree_rows.iter().position(|r| r.workspace.is_current) {
             self.selected_index = idx;
             self.list_state.select(Some(idx));
         }
     }
 
-    /// Build the flattened tree from branch data.
-    /// Uses parent info from EnrichedBranch.services (parent_branch field)
-    /// and from the branch registry.
+    /// Build the flattened tree from workspace data.
+    /// Uses parent info from EnrichedBranch.services (parent_workspace field)
+    /// and from the workspace registry.
     fn rebuild_tree(&mut self) {
         self.tree_rows.clear();
 
@@ -81,42 +81,42 @@ impl EnvironmentsComponent {
             None => return,
         };
 
-        // Build parent map: branch_name -> parent_name
+        // Build parent map: workspace_name -> parent_name
         let mut parent_map: HashMap<String, String> = HashMap::new();
 
-        for branch in &data.branches {
+        for workspace in &data.workspaces {
             // Check service-level parent info
-            for svc in &branch.services {
-                if let Some(ref parent) = svc.parent_branch {
+            for svc in &workspace.services {
+                if let Some(ref parent) = svc.parent_workspace {
                     parent_map
-                        .entry(branch.name.clone())
+                        .entry(workspace.name.clone())
                         .or_insert_with(|| parent.clone());
                 }
             }
             // Registry parent takes precedence
-            if let Some(ref parent) = branch.parent {
-                parent_map.insert(branch.name.clone(), parent.clone());
+            if let Some(ref parent) = workspace.parent {
+                parent_map.insert(workspace.name.clone(), parent.clone());
             }
         }
 
         // Build children map
         let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
-        let all_names: HashSet<String> = data.branches.iter().map(|b| b.name.clone()).collect();
+        let all_names: HashSet<String> = data.workspaces.iter().map(|b| b.name.clone()).collect();
 
-        for branch in &data.branches {
-            if let Some(parent) = parent_map.get(&branch.name) {
+        for workspace in &data.workspaces {
+            if let Some(parent) = parent_map.get(&workspace.name) {
                 if all_names.contains(parent) {
                     children_map
                         .entry(parent.clone())
                         .or_default()
-                        .push(branch.name.clone());
+                        .push(workspace.name.clone());
                 }
             }
         }
 
-        // Find root nodes (no parent, or parent not in our branch list)
+        // Find root nodes (no parent, or parent not in our workspace list)
         let mut roots: Vec<EnrichedBranch> = data
-            .branches
+            .workspaces
             .iter()
             .filter(|b| match parent_map.get(&b.name) {
                 None => true,
@@ -125,7 +125,7 @@ impl EnvironmentsComponent {
             .cloned()
             .collect();
 
-        // Sort: default branch first, then current, then alphabetical
+        // Sort: default workspace first, then current, then alphabetical
         roots.sort_by(|a, b| {
             if a.is_default != b.is_default {
                 return b.is_default.cmp(&a.is_default);
@@ -136,8 +136,8 @@ impl EnvironmentsComponent {
             a.name.cmp(&b.name)
         });
 
-        // Build a name->branch lookup (clone data to avoid borrow conflict)
-        let branches_owned: Vec<EnrichedBranch> = data.branches.clone();
+        // Build a name->workspace lookup (clone data to avoid borrow conflict)
+        let branches_owned: Vec<EnrichedBranch> = data.workspaces.clone();
         let branch_map: HashMap<&str, &EnrichedBranch> = branches_owned
             .iter()
             .map(|b| (b.name.as_str(), b))
@@ -168,7 +168,7 @@ impl EnvironmentsComponent {
     }
 
     fn flatten_node_static(
-        branch: &EnrichedBranch,
+        workspace: &EnrichedBranch,
         depth: usize,
         is_last_sibling: bool,
         ancestor_has_next: &[bool],
@@ -178,17 +178,20 @@ impl EnvironmentsComponent {
         filter: &str,
         tree_rows: &mut Vec<TreeRow>,
     ) {
-        let children = children_map.get(&branch.name);
+        let children = children_map.get(&workspace.name);
         let has_children = children.map_or(false, |c| !c.is_empty());
-        let is_collapsed = collapsed.contains(&branch.name);
+        let is_collapsed = collapsed.contains(&workspace.name);
 
         // Apply filter
-        let matches_filter =
-            filter.is_empty() || branch.name.to_lowercase().contains(&filter.to_lowercase());
+        let matches_filter = filter.is_empty()
+            || workspace
+                .name
+                .to_lowercase()
+                .contains(&filter.to_lowercase());
 
         if matches_filter || has_children {
             tree_rows.push(TreeRow {
-                branch: branch.clone(),
+                workspace: workspace.clone(),
                 depth,
                 is_last_sibling,
                 ancestor_has_next: ancestor_has_next.to_vec(),
@@ -230,25 +233,25 @@ impl EnvironmentsComponent {
     }
 
     fn normalize_service_focus(&mut self) {
-        // Drop stale entries for branches no longer present.
+        // Drop stale entries for workspaces no longer present.
         let valid_branches: HashSet<&str> = self
             .tree_rows
             .iter()
-            .map(|row| row.branch.name.as_str())
+            .map(|row| row.workspace.name.as_str())
             .collect();
         self.service_focus
-            .retain(|branch, _| valid_branches.contains(branch.as_str()));
+            .retain(|workspace, _| valid_branches.contains(workspace.as_str()));
 
-        // Clamp focused service index per branch.
+        // Clamp focused service index per workspace.
         for row in &self.tree_rows {
-            let service_len = row.branch.services.len();
+            let service_len = row.workspace.services.len();
             if service_len == 0 {
-                self.service_focus.remove(&row.branch.name);
+                self.service_focus.remove(&row.workspace.name);
                 continue;
             }
             let idx = self
                 .service_focus
-                .entry(row.branch.name.clone())
+                .entry(row.workspace.name.clone())
                 .or_insert(0);
             if *idx >= service_len {
                 *idx = service_len - 1;
@@ -257,19 +260,19 @@ impl EnvironmentsComponent {
     }
 
     fn selected_service_for_row<'a>(&'a self, row: &'a TreeRow) -> Option<&'a BranchServiceState> {
-        if row.branch.services.is_empty() {
+        if row.workspace.services.is_empty() {
             return None;
         }
 
         let idx = self
             .service_focus
-            .get(&row.branch.name)
+            .get(&row.workspace.name)
             .copied()
             .unwrap_or(0);
-        row.branch
+        row.workspace
             .services
             .get(idx)
-            .or_else(|| row.branch.services.first())
+            .or_else(|| row.workspace.services.first())
     }
 
     fn cycle_service_focus(&mut self, delta: i32) {
@@ -277,15 +280,19 @@ impl EnvironmentsComponent {
             return;
         };
 
-        let branch_name = row.branch.name.clone();
-        let len = row.branch.services.len();
+        let workspace_name = row.workspace.name.clone();
+        let len = row.workspace.services.len();
         if len <= 1 {
             return;
         }
 
-        let current = self.service_focus.get(&branch_name).copied().unwrap_or(0) as i32;
+        let current = self
+            .service_focus
+            .get(&workspace_name)
+            .copied()
+            .unwrap_or(0) as i32;
         let next = (current + delta).rem_euclid(len as i32) as usize;
-        self.service_focus.insert(branch_name, next);
+        self.service_focus.insert(workspace_name, next);
     }
 
     fn move_selection(&mut self, delta: i32) {
@@ -301,7 +308,7 @@ impl EnvironmentsComponent {
     fn toggle_collapse(&mut self) {
         if let Some(row) = self.tree_rows.get(self.selected_index) {
             if row.has_children {
-                let name = row.branch.name.clone();
+                let name = row.workspace.name.clone();
                 if self.collapsed.contains(&name) {
                     self.collapsed.remove(&name);
                 } else {
@@ -357,28 +364,28 @@ impl EnvironmentsComponent {
                     spans.push(Span::raw(" "));
                 }
 
-                // Current branch indicator
-                if row.branch.is_current {
+                // Current workspace indicator
+                if row.workspace.is_current {
                     spans.push(Span::styled(
                         "* ",
                         Style::default().fg(theme::BRANCH_CURRENT).bold(),
                     ));
                 }
 
-                // Branch name
-                let name_style = if row.branch.is_current {
+                // Workspace name
+                let name_style = if row.workspace.is_current {
                     Style::default().fg(theme::BRANCH_CURRENT).bold()
-                } else if row.branch.is_default {
+                } else if row.workspace.is_default {
                     Style::default().fg(theme::BRANCH_DEFAULT)
                 } else {
                     Style::default().fg(theme::TEXT_PRIMARY)
                 };
-                spans.push(Span::styled(&row.branch.name, name_style));
+                spans.push(Span::styled(&row.workspace.name, name_style));
 
                 // Service status badges
-                if !row.branch.services.is_empty() {
+                if !row.workspace.services.is_empty() {
                     spans.push(Span::raw("  "));
-                    for svc in &row.branch.services {
+                    for svc in &row.workspace.services {
                         let state_str = svc.state.as_deref().unwrap_or("?");
                         let color = theme::state_color(state_str);
                         spans.push(Span::styled(
@@ -389,7 +396,7 @@ impl EnvironmentsComponent {
                 }
 
                 // Worktree path
-                if let Some(ref wt) = row.branch.worktree_path {
+                if let Some(ref wt) = row.workspace.worktree_path {
                     spans.push(Span::styled(
                         format!(" {}", wt),
                         Style::default().fg(theme::BRANCH_WORKTREE),
@@ -445,34 +452,34 @@ impl EnvironmentsComponent {
                 )]
             }
             Some(row) => {
-                let branch = &row.branch;
+                let workspace = &row.workspace;
                 let mut lines = Vec::new();
 
                 // Header
                 lines.push(Line::from(vec![
-                    Span::styled("Branch: ", Style::default().fg(theme::TEXT_SECONDARY)),
+                    Span::styled("Workspace: ", Style::default().fg(theme::TEXT_SECONDARY)),
                     Span::styled(
-                        &branch.name,
+                        &workspace.name,
                         Style::default().fg(theme::TEXT_PRIMARY).bold(),
                     ),
                 ]));
 
                 // Current/default indicators
-                if branch.is_current {
+                if workspace.is_current {
                     lines.push(Line::styled(
-                        "  (current branch)",
+                        "  (current workspace)",
                         Style::default().fg(theme::BRANCH_CURRENT),
                     ));
                 }
-                if branch.is_default {
+                if workspace.is_default {
                     lines.push(Line::styled(
-                        "  (default/main branch)",
+                        "  (default/main workspace)",
                         Style::default().fg(theme::BRANCH_DEFAULT),
                     ));
                 }
 
                 // Parent
-                if let Some(ref parent) = branch.parent {
+                if let Some(ref parent) = workspace.parent {
                     lines.push(Line::from(vec![
                         Span::styled("Parent: ", Style::default().fg(theme::TEXT_SECONDARY)),
                         Span::styled(parent, Style::default().fg(theme::VALUE_PARENT)),
@@ -485,7 +492,7 @@ impl EnvironmentsComponent {
                 lines.push(Line::from(vec![
                     Span::styled("Worktree: ", Style::default().fg(theme::TEXT_SECONDARY)),
                     Span::styled(
-                        branch.worktree_path.as_deref().unwrap_or("(none)"),
+                        workspace.worktree_path.as_deref().unwrap_or("(none)"),
                         Style::default().fg(theme::VALUE_PATH),
                     ),
                 ]));
@@ -493,9 +500,9 @@ impl EnvironmentsComponent {
                 lines.push(Line::raw(""));
 
                 // Services section
-                if branch.services.is_empty() {
+                if workspace.services.is_empty() {
                     lines.push(Line::styled(
-                        "Services: (no service branches)",
+                        "Services: (no service workspaces)",
                         Style::default().fg(theme::TEXT_MUTED),
                     ));
                 } else {
@@ -503,7 +510,7 @@ impl EnvironmentsComponent {
                         "Services:",
                         Style::default().fg(theme::TEXT_SECONDARY),
                     ));
-                    for svc in &branch.services {
+                    for svc in &workspace.services {
                         let state = svc.state.as_deref().unwrap_or("unknown");
                         let color = theme::state_color(state);
 
@@ -523,7 +530,7 @@ impl EnvironmentsComponent {
                                 Span::styled(db, Style::default().fg(theme::VALUE_DATABASE)),
                             ]));
                         }
-                        if let Some(ref parent) = svc.parent_branch {
+                        if let Some(ref parent) = svc.parent_workspace {
                             lines.push(Line::from(vec![
                                 Span::raw("    parent: "),
                                 Span::styled(parent, Style::default().fg(theme::VALUE_PARENT)),
@@ -534,7 +541,7 @@ impl EnvironmentsComponent {
                     if let Some(selected_service) = self.selected_service_for_row(row) {
                         let focused_idx = self
                             .service_focus
-                            .get(&branch.name)
+                            .get(&workspace.name)
                             .copied()
                             .unwrap_or(0)
                             .saturating_add(1);
@@ -549,12 +556,12 @@ impl EnvironmentsComponent {
                                     "{} ({}/{})",
                                     selected_service.service_name,
                                     focused_idx,
-                                    branch.services.len()
+                                    workspace.services.len()
                                 ),
                                 Style::default().fg(theme::SERVICE_TYPE).bold(),
                             ),
                         ]));
-                        if branch.services.len() > 1 {
+                        if workspace.services.len() > 1 {
                             lines.push(Line::styled(
                                 "  n/p: cycle focused service",
                                 Style::default().fg(theme::KEY_HINT),
@@ -573,22 +580,22 @@ impl EnvironmentsComponent {
                 let has_any_service = self
                     .data
                     .as_ref()
-                    .map(|d| d.branches.iter().any(|b| !b.services.is_empty()))
+                    .map(|d| d.workspaces.iter().any(|b| !b.services.is_empty()))
                     .unwrap_or(false);
                 let has_lifecycle = self
                     .selected_service_for_row(row)
                     .map(|svc| svc.supports_lifecycle)
                     .unwrap_or(false);
-                let enter_action = if branch.is_current {
-                    "Already on this branch"
+                let enter_action = if workspace.is_current {
+                    "Already on this workspace"
                 } else if has_any_service {
-                    "Align services to this branch"
+                    "Align services to this workspace"
                 } else {
                     "Align services (no services configured)"
                 };
                 let mut hint_lines = vec![
                     ("Enter", enter_action),
-                    ("o", "Open branch/worktree (exit TUI)"),
+                    ("o", "Open workspace/worktree (exit TUI)"),
                 ];
                 if has_lifecycle {
                     hint_lines.extend([
@@ -600,7 +607,7 @@ impl EnvironmentsComponent {
                         ("l", "Logs for focused service"),
                     ]);
                 }
-                hint_lines.extend([("c", "Create child branch"), ("d", "Delete branch")]);
+                hint_lines.extend([("c", "Create child workspace"), ("d", "Delete workspace")]);
                 if row.has_children {
                     hint_lines.push(("Space", "Collapse/expand"));
                 }
@@ -669,8 +676,8 @@ impl Component for EnvironmentsComponent {
             }
             KeyCode::Enter => {
                 if let Some(row) = self.selected_row() {
-                    if !row.branch.is_current {
-                        Action::SwitchServices(row.branch.name.clone())
+                    if !row.workspace.is_current {
+                        Action::SwitchServices(row.workspace.name.clone())
                     } else {
                         Action::None
                     }
@@ -680,7 +687,7 @@ impl Component for EnvironmentsComponent {
             }
             KeyCode::Char('o') => {
                 if let Some(row) = self.selected_row() {
-                    Action::OpenBranchAndExit(row.branch.name.clone())
+                    Action::OpenBranchAndExit(row.workspace.name.clone())
                 } else {
                     Action::None
                 }
@@ -688,22 +695,22 @@ impl Component for EnvironmentsComponent {
             KeyCode::Char('c') => Action::ShowInput {
                 title: self
                     .selected_row()
-                    .map(|row| format!("Create new branch (from: {})", row.branch.name))
-                    .unwrap_or_else(|| "Create new branch".to_string()),
+                    .map(|row| format!("Create new workspace (from: {})", row.workspace.name))
+                    .unwrap_or_else(|| "Create new workspace".to_string()),
                 on_submit: InputTarget::CreateBranch {
-                    from: self.selected_row().map(|row| row.branch.name.clone()),
+                    from: self.selected_row().map(|row| row.workspace.name.clone()),
                 },
             },
             KeyCode::Char('d') => {
                 if let Some(row) = self.selected_row() {
-                    if !row.branch.is_current && !row.branch.is_default {
+                    if !row.workspace.is_current && !row.workspace.is_default {
                         Action::ShowConfirm {
-                            title: "Delete Branch".to_string(),
+                            title: "Delete Workspace".to_string(),
                             message: format!(
-                                "Delete branch '{}' and all its service branches?",
-                                row.branch.name
+                                "Delete workspace '{}' and all its service workspaces?",
+                                row.workspace.name
                             ),
-                            on_confirm: Box::new(Action::DeleteBranch(row.branch.name.clone())),
+                            on_confirm: Box::new(Action::DeleteBranch(row.workspace.name.clone())),
                         }
                     } else {
                         Action::None
@@ -718,7 +725,7 @@ impl Component for EnvironmentsComponent {
                         if svc.supports_lifecycle {
                             Action::StartService {
                                 service: svc.service_name.clone(),
-                                branch: row.branch.name.clone(),
+                                workspace: row.workspace.name.clone(),
                             }
                         } else {
                             Action::Error(format!(
@@ -728,8 +735,8 @@ impl Component for EnvironmentsComponent {
                         }
                     } else {
                         Action::Error(format!(
-                            "No services attached to branch '{}'",
-                            row.branch.name
+                            "No services attached to workspace '{}'",
+                            row.workspace.name
                         ))
                     }
                 } else {
@@ -742,7 +749,7 @@ impl Component for EnvironmentsComponent {
                         if svc.supports_lifecycle {
                             Action::StopService {
                                 service: svc.service_name.clone(),
-                                branch: row.branch.name.clone(),
+                                workspace: row.workspace.name.clone(),
                             }
                         } else {
                             Action::Error(format!(
@@ -752,8 +759,8 @@ impl Component for EnvironmentsComponent {
                         }
                     } else {
                         Action::Error(format!(
-                            "No services attached to branch '{}'",
-                            row.branch.name
+                            "No services attached to workspace '{}'",
+                            row.workspace.name
                         ))
                     }
                 } else {
@@ -762,14 +769,14 @@ impl Component for EnvironmentsComponent {
             }
             KeyCode::Char('A') => {
                 if let Some(row) = self.selected_row() {
-                    Action::StartAllServices(row.branch.name.clone())
+                    Action::StartAllServices(row.workspace.name.clone())
                 } else {
                     Action::None
                 }
             }
             KeyCode::Char('X') => {
                 if let Some(row) = self.selected_row() {
-                    Action::StopAllServices(row.branch.name.clone())
+                    Action::StopAllServices(row.workspace.name.clone())
                 } else {
                     Action::None
                 }
@@ -782,11 +789,11 @@ impl Component for EnvironmentsComponent {
                                 title: "Reset Service".to_string(),
                                 message: format!(
                                     "Reset '{}' on {}? This will restore it to its parent state.",
-                                    row.branch.name, svc.service_name
+                                    row.workspace.name, svc.service_name
                                 ),
                                 on_confirm: Box::new(Action::ResetService {
                                     service: svc.service_name.clone(),
-                                    branch: row.branch.name.clone(),
+                                    workspace: row.workspace.name.clone(),
                                 }),
                             }
                         } else {
@@ -797,8 +804,8 @@ impl Component for EnvironmentsComponent {
                         }
                     } else {
                         Action::Error(format!(
-                            "No services attached to branch '{}'",
-                            row.branch.name
+                            "No services attached to workspace '{}'",
+                            row.workspace.name
                         ))
                     }
                 } else {
@@ -811,7 +818,7 @@ impl Component for EnvironmentsComponent {
                         if svc.supports_lifecycle {
                             Action::ViewLogs {
                                 service: svc.service_name.clone(),
-                                branch: row.branch.name.clone(),
+                                workspace: row.workspace.name.clone(),
                             }
                         } else {
                             Action::Error(format!(
@@ -821,8 +828,8 @@ impl Component for EnvironmentsComponent {
                         }
                     } else {
                         Action::Error(format!(
-                            "No services attached to branch '{}'",
-                            row.branch.name
+                            "No services attached to workspace '{}'",
+                            row.workspace.name
                         ))
                     }
                 } else {
@@ -882,16 +889,16 @@ impl Component for EnvironmentsComponent {
 }
 
 impl EnvironmentsComponent {
-    pub fn services_for_branch(&self, branch_name: &str) -> Vec<String> {
+    pub fn services_for_branch(&self, workspace_name: &str) -> Vec<String> {
         let mut names = Vec::new();
 
-        let branches = match &self.data {
-            Some(data) => &data.branches,
+        let workspaces = match &self.data {
+            Some(data) => &data.workspaces,
             None => return names,
         };
 
-        if let Some(branch) = branches.iter().find(|b| b.name == branch_name) {
-            for svc in &branch.services {
+        if let Some(workspace) = workspaces.iter().find(|b| b.name == workspace_name) {
+            for svc in &workspace.services {
                 if !names.iter().any(|n| n == &svc.service_name) {
                     names.push(svc.service_name.clone());
                 }

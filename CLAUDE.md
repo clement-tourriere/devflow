@@ -1,18 +1,18 @@
 # devflow — Universal Development Environment Branching Tool
 
 ## Overview
-devflow is a Rust-based tool that provides branching support for development services (PostgreSQL, ClickHouse, MySQL, Redis, and more) that automatically synchronize with Git branches. It manages Git worktrees, Docker containers with Copy-on-Write storage, cloud database branches, and lifecycle hooks — from a CLI, TUI, or desktop GUI. It also includes a native reverse proxy that auto-discovers Docker containers and provides HTTPS access via `*.localhost` domains.
+devflow is a Rust-based tool that provides branching support for development services (PostgreSQL, ClickHouse, MySQL, Redis, and more) that automatically synchronize with Git workspaces. It manages Git worktrees, Docker containers with Copy-on-Write storage, cloud database workspaces, and lifecycle hooks — from a CLI, TUI, or desktop GUI. It also includes a native reverse proxy that auto-discovers Docker containers and provides HTTPS access via `*.localhost` domains.
 
 ## Core Concepts
-- **Service branching**: Each Git branch gets its own isolated set of services (databases, caches, etc.)
-- **Git worktree integration**: Optionally creates worktree directories per branch for true parallel development
+- **Service branching**: Each Git workspace gets its own isolated set of services (databases, caches, etc.)
+- **Git worktree integration**: Optionally creates worktree directories per workspace for true parallel development
 - **Multi-provider**: Local Docker containers, PostgreSQL TEMPLATE, Neon, DBLab, Xata, or custom plugins
 - **Multi-service**: A single project can manage multiple services (e.g., PostgreSQL + ClickHouse + Redis)
 - **Lifecycle hooks**: MiniJinja-templated commands that run at specific phases (post-create, pre-merge, etc.)
 - **Copy-on-Write storage**: Uses APFS clones (macOS), ZFS snapshots, Btrfs/XFS reflinks for near-instant branching
 
 ## Key Features
-- **Automatic Git integration**: Creates/switches service branches on `git checkout` via Git hooks
+- **Automatic Git integration**: Creates/switches service workspaces on `git checkout` via Git hooks
 - **Git worktree management**: Creates worktree directories with configurable path templates and file copying
 - **Multi-service support**: PostgreSQL, ClickHouse, MySQL, generic Docker, and plugin providers
 - **Hook engine**: MiniJinja templates with custom filters (`sanitize`, `sanitize_db`, `hash_port`)
@@ -20,9 +20,9 @@ devflow is a Rust-based tool that provides branching support for development ser
 - **Shell integration**: `eval "$(devflow shell-init)"` for automatic `cd` into worktrees
 - **JSON output + non-interactive mode**: For CI/CD and AI agent workflows
 - **AI commit messages**: `devflow commit --ai` generates commit messages via LLM (CLI-first, API fallback)
-- **AI agent integration**: `devflow agent start/status/context/skill/docs` for managing AI coding agents in isolated branches
+- **AI agent integration**: `devflow agent start/status/context/skill/docs` for managing AI coding agents in isolated workspaces
 - **Native reverse proxy**: Auto-discovers Docker containers and serves them via HTTPS `*.localhost` domains with auto-generated certificates
-- **Desktop GUI**: Tauri 2 desktop app with React frontend for managing projects, branches, services, hooks, proxy, and configuration
+- **Desktop GUI**: Tauri 2 desktop app with React frontend for managing projects, workspaces, services, hooks, proxy, and configuration
 
 ## Configuration
 
@@ -36,11 +36,11 @@ The tool is configured via `.devflow.yml` in your Git repository root (created b
 ### Environment Variables:
 - `DEVFLOW_DISABLED=true` — Completely disable devflow
 - `DEVFLOW_SKIP_HOOKS=true` — Skip Git hook execution
-- `DEVFLOW_AUTO_CREATE=false` — Override auto_create_on_branch
-- `DEVFLOW_AUTO_SWITCH=false` — Override auto_switch_on_branch
-- `DEVFLOW_BRANCH_FILTER_REGEX=...` — Override branch filtering
-- `DEVFLOW_DISABLED_BRANCHES=main,release/*` — Disable for specific branches
-- `DEVFLOW_CURRENT_BRANCH_DISABLED=true` — Disable for current branch only
+- `DEVFLOW_AUTO_CREATE=false` — Override auto_create_on_workspace
+- `DEVFLOW_AUTO_SWITCH=false` — Override auto_switch_on_workspace
+- `DEVFLOW_BRANCH_FILTER_REGEX=...` — Override workspace filtering
+- `DEVFLOW_DISABLED_BRANCHES=main,release/*` — Disable for specific workspaces
+- `DEVFLOW_CURRENT_BRANCH_DISABLED=true` — Disable for current workspace only
 - `DEVFLOW_DATABASE_HOST=...` — Override database host
 - `DEVFLOW_DATABASE_PORT=...` — Override database port
 - `DEVFLOW_DATABASE_USER=...` — Override database user
@@ -57,15 +57,15 @@ The tool is configured via `.devflow.yml` in your Git repository root (created b
 ```yaml
 # All sections are optional — an empty file is valid
 git:
-  auto_create_on_branch: true       # Auto-create service branch on git checkout
-  auto_switch_on_branch: true       # Auto-switch services on git checkout
-  main_branch: main                 # Main git branch
-  branch_filter_regex: "^feature/.*"  # Only branch for matching patterns
-  exclude_branches: [main, master]  # Never create branches for these
+  auto_create_on_workspace: true       # Auto-create service workspace on git checkout
+  auto_switch_on_workspace: true       # Auto-switch services on git checkout
+  main_workspace: main                 # Main git workspace
+  workspace_filter_regex: "^feature/.*"  # Only workspace for matching patterns
+  exclude_workspaces: [main, master]  # Never create workspaces for these
 
 behavior:
   auto_cleanup: false
-  max_branches: 10
+  max_workspaces: 10
   naming_strategy: prefix           # prefix, suffix, or replace
 
 # Multi-provider setup
@@ -73,21 +73,21 @@ services:
   - name: app-db
     type: local
     service_type: postgres
-    auto_branch: true
+    auto_workspace: true
     default: true
     local:
       image: postgres:17
   - name: analytics
     type: local
     service_type: clickhouse
-    auto_branch: true
+    auto_workspace: true
     clickhouse:
       image: clickhouse/clickhouse-server:latest
 
 # Worktree configuration
 worktree:
   enabled: true
-  path_template: "../{repo}.{branch}"
+  path_template: "../{repo}.{workspace}"
   copy_files: [".env.local", ".env"]
   copy_ignored: true
 
@@ -107,7 +107,7 @@ hooks:
 # AI agent configuration
 agent:
   command: claude                    # Default agent command
-  branch_prefix: "agent/"           # Prefix for agent branches
+  workspace_prefix: "agent/"           # Prefix for agent workspaces
   auto_context: true                # Provide context on launch
 
 # AI commit message generation
@@ -160,7 +160,7 @@ The project is organized as a Cargo workspace with four crates:
 - `src/services/mysql/` — MySQL backend
 - `src/services/generic/` — Generic Docker backend (Redis, etc.)
 - `src/vcs/mod.rs` — `VcsProvider` trait
-- `src/vcs/git.rs` — Git implementation (branches, worktrees, hooks)
+- `src/vcs/git.rs` — Git implementation (workspaces, worktrees, hooks)
 - `src/vcs/cow_worktree.rs` — Copy-on-Write worktree support (APFS, ZFS, Btrfs, XFS)
 - `src/vcs/jj.rs` — Jujutsu VCS implementation
 - `src/hooks/` — Hook engine (executor, approval, templates)
@@ -183,7 +183,7 @@ The project is organized as a Cargo workspace with four crates:
 ### `src-tauri/` — Tauri 2 desktop GUI (Rust backend)
 - `src/main.rs` — Tauri app setup, system tray, window management
 - `src/state.rs` — `AppState`, `AppSettings`, project registry
-- `src/commands/` — Tauri IPC commands (projects, branches, services, hooks, proxy, config, settings)
+- `src/commands/` — Tauri IPC commands (projects, workspaces, services, hooks, proxy, config, settings)
 
 ### `ui/` — React frontend (for the desktop GUI)
 - `src/App.tsx` — Routes and global layout

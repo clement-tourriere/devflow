@@ -6,6 +6,54 @@ use tauri::{
     Emitter, Manager, WindowEvent,
 };
 
+fn workspace_menu_item_id(project_path: &str, workspace_name: &str) -> String {
+    format!(
+        "workspace-open:{}|{}",
+        urlencoding::encode(project_path),
+        urlencoding::encode(workspace_name)
+    )
+}
+
+fn parse_workspace_menu_project_path(id: &str) -> Option<String> {
+    let payload = id.strip_prefix("workspace-open:")?;
+    let (encoded_project, _) = payload.split_once('|')?;
+    urlencoding::decode(encoded_project)
+        .ok()
+        .map(|s| s.into_owned())
+}
+
+fn workspace_tray_label(workspace: &commands::workspaces::WorkspaceEntry) -> (String, bool) {
+    if let Some(path) = workspace.worktree_path.as_ref() {
+        let folder = std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string());
+        let mut details = vec![format!("dir={}", folder)];
+        if workspace.cow_used {
+            details.push("CoW".to_string());
+        }
+        if let Some(parent) = workspace.parent.as_ref().filter(|p| !p.trim().is_empty()) {
+            details.push(format!("from {}", parent));
+        }
+        if workspace.is_current {
+            details.push("checked out".to_string());
+        }
+        let label = format!("worktree: {} ({})", workspace.name, details.join(", "));
+        (label, false)
+    } else if workspace.is_current {
+        (format!("branch: {} (checked out)", workspace.name), true)
+    } else {
+        (format!("branch: {}", workspace.name), false)
+    }
+}
+
+fn navigate_to_project(app: &tauri::AppHandle, project_path: &str) {
+    let encoded = urlencoding::encode(project_path);
+    let route = format!("/projects/{}", encoded);
+    let _ = app.emit("navigate", route);
+    show_window(app);
+}
+
 mod commands;
 mod state;
 
@@ -34,11 +82,11 @@ fn main() {
             commands::projects::cleanup_orphan_project,
             commands::projects::detect_vcs_info,
             // Branches
-            commands::branches::list_branches,
-            commands::branches::get_connection_info,
-            commands::branches::create_branch,
-            commands::branches::switch_branch,
-            commands::branches::delete_branch,
+            commands::workspaces::list_workspaces,
+            commands::workspaces::get_connection_info,
+            commands::workspaces::create_workspace,
+            commands::workspaces::switch_workspace,
+            commands::workspaces::delete_workspace,
             // Services
             commands::services::add_service,
             commands::services::list_services,
@@ -53,6 +101,8 @@ fn main() {
             commands::hooks::list_hooks,
             commands::hooks::render_template,
             commands::hooks::get_hook_variables,
+            commands::hooks::install_vcs_hooks,
+            commands::hooks::uninstall_vcs_hooks,
             // Proxy
             commands::proxy::start_proxy,
             commands::proxy::stop_proxy,
@@ -170,10 +220,68 @@ fn build_tray(app: &tauri::App) -> Result<tauri::tray::TrayIcon, Box<dyn std::er
             builder = builder.item(&empty);
         } else {
             for project in &settings.projects {
-                let item =
-                    MenuItemBuilder::with_id(&format!("project:{}", project.path), &project.name)
+                let mut project_builder = SubmenuBuilder::with_id(
+                    app,
+                    format!("project_menu:{}", urlencoding::encode(&project.path)),
+                    &project.name,
+                );
+
+                let open_item =
+                    MenuItemBuilder::with_id(&format!("project:{}", project.path), "Open project")
                         .build(app)?;
-                builder = builder.item(&item);
+                project_builder = project_builder.item(&open_item);
+
+                match tauri::async_runtime::block_on(commands::workspaces::list_workspaces(
+                    project.path.clone(),
+                )) {
+                    Ok(ws) => {
+                        let sep = PredefinedMenuItem::separator(app)?;
+                        project_builder = project_builder.item(&sep);
+
+                        if ws.workspaces.is_empty() {
+                            let empty = MenuItemBuilder::with_id(
+                                format!("workspace-empty:{}", urlencoding::encode(&project.path)),
+                                "No workspaces",
+                            )
+                            .enabled(false)
+                            .build(app)?;
+                            project_builder = project_builder.item(&empty);
+                        } else {
+                            for workspace in &ws.workspaces {
+                                let (label, disabled) = workspace_tray_label(workspace);
+                                let item = MenuItemBuilder::with_id(
+                                    workspace_menu_item_id(&project.path, &workspace.name),
+                                    &label,
+                                )
+                                .enabled(!disabled)
+                                .build(app)?;
+                                project_builder = project_builder.item(&item);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to load workspaces for tray project '{}': {}",
+                            project.path,
+                            e
+                        );
+                        let sep = PredefinedMenuItem::separator(app)?;
+                        project_builder = project_builder.item(&sep);
+                        let unavailable = MenuItemBuilder::with_id(
+                            format!(
+                                "workspace-unavailable:{}",
+                                urlencoding::encode(&project.path)
+                            ),
+                            "Workspaces unavailable",
+                        )
+                        .enabled(false)
+                        .build(app)?;
+                        project_builder = project_builder.item(&unavailable);
+                    }
+                }
+
+                let project_submenu = project_builder.build()?;
+                builder = builder.item(&project_submenu);
             }
         }
         builder.build()?
@@ -269,10 +377,12 @@ fn build_tray(app: &tauri::App) -> Result<tauri::tray::TrayIcon, Box<dyn std::er
                 }
                 _ if id.starts_with("project:") => {
                     let project_path = &id["project:".len()..];
-                    let encoded = urlencoding::encode(project_path);
-                    let route = format!("/projects/{}", encoded);
-                    let _ = app.emit("navigate", route);
-                    show_window(app);
+                    navigate_to_project(app, project_path);
+                }
+                _ if id.starts_with("workspace-open:") => {
+                    if let Some(project_path) = parse_workspace_menu_project_path(id) {
+                        navigate_to_project(app, &project_path);
+                    }
                 }
                 _ => {}
             }
@@ -342,11 +452,70 @@ pub fn update_tray_menu(app: &tauri::AppHandle) {
             projects_builder = projects_builder.item(&empty);
         } else {
             for project in &settings.projects {
-                let item =
-                    MenuItemBuilder::with_id(&format!("project:{}", project.path), &project.name)
+                let mut project_builder = SubmenuBuilder::with_id(
+                    &handle,
+                    format!("project_menu:{}", urlencoding::encode(&project.path)),
+                    &project.name,
+                );
+
+                let open_item =
+                    MenuItemBuilder::with_id(&format!("project:{}", project.path), "Open project")
                         .build(&handle)
                         .unwrap();
-                projects_builder = projects_builder.item(&item);
+                project_builder = project_builder.item(&open_item);
+
+                match commands::workspaces::list_workspaces(project.path.clone()).await {
+                    Ok(ws) => {
+                        let sep = PredefinedMenuItem::separator(&handle).unwrap();
+                        project_builder = project_builder.item(&sep);
+
+                        if ws.workspaces.is_empty() {
+                            let empty = MenuItemBuilder::with_id(
+                                format!("workspace-empty:{}", urlencoding::encode(&project.path)),
+                                "No workspaces",
+                            )
+                            .enabled(false)
+                            .build(&handle)
+                            .unwrap();
+                            project_builder = project_builder.item(&empty);
+                        } else {
+                            for workspace in &ws.workspaces {
+                                let (label, disabled) = workspace_tray_label(workspace);
+                                let item = MenuItemBuilder::with_id(
+                                    workspace_menu_item_id(&project.path, &workspace.name),
+                                    &label,
+                                )
+                                .enabled(!disabled)
+                                .build(&handle)
+                                .unwrap();
+                                project_builder = project_builder.item(&item);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to load workspaces for tray project '{}': {}",
+                            project.path,
+                            e
+                        );
+                        let sep = PredefinedMenuItem::separator(&handle).unwrap();
+                        project_builder = project_builder.item(&sep);
+                        let unavailable = MenuItemBuilder::with_id(
+                            format!(
+                                "workspace-unavailable:{}",
+                                urlencoding::encode(&project.path)
+                            ),
+                            "Workspaces unavailable",
+                        )
+                        .enabled(false)
+                        .build(&handle)
+                        .unwrap();
+                        project_builder = project_builder.item(&unavailable);
+                    }
+                }
+
+                let project_submenu = project_builder.build().unwrap();
+                projects_builder = projects_builder.item(&project_submenu);
             }
         }
         let projects_submenu = projects_builder.build().unwrap();

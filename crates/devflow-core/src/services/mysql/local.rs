@@ -1,7 +1,7 @@
-//! MySQL/MariaDB local provider — manages branch-isolated MySQL Docker containers.
+//! MySQL/MariaDB local provider — manages workspace-isolated MySQL Docker containers.
 //!
-//! Each branch gets its own MySQL container. Data is stored in bind-mounted
-//! directories under `data_root/mysql/{service_name}/{branch_name}/`.
+//! Each workspace gets its own MySQL container. Data is stored in bind-mounted
+//! directories under `data_root/mysql/{service_name}/{workspace_name}/`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -22,10 +22,10 @@ use crate::config::MySQLConfig;
 use crate::services::{
     local_docker::{
         collect_container_logs, inspect_container_status, list_managed_service_containers,
-        pick_available_port, sanitize_name_component, service_branch_prefix, ContainerStatus,
+        pick_available_port, sanitize_name_component, service_workspace_prefix, ContainerStatus,
     },
-    BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceCapabilities,
-    ServiceProvider,
+    ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceCapabilities, ServiceProvider,
+    WorkspaceInfo,
 };
 
 const MYSQL_PORT: u16 = 3306;
@@ -76,12 +76,12 @@ impl MySQLLocalProvider {
         })
     }
 
-    fn container_name(&self, branch_name: &str) -> String {
+    fn container_name(&self, workspace_name: &str) -> String {
         let raw = format!(
             "devflow-{}-{}-{}",
             sanitize_name_component(&self.project_name),
             sanitize_name_component(&self.service_name),
-            sanitize_name_component(branch_name)
+            sanitize_name_component(workspace_name)
         );
         if raw.len() > 128 {
             raw[..128].trim_end_matches('-').to_string()
@@ -90,10 +90,10 @@ impl MySQLLocalProvider {
         }
     }
 
-    fn branch_data_dir(&self, branch_name: &str) -> PathBuf {
+    fn branch_data_dir(&self, workspace_name: &str) -> PathBuf {
         self.data_root
             .join(&self.service_name)
-            .join(sanitize_name_component(branch_name))
+            .join(sanitize_name_component(workspace_name))
     }
 
     async fn container_status(&self, container_name: &str) -> anyhow::Result<ContainerStatus> {
@@ -160,12 +160,12 @@ impl MySQLLocalProvider {
     async fn create_and_start(
         &self,
         container_name: &str,
-        branch_name: &str,
+        workspace_name: &str,
         port: u16,
     ) -> anyhow::Result<()> {
         self.ensure_image().await?;
 
-        let data_dir = self.branch_data_dir(branch_name);
+        let data_dir = self.branch_data_dir(workspace_name);
         std::fs::create_dir_all(&data_dir)
             .with_context(|| format!("failed to create data dir: {}", data_dir.display()))?;
 
@@ -196,7 +196,7 @@ impl MySQLLocalProvider {
         labels.insert("devflow.project".to_string(), self.project_name.clone());
         labels.insert("devflow.service".to_string(), self.service_name.clone());
         labels.insert("devflow.service-type".to_string(), "mysql".to_string());
-        labels.insert("devflow.branch".to_string(), branch_name.to_string());
+        labels.insert("devflow.workspace".to_string(), workspace_name.to_string());
 
         let config = ContainerCreateBody {
             image: Some(self.image.clone()),
@@ -304,26 +304,26 @@ impl MySQLLocalProvider {
     }
 
     async fn list_managed_containers(&self) -> anyhow::Result<Vec<(String, String, bool)>> {
-        let prefix = service_branch_prefix(&self.project_name, &self.service_name);
+        let prefix = service_workspace_prefix(&self.project_name, &self.service_name);
         list_managed_service_containers(&self.client, &self.service_name, &prefix).await
     }
 }
 
 #[async_trait]
 impl ServiceProvider for MySQLLocalProvider {
-    async fn create_branch(
+    async fn create_workspace(
         &self,
-        branch_name: &str,
-        from_branch: Option<&str>,
-    ) -> anyhow::Result<BranchInfo> {
-        let container_name = self.container_name(branch_name);
+        workspace_name: &str,
+        from_workspace: Option<&str>,
+    ) -> anyhow::Result<WorkspaceInfo> {
+        let container_name = self.container_name(workspace_name);
 
         match self.container_status(&container_name).await? {
             ContainerStatus::Running => {
-                return Ok(BranchInfo {
-                    name: branch_name.to_string(),
+                return Ok(WorkspaceInfo {
+                    name: workspace_name.to_string(),
                     created_at: Some(Utc::now()),
-                    parent_branch: from_branch.map(|s| s.to_string()),
+                    parent_workspace: from_workspace.map(|s| s.to_string()),
                     database_name: container_name,
                     state: Some("running".to_string()),
                 });
@@ -340,10 +340,10 @@ impl ServiceProvider for MySQLLocalProvider {
                 self.wait_ready(&container_name, Duration::from_secs(120))
                     .await?;
 
-                return Ok(BranchInfo {
-                    name: branch_name.to_string(),
+                return Ok(WorkspaceInfo {
+                    name: workspace_name.to_string(),
                     created_at: Some(Utc::now()),
-                    parent_branch: from_branch.map(|s| s.to_string()),
+                    parent_workspace: from_workspace.map(|s| s.to_string()),
                     database_name: container_name,
                     state: Some("running".to_string()),
                 });
@@ -351,11 +351,11 @@ impl ServiceProvider for MySQLLocalProvider {
             ContainerStatus::NotFound | ContainerStatus::Other(_) => {}
         }
 
-        // Clone data from parent branch if specified
-        if let Some(parent_name) = from_branch {
+        // Clone data from parent workspace if specified
+        if let Some(parent_name) = from_workspace {
             let parent_container = self.container_name(parent_name);
             let parent_data_dir = self.branch_data_dir(parent_name);
-            let new_data_dir = self.branch_data_dir(branch_name);
+            let new_data_dir = self.branch_data_dir(workspace_name);
 
             if parent_data_dir.exists() {
                 // Stop parent container to ensure data consistency
@@ -396,22 +396,22 @@ impl ServiceProvider for MySQLLocalProvider {
         }
 
         let port = self.pick_port().await?;
-        self.create_and_start(&container_name, branch_name, port)
+        self.create_and_start(&container_name, workspace_name, port)
             .await?;
         self.wait_ready(&container_name, Duration::from_secs(120))
             .await?;
 
-        Ok(BranchInfo {
-            name: branch_name.to_string(),
+        Ok(WorkspaceInfo {
+            name: workspace_name.to_string(),
             created_at: Some(Utc::now()),
-            parent_branch: from_branch.map(|s| s.to_string()),
+            parent_workspace: from_workspace.map(|s| s.to_string()),
             database_name: container_name,
             state: Some("running".to_string()),
         })
     }
 
-    async fn delete_branch(&self, branch_name: &str) -> anyhow::Result<()> {
-        let container_name = self.container_name(branch_name);
+    async fn delete_workspace(&self, workspace_name: &str) -> anyhow::Result<()> {
+        let container_name = self.container_name(workspace_name);
 
         if !matches!(
             self.container_status(&container_name).await?,
@@ -427,7 +427,7 @@ impl ServiceProvider for MySQLLocalProvider {
                 .with_context(|| format!("failed to remove container '{container_name}'"))?;
         }
 
-        let data_dir = self.branch_data_dir(branch_name);
+        let data_dir = self.branch_data_dir(workspace_name);
         if data_dir.exists() {
             std::fs::remove_dir_all(&data_dir)
                 .with_context(|| format!("failed to remove data dir: {}", data_dir.display()))?;
@@ -436,30 +436,30 @@ impl ServiceProvider for MySQLLocalProvider {
         Ok(())
     }
 
-    async fn list_branches(&self) -> anyhow::Result<Vec<BranchInfo>> {
+    async fn list_workspaces(&self) -> anyhow::Result<Vec<WorkspaceInfo>> {
         let containers = self.list_managed_containers().await?;
         Ok(containers
             .into_iter()
-            .map(|(branch, container_name, is_running)| BranchInfo {
-                name: branch,
+            .map(|(workspace, container_name, is_running)| WorkspaceInfo {
+                name: workspace,
                 created_at: None,
-                parent_branch: None,
+                parent_workspace: None,
                 database_name: container_name,
                 state: Some(if is_running { "running" } else { "stopped" }.to_string()),
             })
             .collect())
     }
 
-    async fn branch_exists(&self, branch_name: &str) -> anyhow::Result<bool> {
-        let container_name = self.container_name(branch_name);
+    async fn workspace_exists(&self, workspace_name: &str) -> anyhow::Result<bool> {
+        let container_name = self.container_name(workspace_name);
         Ok(!matches!(
             self.container_status(&container_name).await?,
             ContainerStatus::NotFound
         ))
     }
 
-    async fn switch_to_branch(&self, branch_name: &str) -> anyhow::Result<BranchInfo> {
-        let container_name = self.container_name(branch_name);
+    async fn switch_to_branch(&self, workspace_name: &str) -> anyhow::Result<WorkspaceInfo> {
+        let container_name = self.container_name(workspace_name);
 
         match self.container_status(&container_name).await? {
             ContainerStatus::Running => {}
@@ -476,23 +476,23 @@ impl ServiceProvider for MySQLLocalProvider {
             }
             ContainerStatus::NotFound => {
                 return Err(anyhow!(
-                    "no MySQL container for branch '{branch_name}' on service '{}'",
+                    "no MySQL container for workspace '{workspace_name}' on service '{}'",
                     self.service_name
                 ));
             }
         }
 
-        Ok(BranchInfo {
-            name: branch_name.to_string(),
+        Ok(WorkspaceInfo {
+            name: workspace_name.to_string(),
             created_at: None,
-            parent_branch: None,
+            parent_workspace: None,
             database_name: container_name,
             state: Some("running".to_string()),
         })
     }
 
-    async fn get_connection_info(&self, branch_name: &str) -> anyhow::Result<ConnectionInfo> {
-        let container_name = self.container_name(branch_name);
+    async fn get_connection_info(&self, workspace_name: &str) -> anyhow::Result<ConnectionInfo> {
+        let container_name = self.container_name(workspace_name);
         let port = self
             .get_container_port(&container_name)
             .await?
@@ -520,13 +520,13 @@ impl ServiceProvider for MySQLLocalProvider {
         true
     }
 
-    async fn start_branch(&self, branch_name: &str) -> anyhow::Result<()> {
-        let container_name = self.container_name(branch_name);
+    async fn start_workspace(&self, workspace_name: &str) -> anyhow::Result<()> {
+        let container_name = self.container_name(workspace_name);
         match self.container_status(&container_name).await? {
             ContainerStatus::Running => Ok(()),
-            ContainerStatus::NotFound => {
-                Err(anyhow!("no MySQL container for branch '{branch_name}'"))
-            }
+            ContainerStatus::NotFound => Err(anyhow!(
+                "no MySQL container for workspace '{workspace_name}'"
+            )),
             _ => {
                 self.client
                     .start_container(
@@ -541,8 +541,8 @@ impl ServiceProvider for MySQLLocalProvider {
         }
     }
 
-    async fn stop_branch(&self, branch_name: &str) -> anyhow::Result<()> {
-        let container_name = self.container_name(branch_name);
+    async fn stop_workspace(&self, workspace_name: &str) -> anyhow::Result<()> {
+        let container_name = self.container_name(workspace_name);
         match self.container_status(&container_name).await? {
             ContainerStatus::NotFound | ContainerStatus::Exited => return Ok(()),
             ContainerStatus::Paused => {
@@ -579,7 +579,7 @@ impl ServiceProvider for MySQLLocalProvider {
         let containers = self.list_managed_containers().await?;
         let mut deleted = Vec::new();
 
-        for (branch_name, container_name, _) in &containers {
+        for (workspace_name, container_name, _) in &containers {
             let options = RemoveContainerOptions {
                 force: true,
                 ..Default::default()
@@ -589,7 +589,7 @@ impl ServiceProvider for MySQLLocalProvider {
                 .remove_container(container_name, Some(options))
                 .await
             {
-                Ok(()) => deleted.push(branch_name.clone()),
+                Ok(()) => deleted.push(workspace_name.clone()),
                 Err(e) => log::warn!("failed to remove container '{}': {}", container_name, e),
             }
         }
@@ -660,8 +660,8 @@ impl ServiceProvider for MySQLLocalProvider {
         })
     }
 
-    async fn logs(&self, branch_name: &str, tail: Option<usize>) -> anyhow::Result<String> {
-        let container = self.container_name(branch_name);
+    async fn logs(&self, workspace_name: &str, tail: Option<usize>) -> anyhow::Result<String> {
+        let container = self.container_name(workspace_name);
         collect_container_logs(&self.client, &container, tail).await
     }
 
@@ -677,11 +677,11 @@ impl ServiceProvider for MySQLLocalProvider {
             cleanup: true,
             seed_from_source: false,
             template_from_time: false,
-            max_branch_name_length: 255,
+            max_workspace_name_length: 255,
         }
     }
 
-    fn max_branch_name_length(&self) -> usize {
+    fn max_workspace_name_length(&self) -> usize {
         255
     }
 }

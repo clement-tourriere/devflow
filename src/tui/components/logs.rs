@@ -17,29 +17,29 @@ use crate::tui::theme;
 /// Focus area within the logs tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogsFocus {
-    /// Left sidebar: service/branch picker
+    /// Left sidebar: service/workspace picker
     Picker,
     /// Right panel: log content
     Content,
 }
 
-/// An entry in the service/branch picker sidebar.
+/// An entry in the service/workspace picker sidebar.
 #[derive(Debug, Clone)]
 struct PickerEntry {
     service_name: String,
-    branch_name: String,
+    workspace_name: String,
     state: Option<String>,
 }
 
 pub struct LogsComponent {
     // Currently viewed log
     service_name: String,
-    branch_name: String,
+    workspace_name: String,
     content: String,
     scroll_offset: u16,
     content_height: u16,
     loading: bool,
-    // Service/branch picker
+    // Service/workspace picker
     all_picker_entries: Vec<PickerEntry>,
     picker_entries: Vec<PickerEntry>,
     picker_state: ListState,
@@ -54,7 +54,7 @@ impl LogsComponent {
         picker_state.select(Some(0));
         Self {
             service_name: String::new(),
-            branch_name: String::new(),
+            workspace_name: String::new(),
             content: String::new(),
             scroll_offset: 0,
             content_height: 0,
@@ -79,21 +79,21 @@ impl LogsComponent {
         self.focus = LogsFocus::Content;
     }
 
-    pub fn set_loading(&mut self, service: &str, branch: &str) {
+    pub fn set_loading(&mut self, service: &str, workspace: &str) {
         self.service_name = service.to_string();
-        self.branch_name = branch.to_string();
+        self.workspace_name = workspace.to_string();
         self.loading = true;
     }
 
-    /// Build picker entries from services data (all service branches across all services).
+    /// Build picker entries from services data (all service workspaces across all services).
     fn update_picker(&mut self, services: &ServicesData) {
         self.all_picker_entries.clear();
         for svc in &services.services {
-            for branch in &svc.branches {
+            for workspace in &svc.workspaces {
                 self.all_picker_entries.push(PickerEntry {
                     service_name: svc.name.clone(),
-                    branch_name: branch.name.clone(),
-                    state: branch.state.clone(),
+                    workspace_name: workspace.name.clone(),
+                    state: workspace.state.clone(),
                 });
             }
         }
@@ -110,7 +110,7 @@ impl LogsComponent {
                 .iter()
                 .filter(|entry| {
                     entry.service_name.to_lowercase().contains(&needle)
-                        || entry.branch_name.to_lowercase().contains(&needle)
+                        || entry.workspace_name.to_lowercase().contains(&needle)
                 })
                 .cloned()
                 .collect();
@@ -145,7 +145,10 @@ impl LogsComponent {
                         Style::default().fg(theme::SERVICE_TYPE),
                     ),
                     Span::styled(" / ", Style::default().fg(theme::TEXT_MUTED)),
-                    Span::styled(&entry.branch_name, Style::default().fg(theme::TEXT_PRIMARY)),
+                    Span::styled(
+                        &entry.workspace_name,
+                        Style::default().fg(theme::TEXT_PRIMARY),
+                    ),
                     Span::styled(format!(" [{}]", state_str), Style::default().fg(color)),
                 ]))
             })
@@ -205,7 +208,7 @@ impl LogsComponent {
         if self.loading {
             let loading = Paragraph::new(format!(
                 " {} Loading logs for {} on {}...",
-                spinner, self.service_name, self.branch_name
+                spinner, self.service_name, self.workspace_name
             ))
             .block(
                 Block::default()
@@ -220,7 +223,7 @@ impl LogsComponent {
 
         if self.content.is_empty() {
             let empty = Paragraph::new(
-                " Select a service/branch and press Enter to view logs.\n Press f to switch between picker and log content.",
+                " Select a service/workspace and press Enter to view logs.\n Press f to switch between picker and log content.",
             )
             .block(
                 Block::default()
@@ -253,7 +256,7 @@ impl LogsComponent {
 
         let title = format!(
             " Logs: {} / {} ({} lines) ",
-            self.service_name, self.branch_name, self.content_height
+            self.service_name, self.workspace_name, self.content_height
         );
 
         let paragraph = Paragraph::new(lines)
@@ -328,7 +331,7 @@ impl Component for LogsComponent {
                     if let Some(entry) = self.picker_entries.get(self.picker_selected) {
                         Action::ViewLogs {
                             service: entry.service_name.clone(),
-                            branch: entry.branch_name.clone(),
+                            workspace: entry.workspace_name.clone(),
                         }
                     } else {
                         Action::None
@@ -366,10 +369,10 @@ impl Component for LogsComponent {
                     Action::None
                 }
                 KeyCode::Char('r') => {
-                    if !self.service_name.is_empty() && !self.branch_name.is_empty() {
+                    if !self.service_name.is_empty() && !self.workspace_name.is_empty() {
                         Action::ViewLogs {
                             service: self.service_name.clone(),
-                            branch: self.branch_name.clone(),
+                            workspace: self.workspace_name.clone(),
                         }
                     } else {
                         Action::Refresh

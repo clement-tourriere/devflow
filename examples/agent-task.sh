@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Create/switch an isolated branch environment for an agent task.
+# Create/switch an isolated workspace environment for an agent task.
 #
 # Usage:
 #   ./examples/agent-task.sh <task-id>

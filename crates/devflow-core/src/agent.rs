@@ -1,7 +1,7 @@
 //! AI agent integration for devflow.
 //!
 //! Provides commands for launching, tracking, and managing AI coding agents
-//! that work in isolated branch environments.
+//! that work in isolated workspace environments.
 
 use anyhow::Result;
 use std::path::Path;
@@ -16,17 +16,17 @@ pub fn generate_claude_skill(config: &Config, _project_dir: &Path) -> Result<Str
     let mut skill = String::new();
     skill.push_str(&format!("# devflow - {}\n\n", project_name));
     skill.push_str(
-        "This project uses **devflow** for branch-isolated development environments.\n\n",
+        "This project uses **devflow** for workspace-isolated development environments.\n\n",
     );
 
     // Commands reference
     skill.push_str("## Quick Reference\n\n");
     skill.push_str("```bash\n");
-    skill.push_str("# Switch to a branch (creates isolated services)\n");
-    skill.push_str("devflow switch -c <branch-name>\n\n");
+    skill.push_str("# Switch to a workspace (creates isolated services)\n");
+    skill.push_str("devflow switch -c <workspace-name>\n\n");
     skill.push_str("# Get connection info\n");
-    skill.push_str("devflow connection <branch-name>\n");
-    skill.push_str("devflow --json connection <branch-name>\n\n");
+    skill.push_str("devflow connection <workspace-name>\n");
+    skill.push_str("devflow --json connection <workspace-name>\n\n");
     skill.push_str("# Show current status\n");
     skill.push_str("devflow status\n\n");
     skill.push_str("# AI-powered commit\n");
@@ -35,7 +35,7 @@ pub fn generate_claude_skill(config: &Config, _project_dir: &Path) -> Result<Str
     skill.push_str("devflow hook run post-switch\n\n");
     skill.push_str("# Show template variables\n");
     skill.push_str("devflow hook vars\n\n");
-    skill.push_str("# Get full context for current branch\n");
+    skill.push_str("# Get full context for current workspace\n");
     skill.push_str("devflow agent context\n");
     skill.push_str("```\n\n");
 
@@ -48,8 +48,8 @@ pub fn generate_claude_skill(config: &Config, _project_dir: &Path) -> Result<Str
                 svc.name,
                 svc.service_type,
                 svc.provider_type,
-                if svc.auto_branch {
-                    "[auto-branch]"
+                if svc.auto_workspace {
+                    "[auto-workspace]"
                 } else {
                     "[shared]"
                 }
@@ -57,7 +57,7 @@ pub fn generate_claude_skill(config: &Config, _project_dir: &Path) -> Result<Str
         }
         skill.push('\n');
         skill.push_str(
-            "Connection strings are available via `devflow --json connection <branch>`.\n",
+            "Connection strings are available via `devflow --json connection <workspace>`.\n",
         );
         skill.push_str("In hooks, use `{{ service['<name>'].url }}` template syntax.\n\n");
     }
@@ -77,7 +77,7 @@ pub fn generate_claude_skill(config: &Config, _project_dir: &Path) -> Result<Str
     // Agent workflow
     skill.push_str("## Agent Workflow\n\n");
     skill.push_str("When working on a task:\n\n");
-    skill.push_str("1. Create an isolated branch: `devflow switch -c agent/<task-id>`\n");
+    skill.push_str("1. Create an isolated workspace: `devflow switch -c agent/<task-id>`\n");
     skill.push_str("2. Get connection info: `devflow --json connection agent/<task-id>`\n");
     skill.push_str("3. Do your work in the isolated environment\n");
     skill.push_str("4. Commit with AI message: `devflow commit --ai`\n");
@@ -102,7 +102,7 @@ pub fn generate_opencode_config(config: &Config, _project_dir: &Path) -> Result<
     content.push_str("This guide is for autonomous coding agents and CI runners.\n\n");
 
     content.push_str("## Goal\n\n");
-    content.push_str("Use devflow to create an isolated development branch environment per task, with machine-readable output and deterministic behavior.\n\n");
+    content.push_str("Use devflow to create an isolated development workspace environment per task, with machine-readable output and deterministic behavior.\n\n");
 
     content.push_str("## Recommended Flags\n\n");
     content.push_str("- `--json`: structured output on stdout\n");
@@ -122,7 +122,7 @@ pub fn generate_opencode_config(config: &Config, _project_dir: &Path) -> Result<
         content.push_str("## Available Services\n\n");
         for svc in &services {
             content.push_str(&format!(
-                "- **{}** ({}): `devflow --json connection <branch> -s {}`\n",
+                "- **{}** ({}): `devflow --json connection <workspace> -s {}`\n",
                 svc.name, svc.service_type, svc.name
             ));
         }
@@ -151,11 +151,12 @@ pub fn generate_cursor_rules(config: &Config, _project_dir: &Path) -> Result<Str
 
     let mut content = String::new();
     content.push_str(&format!("# devflow rules for {}\n\n", project_name));
-    content.push_str("This project uses devflow for branch-isolated development environments.\n\n");
+    content
+        .push_str("This project uses devflow for workspace-isolated development environments.\n\n");
 
     content.push_str("## Key Commands\n\n");
-    content.push_str("- Create isolated branch: `devflow switch -c <branch>`\n");
-    content.push_str("- Get connection info: `devflow --json connection <branch>`\n");
+    content.push_str("- Create isolated workspace: `devflow switch -c <workspace>`\n");
+    content.push_str("- Get connection info: `devflow --json connection <workspace>`\n");
     content.push_str("- Show status: `devflow status`\n");
     content.push_str("- AI commit: `devflow commit --ai`\n");
     content.push_str("- Show template vars: `devflow hook vars`\n\n");
@@ -174,9 +175,9 @@ pub fn generate_cursor_rules(config: &Config, _project_dir: &Path) -> Result<Str
     content.push_str("## Rules\n\n");
     content.push_str("- Always use `devflow --json` for machine-readable output\n");
     content.push_str(
-        "- Use `devflow connection <branch>` to get database URLs, never hardcode them\n",
+        "- Use `devflow connection <workspace>` to get database URLs, never hardcode them\n",
     );
-    content.push_str("- Use `devflow switch -c` to create new branches with isolated services\n");
+    content.push_str("- Use `devflow switch -c` to create new workspaces with isolated services\n");
     content.push_str("- Use `devflow commit --ai` for consistent commit messages\n");
 
     Ok(content)
@@ -185,19 +186,24 @@ pub fn generate_cursor_rules(config: &Config, _project_dir: &Path) -> Result<Str
 /// Generate project context for agents (JSON or markdown).
 pub async fn generate_agent_context(
     config: &Config,
-    branch_name: &str,
+    project_dir: &Path,
+    workspace_name: &str,
     format: &str,
 ) -> Result<String> {
-    let context = crate::hooks::build_hook_context(config, branch_name).await;
+    let context = crate::hooks::build_hook_context(config, project_dir, workspace_name).await;
 
     match format {
         "json" => Ok(serde_json::to_string_pretty(&context)?),
         _ => {
             let mut md = String::new();
-            md.push_str(&format!("# Agent Context: {}\n\n", branch_name));
-            md.push_str(&format!("**Branch**: {}\n", context.branch));
+            md.push_str(&format!("# Agent Context: {}\n\n", workspace_name));
+            md.push_str(&format!("**Project**: {}\n", context.name));
+            md.push_str(&format!("**Workspace**: {}\n", context.workspace));
             md.push_str(&format!("**Repo**: {}\n", context.repo));
-            md.push_str(&format!("**Default Branch**: {}\n", context.default_branch));
+            md.push_str(&format!(
+                "**Default Workspace**: {}\n",
+                context.default_workspace
+            ));
             if let Some(ref wt) = context.worktree_path {
                 md.push_str(&format!("**Worktree**: {}\n", wt));
             }

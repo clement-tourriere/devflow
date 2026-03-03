@@ -1,4 +1,4 @@
-use super::super::{BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ServiceProvider};
+use super::super::{ConnectionInfo, DoctorCheck, DoctorReport, ServiceProvider, WorkspaceInfo};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -31,7 +31,7 @@ struct XataBranch {
 
 #[derive(Debug, Deserialize)]
 struct ListBranchesResponse {
-    branches: Vec<XataBranch>,
+    workspaces: Vec<XataBranch>,
 }
 
 #[derive(Debug, Serialize)]
@@ -71,7 +71,7 @@ impl XataProvider {
 
     fn branches_url(&self) -> String {
         format!(
-            "{}/organizations/{}/projects/{}/branches",
+            "{}/organizations/{}/projects/{}/workspaces",
             self.base_url, self.organization_id, self.project_id
         )
     }
@@ -151,17 +151,17 @@ impl XataProvider {
         let response: ListBranchesResponse = self
             .api_request(reqwest::Method::GET, &self.branches_url(), None::<&()>)
             .await?;
-        Ok(response.branches)
+        Ok(response.workspaces)
     }
 
-    async fn find_branch_by_name(&self, branch_name: &str) -> Result<Option<XataBranch>> {
-        let normalized = Self::normalize_branch_name(branch_name);
-        let branches = self.fetch_branches().await?;
-        Ok(branches.into_iter().find(|b| b.name == normalized))
+    async fn find_branch_by_name(&self, workspace_name: &str) -> Result<Option<XataBranch>> {
+        let normalized = Self::normalize_workspace_name(workspace_name);
+        let workspaces = self.fetch_branches().await?;
+        Ok(workspaces.into_iter().find(|b| b.name == normalized))
     }
 
-    fn normalize_branch_name(branch_name: &str) -> String {
-        branch_name
+    fn normalize_workspace_name(workspace_name: &str) -> String {
+        workspace_name
             .chars()
             .map(|c| {
                 if c.is_alphanumeric() || c == '-' || c == '_' {
@@ -178,19 +178,19 @@ impl XataProvider {
 
 #[async_trait]
 impl ServiceProvider for XataProvider {
-    async fn create_branch(
+    async fn create_workspace(
         &self,
-        branch_name: &str,
-        from_branch: Option<&str>,
-    ) -> Result<BranchInfo> {
-        let normalized_name = Self::normalize_branch_name(branch_name);
+        workspace_name: &str,
+        from_workspace: Option<&str>,
+    ) -> Result<WorkspaceInfo> {
+        let normalized_name = Self::normalize_workspace_name(workspace_name);
 
-        // Resolve parent branch ID if a from_branch name is given
-        let parent_id = if let Some(from_name) = from_branch {
+        // Resolve parent workspace ID if a from_workspace name is given
+        let parent_id = if let Some(from_name) = from_workspace {
             let parent = self
                 .find_branch_by_name(from_name)
                 .await?
-                .ok_or_else(|| anyhow::anyhow!("Parent branch '{}' not found", from_name))?;
+                .ok_or_else(|| anyhow::anyhow!("Parent workspace '{}' not found", from_name))?;
             Some(parent.id)
         } else {
             None
@@ -201,71 +201,71 @@ impl ServiceProvider for XataProvider {
             parent_id,
         };
 
-        let branch: XataBranch = self
+        let workspace: XataBranch = self
             .api_request(reqwest::Method::POST, &self.branches_url(), Some(&request))
             .await?;
 
-        Ok(BranchInfo {
-            name: branch.name,
-            created_at: branch.created_at,
-            parent_branch: from_branch.map(|s| s.to_string()),
+        Ok(WorkspaceInfo {
+            name: workspace.name,
+            created_at: workspace.created_at,
+            parent_workspace: from_workspace.map(|s| s.to_string()),
             database_name: self.project_id.clone(),
             state: Some("running".to_string()),
         })
     }
 
-    async fn delete_branch(&self, branch_name: &str) -> Result<()> {
-        let branch = self
-            .find_branch_by_name(branch_name)
+    async fn delete_workspace(&self, workspace_name: &str) -> Result<()> {
+        let workspace = self
+            .find_branch_by_name(workspace_name)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Branch '{}' not found", branch_name))?;
+            .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
 
-        self.api_request_no_body(reqwest::Method::DELETE, &self.branch_url(&branch.id))
+        self.api_request_no_body(reqwest::Method::DELETE, &self.branch_url(&workspace.id))
             .await
     }
 
-    async fn list_branches(&self) -> Result<Vec<BranchInfo>> {
-        let branches = self.fetch_branches().await?;
+    async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
+        let workspaces = self.fetch_branches().await?;
 
-        Ok(branches
+        Ok(workspaces
             .into_iter()
-            .map(|branch| BranchInfo {
-                name: branch.name,
-                created_at: branch.created_at,
-                parent_branch: None,
+            .map(|workspace| WorkspaceInfo {
+                name: workspace.name,
+                created_at: workspace.created_at,
+                parent_workspace: None,
                 database_name: self.project_id.clone(),
                 state: Some("running".to_string()),
             })
             .collect())
     }
 
-    async fn branch_exists(&self, branch_name: &str) -> Result<bool> {
-        Ok(self.find_branch_by_name(branch_name).await?.is_some())
+    async fn workspace_exists(&self, workspace_name: &str) -> Result<bool> {
+        Ok(self.find_branch_by_name(workspace_name).await?.is_some())
     }
 
-    async fn switch_to_branch(&self, branch_name: &str) -> Result<BranchInfo> {
-        let normalized_name = Self::normalize_branch_name(branch_name);
-        let branches = self.list_branches().await?;
-        branches
+    async fn switch_to_branch(&self, workspace_name: &str) -> Result<WorkspaceInfo> {
+        let normalized_name = Self::normalize_workspace_name(workspace_name);
+        let workspaces = self.list_workspaces().await?;
+        workspaces
             .into_iter()
             .find(|b| b.name == normalized_name)
-            .ok_or_else(|| anyhow::anyhow!("Branch '{}' does not exist", branch_name))
+            .ok_or_else(|| anyhow::anyhow!("Workspace '{}' does not exist", workspace_name))
     }
 
-    async fn get_connection_info(&self, branch_name: &str) -> Result<ConnectionInfo> {
-        let branch = self
-            .find_branch_by_name(branch_name)
+    async fn get_connection_info(&self, workspace_name: &str) -> Result<ConnectionInfo> {
+        let workspace = self
+            .find_branch_by_name(workspace_name)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Branch '{}' not found", branch_name))?;
+            .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
 
-        let creds_url = format!("{}/credentials", self.branch_url(&branch.id));
+        let creds_url = format!("{}/credentials", self.branch_url(&workspace.id));
         let creds: BranchCredentials = self
             .api_request(reqwest::Method::GET, &creds_url, None::<&()>)
             .await?;
 
         let host = creds.host.unwrap_or_else(|| "localhost".to_string());
         let port = creds.port.unwrap_or(5432);
-        let database = creds.database.unwrap_or_else(|| branch.name.clone());
+        let database = creds.database.unwrap_or_else(|| workspace.name.clone());
 
         let connection_string = format!(
             "postgresql://{}:{}@{}:{}/{}",
@@ -309,7 +309,7 @@ impl ServiceProvider for XataProvider {
         "Xata"
     }
 
-    fn max_branch_name_length(&self) -> usize {
+    fn max_workspace_name_length(&self) -> usize {
         255
     }
 }

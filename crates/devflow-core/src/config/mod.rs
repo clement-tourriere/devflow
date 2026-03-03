@@ -47,12 +47,13 @@ pub struct NamedServiceConfig {
         skip_serializing_if = "is_default_service_type"
     )]
     pub service_type: String,
-    /// Whether to automatically branch this service when git branches are created
+    /// Whether to automatically workspace this service when git workspaces are created
     #[serde(
         default = "default_auto_branch",
+        alias = "auto_branch",
         skip_serializing_if = "std::ops::Not::not"
     )]
-    pub auto_branch: bool,
+    pub auto_workspace: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -144,7 +145,7 @@ pub struct ClickHouseConfig {
     /// Docker image (default: clickhouse/clickhouse-server:latest)
     #[serde(default = "default_clickhouse_image")]
     pub image: String,
-    /// Start of port range for branch-specific instances
+    /// Start of port range for workspace-specific instances
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_range_start: Option<u16>,
     /// Data root directory for persistent storage
@@ -172,7 +173,7 @@ pub struct MySQLConfig {
     /// Docker image (default: mysql:8)
     #[serde(default = "default_mysql_image")]
     pub image: String,
-    /// Start of port range for branch-specific instances
+    /// Start of port range for workspace-specific instances
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_range_start: Option<u16>,
     /// Data root directory for persistent storage
@@ -227,7 +228,7 @@ fn default_plugin_timeout() -> u64 {
 /// Configuration for a generic Docker service provider.
 ///
 /// Generic services run arbitrary Docker images and can optionally be "branched"
-/// by creating isolated containers per branch.
+/// by creating isolated containers per workspace.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenericDockerConfig {
     /// Docker image to run
@@ -235,7 +236,7 @@ pub struct GenericDockerConfig {
     /// Port mapping in Docker format (e.g. "6379:6379")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_mapping: Option<String>,
-    /// Start of port range for branch-specific instances
+    /// Start of port range for workspace-specific instances
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_range_start: Option<u16>,
     /// Environment variables to pass to the container
@@ -258,22 +259,23 @@ pub struct AgentConfig {
     /// Command to launch the agent (e.g., "claude", "codex").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
-    /// Branch prefix for agent-created branches (default: "agent/").
+    /// Workspace prefix for agent-created workspaces (default: "agent/").
     #[serde(
-        default = "default_agent_branch_prefix",
-        skip_serializing_if = "is_default_agent_branch_prefix"
+        default = "default_agent_workspace_prefix",
+        alias = "branch_prefix",
+        skip_serializing_if = "is_default_agent_workspace_prefix"
     )]
-    pub branch_prefix: String,
+    pub workspace_prefix: String,
     /// Automatically provide project context to the agent on launch.
     #[serde(default = "default_true")]
     pub auto_context: bool,
 }
 
-fn default_agent_branch_prefix() -> String {
+fn default_agent_workspace_prefix() -> String {
     "agent/".to_string()
 }
 
-fn is_default_agent_branch_prefix(s: &String) -> bool {
+fn is_default_agent_workspace_prefix(s: &String) -> bool {
     s == "agent/"
 }
 
@@ -310,8 +312,8 @@ pub struct WorktreeConfig {
     #[serde(default)]
     pub enabled: bool,
     /// Path template for new worktrees.
-    /// Supports `{repo}` and `{branch}` placeholders.
-    /// Default: `"../{repo}.{branch}"`
+    /// Supports `{repo}` and `{workspace}` placeholders.
+    /// Default: `"../{repo}.{workspace}"`
     #[serde(default = "default_worktree_path_template")]
     pub path_template: String,
     /// Files to copy from the main worktree into each new worktree.
@@ -375,34 +377,42 @@ pub enum AuthMethod {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitConfig {
-    #[serde(default = "default_true")]
-    pub auto_create_on_branch: bool,
-    #[serde(default = "default_true")]
-    pub auto_switch_on_branch: bool,
-    #[serde(default = "default_main_branch")]
-    pub main_branch: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_create_branch_filter: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch_filter_regex: Option<String>,
-    #[serde(default = "default_exclude_branches")]
-    pub exclude_branches: Vec<String>,
+    #[serde(default = "default_true", alias = "auto_create_on_branch")]
+    pub auto_create_on_workspace: bool,
+    #[serde(default = "default_true", alias = "auto_switch_on_branch")]
+    pub auto_switch_on_workspace: bool,
+    #[serde(default = "default_main_workspace", alias = "main_branch")]
+    pub main_workspace: String,
+    #[serde(
+        default,
+        alias = "auto_create_branch_filter",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auto_create_workspace_filter: Option<String>,
+    #[serde(
+        default,
+        alias = "branch_filter_regex",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub workspace_filter_regex: Option<String>,
+    #[serde(default = "default_exclude_workspaces", alias = "exclude_branches")]
+    pub exclude_workspaces: Vec<String>,
 }
 
 impl Default for GitConfig {
     fn default() -> Self {
         Self {
-            auto_create_on_branch: true,
-            auto_switch_on_branch: true,
-            main_branch: "main".to_string(),
-            auto_create_branch_filter: None,
-            branch_filter_regex: None,
-            exclude_branches: vec!["main".to_string(), "master".to_string()],
+            auto_create_on_workspace: true,
+            auto_switch_on_workspace: true,
+            main_workspace: "main".to_string(),
+            auto_create_workspace_filter: None,
+            workspace_filter_regex: None,
+            exclude_workspaces: vec!["main".to_string(), "master".to_string()],
         }
     }
 }
 
-fn default_exclude_branches() -> Vec<String> {
+fn default_exclude_workspaces() -> Vec<String> {
     vec!["main".to_string(), "master".to_string()]
 }
 
@@ -410,20 +420,24 @@ fn default_true() -> bool {
     true
 }
 
-fn default_main_branch() -> String {
+fn default_main_workspace() -> String {
     "main".to_string()
 }
 
 fn default_worktree_path_template() -> String {
-    "../{repo}.{branch}".to_string()
+    "../{repo}.{workspace}".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BehaviorConfig {
     #[serde(default)]
     pub auto_cleanup: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_branches: Option<usize>,
+    #[serde(
+        default,
+        alias = "max_branches",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_workspaces: Option<usize>,
     #[serde(default)]
     pub naming_strategy: NamingStrategy,
 }
@@ -432,7 +446,7 @@ impl Default for BehaviorConfig {
     fn default() -> Self {
         Self {
             auto_cleanup: false,
-            max_branches: Some(10),
+            max_workspaces: Some(10),
             naming_strategy: NamingStrategy::Prefix,
         }
     }
@@ -456,7 +470,7 @@ pub struct LocalConfig {
     pub git: Option<LocalGitConfig>,
     pub behavior: Option<LocalBehaviorConfig>,
     pub disabled: Option<bool>,
-    pub disabled_branches: Option<Vec<String>>,
+    pub disabled_workspaces: Option<Vec<String>>,
     pub worktree: Option<WorktreeConfig>,
     /// Override the project-level `default_vcs` locally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -484,18 +498,25 @@ pub struct LocalAuthConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LocalGitConfig {
-    pub auto_create_on_branch: Option<bool>,
-    pub auto_switch_on_branch: Option<bool>,
-    pub main_branch: Option<String>,
-    pub auto_create_branch_filter: Option<String>,
-    pub branch_filter_regex: Option<String>,
-    pub exclude_branches: Option<Vec<String>>,
+    #[serde(alias = "auto_create_on_branch")]
+    pub auto_create_on_workspace: Option<bool>,
+    #[serde(alias = "auto_switch_on_branch")]
+    pub auto_switch_on_workspace: Option<bool>,
+    #[serde(alias = "main_branch")]
+    pub main_workspace: Option<String>,
+    #[serde(alias = "auto_create_branch_filter")]
+    pub auto_create_workspace_filter: Option<String>,
+    #[serde(alias = "branch_filter_regex")]
+    pub workspace_filter_regex: Option<String>,
+    #[serde(alias = "exclude_branches")]
+    pub exclude_workspaces: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LocalBehaviorConfig {
     pub auto_cleanup: Option<bool>,
-    pub max_branches: Option<usize>,
+    #[serde(alias = "max_branches")]
+    pub max_workspaces: Option<usize>,
     pub naming_strategy: Option<NamingStrategy>,
 }
 
@@ -506,9 +527,9 @@ pub struct EnvConfig {
     pub skip_hooks: Option<bool>,
     pub auto_create: Option<bool>,
     pub auto_switch: Option<bool>,
-    pub branch_filter_regex: Option<String>,
-    pub disabled_branches: Option<Vec<String>>,
-    pub current_branch_disabled: Option<bool>,
+    pub workspace_filter_regex: Option<String>,
+    pub disabled_workspaces: Option<Vec<String>>,
+    pub current_workspace_disabled: Option<bool>,
     pub database_host: Option<String>,
     pub database_port: Option<u16>,
     pub database_user: Option<String>,
@@ -578,7 +599,7 @@ pub struct EffectiveConfig {
     pub env_config: EnvConfig,
     pub disabled: bool,
     pub skip_hooks: bool,
-    pub current_branch_disabled: bool,
+    pub current_workspace_disabled: bool,
 }
 
 impl Default for DatabaseConfig {
@@ -624,16 +645,16 @@ impl Default for Config {
             default_vcs: None,
             database: DatabaseConfig::default(),
             git: GitConfig {
-                auto_create_on_branch: true,
-                auto_switch_on_branch: true,
-                main_branch: "main".to_string(),
-                auto_create_branch_filter: None,
-                branch_filter_regex: None,
-                exclude_branches: vec!["main".to_string(), "master".to_string()],
+                auto_create_on_workspace: true,
+                auto_switch_on_workspace: true,
+                main_workspace: "main".to_string(),
+                auto_create_workspace_filter: None,
+                workspace_filter_regex: None,
+                exclude_workspaces: vec!["main".to_string(), "master".to_string()],
             },
             behavior: BehaviorConfig {
                 auto_cleanup: false,
-                max_branches: Some(10),
+                max_workspaces: Some(10),
                 naming_strategy: NamingStrategy::Prefix,
             },
             services: None,
@@ -710,18 +731,22 @@ impl Config {
         Ok(None)
     }
 
-    pub fn get_database_name(&self, branch_name: &str) -> String {
-        // For main branch marker, use the template database name directly
-        if branch_name == "_main" {
+    pub fn get_database_name(&self, workspace_name: &str) -> String {
+        // For main workspace marker, use the template database name directly
+        if workspace_name == "_main" {
             return self.database.template_database.clone();
         }
 
-        // For excluded branches (main/master), use the template database name directly
-        if self.git.exclude_branches.contains(&branch_name.to_string()) {
+        // For excluded workspaces (main/master), use the template database name directly
+        if self
+            .git
+            .exclude_workspaces
+            .contains(&workspace_name.to_string())
+        {
             return self.database.template_database.clone();
         }
 
-        let sanitized_branch = Self::sanitize_branch_name(branch_name);
+        let sanitized_branch = Self::sanitize_workspace_name(workspace_name);
 
         let full_name = match self.behavior.naming_strategy {
             NamingStrategy::Prefix => {
@@ -736,11 +761,11 @@ impl Config {
         Self::ensure_valid_postgres_name(&full_name)
     }
 
-    fn sanitize_branch_name(branch_name: &str) -> String {
+    fn sanitize_workspace_name(workspace_name: &str) -> String {
         // Convert to lowercase and replace invalid characters with underscores
         let mut sanitized = String::new();
 
-        for ch in branch_name.to_lowercase().chars() {
+        for ch in workspace_name.to_lowercase().chars() {
             match ch {
                 // Valid PostgreSQL identifier characters
                 'a'..='z' | '0'..='9' | '_' | '$' => sanitized.push(ch),
@@ -764,7 +789,7 @@ impl Config {
 
         // Ensure we have something if everything got removed
         if sanitized.is_empty() {
-            sanitized = "branch".to_string();
+            sanitized = "workspace".to_string();
         }
 
         sanitized
@@ -794,26 +819,30 @@ impl Config {
         (hasher.finish() as u32) & 0xFFFF // Use 16 bits for shorter hash
     }
 
-    pub fn should_create_branch(&self, branch_name: &str) -> bool {
-        if !self.git.auto_create_on_branch {
+    pub fn should_create_workspace(&self, workspace_name: &str) -> bool {
+        if !self.git.auto_create_on_workspace {
             return false;
         }
 
-        if self.git.exclude_branches.contains(&branch_name.to_string()) {
+        if self
+            .git
+            .exclude_workspaces
+            .contains(&workspace_name.to_string())
+        {
             return false;
         }
 
-        // Prefer the newer branch_filter_regex, but keep supporting
-        // auto_create_branch_filter for backward compatibility.
+        // Prefer the newer workspace_filter_regex, but keep supporting
+        // auto_create_workspace_filter for backward compatibility.
         let create_filter = self
             .git
-            .branch_filter_regex
+            .workspace_filter_regex
             .as_ref()
-            .or(self.git.auto_create_branch_filter.as_ref());
+            .or(self.git.auto_create_workspace_filter.as_ref());
 
         if let Some(filter) = create_filter {
             match regex::Regex::new(filter) {
-                Ok(re) => re.is_match(branch_name),
+                Ok(re) => re.is_match(workspace_name),
                 Err(_) => {
                     log::warn!("Invalid regex filter: {}", filter);
                     false
@@ -824,23 +853,27 @@ impl Config {
         }
     }
 
-    pub fn should_switch_on_branch(&self, branch_name: &str) -> bool {
-        if !self.git.auto_switch_on_branch {
+    pub fn should_switch_on_workspace(&self, workspace_name: &str) -> bool {
+        if !self.git.auto_switch_on_workspace {
             return false;
         }
 
-        // Always switch to main branch
-        if branch_name == self.git.main_branch {
+        // Always switch to main workspace
+        if workspace_name == self.git.main_workspace {
             return true;
         }
 
-        if self.git.exclude_branches.contains(&branch_name.to_string()) {
+        if self
+            .git
+            .exclude_workspaces
+            .contains(&workspace_name.to_string())
+        {
             return false;
         }
 
-        if let Some(filter) = &self.git.branch_filter_regex {
+        if let Some(filter) = &self.git.workspace_filter_regex {
             match regex::Regex::new(filter) {
-                Ok(re) => re.is_match(branch_name),
+                Ok(re) => re.is_match(workspace_name),
                 Err(_) => {
                     log::warn!("Invalid regex filter: {}", filter);
                     false
@@ -851,8 +884,8 @@ impl Config {
         }
     }
 
-    pub fn get_normalized_branch_name(&self, branch_name: &str) -> String {
-        Self::sanitize_branch_name(branch_name)
+    pub fn get_normalized_workspace_name(&self, workspace_name: &str) -> String {
+        Self::sanitize_workspace_name(workspace_name)
     }
 
     /// Resolve the list of named services from the `services` config.
@@ -1012,8 +1045,8 @@ impl EnvConfig {
             skip_hooks: Self::parse_bool_env("DEVFLOW_SKIP_HOOKS")?,
             auto_create: Self::parse_bool_env("DEVFLOW_AUTO_CREATE")?,
             auto_switch: Self::parse_bool_env("DEVFLOW_AUTO_SWITCH")?,
-            current_branch_disabled: Self::parse_bool_env("DEVFLOW_CURRENT_BRANCH_DISABLED")?,
-            branch_filter_regex: env::var("DEVFLOW_BRANCH_FILTER_REGEX").ok(),
+            current_workspace_disabled: Self::parse_bool_env("DEVFLOW_CURRENT_BRANCH_DISABLED")?,
+            workspace_filter_regex: env::var("DEVFLOW_BRANCH_FILTER_REGEX").ok(),
             database_host: env::var("DEVFLOW_DATABASE_HOST").ok(),
             database_user: env::var("DEVFLOW_DATABASE_USER").ok(),
             database_password: env::var("DEVFLOW_DATABASE_PASSWORD").ok(),
@@ -1021,7 +1054,7 @@ impl EnvConfig {
             database_port: env::var("DEVFLOW_DATABASE_PORT")
                 .ok()
                 .and_then(|s| s.parse().ok()),
-            disabled_branches: env::var("DEVFLOW_DISABLED_BRANCHES")
+            disabled_workspaces: env::var("DEVFLOW_DISABLED_BRANCHES")
                 .ok()
                 .map(|s| s.split(',').map(|s| s.trim().to_string()).collect()),
         };
@@ -1063,8 +1096,8 @@ impl EffectiveConfig {
         // Determine skip hooks state
         let skip_hooks = env_config.skip_hooks.unwrap_or(false);
 
-        // Determine current branch disabled state
-        let current_branch_disabled = env_config.current_branch_disabled.unwrap_or(false);
+        // Determine current workspace disabled state
+        let current_workspace_disabled = env_config.current_workspace_disabled.unwrap_or(false);
 
         Ok(EffectiveConfig {
             config,
@@ -1073,7 +1106,7 @@ impl EffectiveConfig {
             env_config,
             disabled,
             skip_hooks,
-            current_branch_disabled,
+            current_workspace_disabled,
         })
     }
 
@@ -1085,22 +1118,22 @@ impl EffectiveConfig {
         self.skip_hooks
     }
 
-    pub fn is_current_branch_disabled(&self) -> bool {
-        self.current_branch_disabled
+    pub fn is_current_workspace_disabled(&self) -> bool {
+        self.current_workspace_disabled
     }
 
-    pub fn is_branch_disabled(&self, branch_name: &str) -> bool {
-        // Check environment disabled branches
-        if let Some(ref disabled_branches) = self.env_config.disabled_branches {
-            if Self::branch_matches_patterns(branch_name, disabled_branches) {
+    pub fn is_workspace_disabled(&self, workspace_name: &str) -> bool {
+        // Check environment disabled workspaces
+        if let Some(ref disabled_workspaces) = self.env_config.disabled_workspaces {
+            if Self::workspace_matches_patterns(workspace_name, disabled_workspaces) {
                 return true;
             }
         }
 
-        // Check local config disabled branches
+        // Check local config disabled workspaces
         if let Some(ref local_config) = self.local_config {
-            if let Some(ref disabled_branches) = local_config.disabled_branches {
-                if Self::branch_matches_patterns(branch_name, disabled_branches) {
+            if let Some(ref disabled_workspaces) = local_config.disabled_workspaces {
+                if Self::workspace_matches_patterns(workspace_name, disabled_workspaces) {
                     return true;
                 }
             }
@@ -1109,7 +1142,7 @@ impl EffectiveConfig {
         false
     }
 
-    fn branch_matches_patterns(branch_name: &str, patterns: &[String]) -> bool {
+    fn workspace_matches_patterns(workspace_name: &str, patterns: &[String]) -> bool {
         patterns.iter().any(|pattern| {
             if pattern.contains('*') {
                 // Simple glob pattern matching (*), with all other regex
@@ -1117,26 +1150,26 @@ impl EffectiveConfig {
                 let escaped = regex::escape(pattern);
                 let regex_pattern = format!("^{}$", escaped.replace("\\*", ".*"));
                 match regex::Regex::new(&regex_pattern) {
-                    Ok(re) => re.is_match(branch_name),
+                    Ok(re) => re.is_match(workspace_name),
                     Err(_) => false,
                 }
             } else {
                 // Exact match
-                branch_name == pattern
+                workspace_name == pattern
             }
         })
     }
 
-    pub fn check_current_git_branch_disabled(&self) -> Result<bool> {
-        if self.is_current_branch_disabled() {
+    pub fn check_current_git_workspace_disabled(&self) -> Result<bool> {
+        if self.is_current_workspace_disabled() {
             return Ok(true);
         }
 
-        // Get current VCS branch and check if it's disabled
+        // Get current VCS workspace and check if it's disabled
         match crate::vcs::detect_vcs_provider(".") {
             Ok(vcs_repo) => {
-                if let Ok(Some(current_branch)) = vcs_repo.current_branch() {
-                    Ok(self.is_branch_disabled(&current_branch))
+                if let Ok(Some(current_workspace)) = vcs_repo.current_workspace() {
+                    Ok(self.is_workspace_disabled(&current_workspace))
                 } else {
                     Ok(false)
                 }
@@ -1150,7 +1183,7 @@ impl EffectiveConfig {
             return Ok(true);
         }
 
-        self.check_current_git_branch_disabled()
+        self.check_current_git_workspace_disabled()
     }
 
     pub fn get_merged_config(&self) -> Config {
@@ -1202,23 +1235,23 @@ impl EffectiveConfig {
             }
 
             if let Some(ref local_git) = local_config.git {
-                if let Some(auto_create) = local_git.auto_create_on_branch {
-                    merged.git.auto_create_on_branch = auto_create;
+                if let Some(auto_create) = local_git.auto_create_on_workspace {
+                    merged.git.auto_create_on_workspace = auto_create;
                 }
-                if let Some(auto_switch) = local_git.auto_switch_on_branch {
-                    merged.git.auto_switch_on_branch = auto_switch;
+                if let Some(auto_switch) = local_git.auto_switch_on_workspace {
+                    merged.git.auto_switch_on_workspace = auto_switch;
                 }
-                if let Some(ref main_branch) = local_git.main_branch {
-                    merged.git.main_branch = main_branch.clone();
+                if let Some(ref main_workspace) = local_git.main_workspace {
+                    merged.git.main_workspace = main_workspace.clone();
                 }
-                if let Some(ref filter) = local_git.auto_create_branch_filter {
-                    merged.git.auto_create_branch_filter = Some(filter.clone());
+                if let Some(ref filter) = local_git.auto_create_workspace_filter {
+                    merged.git.auto_create_workspace_filter = Some(filter.clone());
                 }
-                if let Some(ref regex) = local_git.branch_filter_regex {
-                    merged.git.branch_filter_regex = Some(regex.clone());
+                if let Some(ref regex) = local_git.workspace_filter_regex {
+                    merged.git.workspace_filter_regex = Some(regex.clone());
                 }
-                if let Some(ref exclude_branches) = local_git.exclude_branches {
-                    merged.git.exclude_branches = exclude_branches.clone();
+                if let Some(ref exclude_workspaces) = local_git.exclude_workspaces {
+                    merged.git.exclude_workspaces = exclude_workspaces.clone();
                 }
             }
 
@@ -1226,8 +1259,8 @@ impl EffectiveConfig {
                 if let Some(auto_cleanup) = local_behavior.auto_cleanup {
                     merged.behavior.auto_cleanup = auto_cleanup;
                 }
-                if let Some(max_branches) = local_behavior.max_branches {
-                    merged.behavior.max_branches = Some(max_branches);
+                if let Some(max_workspaces) = local_behavior.max_workspaces {
+                    merged.behavior.max_workspaces = Some(max_workspaces);
                 }
                 if let Some(ref naming_strategy) = local_behavior.naming_strategy {
                     merged.behavior.naming_strategy = naming_strategy.clone();
@@ -1261,13 +1294,13 @@ impl EffectiveConfig {
             merged.database.database_prefix = prefix.clone();
         }
         if let Some(auto_create) = self.env_config.auto_create {
-            merged.git.auto_create_on_branch = auto_create;
+            merged.git.auto_create_on_workspace = auto_create;
         }
         if let Some(auto_switch) = self.env_config.auto_switch {
-            merged.git.auto_switch_on_branch = auto_switch;
+            merged.git.auto_switch_on_workspace = auto_switch;
         }
-        if let Some(ref regex) = self.env_config.branch_filter_regex {
-            merged.git.branch_filter_regex = Some(regex.clone());
+        if let Some(ref regex) = self.env_config.workspace_filter_regex {
+            merged.git.workspace_filter_regex = Some(regex.clone());
         }
 
         merged
@@ -1282,10 +1315,10 @@ mod tests {
     fn test_hooks_yaml_parsing_simple() {
         let yaml = r#"
 git:
-  auto_create_on_branch: true
-  auto_switch_on_branch: true
-  main_branch: main
-  exclude_branches: [main, master]
+  auto_create_on_workspace: true
+  auto_switch_on_workspace: true
+  main_workspace: main
+  exclude_workspaces: [main, master]
 behavior:
   auto_cleanup: false
   naming_strategy: prefix
@@ -1317,10 +1350,10 @@ hooks:
     fn test_hooks_yaml_parsing_extended() {
         let yaml = r#"
 git:
-  auto_create_on_branch: true
-  auto_switch_on_branch: true
-  main_branch: main
-  exclude_branches: [main]
+  auto_create_on_workspace: true
+  auto_switch_on_workspace: true
+  main_workspace: main
+  exclude_workspaces: [main]
 behavior:
   auto_cleanup: false
   naming_strategy: prefix
@@ -1364,10 +1397,10 @@ hooks:
     fn test_no_hooks_parses_as_none() {
         let yaml = r#"
 git:
-  auto_create_on_branch: true
-  auto_switch_on_branch: true
-  main_branch: main
-  exclude_branches: [main]
+  auto_create_on_workspace: true
+  auto_switch_on_workspace: true
+  main_workspace: main
+  exclude_workspaces: [main]
 behavior:
   auto_cleanup: false
   naming_strategy: prefix
@@ -1380,9 +1413,9 @@ behavior:
     fn test_multi_services_parsing() {
         let yaml = r#"
 git:
-  auto_create_on_branch: true
-  main_branch: main
-  exclude_branches: [main]
+  auto_create_on_workspace: true
+  main_workspace: main
+  exclude_workspaces: [main]
 behavior:
   auto_cleanup: false
   naming_strategy: prefix
@@ -1390,14 +1423,14 @@ services:
   - name: db
     type: local
     service_type: postgres
-    auto_branch: true
+    auto_workspace: true
     local:
       image: postgres:16
       port_range_start: 15432
   - name: analytics
     type: local
     service_type: clickhouse
-    auto_branch: true
+    auto_workspace: true
     clickhouse:
       image: clickhouse/clickhouse-server:24
       port_range_start: 18123
@@ -1405,7 +1438,7 @@ services:
   - name: legacy-db
     type: local
     service_type: mysql
-    auto_branch: false
+    auto_workspace: false
     mysql:
       image: mysql:8
       root_password: secret
@@ -1415,7 +1448,7 @@ services:
   - name: cache
     type: local
     service_type: generic
-    auto_branch: true
+    auto_workspace: true
     generic:
       image: redis:7
       port_mapping: "6379:6379"
@@ -1430,7 +1463,7 @@ services:
         // Postgres service
         assert_eq!(services[0].name, "db");
         assert_eq!(services[0].service_type, "postgres");
-        assert!(services[0].auto_branch);
+        assert!(services[0].auto_workspace);
         assert!(services[0].local.is_some());
         assert_eq!(
             services[0].local.as_ref().unwrap().port_range_start,
@@ -1440,16 +1473,16 @@ services:
         // ClickHouse service
         assert_eq!(services[1].name, "analytics");
         assert_eq!(services[1].service_type, "clickhouse");
-        assert!(services[1].auto_branch);
+        assert!(services[1].auto_workspace);
         let ch = services[1].clickhouse.as_ref().expect("clickhouse config");
         assert_eq!(ch.image, "clickhouse/clickhouse-server:24");
         assert_eq!(ch.port_range_start, Some(18123));
         assert_eq!(ch.user, "analytics");
 
-        // MySQL service — auto_branch is false
+        // MySQL service — auto_workspace is false
         assert_eq!(services[2].name, "legacy-db");
         assert_eq!(services[2].service_type, "mysql");
-        assert!(!services[2].auto_branch);
+        assert!(!services[2].auto_workspace);
         let mysql = services[2].mysql.as_ref().expect("mysql config");
         assert_eq!(mysql.root_password, "secret");
         assert_eq!(mysql.database.as_deref(), Some("legacy"));
@@ -1459,7 +1492,7 @@ services:
         // Generic Docker service
         assert_eq!(services[3].name, "cache");
         assert_eq!(services[3].service_type, "generic");
-        assert!(services[3].auto_branch);
+        assert!(services[3].auto_workspace);
         let generic = services[3].generic.as_ref().expect("generic config");
         assert_eq!(generic.image, "redis:7");
         assert_eq!(generic.port_mapping.as_deref(), Some("6379:6379"));
@@ -1470,9 +1503,9 @@ services:
     fn test_clickhouse_config_defaults() {
         let yaml = r#"
 git:
-  auto_create_on_branch: true
-  main_branch: main
-  exclude_branches: [main]
+  auto_create_on_workspace: true
+  main_workspace: main
+  exclude_workspaces: [main]
 behavior:
   auto_cleanup: false
   naming_strategy: prefix
@@ -1495,9 +1528,9 @@ services:
     fn test_mysql_config_defaults() {
         let yaml = r#"
 git:
-  auto_create_on_branch: true
-  main_branch: main
-  exclude_branches: [main]
+  auto_create_on_workspace: true
+  main_workspace: main
+  exclude_workspaces: [main]
 behavior:
   auto_cleanup: false
   naming_strategy: prefix
@@ -1520,9 +1553,9 @@ services:
     fn test_generic_docker_config_parsing() {
         let yaml = r#"
 git:
-  auto_create_on_branch: true
-  main_branch: main
-  exclude_branches: [main]
+  auto_create_on_workspace: true
+  main_workspace: main
+  exclude_workspaces: [main]
 behavior:
   auto_cleanup: false
   naming_strategy: prefix
@@ -1559,9 +1592,9 @@ services:
     fn test_service_type_defaults_to_postgres() {
         let yaml = r#"
 git:
-  auto_create_on_branch: true
-  main_branch: main
-  exclude_branches: [main]
+  auto_create_on_workspace: true
+  main_workspace: main
+  exclude_workspaces: [main]
 behavior:
   auto_cleanup: false
   naming_strategy: prefix
@@ -1572,35 +1605,35 @@ services:
         let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
         let services = config.resolve_services();
         assert_eq!(services[0].service_type, "postgres");
-        assert!(services[0].auto_branch); // default is true
+        assert!(services[0].auto_workspace); // default is true
     }
 
     #[test]
     fn test_auto_branch_filtering() {
         let yaml = r#"
 git:
-  auto_create_on_branch: true
-  main_branch: main
-  exclude_branches: [main]
+  auto_create_on_workspace: true
+  main_workspace: main
+  exclude_workspaces: [main]
 behavior:
   auto_cleanup: false
   naming_strategy: prefix
 services:
   - name: primary
     type: local
-    auto_branch: true
+    auto_workspace: true
   - name: shared
     type: local
-    auto_branch: false
+    auto_workspace: false
   - name: analytics
     type: local
     service_type: clickhouse
-    auto_branch: true
+    auto_workspace: true
     clickhouse: {}
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
         let services = config.resolve_services();
-        let auto_branch_services: Vec<_> = services.iter().filter(|b| b.auto_branch).collect();
+        let auto_branch_services: Vec<_> = services.iter().filter(|b| b.auto_workspace).collect();
         assert_eq!(auto_branch_services.len(), 2);
         assert_eq!(auto_branch_services[0].name, "primary");
         assert_eq!(auto_branch_services[1].name, "analytics");
@@ -1610,16 +1643,16 @@ services:
     fn test_plugin_service_config_parsing() {
         let yaml = r#"
 git:
-  auto_create_on_branch: true
-  main_branch: main
-  exclude_branches: [main]
+  auto_create_on_workspace: true
+  main_workspace: main
+  exclude_workspaces: [main]
 behavior:
   auto_cleanup: false
   naming_strategy: prefix
 services:
   - name: my-redis
     service_type: plugin
-    auto_branch: true
+    auto_workspace: true
     plugin:
       path: "./plugins/devflow-redis"
       timeout: 45
@@ -1640,7 +1673,7 @@ services:
         // First plugin service
         assert_eq!(services[0].name, "my-redis");
         assert_eq!(services[0].service_type, "plugin");
-        assert!(services[0].auto_branch);
+        assert!(services[0].auto_workspace);
         let plugin = services[0].plugin.as_ref().unwrap();
         assert_eq!(plugin.path.as_deref(), Some("./plugins/devflow-redis"));
         assert!(plugin.name.is_none());
@@ -1659,21 +1692,21 @@ services:
     }
 
     #[test]
-    fn test_should_create_branch_uses_branch_filter_regex() {
+    fn test_should_create_workspace_uses_workspace_filter_regex() {
         let mut config = Config::default();
-        config.git.branch_filter_regex = Some("^feature/.*".to_string());
+        config.git.workspace_filter_regex = Some("^feature/.*".to_string());
 
-        assert!(config.should_create_branch("feature/auth"));
-        assert!(!config.should_create_branch("bugfix/auth"));
+        assert!(config.should_create_workspace("feature/auth"));
+        assert!(!config.should_create_workspace("bugfix/auth"));
     }
 
     #[test]
-    fn test_should_create_branch_falls_back_to_auto_create_branch_filter() {
+    fn test_should_create_workspace_falls_back_to_auto_create_workspace_filter() {
         let mut config = Config::default();
-        config.git.branch_filter_regex = None;
-        config.git.auto_create_branch_filter = Some("^chore/.*".to_string());
+        config.git.workspace_filter_regex = None;
+        config.git.auto_create_workspace_filter = Some("^chore/.*".to_string());
 
-        assert!(config.should_create_branch("chore/deps"));
-        assert!(!config.should_create_branch("feature/deps"));
+        assert!(config.should_create_workspace("chore/deps"));
+        assert!(!config.should_create_workspace("feature/deps"));
     }
 }

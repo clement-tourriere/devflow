@@ -52,7 +52,7 @@ if [ "$STORAGE" != "$EXPECTED_STORAGE" ]; then
   exit 1
 fi
 
-# 3. Branch lifecycle: create -> list -> connection -> stop -> start -> delete
+# 3. Workspace lifecycle: create -> list -> connection -> stop -> start -> delete
 echo "--- service create test-feature ---"
 $DEVFLOW_BIN --non-interactive service create test-feature
 

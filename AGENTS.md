@@ -4,7 +4,7 @@ This guide is for autonomous coding agents and CI runners.
 
 ## Goal
 
-Use devflow to create an isolated development branch environment per task, with machine-readable output and deterministic behavior.
+Use devflow to create an isolated development workspace environment per task, with machine-readable output and deterministic behavior.
 
 ## Recommended Flags
 
@@ -46,19 +46,19 @@ devflow --json service connection "$BRANCH"
 devflow includes built-in agent management commands:
 
 ```bash
-# Start an AI agent in an isolated branch (launches in tmux if available)
+# Start an AI agent in an isolated workspace (launches in tmux if available)
 devflow agent start fix-login -- 'Fix the login timeout bug'
 devflow agent start fix-login --command codex
 devflow agent start fix-login --dry-run          # Preview without executing
 
-# Check agent branches
+# Check agent workspaces
 devflow agent status
 devflow --json agent status
 
-# Get project context (branch info, services, connections)
+# Get project context (workspace info, services, connections)
 devflow agent context
 devflow agent context --format json
-devflow agent context --branch feature/auth
+devflow agent context --workspace feature/auth
 
 # Generate AI tool skills/rules
 devflow agent skill                               # All tools
@@ -75,7 +75,7 @@ devflow agent docs
 Agents can inspect hooks and template variables without running them:
 
 ```bash
-# Show all template variables for the current branch
+# Show all template variables for the current workspace
 devflow hook vars
 devflow --json hook vars
 

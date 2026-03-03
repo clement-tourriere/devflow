@@ -166,7 +166,7 @@ function ProxyDashboard() {
                 <th>Container</th>
                 <th>Upstream</th>
                 <th>Project</th>
-                <th>Branch</th>
+                <th>Workspace</th>
               </tr>
             </thead>
             <tbody>
@@ -186,7 +186,7 @@ function ProxyDashboard() {
                     {c.container_ip}:{c.port}
                   </td>
                   <td>{c.project || "-"}</td>
-                  <td>{c.branch || "-"}</td>
+                  <td>{c.workspace || "-"}</td>
                 </tr>
               ))}
             </tbody>

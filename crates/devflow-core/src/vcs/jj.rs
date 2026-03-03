@@ -1,7 +1,7 @@
 //! Jujutsu (jj) VCS provider.
 //!
 //! Maps jj concepts to devflow's VcsProvider trait:
-//! - jj **bookmarks** → branches
+//! - jj **bookmarks** → workspaces
 //! - jj **workspaces** → worktrees
 //! - jj **colocated repos** are supported (`.jj` + `.git` side by side)
 //!
@@ -13,7 +13,7 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::{BranchInfo, VcsProvider, WorktreeCreateResult, WorktreeInfo};
+use super::{VcsProvider, WorkspaceInfo, WorktreeCreateResult, WorktreeInfo};
 
 /// A Jujutsu repository.
 pub struct JjRepository {
@@ -159,38 +159,38 @@ impl JjRepository {
 }
 
 impl VcsProvider for JjRepository {
-    // ── Branch operations (mapped to bookmarks) ────────────────────
+    // ── Workspace operations (mapped to bookmarks) ────────────────────
 
-    fn current_branch(&self) -> Result<Option<String>> {
+    fn current_workspace(&self) -> Result<Option<String>> {
         self.current_bookmark()
     }
 
-    fn default_branch(&self) -> Result<Option<String>> {
+    fn default_workspace(&self) -> Result<Option<String>> {
         self.detect_default_bookmark()
     }
 
-    fn list_branches(&self) -> Result<Vec<BranchInfo>> {
+    fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
         let output = self.jj(&["bookmark", "list"])?;
         let current = self.current_bookmark()?;
         let default = self.detect_default_bookmark()?;
-        let mut branches = Vec::new();
+        let mut workspaces = Vec::new();
 
         for line in output.lines() {
             let name = line.split(':').next().unwrap_or("").trim();
             if name.is_empty() {
                 continue;
             }
-            branches.push(BranchInfo {
+            workspaces.push(WorkspaceInfo {
                 name: name.to_string(),
                 is_current: current.as_deref() == Some(name),
                 is_default: default.as_deref() == Some(name),
             });
         }
 
-        Ok(branches)
+        Ok(workspaces)
     }
 
-    fn create_branch(&self, name: &str, base: Option<&str>) -> Result<()> {
+    fn create_workspace(&self, name: &str, base: Option<&str>) -> Result<()> {
         if let Some(base_rev) = base {
             // Create a new commit on top of the base, then set the bookmark
             self.jj(&["new", base_rev])?;
@@ -199,12 +199,12 @@ impl VcsProvider for JjRepository {
         Ok(())
     }
 
-    fn delete_branch(&self, name: &str) -> Result<()> {
+    fn delete_workspace(&self, name: &str) -> Result<()> {
         self.jj(&["bookmark", "delete", name])?;
         Ok(())
     }
 
-    fn branch_exists(&self, name: &str) -> Result<bool> {
+    fn workspace_exists(&self, name: &str) -> Result<bool> {
         // `jj bookmark list --bookmark <name>` returns empty if it doesn't exist
         let output = self.jj_try(&["bookmark", "list", "--bookmark", name])?;
         Ok(!output.trim().is_empty())
@@ -261,7 +261,7 @@ impl VcsProvider for JjRepository {
 
             worktrees.push(WorktreeInfo {
                 path,
-                branch: if is_main {
+                workspace: if is_main {
                     self.current_bookmark().ok().flatten()
                 } else {
                     None // Would need per-workspace bookmark resolution
@@ -274,8 +274,8 @@ impl VcsProvider for JjRepository {
         Ok(worktrees)
     }
 
-    fn create_worktree(&self, branch: &str, path: &Path) -> Result<WorktreeCreateResult> {
-        let workspace_name = Self::workspace_name_for_branch(branch);
+    fn create_worktree(&self, workspace: &str, path: &Path) -> Result<WorktreeCreateResult> {
+        let workspace_name = Self::workspace_name_for_branch(workspace);
         let path_str = path.to_str().context("Worktree path is not valid UTF-8")?;
 
         // Create a new workspace at the given path
@@ -283,7 +283,7 @@ impl VcsProvider for JjRepository {
 
         // Set the bookmark in the new workspace
         // We need to move to the bookmark's commit in the new workspace
-        if self.branch_exists(branch)? {
+        if self.workspace_exists(workspace)? {
             // Run jj edit in the new workspace to point it at the bookmark
             let jj_result = Command::new("jj")
                 .args([
@@ -292,7 +292,7 @@ impl VcsProvider for JjRepository {
                     "--repository",
                     path_str,
                     "edit",
-                    branch,
+                    workspace,
                 ])
                 .current_dir(&self.root)
                 .output()
@@ -301,7 +301,7 @@ impl VcsProvider for JjRepository {
             if !jj_result.status.success() {
                 log::debug!(
                     "Could not set workspace to bookmark {}: {}",
-                    branch,
+                    workspace,
                     String::from_utf8_lossy(&jj_result.stderr)
                 );
             }
@@ -343,15 +343,15 @@ impl VcsProvider for JjRepository {
         Ok(())
     }
 
-    fn worktree_path(&self, branch: &str) -> Result<Option<PathBuf>> {
-        let workspace_name = Self::workspace_name_for_branch(branch);
+    fn worktree_path(&self, workspace: &str) -> Result<Option<PathBuf>> {
+        let workspace_name = Self::workspace_name_for_branch(workspace);
         let worktrees = self.list_worktrees()?;
 
         Ok(worktrees
             .iter()
             .find(|w| {
-                // Match by branch name or workspace name derived from the branch
-                w.branch.as_deref() == Some(branch)
+                // Match by workspace name or workspace name derived from the workspace
+                w.workspace.as_deref() == Some(workspace)
                     || w.path
                         .file_name()
                         .map(|n| n.to_string_lossy().contains(&workspace_name))
@@ -403,7 +403,7 @@ impl VcsProvider for JjRepository {
             println!(
                 "Note: jj does not have native hook support.\n\
                  Add 'eval \"$(devflow shell-init bash)\"' to your shell RC file\n\
-                 for automatic branch switching via shell integration."
+                 for automatic workspace switching via shell integration."
             );
         }
 
@@ -566,10 +566,10 @@ impl JjRepository {
         Self::new(path)
     }
 
-    /// Convert a branch name to a workspace-safe name.
+    /// Convert a workspace name to a workspace-safe name.
     /// Replaces `/` with `-` (same convention as Git worktrees).
-    fn workspace_name_for_branch(branch: &str) -> String {
-        branch.replace('/', "-")
+    fn workspace_name_for_branch(workspace: &str) -> String {
+        workspace.replace('/', "-")
     }
 }
 
@@ -585,8 +585,8 @@ mod tests {
         );
         assert_eq!(JjRepository::workspace_name_for_branch("main"), "main");
         assert_eq!(
-            JjRepository::workspace_name_for_branch("fix/deep/nested/branch"),
-            "fix-deep-nested-branch"
+            JjRepository::workspace_name_for_branch("fix/deep/nested/workspace"),
+            "fix-deep-nested-workspace"
         );
     }
 }

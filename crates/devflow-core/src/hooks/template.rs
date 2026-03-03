@@ -127,7 +127,7 @@ fn filter_sanitize_db(value: &str) -> String {
     }
 
     if sanitized.is_empty() {
-        sanitized = "branch".to_string();
+        sanitized = "workspace".to_string();
     }
 
     // Truncate with hash if too long
@@ -197,9 +197,9 @@ mod tests {
         );
 
         HookContext {
-            branch: "feature/my-cool-feature".to_string(),
+            workspace: "feature/my-cool-feature".to_string(),
             repo: "myapp".to_string(),
-            default_branch: "main".to_string(),
+            default_workspace: "main".to_string(),
             service: services,
             ..Default::default()
         }
@@ -209,7 +209,7 @@ mod tests {
     fn test_simple_template() {
         let engine = TemplateEngine::new();
         let ctx = test_context();
-        let result = engine.render("echo {{ branch }}", &ctx).unwrap();
+        let result = engine.render("echo {{ workspace }}", &ctx).unwrap();
         assert_eq!(result, "echo feature/my-cool-feature");
     }
 
@@ -228,24 +228,30 @@ mod tests {
 
     #[test]
     fn test_sanitize_filter() {
-        assert_eq!(filter_sanitize("feature/my-branch"), "feature-my-branch");
+        assert_eq!(
+            filter_sanitize("feature/my-workspace"),
+            "feature-my-workspace"
+        );
         assert_eq!(filter_sanitize("fix\\back\\slash"), "fix-back-slash");
         assert_eq!(filter_sanitize("  spaces  "), "spaces");
     }
 
     #[test]
     fn test_sanitize_db_filter() {
-        assert_eq!(filter_sanitize_db("feature/my-branch"), "feature_my_branch");
+        assert_eq!(
+            filter_sanitize_db("feature/my-workspace"),
+            "feature_my_workspace"
+        );
         assert_eq!(filter_sanitize_db("123start"), "_123start");
-        assert_eq!(filter_sanitize_db(""), "branch");
+        assert_eq!(filter_sanitize_db(""), "workspace");
     }
 
     #[test]
     fn test_hash_port_filter() {
-        let port = filter_hash_port("feature/my-branch");
+        let port = filter_hash_port("feature/my-workspace");
         assert!((10000..20000).contains(&port));
         // Same input always produces same port
-        assert_eq!(port, filter_hash_port("feature/my-branch"));
+        assert_eq!(port, filter_hash_port("feature/my-workspace"));
         // Different input produces different port (probabilistically)
         assert_ne!(filter_hash_port("feature/a"), filter_hash_port("feature/b"));
     }
@@ -254,7 +260,7 @@ mod tests {
     fn test_sanitize_filter_in_template() {
         let engine = TemplateEngine::new();
         let ctx = test_context();
-        let result = engine.render("{{ branch | sanitize }}", &ctx).unwrap();
+        let result = engine.render("{{ workspace | sanitize }}", &ctx).unwrap();
         assert_eq!(result, "feature-my-cool-feature");
     }
 
@@ -262,7 +268,7 @@ mod tests {
     fn test_hash_port_filter_in_template() {
         let engine = TemplateEngine::new();
         let ctx = test_context();
-        let result = engine.render("{{ branch | hash_port }}", &ctx).unwrap();
+        let result = engine.render("{{ workspace | hash_port }}", &ctx).unwrap();
         let port: u16 = result.parse().unwrap();
         assert!((10000..20000).contains(&port));
     }
@@ -271,7 +277,9 @@ mod tests {
     fn test_sanitize_db_filter_in_template() {
         let engine = TemplateEngine::new();
         let ctx = test_context();
-        let result = engine.render("{{ branch | sanitize_db }}", &ctx).unwrap();
+        let result = engine
+            .render("{{ workspace | sanitize_db }}", &ctx)
+            .unwrap();
         assert_eq!(result, "feature_my_cool_feature");
     }
 
@@ -279,7 +287,7 @@ mod tests {
     fn test_complex_template() {
         let engine = TemplateEngine::new();
         let ctx = test_context();
-        let template = r#"docker stop {{ repo }}-{{ branch | sanitize }}-* 2>/dev/null || true"#;
+        let template = r#"docker stop {{ repo }}-{{ workspace | sanitize }}-* 2>/dev/null || true"#;
         let result = engine.render(template, &ctx).unwrap();
         assert_eq!(
             result,

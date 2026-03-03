@@ -1,4 +1,4 @@
-use super::super::{BranchInfo, ConnectionInfo, DoctorCheck, DoctorReport, ServiceProvider};
+use super::super::{ConnectionInfo, DoctorCheck, DoctorReport, ServiceProvider, WorkspaceInfo};
 use crate::config::Config;
 use crate::database::DatabaseManager;
 use anyhow::Result;
@@ -20,72 +20,74 @@ impl PostgresTemplateProvider {
         })
     }
 
-    fn get_branch_database_name(&self, branch_name: &str) -> String {
-        self.config.get_database_name(branch_name)
+    fn get_workspace_database_name(&self, workspace_name: &str) -> String {
+        self.config.get_database_name(workspace_name)
     }
 }
 
 #[async_trait]
 impl ServiceProvider for PostgresTemplateProvider {
-    async fn create_branch(
+    async fn create_workspace(
         &self,
-        branch_name: &str,
-        _from_branch: Option<&str>,
-    ) -> Result<BranchInfo> {
-        self.db_manager.create_database_branch(branch_name).await?;
+        workspace_name: &str,
+        _from_workspace: Option<&str>,
+    ) -> Result<WorkspaceInfo> {
+        self.db_manager
+            .create_database_branch(workspace_name)
+            .await?;
 
-        let database_name = self.get_branch_database_name(branch_name);
+        let database_name = self.get_workspace_database_name(workspace_name);
 
-        Ok(BranchInfo {
-            name: branch_name.to_string(),
+        Ok(WorkspaceInfo {
+            name: workspace_name.to_string(),
             created_at: Some(Utc::now()),
-            parent_branch: _from_branch.map(|s| s.to_string()),
+            parent_workspace: _from_workspace.map(|s| s.to_string()),
             database_name,
             state: Some("running".to_string()),
         })
     }
 
-    async fn delete_branch(&self, branch_name: &str) -> Result<()> {
-        self.db_manager.drop_database_branch(branch_name).await
+    async fn delete_workspace(&self, workspace_name: &str) -> Result<()> {
+        self.db_manager.drop_database_branch(workspace_name).await
     }
 
-    async fn list_branches(&self) -> Result<Vec<BranchInfo>> {
+    async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
         let db_names = self.db_manager.list_database_branches().await?;
 
-        let branches: Vec<BranchInfo> = db_names
+        let workspaces: Vec<WorkspaceInfo> = db_names
             .into_iter()
-            .map(|name| BranchInfo {
+            .map(|name| WorkspaceInfo {
                 name: name.clone(),
                 created_at: None,
-                parent_branch: None,
-                database_name: self.get_branch_database_name(&name),
+                parent_workspace: None,
+                database_name: self.get_workspace_database_name(&name),
                 state: Some("running".to_string()),
             })
             .collect();
 
-        Ok(branches)
+        Ok(workspaces)
     }
 
-    async fn branch_exists(&self, branch_name: &str) -> Result<bool> {
+    async fn workspace_exists(&self, workspace_name: &str) -> Result<bool> {
         let client = self.db_manager.connect().await?;
-        let db_name = self.get_branch_database_name(branch_name);
+        let db_name = self.get_workspace_database_name(workspace_name);
         self.db_manager.database_exists(&client, &db_name).await
     }
 
-    async fn switch_to_branch(&self, branch_name: &str) -> Result<BranchInfo> {
-        let database_name = self.get_branch_database_name(branch_name);
+    async fn switch_to_branch(&self, workspace_name: &str) -> Result<WorkspaceInfo> {
+        let database_name = self.get_workspace_database_name(workspace_name);
 
-        Ok(BranchInfo {
-            name: branch_name.to_string(),
+        Ok(WorkspaceInfo {
+            name: workspace_name.to_string(),
             created_at: None,
-            parent_branch: None,
+            parent_workspace: None,
             database_name,
             state: Some("running".to_string()),
         })
     }
 
-    async fn get_connection_info(&self, branch_name: &str) -> Result<ConnectionInfo> {
-        let database_name = self.get_branch_database_name(branch_name);
+    async fn get_connection_info(&self, workspace_name: &str) -> Result<ConnectionInfo> {
+        let database_name = self.get_workspace_database_name(workspace_name);
 
         let connection_string = if let Some(ref password) = self.config.database.password {
             format!(
@@ -116,8 +118,8 @@ impl ServiceProvider for PostgresTemplateProvider {
         })
     }
 
-    async fn cleanup_old_branches(&self, max_count: usize) -> Result<Vec<String>> {
-        self.db_manager.cleanup_old_branches(max_count).await?;
+    async fn cleanup_old_workspaces(&self, max_count: usize) -> Result<Vec<String>> {
+        self.db_manager.cleanup_old_workspaces(max_count).await?;
         Ok(vec![])
     }
 
@@ -191,7 +193,7 @@ impl ServiceProvider for PostgresTemplateProvider {
         true
     }
 
-    fn max_branch_name_length(&self) -> usize {
+    fn max_workspace_name_length(&self) -> usize {
         63
     }
 }

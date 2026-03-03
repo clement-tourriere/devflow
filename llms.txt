@@ -1,10 +1,10 @@
 # devflow
 
-> Isolated dev environments for every Git branch — worktrees, databases, caches, and stateful services that sync with your Git workflow.
+> Isolated dev environments for every Git workspace — worktrees, databases, caches, and stateful services that sync with your Git workflow.
 
-devflow gives each Git branch its own isolated development environment. When you
+devflow gives each Git workspace its own isolated development environment. When you
 `git checkout feature-auth`, devflow automatically creates (or switches to)
-a dedicated worktree and service instances that belong to that branch. Data is
+a dedicated worktree and service instances that belong to that workspace. Data is
 cloned using Copy-on-Write for near-instant, space-efficient branching.
 
 ## Automation defaults
@@ -25,7 +25,7 @@ cloned using Copy-on-Write for near-instant, space-efficient branching.
 ## Agent workflows
 
 - [examples/agent-bootstrap.sh](examples/agent-bootstrap.sh): Idempotent repository setup for agents and CI.
-- [examples/agent-task.sh](examples/agent-task.sh): Create/switch to a task-scoped branch environment, fetch connection info.
+- [examples/agent-task.sh](examples/agent-task.sh): Create/switch to a task-scoped workspace environment, fetch connection info.
 - [examples/simple.devflow.yml](examples/simple.devflow.yml): Minimal single-service configuration.
 - [examples/multi-service.devflow.yml](examples/multi-service.devflow.yml): Multi-service setup with hooks and worktrees.
 - [examples/django.devflow.yml](examples/django.devflow.yml): Django project config with migrations and Docker Compose.

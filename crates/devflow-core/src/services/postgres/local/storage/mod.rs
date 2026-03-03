@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 
-use super::model::{Branch, Project, StorageDriver};
+use super::model::{Project, StorageDriver, Workspace};
 
 #[derive(Debug, Clone)]
 pub struct StorageSelection {
@@ -168,7 +168,7 @@ impl StorageCoordinator {
     pub async fn clone_branch_from_parent(
         &self,
         project: &Project,
-        parent: &Branch,
+        parent: &Workspace,
         child_branch_id: &str,
         child_data_dir: &Path,
     ) -> anyhow::Result<Option<String>> {
@@ -212,19 +212,19 @@ impl StorageCoordinator {
         }
     }
 
-    pub async fn delete_branch_data(
+    pub async fn delete_workspace_data(
         &self,
         project: &Project,
-        branch: &Branch,
+        workspace: &Workspace,
     ) -> anyhow::Result<()> {
         match project.storage_driver {
             StorageDriver::Zfs => {
                 let config = parse_zfs_config(project)?;
-                self.zfs.delete_branch(project, &config, branch).await
+                self.zfs.delete_workspace(project, &config, workspace).await
             }
             StorageDriver::ApfsClone | StorageDriver::Reflink | StorageDriver::Copy => {
                 self.local
-                    .remove_dir(std::path::PathBuf::from(&branch.data_dir).as_path())
+                    .remove_dir(std::path::PathBuf::from(&workspace.data_dir).as_path())
                     .await
             }
         }

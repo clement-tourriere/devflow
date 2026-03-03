@@ -24,7 +24,7 @@ pub enum Action {
     /// An error occurred
     Error(String),
 
-    // ── Branch actions ──
+    // ── Workspace actions ──
     SwitchServices(String),
     OpenBranchAndExit(String),
     CreateBranch {
@@ -32,39 +32,39 @@ pub enum Action {
         from: Option<String>,
     },
     DeleteBranch(String),
-    /// Internal: delete the VCS branch after service branches are cleaned up.
+    /// Internal: delete the VCS workspace after service workspaces are cleaned up.
     /// Sent by background tasks back to the main thread.
     DeleteVcsBranch(String),
 
     // ── Service actions ──
     StartService {
         service: String,
-        branch: String,
+        workspace: String,
     },
     StopService {
         service: String,
-        branch: String,
+        workspace: String,
     },
     ResetService {
         service: String,
-        branch: String,
+        workspace: String,
     },
-    DeleteServiceBranch {
+    DeleteServiceWorkspace {
         service: String,
-        branch: String,
+        workspace: String,
     },
     ViewLogs {
         service: String,
-        branch: String,
+        workspace: String,
     },
     RunDoctor,
 
     // ── Environments tree actions ──
     /// Toggle collapse/expand of a tree node
     CollapseToggle(String),
-    /// Start all services for a branch
+    /// Start all services for a workspace
     StartAllServices(String),
-    /// Stop all services for a branch
+    /// Stop all services for a workspace
     StopAllServices(String),
 
     // ── System tab actions ──
@@ -115,7 +115,7 @@ pub enum DataPayload {
     HooksData(HooksData),
 }
 
-/// Enriched branch info combining VCS + service data.
+/// Enriched workspace info combining VCS + service data.
 #[derive(Debug, Clone)]
 pub struct EnrichedBranch {
     pub name: String,
@@ -123,7 +123,7 @@ pub struct EnrichedBranch {
     pub is_default: bool,
     pub worktree_path: Option<String>,
     pub services: Vec<BranchServiceState>,
-    /// Parent branch name from the devflow branch registry.
+    /// Parent workspace name from the devflow workspace registry.
     pub parent: Option<String>,
 }
 
@@ -132,7 +132,7 @@ pub struct BranchServiceState {
     pub service_name: String,
     pub state: Option<String>,
     pub database_name: Option<String>,
-    pub parent_branch: Option<String>,
+    pub parent_workspace: Option<String>,
     /// Whether this service supports lifecycle operations (start/stop/reset/logs).
     /// Only true for local Docker-based providers.
     pub supports_lifecycle: bool,
@@ -141,9 +141,9 @@ pub struct BranchServiceState {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct BranchesData {
-    pub branches: Vec<EnrichedBranch>,
-    pub current_branch: Option<String>,
-    pub default_branch: Option<String>,
+    pub workspaces: Vec<EnrichedBranch>,
+    pub current_workspace: Option<String>,
+    pub default_workspace: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -152,18 +152,18 @@ pub struct ServiceEntry {
     pub name: String,
     pub provider_type: String,
     pub service_type: String,
-    pub auto_branch: bool,
+    pub auto_workspace: bool,
     pub is_default: bool,
-    pub branches: Vec<ServiceBranchEntry>,
+    pub workspaces: Vec<ServiceWorkspaceEntry>,
     pub project_info: Option<ProjectInfoEntry>,
 }
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub struct ServiceBranchEntry {
+pub struct ServiceWorkspaceEntry {
     pub name: String,
     pub state: Option<String>,
-    pub parent_branch: Option<String>,
+    pub parent_workspace: Option<String>,
     pub database_name: String,
     pub created_at: Option<String>,
 }
