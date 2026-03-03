@@ -177,7 +177,7 @@ function ProjectDetail() {
       setCreationMode(projectDefaultCreationMode);
       await reload();
     } catch (e) {
-      alert(`Failed to create workspace: ${e}`);
+      alert(`${e}`);
     } finally {
       setActionLoading(null);
     }
@@ -191,7 +191,7 @@ function ProjectDetail() {
       setDeletingWorkspace(null);
       await reload();
     } catch (e) {
-      alert(`Failed to delete workspace: ${e}`);
+      alert(`${e}`);
     } finally {
       setActionLoading(null);
     }
@@ -262,7 +262,7 @@ function ProjectDetail() {
         // ignore
       }
     } catch (e) {
-      alert(`Failed to start service: ${e}`);
+      alert(`${e}`);
     } finally {
       setActionLoading(null);
     }
@@ -280,7 +280,7 @@ function ProjectDetail() {
         // ignore
       }
     } catch (e) {
-      alert(`Failed to stop service: ${e}`);
+      alert(`${e}`);
     } finally {
       setActionLoading(null);
     }
@@ -306,7 +306,7 @@ function ProjectDetail() {
       }
       setResetTarget(null);
     } catch (e) {
-      alert(`Failed to reset service: ${e}`);
+      alert(`${e}`);
     } finally {
       setActionLoading(null);
     }
@@ -341,7 +341,7 @@ function ProjectDetail() {
       await removeProject(projectPath);
       navigate("/projects");
     } catch (e) {
-      alert(`Failed to remove project: ${e}`);
+      alert(`${e}`);
     } finally {
       setActionLoading(null);
       setShowRemoveConfirm(false);

@@ -76,9 +76,7 @@ pub async fn create_workspace(
     }
 
     // 1. Create VCS branch
-    vcs_provider
-        .create_workspace(workspace_name, options.from_workspace.as_deref())
-        .with_context(|| format!("Failed to create workspace '{}'", workspace_name))?;
+    vcs_provider.create_workspace(workspace_name, options.from_workspace.as_deref())?;
 
     // 2. Create worktree if enabled
     let worktree_result = if create_as_worktree {

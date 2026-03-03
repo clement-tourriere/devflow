@@ -38,7 +38,7 @@ pub async fn add_service(
 ) -> Result<ServiceEntry, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let mut config =
-        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
 
     // Ensure config.name is set so container names derive from the project, not cwd
     if config.name.is_none() {
@@ -51,10 +51,10 @@ pub async fn add_service(
 
     config
         .add_service(named.clone(), false)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::commands::format_error)?;
     config
         .save_to_file(&config_path)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::commands::format_error)?;
 
     // For local providers, initialize the service
     if request.provider_type == "local" || request.provider_type.is_empty() {
@@ -179,7 +179,7 @@ fn build_named_config(request: &AddServiceRequest) -> Result<NamedServiceConfig,
 pub async fn list_services(project_path: String) -> Result<Vec<ServiceEntry>, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
 
     let named_services = config.resolve_services();
     Ok(named_services
@@ -201,7 +201,7 @@ pub async fn start_service(
 ) -> Result<(), String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -211,12 +211,12 @@ pub async fn start_service(
 
     let provider = services::factory::create_provider_from_named_config(&config, svc)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::commands::format_error)?;
 
     provider
         .start_workspace(&workspace_name)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(crate::commands::format_error)
 }
 
 #[tauri::command]
@@ -227,7 +227,7 @@ pub async fn stop_service(
 ) -> Result<(), String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -237,12 +237,12 @@ pub async fn stop_service(
 
     let provider = services::factory::create_provider_from_named_config(&config, svc)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::commands::format_error)?;
 
     provider
         .stop_workspace(&workspace_name)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(crate::commands::format_error)
 }
 
 #[tauri::command]
@@ -444,7 +444,7 @@ pub async fn get_service_logs(
 ) -> Result<String, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -454,12 +454,12 @@ pub async fn get_service_logs(
 
     let provider = services::factory::create_provider_from_named_config(&config, svc)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::commands::format_error)?;
 
     provider
         .logs(&workspace_name, Some(200))
         .await
-        .map_err(|e| e.to_string())
+        .map_err(crate::commands::format_error)
 }
 
 #[tauri::command]
@@ -470,7 +470,7 @@ pub async fn reset_service(
 ) -> Result<(), String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -480,12 +480,12 @@ pub async fn reset_service(
 
     let provider = services::factory::create_provider_from_named_config(&config, svc)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::commands::format_error)?;
 
     provider
         .reset_workspace(&workspace_name)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(crate::commands::format_error)
 }
 
 #[derive(Serialize)]
@@ -504,7 +504,7 @@ pub async fn list_service_workspaces(
 ) -> Result<Vec<ServiceWorkspaceInfo>, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -514,12 +514,12 @@ pub async fn list_service_workspaces(
 
     let provider = services::factory::create_provider_from_named_config(&config, svc)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::commands::format_error)?;
 
     let workspaces = provider
         .list_workspaces()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::commands::format_error)?;
 
     Ok(workspaces
         .into_iter()
@@ -541,7 +541,7 @@ pub async fn get_service_status(
 ) -> Result<ServiceWorkspaceStatus, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -551,12 +551,12 @@ pub async fn get_service_status(
 
     let provider = services::factory::create_provider_from_named_config(&config, svc)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::commands::format_error)?;
 
     let workspaces = provider
         .list_workspaces()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::commands::format_error)?;
 
     let state = workspaces
         .iter()

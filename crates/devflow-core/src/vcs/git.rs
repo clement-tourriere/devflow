@@ -400,6 +400,11 @@ impl VcsProvider for GitRepository {
     }
 
     fn create_workspace(&self, name: &str, base: Option<&str>) -> Result<()> {
+        if self.workspace_exists(name)? {
+            log::info!("VCS branch '{}' already exists, reusing", name);
+            return Ok(());
+        }
+
         // Resolve the base commit
         let base_commit = if let Some(base_name) = base {
             let obj = self

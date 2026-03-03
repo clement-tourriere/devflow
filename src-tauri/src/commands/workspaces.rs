@@ -48,11 +48,11 @@ pub async fn list_workspaces(project_path: String) -> Result<WorkspacesResponse,
         .unwrap_or_else(|| "main".to_string());
 
     // Read devflow workspace registry
-    let mut state_mgr = LocalStateManager::new().map_err(|e| e.to_string())?;
+    let mut state_mgr = LocalStateManager::new().map_err(crate::commands::format_error)?;
 
     let devflow_branches = state_mgr
         .get_or_init_workspaces_by_dir(project_dir, &main_workspace)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::commands::format_error)?;
 
     // Determine current git workspace to find active devflow workspace
     let vcs_provider = vcs::detect_vcs_provider(&project_path).ok();
@@ -123,7 +123,7 @@ pub async fn get_connection_info(
 ) -> Result<serde_json::Value, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
 
     let named_services = config.resolve_services();
     let service_name = service_name.unwrap_or_else(|| "default".to_string());
@@ -136,12 +136,12 @@ pub async fn get_connection_info(
         let provider =
             devflow_core::services::factory::create_provider_from_named_config(&config, svc)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(crate::commands::format_error)?;
 
         let info = provider
             .get_connection_info(&workspace_name)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(crate::commands::format_error)?;
 
         serde_json::to_value(&info).map_err(|e| e.to_string())
     } else {
@@ -167,7 +167,7 @@ pub async fn create_workspace(
     let project_dir = std::path::Path::new(&project_path);
     let config_path = project_dir.join(".devflow.yml");
     let cfg = if config_path.exists() {
-        config::Config::from_file(&config_path).map_err(|e| e.to_string())?
+        config::Config::from_file(&config_path).map_err(crate::commands::format_error)?
     } else {
         config::Config::default()
     };
@@ -183,7 +183,7 @@ pub async fn create_workspace(
 
     let result = workspace::create::create_workspace(&cfg, project_dir, &workspace_name, &options)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::commands::format_error)?;
 
     let response = CreateWorkspaceResult {
         services: result
@@ -212,7 +212,7 @@ pub async fn switch_workspace(
     let project_dir = std::path::Path::new(&project_path);
     let config_path = project_dir.join(".devflow.yml");
     let cfg = if config_path.exists() {
-        config::Config::from_file(&config_path).map_err(|e| e.to_string())?
+        config::Config::from_file(&config_path).map_err(crate::commands::format_error)?
     } else {
         config::Config::default()
     };
@@ -226,7 +226,7 @@ pub async fn switch_workspace(
     let result =
         workspace::switch::switch_workspace(&cfg, project_dir, &workspace_name, &options)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(crate::commands::format_error)?;
 
     let response = result
         .services
@@ -251,7 +251,7 @@ pub async fn delete_workspace(
     let project_dir = std::path::Path::new(&project_path);
     let config_path = project_dir.join(".devflow.yml");
     let cfg = if config_path.exists() {
-        config::Config::from_file(&config_path).map_err(|e| e.to_string())?
+        config::Config::from_file(&config_path).map_err(crate::commands::format_error)?
     } else {
         config::Config::default()
     };
@@ -264,7 +264,7 @@ pub async fn delete_workspace(
     let result =
         workspace::delete::delete_workspace(&cfg, project_dir, &workspace_name, &options)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(crate::commands::format_error)?;
 
     let response = result
         .services
@@ -288,14 +288,14 @@ pub struct PruneResult {
 
 #[tauri::command]
 pub async fn prune_worktrees(project_path: String) -> Result<PruneResult, String> {
-    let vcs_provider = vcs::detect_vcs_provider(&project_path).map_err(|e| e.to_string())?;
+    let vcs_provider = vcs::detect_vcs_provider(&project_path).map_err(crate::commands::format_error)?;
 
     if !vcs_provider.supports_worktrees() {
         return Err("VCS provider does not support worktrees".to_string());
     }
 
     // Identify stale worktrees (path no longer exists on disk)
-    let worktrees = vcs_provider.list_worktrees().map_err(|e| e.to_string())?;
+    let worktrees = vcs_provider.list_worktrees().map_err(crate::commands::format_error)?;
     let stale: Vec<_> = worktrees
         .iter()
         .filter(|wt| !wt.is_main && !wt.path.exists())

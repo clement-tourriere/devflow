@@ -79,7 +79,7 @@ pub async fn add_project(
     let mut settings = state.settings.write().await;
     if !settings.projects.iter().any(|p| p.path == entry.path) {
         settings.projects.push(entry.clone());
-        settings.save().map_err(|e| e.to_string())?;
+        settings.save().map_err(crate::commands::format_error)?;
     }
 
     // Update tray menu to include new project
@@ -96,7 +96,7 @@ pub async fn remove_project(
 ) -> Result<(), String> {
     let mut settings = state.settings.write().await;
     settings.projects.retain(|p| p.path != path);
-    settings.save().map_err(|e| e.to_string())?;
+    settings.save().map_err(crate::commands::format_error)?;
 
     // Update tray menu to remove project
     crate::update_tray_menu(&app);
@@ -218,7 +218,7 @@ pub async fn init_project(
     let mut settings = state.settings.write().await;
     if !settings.projects.iter().any(|p| p.path == entry.path) {
         settings.projects.push(entry.clone());
-        settings.save().map_err(|e| e.to_string())?;
+        settings.save().map_err(crate::commands::format_error)?;
     }
 
     crate::update_tray_menu(&app);
@@ -348,7 +348,7 @@ pub async fn add_or_init_project(
     let mut settings = state.settings.write().await;
     if !settings.projects.iter().any(|p| p.path == entry.path) {
         settings.projects.push(entry.clone());
-        settings.save().map_err(|e| e.to_string())?;
+        settings.save().map_err(crate::commands::format_error)?;
     }
 
     crate::update_tray_menu(&app);
@@ -481,7 +481,7 @@ pub async fn destroy_project(project_path: String) -> Result<DestroyResult, Stri
     let local_config_path = path.join(".devflow.local.yml");
 
     let mut config = if config_path.exists() {
-        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?
     } else {
         devflow_core::config::Config::default()
     };

@@ -108,7 +108,7 @@ fn detect_hooks_installed(project_path: &Path, vcs: &dyn devflow_core::vcs::VcsP
 pub async fn list_hooks(project_path: String) -> Result<Vec<HookPhaseEntry>, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
 
     let hooks_config = config.hooks.unwrap_or_default();
     let mut entries = Vec::new();
@@ -161,7 +161,7 @@ pub async fn render_template(
 ) -> Result<String, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
 
     let workspace = workspace_name.unwrap_or_else(|| "main".to_string());
     let context =
@@ -180,7 +180,7 @@ pub async fn get_hook_variables(
 ) -> Result<serde_json::Value, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
 
     let workspace = workspace_name.unwrap_or_else(|| "main".to_string());
     let context =
@@ -193,8 +193,8 @@ pub async fn get_hook_variables(
 
 #[tauri::command]
 pub async fn install_vcs_hooks(project_path: String) -> Result<VcsHooksActionResult, String> {
-    let vcs = devflow_core::vcs::detect_vcs_provider(&project_path).map_err(|e| e.to_string())?;
-    vcs.install_hooks().map_err(|e| e.to_string())?;
+    let vcs = devflow_core::vcs::detect_vcs_provider(&project_path).map_err(crate::commands::format_error)?;
+    vcs.install_hooks().map_err(crate::commands::format_error)?;
 
     let installed = detect_hooks_installed(Path::new(&project_path), vcs.as_ref());
     Ok(VcsHooksActionResult {
@@ -209,8 +209,8 @@ pub async fn install_vcs_hooks(project_path: String) -> Result<VcsHooksActionRes
 
 #[tauri::command]
 pub async fn uninstall_vcs_hooks(project_path: String) -> Result<VcsHooksActionResult, String> {
-    let vcs = devflow_core::vcs::detect_vcs_provider(&project_path).map_err(|e| e.to_string())?;
-    vcs.uninstall_hooks().map_err(|e| e.to_string())?;
+    let vcs = devflow_core::vcs::detect_vcs_provider(&project_path).map_err(crate::commands::format_error)?;
+    vcs.uninstall_hooks().map_err(crate::commands::format_error)?;
 
     let installed = detect_hooks_installed(Path::new(&project_path), vcs.as_ref());
     Ok(VcsHooksActionResult {
@@ -602,7 +602,7 @@ pub async fn validate_hook(
     // Check if template rendering works
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
     let workspace = workspace_name.unwrap_or_else(|| "main".to_string());
     let _context =
         hooks::build_hook_context(&config, std::path::Path::new(&project_path), &workspace).await;
@@ -621,7 +621,7 @@ pub async fn preview_hook(
 
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
     let workspace = workspace_name.unwrap_or_else(|| "main".to_string());
     let context =
         hooks::build_hook_context(&config, std::path::Path::new(&project_path), &workspace).await;
@@ -666,7 +666,7 @@ pub async fn run_hook(
 ) -> Result<serde_json::Value, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
 
     let hooks_config = config.hooks.clone().unwrap_or_default();
     let hook_phase: hooks::HookPhase = phase.parse().unwrap();
@@ -734,7 +734,7 @@ pub async fn get_trigger_mappings(
 ) -> Result<serde_json::Value, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
 
     let triggers = config.triggers.unwrap_or_default();
     let mappings = triggers.git_mappings();

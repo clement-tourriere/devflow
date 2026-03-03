@@ -33,7 +33,7 @@ pub async fn start_proxy(
 
     let handle = devflow_proxy::run_proxy(config.clone())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::commands::format_error)?;
 
     *state.proxy.write().await = Some(Arc::new(handle));
 
@@ -114,12 +114,12 @@ pub async fn get_proxy_status(state: State<'_, AppState>) -> Result<ProxyStatus,
 
 #[tauri::command]
 pub async fn list_containers() -> Result<Vec<ContainerEntry>, String> {
-    let monitor = devflow_proxy::monitor::DockerMonitor::new().map_err(|e| e.to_string())?;
+    let monitor = devflow_proxy::monitor::DockerMonitor::new().map_err(crate::commands::format_error)?;
 
     let containers = monitor
         .get_running_containers()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::commands::format_error)?;
 
     let mut entries = Vec::new();
     for container in &containers {
@@ -158,11 +158,11 @@ pub async fn get_certificate_status() -> Result<serde_json::Value, String> {
 #[tauri::command]
 pub async fn install_certificate() -> Result<(), String> {
     let ca =
-        devflow_proxy::ca::CertificateAuthority::load_or_generate().map_err(|e| e.to_string())?;
-    devflow_proxy::platform::install_system_trust(&ca).map_err(|e| e.to_string())
+        devflow_proxy::ca::CertificateAuthority::load_or_generate().map_err(crate::commands::format_error)?;
+    devflow_proxy::platform::install_system_trust(&ca).map_err(crate::commands::format_error)
 }
 
 #[tauri::command]
 pub async fn remove_certificate() -> Result<(), String> {
-    devflow_proxy::platform::remove_system_trust().map_err(|e| e.to_string())
+    devflow_proxy::platform::remove_system_trust().map_err(crate::commands::format_error)
 }

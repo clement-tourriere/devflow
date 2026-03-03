@@ -96,13 +96,7 @@ pub async fn switch_workspace(
                 }
 
                 vcs_provider
-                    .create_workspace(workspace_name, options.from_workspace.as_deref())
-                    .with_context(|| {
-                        format!(
-                            "Failed to create workspace '{}' before worktree creation",
-                            workspace_name
-                        )
-                    })?;
+                    .create_workspace(workspace_name, options.from_workspace.as_deref())?;
                 branch_created = true;
                 parent_for_new = options.from_workspace.clone();
             }
