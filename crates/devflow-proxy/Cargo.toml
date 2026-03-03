@@ -22,7 +22,7 @@ rustls = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2.0"
 
 # Certificate generation
-rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 time = "0.3"
 
 # Docker API
