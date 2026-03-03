@@ -284,7 +284,11 @@ impl DevflowContext {
     // These are designed to be called from `tokio::spawn` background
     // tasks. They only need a `Config` clone, not the full context.
 
-    /// Fetch enriched branch list: VCS snapshot + service states from providers.
+    /// Fetch enriched branch list: registry-first, enriched with VCS + service data.
+    ///
+    /// Only devflow-registered branches are shown.  VCS branches that are
+    /// not in the registry are excluded.  Service states are attached where
+    /// available.
     pub async fn fetch_branches_bg(
         config: &Config,
         vcs: VcsSnapshot,
@@ -294,15 +298,27 @@ impl DevflowContext {
         // Get all providers and their branches (network calls)
         let providers = factory::create_all_providers(config).await.ok();
 
-        let mut enriched = Vec::with_capacity(vcs.branches.len());
+        let mut enriched = Vec::with_capacity(branch_registry.len());
 
-        for branch in &vcs.branches {
-            // Find worktree path for this branch
+        for (reg_name, reg_parent) in &branch_registry {
+            // Enrich with VCS data: worktree path, is_current
             let worktree_path = vcs
                 .worktrees
                 .iter()
-                .find(|wt| wt.branch.as_deref() == Some(&branch.name))
+                .find(|wt| wt.branch.as_deref() == Some(reg_name.as_str()))
                 .map(|wt| wt.path.display().to_string());
+
+            let normalized = config.get_normalized_branch_name(reg_name);
+            let is_current = context_branch
+                .as_deref()
+                .map(|active| active == reg_name || active == normalized)
+                .unwrap_or(false);
+
+            let is_default = vcs
+                .default_branch
+                .as_deref()
+                .map(|db| db == reg_name || config.get_normalized_branch_name(db) == *reg_name)
+                .unwrap_or(false);
 
             // Collect service states for this branch
             let mut services = Vec::new();
@@ -311,7 +327,7 @@ impl DevflowContext {
                     let svc_branches = named.provider.list_branches().await.ok();
                     if let Some(svc_branches) = svc_branches {
                         if let Some(svc_branch) =
-                            svc_branches.iter().find(|sb| sb.name == branch.name)
+                            svc_branches.iter().find(|sb| sb.name == *reg_name)
                         {
                             services.push(BranchServiceState {
                                 service_name: named.name.clone(),
@@ -325,48 +341,12 @@ impl DevflowContext {
                 }
             }
 
-            // Get parent from the branch registry
-            let parent = branch_registry.get(&branch.name).cloned().flatten();
-
-            let normalized = config.get_normalized_branch_name(&branch.name);
-            let is_current = context_branch
-                .as_deref()
-                .map(|active| active == branch.name || active == normalized)
-                .unwrap_or(branch.is_current);
-
-            enriched.push(EnrichedBranch {
-                name: branch.name.clone(),
-                is_current,
-                is_default: branch.is_default,
-                worktree_path,
-                services,
-                parent,
-            });
-        }
-
-        // Include branches from the registry that are not present in VCS
-        // (e.g. just-registered main branch on an unborn repo, or branches
-        // whose worktrees were pruned).
-        let vcs_names: std::collections::HashSet<&str> =
-            vcs.branches.iter().map(|b| b.name.as_str()).collect();
-
-        for (reg_name, reg_parent) in &branch_registry {
-            if vcs_names.contains(reg_name.as_str()) {
-                continue; // already handled above
-            }
-
-            let normalized = config.get_normalized_branch_name(reg_name);
-            let is_current = context_branch
-                .as_deref()
-                .map(|active| active == reg_name || active == normalized)
-                .unwrap_or(false);
-
             enriched.push(EnrichedBranch {
                 name: reg_name.clone(),
                 is_current,
-                is_default: vcs.default_branch.as_deref() == Some(reg_name.as_str()),
-                worktree_path: None,
-                services: Vec::new(),
+                is_default,
+                worktree_path,
+                services,
                 parent: reg_parent.clone(),
             });
         }

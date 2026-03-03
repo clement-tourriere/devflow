@@ -451,8 +451,8 @@ function ProjectDetail() {
             >
               {detail.path}
             </span>
-            {currentBranch && (
-              <span className="badge badge-info">{currentBranch}</span>
+            {currentBranch && !detail.worktree_enabled && (
+              <span className="badge" style={{ opacity: 0.7 }}>HEAD: {currentBranch}</span>
             )}
             {detail.has_config ? (
               <span className="badge badge-success">configured</span>
@@ -501,7 +501,12 @@ function ProjectDetail() {
           </span>
           <button
             className="btn btn-primary"
-            onClick={() => setShowCreateBranch(true)}
+            onClick={() => {
+              const defaultBranch = branches.find((b) => b.is_default);
+              setFromBranch(defaultBranch?.name ?? "");
+              setNewBranchName("");
+              setShowCreateBranch(true);
+            }}
             style={{ padding: "4px 12px", fontSize: 13 }}
           >
             Create Branch
@@ -514,7 +519,8 @@ function ProjectDetail() {
             <thead>
               <tr>
                 <th>Branch</th>
-                <th>Status</th>
+                <th>Parent</th>
+                <th>Created</th>
                 <th>Worktree</th>
                 <th style={{ textAlign: "right" }}>Actions</th>
               </tr>
@@ -523,7 +529,7 @@ function ProjectDetail() {
               {branches.map((b) => (
                 <tr key={b.name}>
                   <td>
-                    <span style={{ fontWeight: b.is_current ? 600 : 400 }}>
+                    <span style={{ fontWeight: b.is_default ? 600 : 400 }}>
                       {b.name}
                     </span>
                     {b.is_default && (
@@ -534,11 +540,29 @@ function ProjectDetail() {
                         default
                       </span>
                     )}
+                    {!detail.worktree_enabled && b.is_current && (
+                      <span
+                        className="badge"
+                        style={{ marginLeft: 6, fontSize: 10, opacity: 0.7 }}
+                      >
+                        HEAD
+                      </span>
+                    )}
+                    {b.agent_status && (
+                      <span
+                        className={`badge${b.agent_status === "running" ? " badge-success" : ""}`}
+                        style={{ marginLeft: 6 }}
+                        title={b.agent_tool ? `Agent: ${b.agent_tool}` : undefined}
+                      >
+                        {b.agent_status}
+                      </span>
+                    )}
                   </td>
-                  <td>
-                    {b.is_current ? (
-                      <span className="badge badge-success">current</span>
-                    ) : null}
+                  <td style={{ color: "var(--text-muted)", fontSize: 13 }}>
+                    {b.parent || "-"}
+                  </td>
+                  <td style={{ color: "var(--text-muted)", fontSize: 12 }}>
+                    {b.created_at || "-"}
                   </td>
                   <td
                     className="mono"
@@ -572,7 +596,7 @@ function ProjectDetail() {
                       >
                         Branch from
                       </button>
-                      {!b.is_current && !b.is_default && (
+                      {!b.is_default && (
                         <button
                           className="btn btn-danger"
                           style={{ padding: "2px 10px", fontSize: 12 }}
@@ -759,38 +783,12 @@ function ProjectDetail() {
                                 b.state === "failed" ||
                                 b.state === null ||
                                 b.state === undefined;
-                              const isCurrent = b.name === currentBranch;
                               return (
-                                <tr
-                                  key={b.name}
-                                  style={
-                                    isCurrent
-                                      ? {
-                                          background:
-                                            "rgba(88, 166, 255, 0.06)",
-                                        }
-                                      : undefined
-                                  }
-                                >
+                                <tr key={b.name}>
                                   <td>
-                                    <span
-                                      style={{
-                                        fontWeight: isCurrent ? 600 : 400,
-                                      }}
-                                    >
+                                    <span>
                                       {b.name}
                                     </span>
-                                    {isCurrent && (
-                                      <span
-                                        className="badge badge-info"
-                                        style={{
-                                          marginLeft: 6,
-                                          fontSize: 10,
-                                        }}
-                                      >
-                                        current
-                                      </span>
-                                    )}
                                   </td>
                                   <td>
                                     <StatusBadge state={b.state} />
@@ -1180,10 +1178,9 @@ function ProjectDetail() {
               fontSize: 14,
             }}
           >
-            <option value="">Current branch</option>
             {branches.map((b) => (
               <option key={b.name} value={b.name}>
-                {b.name}
+                {b.name}{b.is_default ? " (default)" : ""}
               </option>
             ))}
           </select>

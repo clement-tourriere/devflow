@@ -19,6 +19,10 @@ export interface BranchEntry {
   is_current: boolean;
   is_default: boolean;
   worktree_path: string | null;
+  parent: string | null;
+  created_at: string | null;
+  agent_tool: string | null;
+  agent_status: string | null;
 }
 
 export interface BranchesResponse {

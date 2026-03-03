@@ -1,3 +1,4 @@
+use devflow_core::state::{DevflowBranch, LocalStateManager};
 use devflow_core::{config, services, vcs};
 use serde::Serialize;
 
@@ -7,6 +8,10 @@ pub struct BranchEntry {
     pub is_current: bool,
     pub is_default: bool,
     pub worktree_path: Option<String>,
+    pub parent: Option<String>,
+    pub created_at: Option<String>,
+    pub agent_tool: Option<String>,
+    pub agent_status: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -24,38 +29,88 @@ pub struct OrchestrationResultDto {
 
 #[tauri::command]
 pub async fn list_branches(project_path: String) -> Result<BranchesResponse, String> {
-    let vcs_provider =
-        vcs::detect_vcs_provider(&project_path).map_err(|e| e.to_string())?;
+    let project_dir = std::path::Path::new(&project_path);
+    let config_path = project_dir.join(".devflow.yml");
 
-    let branches = vcs_provider
-        .list_branches()
-        .map_err(|e| e.to_string())?;
+    // Load config for main_branch / normalization
+    let cfg = if config_path.exists() {
+        config::Config::from_file(&config_path).ok()
+    } else {
+        None
+    };
 
+    let main_branch = cfg
+        .as_ref()
+        .map(|c| c.git.main_branch.clone())
+        .unwrap_or_else(|| "main".to_string());
+
+    // Read devflow branch registry
+    let mut state_mgr = LocalStateManager::new().map_err(|e| e.to_string())?;
+
+    // Auto-migration: if registry is empty but config exists, register the default branch
+    if config_path.exists() {
+        let branches = state_mgr.get_branches_by_dir(project_dir);
+        if branches.is_empty() {
+            let _ = state_mgr.ensure_default_branch(project_dir, &main_branch);
+        }
+    }
+
+    let devflow_branches = state_mgr.get_branches_by_dir(project_dir);
+
+    // Determine current git branch to find active devflow branch
+    let vcs_provider = vcs::detect_vcs_provider(&project_path).ok();
+    let current_vcs_branch = vcs_provider
+        .as_ref()
+        .and_then(|v| v.current_branch().ok().flatten());
+
+    // Normalize the VCS branch name for matching
+    let normalized_current = current_vcs_branch.as_deref().map(|b| {
+        cfg.as_ref()
+            .map(|c| c.get_normalized_branch_name(b))
+            .unwrap_or_else(|| b.to_string())
+    });
+
+    // Get worktrees for enrichment
     let worktrees = vcs_provider
-        .list_worktrees()
+        .as_ref()
+        .and_then(|v| v.list_worktrees().ok())
         .unwrap_or_default();
 
-    let current = vcs_provider
-        .current_branch()
-        .ok()
-        .flatten();
-
-    let entries: Vec<BranchEntry> = branches
+    let entries: Vec<BranchEntry> = devflow_branches
         .into_iter()
         .map(|b| {
+            // Check if this is the current branch
+            let is_current = normalized_current
+                .as_deref()
+                .map(|cur| cur == b.name)
+                .unwrap_or(false);
+
+            let is_default = b.name == main_branch;
+
+            // Prefer worktree_path from VCS if available, fall back to registry
             let worktree_path = worktrees
                 .iter()
                 .find(|w| w.branch.as_deref() == Some(&b.name))
-                .map(|w| w.path.display().to_string());
+                .map(|w| w.path.display().to_string())
+                .or(b.worktree_path);
 
             BranchEntry {
                 name: b.name,
-                is_current: b.is_current,
-                is_default: b.is_default,
+                is_current,
+                is_default,
                 worktree_path,
+                parent: b.parent,
+                created_at: Some(b.created_at.format("%Y-%m-%d %H:%M").to_string()),
+                agent_tool: b.agent_tool,
+                agent_status: b.agent_status,
             }
         })
         .collect();
+
+    let current = entries
+        .iter()
+        .find(|e| e.is_current)
+        .map(|e| e.name.clone());
 
     Ok(BranchesResponse {
         branches: entries,
@@ -126,6 +181,18 @@ pub async fn create_branch(
         .and_then(|c| c.worktree.as_ref())
         .is_some_and(|wt| wt.enabled);
 
+    // Normalize the branch name
+    let normalized_name = cfg
+        .as_ref()
+        .map(|c| c.get_normalized_branch_name(&branch_name))
+        .unwrap_or_else(|| branch_name.clone());
+
+    let normalized_parent = from_branch.as_deref().map(|fb| {
+        cfg.as_ref()
+            .map(|c| c.get_normalized_branch_name(fb))
+            .unwrap_or_else(|| fb.to_string())
+    });
+
     // Create VCS branch
     vcs_provider
         .create_branch(&branch_name, from_branch.as_deref())
@@ -168,7 +235,7 @@ pub async fn create_branch(
                 .map_err(|e| format!("Failed to create worktree: {}", e))?;
 
             // Copy configured files from main worktree
-            if let Some(ref wt_cfg) = wt_config {
+            if let Some(wt_cfg) = wt_config {
                 let main_dir = vcs_provider
                     .main_worktree_dir()
                     .unwrap_or_else(|| project_dir.to_path_buf());
@@ -233,6 +300,22 @@ pub async fn create_branch(
         vec![]
     };
 
+    // Register the new branch in devflow state
+    if let Ok(mut state_mgr) = LocalStateManager::new() {
+        let branch = DevflowBranch {
+            name: normalized_name,
+            parent: normalized_parent,
+            worktree_path: worktree_path.clone(),
+            created_at: chrono::Utc::now(),
+            agent_tool: None,
+            agent_status: None,
+            agent_started_at: None,
+        };
+        if let Err(e) = state_mgr.register_branch_by_dir(project_dir, branch) {
+            log::warn!("Failed to register branch in devflow state: {}", e);
+        }
+    }
+
     Ok(CreateBranchResult {
         services: service_results,
         worktree_path,
@@ -277,6 +360,7 @@ pub async fn delete_branch(
     project_path: String,
     branch_name: String,
 ) -> Result<Vec<OrchestrationResultDto>, String> {
+    let project_dir = std::path::Path::new(&project_path);
     let vcs_provider =
         vcs::detect_vcs_provider(&project_path).map_err(|e| e.to_string())?;
 
@@ -295,10 +379,14 @@ pub async fn delete_branch(
     }
 
     // 2. Orchestrate service branch deletion if config exists
-    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
+    let config_path = project_dir.join(".devflow.yml");
     let mut results = vec![];
     if config_path.exists() {
         let cfg = config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
+
+        // Normalize the branch name for unregistration
+        let normalized = cfg.get_normalized_branch_name(&branch_name);
+
         results = services::factory::orchestrate_delete(&cfg, &branch_name)
             .await
             .map_err(|e| e.to_string())?
@@ -309,9 +397,23 @@ pub async fn delete_branch(
                 message: r.message,
             })
             .collect();
+
+        // 3. Unregister from devflow state
+        if let Ok(mut state_mgr) = LocalStateManager::new() {
+            if let Err(e) = state_mgr.unregister_branch_by_dir(project_dir, &normalized) {
+                log::warn!("Failed to unregister branch from devflow state: {}", e);
+            }
+        }
+    } else {
+        // No config — still unregister from state using the raw name
+        if let Ok(mut state_mgr) = LocalStateManager::new() {
+            if let Err(e) = state_mgr.unregister_branch_by_dir(project_dir, &branch_name) {
+                log::warn!("Failed to unregister branch from devflow state: {}", e);
+            }
+        }
     }
 
-    // 3. Delete VCS branch
+    // 4. Delete VCS branch
     vcs_provider
         .delete_branch(&branch_name)
         .map_err(|e| e.to_string())?;

@@ -202,8 +202,8 @@ function ProjectCard({ project }: { project: ProjectInfo }) {
 
       {/* Info row */}
       <div className="flex items-center gap-2" style={{ flexWrap: "wrap" }}>
-        {d?.current_branch && (
-          <span className="badge badge-info">{d.current_branch}</span>
+        {d?.current_branch && !d?.worktree_enabled && (
+          <span className="badge" style={{ opacity: 0.7 }}>HEAD: {d.current_branch}</span>
         )}
         {d?.worktree_enabled && (
           <span className="badge badge-success" style={{ fontSize: 11 }}>worktrees</span>

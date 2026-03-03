@@ -31,6 +31,8 @@ export const getProjectDetail = (projectPath: string) =>
   invoke<ProjectDetail>("get_project_detail", { projectPath });
 export const initProject = (path: string, name?: string, vcsPreference?: string, worktreeEnabled?: boolean) =>
   invoke<ProjectEntry>("init_project", { path, name, vcsPreference, worktreeEnabled });
+export const addOrInitProject = (path: string, name?: string, vcsPreference?: string, worktreeEnabled?: boolean) =>
+  invoke<ProjectEntry>("add_or_init_project", { path, name, vcsPreference, worktreeEnabled });
 
 // VCS
 export const detectVcsInfo = (path: string) =>

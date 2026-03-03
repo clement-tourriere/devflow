@@ -295,8 +295,8 @@ function TerminalPanel({
 
         setLauncherBranchName((prev) => {
           if (prev && branches.some((b) => b.name === prev)) return prev;
-          const current = branches.find((b) => b.is_current);
-          return current?.name ?? branches[0]?.name ?? "";
+          const defaultBranch = branches.find((b) => b.is_default);
+          return defaultBranch?.name ?? branches[0]?.name ?? "";
         });
 
         setLauncherServiceName((prev) =>
@@ -638,7 +638,6 @@ function TerminalPanel({
                     filteredBranches.map((branch) => (
                       <option key={branch.name} value={branch.name}>
                         {branch.name}
-                        {branch.is_current ? "  * current" : ""}
                         {branch.is_default ? "  * default" : ""}
                       </option>
                     ))

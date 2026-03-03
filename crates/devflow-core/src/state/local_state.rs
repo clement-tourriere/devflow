@@ -271,7 +271,6 @@ impl LocalStateManager {
     }
 
     /// Look up a single registered branch by name.
-    #[allow(dead_code)]
     pub fn get_branch(&self, project_path: &Path, name: &str) -> Option<DevflowBranch> {
         self.get_branches(project_path)
             .into_iter()
@@ -311,6 +310,62 @@ impl LocalStateManager {
         project.last_updated = chrono::Utc::now();
         self.save_state()?;
         Ok(())
+    }
+
+    // ── Convenience methods that accept a project directory ────────
+    //
+    // The standard CRUD methods above expect the `.devflow.yml` config file
+    // path (because `get_project_key` strips the last component).  These
+    // `_by_dir` variants accept the **project directory** and append
+    // `.devflow.yml` internally, eliminating a common source of bugs.
+
+    /// Get all registered devflow branches for a project directory.
+    pub fn get_branches_by_dir(&self, project_dir: &Path) -> Vec<DevflowBranch> {
+        self.get_branches(&project_dir.join(".devflow.yml"))
+    }
+
+    /// Look up a single registered branch by name (project directory variant).
+    pub fn get_branch_by_dir(&self, project_dir: &Path, name: &str) -> Option<DevflowBranch> {
+        self.get_branch(&project_dir.join(".devflow.yml"), name)
+    }
+
+    /// Register (upsert) a devflow branch (project directory variant).
+    pub fn register_branch_by_dir(
+        &mut self,
+        project_dir: &Path,
+        branch: DevflowBranch,
+    ) -> Result<()> {
+        self.register_branch(&project_dir.join(".devflow.yml"), branch)
+    }
+
+    /// Remove a branch from the registry by name (project directory variant).
+    pub fn unregister_branch_by_dir(&mut self, project_dir: &Path, name: &str) -> Result<()> {
+        self.unregister_branch(&project_dir.join(".devflow.yml"), name)
+    }
+
+    /// Ensure a default devflow branch exists for this project.
+    ///
+    /// If the branch registry is empty, registers `main_branch` as the
+    /// default branch with `created_at = now` and no parent.  This is the
+    /// auto-migration path for projects created before the registry existed.
+    pub fn ensure_default_branch(&mut self, project_dir: &Path, main_branch: &str) -> Result<()> {
+        let config_path = project_dir.join(".devflow.yml");
+        let existing = self.get_branches(&config_path);
+        if !existing.is_empty() {
+            return Ok(());
+        }
+
+        let branch = DevflowBranch {
+            name: main_branch.to_string(),
+            parent: None,
+            worktree_path: None,
+            created_at: chrono::Utc::now(),
+            agent_tool: None,
+            agent_status: None,
+            agent_started_at: None,
+        };
+
+        self.register_branch(&config_path, branch)
     }
 
     /// Remove a branch from the registry by name.

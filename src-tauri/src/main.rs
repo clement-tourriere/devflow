@@ -28,6 +28,7 @@ fn main() {
             commands::projects::remove_project,
             commands::projects::get_project_detail,
             commands::projects::init_project,
+            commands::projects::add_or_init_project,
             commands::projects::destroy_project,
             commands::projects::detect_orphan_projects,
             commands::projects::cleanup_orphan_project,

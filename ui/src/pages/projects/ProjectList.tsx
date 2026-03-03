@@ -3,9 +3,8 @@ import { Link } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   listProjects,
-  addProject,
   removeProject,
-  initProject,
+  addOrInitProject,
   getProjectDetail,
   detectVcsInfo,
 } from "../../utils/invoke";
@@ -37,18 +36,20 @@ function ProjectList() {
   const [projects, setProjects] = useState<ProjectRow[]>([]);
   const [removeTarget, setRemoveTarget] = useState<string | null>(null);
 
-  // Modal state for Init / Add
-  const [modalMode, setModalMode] = useState<"init" | "add" | null>(null);
+  // Unified modal state
+  const [modalOpen, setModalOpen] = useState(false);
   const [selectedPath, setSelectedPath] = useState("");
   const [projectName, setProjectName] = useState("");
   const [modalError, setModalError] = useState("");
   const [modalLoading, setModalLoading] = useState(false);
 
-  // VCS selection state (init mode only)
+  // Detection state
   const [vcsInfo, setVcsInfo] = useState<VcsInfo | null>(null);
-  const [selectedVcs, setSelectedVcs] = useState<string>("git");
+  const [hasExistingConfig, setHasExistingConfig] = useState(false);
+  const [hasWorktreeConfig, setHasWorktreeConfig] = useState(false);
 
-  // Branching mode (init mode only)
+  // User selections
+  const [selectedVcs, setSelectedVcs] = useState<string>("git");
   const [branchingMode, setBranchingMode] = useState<"worktree" | "branch">("worktree");
 
   const loadProjects = async () => {
@@ -74,7 +75,7 @@ function ProjectList() {
     loadProjects();
   }, []);
 
-  const openDirectoryThenModal = async (mode: "init" | "add") => {
+  const openAddProjectModal = async () => {
     try {
       const selected = await open({ directory: true, multiple: false });
       if (!selected) return;
@@ -84,29 +85,39 @@ function ProjectList() {
       setProjectName(defaultName);
       setModalError("");
 
-      // Detect VCS for init mode
-      if (mode === "init") {
-        try {
-          const info = await detectVcsInfo(dirPath);
-          setVcsInfo(info);
-          // Default to existing VCS, or first available tool
-          setSelectedVcs(info.existing_vcs || info.available_tools[0] || "git");
-        } catch {
-          setVcsInfo(null);
-          setSelectedVcs("git");
-        }
-      } else {
+      // Detect VCS info
+      let detectedVcsInfo: VcsInfo | null = null;
+      try {
+        detectedVcsInfo = await detectVcsInfo(dirPath);
+        setVcsInfo(detectedVcsInfo);
+        setSelectedVcs(detectedVcsInfo.existing_vcs || detectedVcsInfo.available_tools[0] || "git");
+      } catch {
         setVcsInfo(null);
+        setSelectedVcs("git");
       }
 
-      setModalMode(mode);
+      // Detect existing config
+      try {
+        const detail = await getProjectDetail(dirPath);
+        setHasExistingConfig(detail.has_config);
+        setHasWorktreeConfig(detail.worktree_enabled);
+        // Default branching mode based on existing config
+        if (detail.has_config && detail.worktree_enabled) {
+          setBranchingMode("worktree");
+        }
+      } catch {
+        setHasExistingConfig(false);
+        setHasWorktreeConfig(false);
+      }
+
+      setModalOpen(true);
     } catch (e) {
       console.error("Failed to open directory picker:", e);
     }
   };
 
   const handleModalClose = () => {
-    setModalMode(null);
+    setModalOpen(false);
     setSelectedPath("");
     setProjectName("");
     setModalError("");
@@ -114,6 +125,8 @@ function ProjectList() {
     setVcsInfo(null);
     setSelectedVcs("git");
     setBranchingMode("worktree");
+    setHasExistingConfig(false);
+    setHasWorktreeConfig(false);
   };
 
   const handleModalSubmit = async () => {
@@ -126,13 +139,9 @@ function ProjectList() {
     setModalLoading(true);
     setModalError("");
     try {
-      if (modalMode === "init") {
-        // Pass VCS preference only when no VCS already exists
-        const vcsPref = vcsInfo?.existing_vcs ? undefined : selectedVcs;
-        await initProject(selectedPath, normalized, vcsPref, branchingMode === "worktree");
-      } else {
-        await addProject(selectedPath, normalized);
-      }
+      // Pass VCS preference only when no VCS already exists
+      const vcsPref = vcsInfo?.existing_vcs ? undefined : selectedVcs;
+      await addOrInitProject(selectedPath, normalized, vcsPref, branchingMode === "worktree");
       handleModalClose();
       await loadProjects();
     } catch (e) {
@@ -156,26 +165,22 @@ function ProjectList() {
   const normalized = normalizeProjectName(projectName);
   const nameChanged = projectName !== normalized && normalized.length > 0;
 
+  // Determine which sections to show in the modal
+  const showVcsSelector = vcsInfo && !vcsInfo.existing_vcs && !hasExistingConfig;
+  const showWorktreeSelector = !hasExistingConfig || (hasExistingConfig && !hasWorktreeConfig);
+
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
         <h1 className="page-title" style={{ marginBottom: 0 }}>
           Projects
         </h1>
-        <div className="flex gap-2">
-          <button
-            className="btn btn-primary"
-            onClick={() => openDirectoryThenModal("add")}
-          >
-            Add Existing Project
-          </button>
-          <button
-            className="btn"
-            onClick={() => openDirectoryThenModal("init")}
-          >
-            Initialize New Project
-          </button>
-        </div>
+        <button
+          className="btn btn-primary"
+          onClick={openAddProjectModal}
+        >
+          Add Project
+        </button>
       </div>
 
       <div className="card">
@@ -191,7 +196,7 @@ function ProjectList() {
               No projects registered yet.
             </p>
             <p style={{ color: "var(--text-muted)", fontSize: 13 }}>
-              Add an existing devflow project or initialize a new one.
+              Select a directory to add a new or existing devflow project.
             </p>
           </div>
         ) : (
@@ -237,9 +242,9 @@ function ProjectList() {
                     {p.path}
                   </td>
                   <td>
-                    {p.detail?.current_branch && (
-                      <span className="badge badge-info">
-                        {p.detail.current_branch}
+                    {p.detail?.current_branch && !p.detail?.worktree_enabled && (
+                      <span className="badge" style={{ opacity: 0.7 }}>
+                        HEAD: {p.detail.current_branch}
                       </span>
                     )}
                   </td>
@@ -289,13 +294,30 @@ function ProjectList() {
         danger
       />
 
-      {/* Init / Add Project Modal */}
+      {/* Unified Add Project Modal */}
       <Modal
-        open={modalMode !== null}
+        open={modalOpen}
         onClose={handleModalClose}
-        title={modalMode === "init" ? "Initialize New Project" : "Add Existing Project"}
+        title="Add Project"
         width={520}
       >
+        {/* Existing config notice */}
+        {hasExistingConfig && (
+          <div
+            style={{
+              marginBottom: 16,
+              padding: "8px 12px",
+              background: "var(--info-bg, rgba(0,120,255,0.08))",
+              border: "1px solid var(--info, #3b82f6)",
+              borderRadius: 6,
+              fontSize: 13,
+              color: "var(--text-secondary)",
+            }}
+          >
+            Existing <strong className="mono">.devflow.yml</strong> detected — your configuration will be preserved.
+          </div>
+        )}
+
         {/* Directory */}
         <div style={{ marginBottom: 16 }}>
           <label
@@ -371,8 +393,8 @@ function ProjectList() {
           )}
         </div>
 
-        {/* VCS selection (init mode only) */}
-        {modalMode === "init" && vcsInfo && (
+        {/* VCS selection (only when no VCS exists and no config) */}
+        {showVcsSelector && vcsInfo && vcsInfo.available_tools.length > 1 && (
           <div style={{ marginBottom: 16 }}>
             <label
               style={{
@@ -385,46 +407,56 @@ function ProjectList() {
             >
               Version Control
             </label>
-            {vcsInfo.existing_vcs ? (
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  fontSize: 13,
-                }}
-              >
-                <span className="badge badge-info">
-                  {vcsInfo.existing_vcs}
-                </span>
-                <span style={{ color: "var(--text-muted)" }}>
-                  already initialized
-                </span>
-              </div>
-            ) : vcsInfo.available_tools.length > 1 ? (
-              <div className="flex gap-2">
-                {vcsInfo.available_tools.map((tool) => (
-                  <button
-                    key={tool}
-                    className={`btn${selectedVcs === tool ? " btn-primary" : ""}`}
-                    style={{ padding: "4px 16px", fontSize: 13 }}
-                    onClick={() => setSelectedVcs(tool)}
-                    type="button"
-                  >
-                    {tool}
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>
-                <span className="badge">{vcsInfo.available_tools[0] || "git"}</span>
-              </div>
-            )}
+            <div className="flex gap-2">
+              {vcsInfo.available_tools.map((tool) => (
+                <button
+                  key={tool}
+                  className={`btn${selectedVcs === tool ? " btn-primary" : ""}`}
+                  style={{ padding: "4px 16px", fontSize: 13 }}
+                  onClick={() => setSelectedVcs(tool)}
+                  type="button"
+                >
+                  {tool}
+                </button>
+              ))}
+            </div>
           </div>
         )}
 
-        {/* Branching mode (init mode only) */}
-        {modalMode === "init" && (
+        {/* VCS info display (when VCS already exists) */}
+        {vcsInfo?.existing_vcs && (
+          <div style={{ marginBottom: 16 }}>
+            <label
+              style={{
+                display: "block",
+                marginBottom: 6,
+                fontSize: 13,
+                color: "var(--text-secondary)",
+                fontWeight: 500,
+              }}
+            >
+              Version Control
+            </label>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                fontSize: 13,
+              }}
+            >
+              <span className="badge badge-info">
+                {vcsInfo.existing_vcs}
+              </span>
+              <span style={{ color: "var(--text-muted)" }}>
+                already initialized
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Branching mode (show when no config or config without worktree) */}
+        {showWorktreeSelector && (
           <div style={{ marginBottom: 16 }}>
             <label
               style={{
@@ -498,13 +530,7 @@ function ProjectList() {
             onClick={handleModalSubmit}
             disabled={!normalized || modalLoading}
           >
-            {modalLoading
-              ? modalMode === "init"
-                ? "Initializing..."
-                : "Adding..."
-              : modalMode === "init"
-                ? "Initialize"
-                : "Add Project"}
+            {modalLoading ? "Adding..." : "Add Project"}
           </button>
         </div>
       </Modal>

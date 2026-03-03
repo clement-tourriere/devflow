@@ -170,6 +170,114 @@ pub async fn init_project(
     Ok(entry)
 }
 
+/// Unified project add/init command.
+///
+/// Works for both new and existing projects:
+/// 1. Initializes VCS if missing
+/// 2. Creates `.devflow.yml` if missing (with optional worktree config)
+/// 3. Adds worktree config to existing `.devflow.yml` if requested and missing
+/// 4. Registers default devflow branch
+/// 5. Registers project in GUI settings
+#[tauri::command]
+pub async fn add_or_init_project(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    name: Option<String>,
+    vcs_preference: Option<String>,
+    worktree_enabled: Option<bool>,
+) -> Result<ProjectEntry, String> {
+    let dir = std::path::Path::new(&path);
+    if !dir.is_dir() {
+        return Err(format!("Not a directory: {}", path));
+    }
+
+    let abs_path = dir
+        .canonicalize()
+        .map_err(|e| format!("Invalid path: {}", e))?;
+
+    // Initialize VCS if not already a repo
+    if devflow_core::vcs::detect_vcs_kind(&abs_path).is_none() {
+        let preference = vcs_preference.as_deref().and_then(|s| match s {
+            "git" => Some(devflow_core::vcs::VcsKind::Git),
+            "jj" => Some(devflow_core::vcs::VcsKind::Jj),
+            _ => None,
+        });
+        devflow_core::vcs::init_vcs_repository(&abs_path, preference, false)
+            .map_err(|e| format!("Failed to init VCS: {}", e))?;
+    } else {
+        // VCS already exists — ensure it has at least one commit
+        if let Ok(vcs) = devflow_core::vcs::detect_vcs_provider(&abs_path) {
+            let _ = vcs.ensure_initial_commit();
+        }
+    }
+
+    // Derive project name
+    let project_name = name.unwrap_or_else(|| {
+        abs_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    });
+
+    let config_path = abs_path.join(".devflow.yml");
+    let wt_enabled = worktree_enabled.unwrap_or(true);
+
+    if !config_path.exists() {
+        // Create a new config
+        let mut config = devflow_core::config::Config::default();
+        config.name = Some(project_name.clone());
+        if wt_enabled {
+            config.worktree = Some(devflow_core::config::WorktreeConfig::recommended_default());
+        }
+        config
+            .save_to_file(&config_path)
+            .map_err(|e| format!("Failed to create config: {}", e))?;
+    } else if wt_enabled {
+        // Config exists — add worktree config if not already present
+        if let Ok(mut config) = devflow_core::config::Config::from_file(&config_path) {
+            if config.worktree.is_none() {
+                config.worktree =
+                    Some(devflow_core::config::WorktreeConfig::recommended_default());
+                config
+                    .save_to_file(&config_path)
+                    .map_err(|e| format!("Failed to update config: {}", e))?;
+            }
+        }
+    }
+
+    // Register default devflow branch
+    let main_branch = if config_path.exists() {
+        devflow_core::config::Config::from_file(&config_path)
+            .ok()
+            .map(|c| c.git.main_branch.clone())
+            .unwrap_or_else(|| "main".to_string())
+    } else {
+        "main".to_string()
+    };
+
+    if let Ok(mut state_mgr) = devflow_core::state::LocalStateManager::new() {
+        if let Err(e) = state_mgr.ensure_default_branch(&abs_path, &main_branch) {
+            log::warn!("Failed to register default branch: {}", e);
+        }
+    }
+
+    let entry = ProjectEntry {
+        path: abs_path.display().to_string(),
+        name: project_name,
+    };
+
+    let mut settings = state.settings.write().await;
+    if !settings.projects.iter().any(|p| p.path == entry.path) {
+        settings.projects.push(entry.clone());
+        settings.save().map_err(|e| e.to_string())?;
+    }
+
+    crate::update_tray_menu(&app);
+
+    Ok(entry)
+}
+
 #[tauri::command]
 pub async fn get_project_detail(project_path: String) -> Result<ProjectDetail, String> {
     let path = std::path::Path::new(&project_path);
@@ -184,21 +292,33 @@ pub async fn get_project_detail(project_path: String) -> Result<ProjectDetail, S
     let vcs = devflow_core::vcs::detect_vcs_provider(&project_path).ok();
     let vcs_type = vcs.as_ref().map(|v| v.provider_name().to_string());
 
-    let current_branch = vcs
-        .as_ref()
-        .and_then(|v| v.current_branch().ok().flatten());
-
-    let branch_count = vcs
-        .as_ref()
-        .and_then(|v| v.list_branches().ok())
-        .map(|b| b.len())
-        .unwrap_or(0);
-
     let config = if has_config {
         devflow_core::config::Config::from_file(&config_path).ok()
     } else {
         None
     };
+
+    // Derive current devflow branch: VCS branch → normalize → look up in registry
+    let vcs_branch = vcs
+        .as_ref()
+        .and_then(|v| v.current_branch().ok().flatten());
+
+    let normalized_branch = vcs_branch.as_deref().map(|b| {
+        config
+            .as_ref()
+            .map(|c| c.get_normalized_branch_name(b))
+            .unwrap_or_else(|| b.to_string())
+    });
+
+    // Use devflow registry for branch count
+    let branch_count = if let Ok(state_mgr) = devflow_core::state::LocalStateManager::new() {
+        let branches = state_mgr.get_branches_by_dir(path);
+        branches.len()
+    } else {
+        0
+    };
+
+    let current_branch = normalized_branch;
 
     let service_count = config
         .as_ref()
