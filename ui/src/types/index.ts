@@ -52,6 +52,11 @@ export interface ServiceWorkspaceInfo {
   state: string | null;
 }
 
+export interface PruneResult {
+  pruned: number;
+  details: string[];
+}
+
 export interface DoctorCheck {
   name: string;
   available: boolean;
@@ -201,7 +206,6 @@ export interface TerminalSessionInfo {
   label: string;
   project_path: string | null;
   workspace_name: string | null;
-  service_name: string | null;
   working_directory: string;
   status: "Running" | "Exited";
 }

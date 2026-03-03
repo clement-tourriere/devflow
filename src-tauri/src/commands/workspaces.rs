@@ -500,3 +500,52 @@ pub async fn delete_workspace(
     crate::update_tray_menu(&app);
     Ok(results)
 }
+
+#[derive(Serialize)]
+pub struct PruneResult {
+    pub pruned: usize,
+    pub details: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn prune_worktrees(project_path: String) -> Result<PruneResult, String> {
+    let vcs_provider = vcs::detect_vcs_provider(&project_path).map_err(|e| e.to_string())?;
+
+    if !vcs_provider.supports_worktrees() {
+        return Err("VCS provider does not support worktrees".to_string());
+    }
+
+    // Identify stale worktrees (path no longer exists on disk)
+    let worktrees = vcs_provider.list_worktrees().map_err(|e| e.to_string())?;
+    let stale: Vec<_> = worktrees
+        .iter()
+        .filter(|wt| !wt.is_main && !wt.path.exists())
+        .collect();
+
+    if stale.is_empty() {
+        return Ok(PruneResult {
+            pruned: 0,
+            details: vec![],
+        });
+    }
+
+    // Use `git worktree prune` to clean up all stale entries at once
+    let output = std::process::Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(&project_path)
+        .output()
+        .map_err(|e| format!("Failed to run git worktree prune: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git worktree prune failed: {}", stderr));
+    }
+
+    let details: Vec<String> = stale
+        .iter()
+        .map(|wt| wt.path.display().to_string())
+        .collect();
+    let pruned = details.len();
+
+    Ok(PruneResult { pruned, details })
+}

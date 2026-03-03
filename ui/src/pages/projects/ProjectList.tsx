@@ -17,13 +17,9 @@ interface ProjectRow extends ProjectEntry {
   missing?: boolean;
 }
 
-/** Normalize a project name: lowercase, collapse non-alnum to dashes, max 63 chars. */
-function normalizeProjectName(raw: string): string {
-  return raw
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 63);
+/** Minimal sanitization: trim whitespace and cap length. */
+function sanitizeProjectName(raw: string): string {
+  return raw.trim().slice(0, 100);
 }
 
 /** Extract the directory basename from a full path. */
@@ -80,7 +76,7 @@ function ProjectList() {
       const selected = await open({ directory: true, multiple: false });
       if (!selected) return;
       const dirPath = selected as string;
-      const defaultName = normalizeProjectName(basenameFromPath(dirPath));
+      const defaultName = sanitizeProjectName(basenameFromPath(dirPath));
       setSelectedPath(dirPath);
       setProjectName(defaultName);
       setModalError("");
@@ -130,7 +126,7 @@ function ProjectList() {
   };
 
   const handleModalSubmit = async () => {
-    const normalized = normalizeProjectName(projectName);
+    const normalized = sanitizeProjectName(projectName);
     if (!normalized) {
       setModalError("Project name cannot be empty.");
       return;
@@ -162,8 +158,7 @@ function ProjectList() {
     }
   };
 
-  const normalized = normalizeProjectName(projectName);
-  const nameChanged = projectName !== normalized && normalized.length > 0;
+  const normalized = sanitizeProjectName(projectName);
 
   // Determine which sections to show in the modal
   const showVcsSelector = vcsInfo && !vcsInfo.existing_vcs && !hasExistingConfig;
@@ -371,26 +366,10 @@ function ProjectList() {
               if (e.key === "Enter" && !modalLoading) handleModalSubmit();
             }}
             placeholder="e.g. my-project"
-            maxLength={63}
+            maxLength={100}
             autoFocus
             style={{ width: "100%" }}
           />
-        </div>
-
-        {/* Normalized preview */}
-        <div
-          style={{
-            minHeight: 22,
-            marginBottom: 12,
-            fontSize: 12,
-            color: "var(--text-muted)",
-          }}
-        >
-          {nameChanged && (
-            <span>
-              Will be saved as: <strong className="mono">{normalized}</strong>
-            </span>
-          )}
         </div>
 
         {/* VCS selection (only when no VCS exists and no config) */}
@@ -467,7 +446,7 @@ function ProjectList() {
                 fontWeight: 500,
               }}
             >
-              Branching Mode
+              Workspace Mode
             </label>
             <div className="flex gap-2">
               <button

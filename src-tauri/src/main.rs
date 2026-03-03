@@ -81,16 +81,17 @@ fn main() {
             commands::projects::detect_orphan_projects,
             commands::projects::cleanup_orphan_project,
             commands::projects::detect_vcs_info,
-            // Branches
+            // Workspaces
             commands::workspaces::list_workspaces,
             commands::workspaces::get_connection_info,
             commands::workspaces::create_workspace,
             commands::workspaces::switch_workspace,
             commands::workspaces::delete_workspace,
+            commands::workspaces::prune_worktrees,
             // Services
             commands::services::add_service,
             commands::services::list_services,
-            commands::services::list_service_branches,
+            commands::services::list_service_workspaces,
             commands::services::start_service,
             commands::services::stop_service,
             commands::services::run_doctor,

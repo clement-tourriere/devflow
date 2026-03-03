@@ -31,7 +31,6 @@ pub struct TerminalSessionInfo {
     pub label: String,
     pub project_path: Option<String>,
     pub workspace_name: Option<String>,
-    pub service_name: Option<String>,
     pub working_directory: String,
     pub status: TerminalStatus,
 }
@@ -41,7 +40,6 @@ pub struct SessionMetadata {
     pub label: String,
     pub project_path: Option<String>,
     pub workspace_name: Option<String>,
-    pub service_name: Option<String>,
 }
 
 /// A live terminal session backed by a PTY.
@@ -125,7 +123,6 @@ impl TerminalManager {
             label: metadata.label.clone(),
             project_path: metadata.project_path.clone(),
             workspace_name: metadata.workspace_name.clone(),
-            service_name: metadata.service_name.clone(),
             working_directory: working_dir.clone(),
             status: TerminalStatus::Running,
         };
@@ -246,7 +243,6 @@ impl TerminalManager {
                 label: s.metadata.label.clone(),
                 project_path: s.metadata.project_path.clone(),
                 workspace_name: s.metadata.workspace_name.clone(),
-                service_name: s.metadata.service_name.clone(),
                 working_directory: s.working_directory.clone(),
                 status: s.status.clone(),
             });
@@ -264,7 +260,6 @@ impl TerminalManager {
             label: s.metadata.label.clone(),
             project_path: s.metadata.project_path.clone(),
             workspace_name: s.metadata.workspace_name.clone(),
-            service_name: s.metadata.service_name.clone(),
             working_directory: s.working_directory.clone(),
             status: s.status.clone(),
         })

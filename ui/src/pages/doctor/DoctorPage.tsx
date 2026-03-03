@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
-import { runDoctor, installVcsHooks, uninstallVcsHooks } from "../../utils/invoke";
+import { runDoctor, installVcsHooks, uninstallVcsHooks, pruneWorktrees } from "../../utils/invoke";
 import type { DoctorReport, DoctorServiceReport } from "../../types";
 
 function DoctorPage() {
@@ -14,6 +14,7 @@ function DoctorPage() {
     "install" | "remove" | null
   >(null);
   const [hookActionError, setHookActionError] = useState<string | null>(null);
+  const [pruneLoading, setPruneLoading] = useState(false);
 
   const reloadDoctor = useCallback(async () => {
     if (!projectPath) {
@@ -65,6 +66,19 @@ function DoctorPage() {
     }
   };
 
+  const handlePruneWorktrees = async () => {
+    if (!projectPath || pruneLoading) return;
+    setPruneLoading(true);
+    try {
+      await pruneWorktrees(projectPath);
+      await reloadDoctor();
+    } catch (e) {
+      setHookActionError(`Failed to prune worktrees: ${e}`);
+    } finally {
+      setPruneLoading(false);
+    }
+  };
+
   const renderServiceReport = (
     entry: DoctorServiceReport,
     title: string,
@@ -84,6 +98,7 @@ function DoctorPage() {
         <tbody>
           {entry.checks.map((check) => {
             const isHooksCheck = showHookActions && check.name === "VCS hooks";
+            const isWorktreeCheck = showHookActions && check.name === "Worktree metadata";
             return (
               <tr key={check.name}>
                 <td>
@@ -128,6 +143,15 @@ function DoctorPage() {
                           {hookActionLoading === "remove" ? "Removing..." : "Remove hooks"}
                         </button>
                       </div>
+                    ) : isWorktreeCheck && !check.available ? (
+                      <button
+                        className="btn"
+                        onClick={handlePruneWorktrees}
+                        disabled={pruneLoading}
+                        style={{ padding: "4px 10px", fontSize: 12 }}
+                      >
+                        {pruneLoading ? "Pruning..." : "Prune"}
+                      </button>
                     ) : (
                       <span style={{ color: "var(--text-muted)", fontSize: 12 }}>-</span>
                     )}

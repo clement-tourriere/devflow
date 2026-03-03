@@ -8,14 +8,12 @@ import {
   listTerminals,
   listProjects,
   listWorkspaces,
-  listServices,
   getSettings,
 } from "../utils/invoke";
 import type {
   AppSettings,
   WorkspaceEntry,
   ProjectEntry,
-  ServiceEntry,
   TerminalExitEvent,
   TerminalRenderer,
   TerminalSessionInfo,
@@ -31,7 +29,6 @@ interface TerminalPanelProps {
   pendingTerminal: {
     projectPath?: string;
     workspaceName?: string;
-    serviceName?: string;
   } | null;
   onPendingTerminalHandled: () => void;
 }
@@ -68,11 +65,8 @@ function TerminalPanel({
   const [launcherProjectPath, setLauncherProjectPath] = useState("");
   const [launcherBranches, setLauncherBranches] = useState<WorkspaceEntry[]>([]);
   const [launcherBranchName, setLauncherBranchName] = useState("");
-  const [launcherServices, setLauncherServices] = useState<ServiceEntry[]>([]);
-  const [launcherServiceName, setLauncherServiceName] = useState("");
   const [launcherProjectFilter, setLauncherProjectFilter] = useState("");
   const [launcherBranchFilter, setLauncherBranchFilter] = useState("");
-  const [launcherServiceFilter, setLauncherServiceFilter] = useState("");
   const [launcherLoadingProjects, setLauncherLoadingProjects] = useState(false);
   const [launcherLoadingTargets, setLauncherLoadingTargets] = useState(false);
   const [launcherError, setLauncherError] = useState<string | null>(null);
@@ -97,17 +91,6 @@ function TerminalPanel({
     );
   }, [launcherBranches, launcherBranchFilter]);
 
-  const filteredServices = useMemo(() => {
-    const query = launcherServiceFilter.trim().toLowerCase();
-    if (!query) return launcherServices;
-    return launcherServices.filter(
-      (service) =>
-        service.name.toLowerCase().includes(query) ||
-        service.service_type.toLowerCase().includes(query) ||
-        service.provider_type.toLowerCase().includes(query)
-    );
-  }, [launcherServices, launcherServiceFilter]);
-
   const selectedProject = useMemo(
     () => launcherProjects.find((project) => project.path === launcherProjectPath) ?? null,
     [launcherProjects, launcherProjectPath]
@@ -116,11 +99,8 @@ function TerminalPanel({
   const previewLabel = useMemo(() => {
     const projectName = selectedProject?.name ?? "terminal";
     if (!launcherBranchName) return projectName;
-    if (launcherServiceName) {
-      return `${launcherServiceName}:${projectName}/${launcherBranchName}`;
-    }
     return `${projectName}/${launcherBranchName}`;
-  }, [selectedProject, launcherBranchName, launcherServiceName]);
+  }, [selectedProject, launcherBranchName]);
 
   // Load existing terminal sessions
   useEffect(() => {
@@ -213,9 +193,9 @@ function TerminalPanel({
   }, []);
 
   const handleCreateTargetedTab = useCallback(
-    async (projectPath?: string, workspaceName?: string, serviceName?: string) => {
+    async (projectPath?: string, workspaceName?: string) => {
       try {
-        const session = await createTerminalInvoke(projectPath, workspaceName, serviceName);
+        const session = await createTerminalInvoke(projectPath, workspaceName);
         setTabs((prev) => [...prev, session]);
         setActiveTabId(session.id);
       } catch (e) {
@@ -232,8 +212,7 @@ function TerminalPanel({
     const open = async () => {
       await handleCreateTargetedTab(
         pendingTerminal.projectPath,
-        pendingTerminal.workspaceName,
-        pendingTerminal.serviceName
+        pendingTerminal.workspaceName
       );
       onPendingTerminalHandled();
     };
@@ -246,7 +225,6 @@ function TerminalPanel({
     setLauncherError(null);
     setLauncherProjectFilter("");
     setLauncherBranchFilter("");
-    setLauncherServiceFilter("");
     setLauncherLoadingProjects(true);
 
     try {
@@ -257,8 +235,6 @@ function TerminalPanel({
         setLauncherProjectPath("");
         setLauncherBranches([]);
         setLauncherBranchName("");
-        setLauncherServices([]);
-        setLauncherServiceName("");
         setLauncherError("No projects registered yet.");
         return;
       }
@@ -282,33 +258,23 @@ function TerminalPanel({
     setLauncherLoadingTargets(true);
     setLauncherError(null);
 
-    Promise.all([
-      listWorkspaces(launcherProjectPath),
-      listServices(launcherProjectPath),
-    ])
-      .then(([branchResponse, services]) => {
+    listWorkspaces(launcherProjectPath)
+      .then((branchResponse) => {
         if (cancelled) return;
 
         const workspaces = branchResponse.workspaces;
         setLauncherBranches(workspaces);
-        setLauncherServices(services);
 
         setLauncherBranchName((prev) => {
           if (prev && workspaces.some((b) => b.name === prev)) return prev;
           const defaultBranch = workspaces.find((b) => b.is_default);
           return defaultBranch?.name ?? workspaces[0]?.name ?? "";
         });
-
-        setLauncherServiceName((prev) =>
-          prev && services.some((s) => s.name === prev) ? prev : ""
-        );
       })
       .catch((e) => {
         if (cancelled) return;
         setLauncherBranches([]);
         setLauncherBranchName("");
-        setLauncherServices([]);
-        setLauncherServiceName("");
         setLauncherError(`Failed to load workspace targets: ${e}`);
       })
       .finally(() => {
@@ -336,13 +302,6 @@ function TerminalPanel({
     }
   }, [showLauncher, filteredBranches, launcherBranchName]);
 
-  useEffect(() => {
-    if (!showLauncher) return;
-    if (launcherServiceName && !filteredServices.some((s) => s.name === launcherServiceName)) {
-      setLauncherServiceName("");
-    }
-  }, [showLauncher, filteredServices, launcherServiceName]);
-
   const handleCreateFromLauncher = useCallback(async () => {
     if (!launcherProjectPath) {
       setLauncherError("Choose a project first.");
@@ -355,16 +314,10 @@ function TerminalPanel({
 
     await handleCreateTargetedTab(
       launcherProjectPath,
-      launcherBranchName,
-      launcherServiceName || undefined
+      launcherBranchName
     );
     setShowLauncher(false);
-  }, [
-    launcherProjectPath,
-    launcherBranchName,
-    launcherServiceName,
-    handleCreateTargetedTab,
-  ]);
+  }, [launcherProjectPath, launcherBranchName, handleCreateTargetedTab]);
 
   const handleCloseTab = useCallback(
     async (sessionId: string, e: React.MouseEvent) => {
@@ -568,8 +521,7 @@ function TerminalPanel({
                 Focus your terminal on one workspace
               </div>
               <div className="terminal-launcher-intro-subtitle">
-                Pick a project, choose a workspace, and optionally attach a service
-                environment.
+                Pick a project and choose a workspace.
               </div>
             </div>
 
@@ -644,36 +596,6 @@ function TerminalPanel({
                   )}
                 </select>
               </div>
-
-              <div className="terminal-launcher-field">
-                <div className="terminal-launcher-field-head">
-                  <span>Service Environment (optional)</span>
-                  <span className="terminal-launcher-count">
-                    {filteredServices.length}/{launcherServices.length}
-                  </span>
-                </div>
-                <input
-                  type="text"
-                  className="terminal-launcher-filter"
-                  placeholder="Filter services"
-                  value={launcherServiceFilter}
-                  onChange={(e) => setLauncherServiceFilter(e.target.value)}
-                  disabled={launcherLoadingTargets}
-                />
-                <select
-                  value={launcherServiceName}
-                  onChange={(e) => setLauncherServiceName(e.target.value)}
-                  className="terminal-launcher-select"
-                  disabled={launcherLoadingTargets}
-                >
-                  <option value="">Default shell environment</option>
-                  {filteredServices.map((service) => (
-                    <option key={service.name} value={service.name}>
-                      {service.name} ({service.service_type}/{service.provider_type})
-                    </option>
-                  ))}
-                </select>
-              </div>
             </div>
 
             <div className="terminal-launcher-preview">
@@ -684,10 +606,6 @@ function TerminalPanel({
               <div className="terminal-launcher-preview-row">
                 <span>Workspace</span>
                 <span className="mono">{launcherBranchName || "-"}</span>
-              </div>
-              <div className="terminal-launcher-preview-row">
-                <span>Service scope</span>
-                <span className="mono">{launcherServiceName || "default"}</span>
               </div>
             </div>
 

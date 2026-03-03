@@ -22,6 +22,7 @@ import type {
   VcsInfo,
   TerminalSessionInfo,
   WorkspaceCreationMode,
+  PruneResult,
 } from "../types";
 
 // Projects
@@ -41,7 +42,7 @@ export const addOrInitProject = (path: string, name?: string, vcsPreference?: st
 export const detectVcsInfo = (path: string) =>
   invoke<VcsInfo>("detect_vcs_info", { path });
 
-// Branches
+// Workspaces
 export const listWorkspaces = (projectPath: string) =>
   invoke<WorkspacesResponse>("list_workspaces", { projectPath });
 export const getConnectionInfo = (
@@ -71,6 +72,8 @@ export const deleteWorkspace = (projectPath: string, workspaceName: string) =>
     projectPath,
     workspaceName,
   });
+export const pruneWorktrees = (projectPath: string) =>
+  invoke<PruneResult>("prune_worktrees", { projectPath });
 
 // Services
 export const addService = (projectPath: string, request: AddServiceRequest) =>
@@ -119,7 +122,7 @@ export const listServiceWorkspaces = (
   projectPath: string,
   serviceName: string
 ) =>
-  invoke<ServiceWorkspaceInfo[]>("list_service_branches", {
+  invoke<ServiceWorkspaceInfo[]>("list_service_workspaces", {
     projectPath,
     serviceName,
   });
@@ -184,13 +187,11 @@ export const saveSettings = (settings: AppSettings) =>
 // Terminal
 export const createTerminal = (
   projectPath?: string,
-  workspaceName?: string,
-  serviceName?: string
+  workspaceName?: string
 ) =>
   invoke<TerminalSessionInfo>("create_terminal", {
     projectPath,
     workspaceName,
-    serviceName,
   });
 export const listTerminals = () =>
   invoke<TerminalSessionInfo[]>("list_terminals");

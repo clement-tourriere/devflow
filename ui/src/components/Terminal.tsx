@@ -133,10 +133,12 @@ palette = 15=#ffffff
               },
             },
             beforeInput: ({ text, source }: { text: string; source: string }) => {
-              if (source !== "pty" && text.length > 0) {
-                writeTerminal(sessionId, encodeBase64(text)).catch(() => {});
+              if (source === "pty" || text.length === 0) {
+                return text;
               }
-              return text;
+
+              writeTerminal(sessionId, encodeBase64(text)).catch(() => {});
+              return null;
             },
           },
         });

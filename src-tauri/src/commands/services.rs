@@ -498,7 +498,7 @@ pub struct ServiceWorkspaceInfo {
 }
 
 #[tauri::command]
-pub async fn list_service_branches(
+pub async fn list_service_workspaces(
     project_path: String,
     service_name: String,
 ) -> Result<Vec<ServiceWorkspaceInfo>, String> {

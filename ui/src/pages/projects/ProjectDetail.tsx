@@ -40,13 +40,13 @@ function ProjectDetail() {
   const { openTerminal } = useTerminal();
 
   const [detail, setDetail] = useState<ProjectDetailType | null>(null);
-  const [workspaces, setBranches] = useState<WorkspaceEntry[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
   const [services, setServices] = useState<ServiceEntry[]>([]);
-  const [currentWorkspace, setCurrentBranch] = useState<string | null>(null);
+  const [currentWorkspace, setCurrentWorkspace] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Service workspace tracking: { "service-name": ServiceWorkspaceInfo[] }
-  const [serviceWorkspaces, setServiceWorkspacees] = useState<
+  const [serviceWorkspaces, setServiceWorkspaces] = useState<
     Record<string, ServiceWorkspaceInfo[]>
   >({});
   const [expandedServices, setExpandedServices] = useState<Set<string>>(
@@ -54,12 +54,12 @@ function ProjectDetail() {
   );
 
   // Modal state
-  const [showCreateBranch, setShowCreateBranch] = useState(false);
-  const [newBranchName, setNewBranchName] = useState("");
-  const [fromWorkspace, setFromBranch] = useState("");
+  const [showCreateWorkspace, setShowCreateWorkspace] = useState(false);
+  const [newWorkspaceName, setNewWorkspaceName] = useState("");
+  const [fromWorkspace, setFromWorkspace] = useState("");
   const [creationMode, setCreationMode] = useState<WorkspaceCreationMode>("branch");
-  const [deletingBranch, setDeletingBranch] = useState<string | null>(null);
-  const [connInfoBranch, setConnInfoBranch] = useState<string | null>(null);
+  const [deletingWorkspace, setDeletingWorkspace] = useState<string | null>(null);
+  const [connInfoWorkspace, setConnInfoWorkspace] = useState<string | null>(null);
   const [connInfo, setConnInfo] = useState<Record<string, ConnectionInfo>>({});
   const [connInfoContainers, setConnInfoContainers] = useState<Record<string, ContainerEntry>>({});
   const [logService, setLogService] = useState<{
@@ -79,7 +79,7 @@ function ProjectDetail() {
   const [addSvcName, setAddSvcName] = useState("app-db");
   const [addSvcImage, setAddSvcImage] = useState("postgres:17");
   const [addSvcSeed, setAddSvcSeed] = useState("");
-  const [addSvcAutoBranch, setAddSvcAutoBranch] = useState(true);
+  const [addSvcAutoWorkspace, setAddSvcAutoWorkspace] = useState(true);
   const [addSvcError, setAddSvcError] = useState<string | null>(null);
 
   // Danger zone state
@@ -93,15 +93,15 @@ function ProjectDetail() {
 
   // Loading state
   const [actionLoading, setActionLoading] = useState<string | null>(null);
-  const isCreatingBranch = actionLoading === "create";
+  const isCreatingWorkspace = actionLoading === "create";
   const projectDefaultCreationMode: WorkspaceCreationMode = detail?.worktree_enabled
     ? "worktree"
     : "branch";
 
-  const fetchServiceWorkspacees = useCallback(
+  const fetchServiceWorkspaces = useCallback(
     async (svcs: ServiceEntry[]) => {
       if (svcs.length === 0) {
-        setServiceWorkspacees({});
+        setServiceWorkspaces({});
         return;
       }
       const result: Record<string, ServiceWorkspaceInfo[]> = {};
@@ -114,7 +114,7 @@ function ProjectDetail() {
           }
         })
       );
-      setServiceWorkspacees(result);
+      setServiceWorkspaces(result);
     },
     [projectPath]
   );
@@ -133,12 +133,12 @@ function ProjectDetail() {
     await Promise.all([
       listWorkspaces(projectPath)
         .then((b) => {
-          setBranches(b.workspaces);
-          setCurrentBranch(b.current);
+          setWorkspaces(b.workspaces);
+          setCurrentWorkspace(b.current);
         })
         .catch(() => {
-          setBranches([]);
-          setCurrentBranch(null);
+          setWorkspaces([]);
+          setCurrentWorkspace(null);
         }),
       listServices(projectPath)
         .then((svcs) => {
@@ -154,26 +154,26 @@ function ProjectDetail() {
         .catch(() => setContainers([])),
     ]);
     // Fetch service workspaces after we know the services
-    await fetchServiceWorkspacees(loadedServices);
-  }, [projectPath, fetchServiceWorkspacees]);
+    await fetchServiceWorkspaces(loadedServices);
+  }, [projectPath, fetchServiceWorkspaces]);
 
   useEffect(() => {
     reload();
   }, [reload]);
 
-  const handleCreateBranch = async () => {
-    if (!newBranchName.trim() || isCreatingBranch) return;
+  const handleCreateWorkspace = async () => {
+    if (!newWorkspaceName.trim() || isCreatingWorkspace) return;
     setActionLoading("create");
     try {
       await createWorkspace(
         projectPath,
-        newBranchName.trim(),
+        newWorkspaceName.trim(),
         fromWorkspace || undefined,
         creationMode
       );
-      setShowCreateBranch(false);
-      setNewBranchName("");
-      setFromBranch("");
+      setShowCreateWorkspace(false);
+      setNewWorkspaceName("");
+      setFromWorkspace("");
       setCreationMode(projectDefaultCreationMode);
       await reload();
     } catch (e) {
@@ -183,12 +183,12 @@ function ProjectDetail() {
     }
   };
 
-  const handleDeleteBranch = async () => {
-    if (!deletingBranch) return;
+  const handleDeleteWorkspace = async () => {
+    if (!deletingWorkspace) return;
     setActionLoading("delete");
     try {
-      await deleteWorkspace(projectPath, deletingBranch);
-      setDeletingBranch(null);
+      await deleteWorkspace(projectPath, deletingWorkspace);
+      setDeletingWorkspace(null);
       await reload();
     } catch (e) {
       alert(`Failed to delete workspace: ${e}`);
@@ -201,7 +201,7 @@ function ProjectDetail() {
     serviceName: string,
     workspaceName: string
   ) => {
-    setConnInfoBranch(workspaceName);
+    setConnInfoWorkspace(workspaceName);
     try {
       const infos: Record<string, ConnectionInfo> = {};
       try {
@@ -257,7 +257,7 @@ function ProjectDetail() {
       // Refresh workspaces for this service
       try {
         const workspaces = await listServiceWorkspaces(projectPath, svcName);
-        setServiceWorkspacees((prev) => ({ ...prev, [svcName]: workspaces }));
+        setServiceWorkspaces((prev) => ({ ...prev, [svcName]: workspaces }));
       } catch {
         // ignore
       }
@@ -275,7 +275,7 @@ function ProjectDetail() {
       // Refresh workspaces for this service
       try {
         const workspaces = await listServiceWorkspaces(projectPath, svcName);
-        setServiceWorkspacees((prev) => ({ ...prev, [svcName]: workspaces }));
+        setServiceWorkspaces((prev) => ({ ...prev, [svcName]: workspaces }));
       } catch {
         // ignore
       }
@@ -297,7 +297,7 @@ function ProjectDetail() {
           projectPath,
           resetTarget.name
         );
-        setServiceWorkspacees((prev) => ({
+        setServiceWorkspaces((prev) => ({
           ...prev,
           [resetTarget.name]: workspaces,
         }));
@@ -388,7 +388,7 @@ function ProjectDetail() {
     setAddSvcName("app-db");
     setAddSvcImage("postgres:17");
     setAddSvcSeed("");
-    setAddSvcAutoBranch(true);
+    setAddSvcAutoWorkspace(true);
     setAddSvcError(null);
     setShowAddService(true);
   };
@@ -419,7 +419,7 @@ function ProjectDetail() {
         name: addSvcName.trim(),
         service_type: addSvcType,
         provider_type: addSvcProvider,
-        auto_workspace: addSvcAutoBranch,
+        auto_workspace: addSvcAutoWorkspace,
         image: addSvcImage.trim() || undefined,
         seed_from: addSvcSeed.trim() || undefined,
       };
@@ -512,11 +512,11 @@ function ProjectDetail() {
           <button
             className="btn btn-primary"
             onClick={() => {
-              const defaultBranch = workspaces.find((b) => b.is_default);
-              setFromBranch(defaultBranch?.name ?? "");
-              setNewBranchName("");
+              const defaultWorkspace = workspaces.find((b) => b.is_default);
+              setFromWorkspace(defaultWorkspace?.name ?? "");
+              setNewWorkspaceName("");
               setCreationMode(projectDefaultCreationMode);
-              setShowCreateBranch(true);
+              setShowCreateWorkspace(true);
             }}
             style={{ padding: "4px 12px", fontSize: 13 }}
           >
@@ -530,78 +530,71 @@ function ProjectDetail() {
             <thead>
               <tr>
                 <th style={{ width: "25%" }}>Workspace</th>
-                <th style={{ width: "15%" }}>Parent</th>
+                <th style={{ width: "26%" }}>Tags</th>
+                <th style={{ width: "12%" }}>Parent</th>
                 <th style={{ width: "12%" }}>Created</th>
-                <th style={{ width: "26%" }}>Worktree</th>
-                <th style={{ textAlign: "right", width: "22%" }}>Actions</th>
+                <th style={{ textAlign: "right", width: "25%" }}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {workspaces.map((b) => (
                 <tr key={b.name}>
-                  <td style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={b.name}>
-                    <span style={{ fontWeight: b.is_default ? 600 : 400 }}>
-                      {b.name}
-                    </span>
-                    {b.is_default && (
+                  <td style={{ overflow: "hidden" }} title={b.name}>
+                    <div>
+                      <span style={{ fontWeight: b.is_default ? 600 : 400 }}>
+                        {b.name}
+                      </span>
+                    </div>
+                    {b.worktree_path && (
                       <span
-                        className="badge badge-info"
-                        style={{ marginLeft: 6 }}
+                        className="mono"
+                        style={{
+                          color: "var(--text-muted)",
+                          fontSize: 11,
+                          display: "block",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                        title={b.worktree_path}
                       >
-                        default
+                        {b.worktree_path}
                       </span>
                     )}
-                    {!detail.worktree_enabled && b.is_current && (
-                      <span
-                        className="badge"
-                        style={{ marginLeft: 6, fontSize: 10, opacity: 0.7 }}
-                      >
-                        HEAD
-                      </span>
-                    )}
-                    {b.agent_status && (
-                      <span
-                        className={`badge${b.agent_status === "running" ? " badge-success" : ""}`}
-                        style={{ marginLeft: 6 }}
-                        title={b.agent_tool ? `Agent: ${b.agent_tool}` : undefined}
-                      >
-                        {b.agent_status}
-                      </span>
-                    )}
+                  </td>
+                  <td>
+                    <div className="flex gap-1" style={{ flexWrap: "wrap" }}>
+                      {b.worktree_path ? (
+                        <span className="badge" style={{ fontSize: 10 }}>git worktree</span>
+                      ) : (
+                        <span className="badge" style={{ fontSize: 10 }}>git branch</span>
+                      )}
+                      {b.cow_used && (
+                        <span className="badge badge-success" style={{ fontSize: 10 }}
+                          title="Copy-on-Write clone">CoW</span>
+                      )}
+                      {b.is_current && (
+                        <span className="badge badge-success" style={{ fontSize: 10 }}>active</span>
+                      )}
+                      {b.is_default && (
+                        <span className="badge badge-info" style={{ fontSize: 10 }}>default</span>
+                      )}
+                      {b.agent_status && (
+                        <span
+                          className={`badge${b.agent_status === "running" ? " badge-success" : ""}`}
+                          style={{ fontSize: 10 }}
+                          title={b.agent_tool ? `Agent: ${b.agent_tool}` : undefined}
+                        >
+                          {b.agent_status}
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td style={{ color: "var(--text-muted)", fontSize: 13 }}>
                     {b.parent || "-"}
                   </td>
                   <td style={{ color: "var(--text-muted)", fontSize: 12 }}>
                     {b.created_at || "-"}
-                  </td>
-                  <td style={{ overflow: "hidden" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, width: "100%" }}>
-                      <span
-                        className="mono"
-                        style={{
-                          color: "var(--text-muted)",
-                          fontSize: 12,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                          flex: 1,
-                          minWidth: 0,
-                        }}
-                        title={b.worktree_path || undefined}
-                      >
-                        {b.worktree_path || "-"}
-                      </span>
-                      {b.worktree_path && b.cow_used && (
-                        <span
-                          className="badge badge-success"
-                          style={{ fontSize: 10, flexShrink: 0 }}
-                          title="Worktree created using APFS Copy-on-Write clone (near-zero disk usage)"
-                        >
-                          CoW
-                        </span>
-                      )}
-                    </div>
                   </td>
                   <td style={{ textAlign: "right" }}>
                     <div className="flex gap-2" style={{ justifyContent: "flex-end", flexWrap: "wrap", rowGap: 6 }}>
@@ -627,10 +620,10 @@ function ProjectDetail() {
                           justifyContent: "center",
                         }}
                           onClick={() => {
-                            setFromBranch(b.name);
-                            setNewBranchName("");
+                            setFromWorkspace(b.name);
+                            setNewWorkspaceName("");
                             setCreationMode(projectDefaultCreationMode);
-                            setShowCreateBranch(true);
+                            setShowCreateWorkspace(true);
                           }}
                         title="Workspace from this workspace"
                         aria-label={`Workspace from ${b.name}`}
@@ -662,7 +655,7 @@ function ProjectDetail() {
                             padding: 0,
                             justifyContent: "center",
                           }}
-                          onClick={() => setDeletingBranch(b.name)}
+                          onClick={() => setDeletingWorkspace(b.name)}
                           title={`Delete workspace ${b.name}`}
                           aria-label={`Delete workspace ${b.name}`}
                         >
@@ -897,23 +890,6 @@ function ProjectDetail() {
                                         justifyContent: "flex-end",
                                       }}
                                     >
-                                      <button
-                                        className="btn"
-                                        style={{
-                                          padding: "2px 10px",
-                                          fontSize: 12,
-                                        }}
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          openTerminal({
-                                            projectPath,
-                                            workspaceName: b.name,
-                                            serviceName: s.name,
-                                          });
-                                        }}
-                                      >
-                                        Terminal
-                                      </button>
                                       <button
                                         className="btn"
                                         style={{
@@ -1206,10 +1182,10 @@ function ProjectDetail() {
 
       {/* Create Workspace Modal */}
       <Modal
-        open={showCreateBranch}
+        open={showCreateWorkspace}
         onClose={() => {
-          if (!isCreatingBranch) {
-            setShowCreateBranch(false);
+          if (!isCreatingWorkspace) {
+            setShowCreateWorkspace(false);
           }
         }}
         title="Create Workspace"
@@ -1227,13 +1203,13 @@ function ProjectDetail() {
           </label>
           <input
             type="text"
-            value={newBranchName}
-            onChange={(e) => setNewBranchName(e.target.value)}
+            value={newWorkspaceName}
+            onChange={(e) => setNewWorkspaceName(e.target.value)}
             placeholder="feature/my-workspace"
             style={{ width: "100%" }}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !isCreatingBranch) {
-                handleCreateBranch();
+              if (e.key === "Enter" && !isCreatingWorkspace) {
+                handleCreateWorkspace();
               }
             }}
             autoFocus
@@ -1290,7 +1266,7 @@ function ProjectDetail() {
           </label>
           <select
             value={fromWorkspace}
-            onChange={(e) => setFromBranch(e.target.value)}
+            onChange={(e) => setFromWorkspace(e.target.value)}
             style={{
               width: "100%",
               background: "var(--bg-primary)",
@@ -1311,20 +1287,20 @@ function ProjectDetail() {
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
           <button
             className="btn"
-            onClick={() => setShowCreateBranch(false)}
-            disabled={isCreatingBranch}
+            onClick={() => setShowCreateWorkspace(false)}
+            disabled={isCreatingWorkspace}
           >
             Cancel
           </button>
           <button
             className="btn btn-primary"
-            onClick={handleCreateBranch}
-            disabled={!newBranchName.trim() || isCreatingBranch}
+            onClick={handleCreateWorkspace}
+            disabled={!newWorkspaceName.trim() || isCreatingWorkspace}
           >
-            {isCreatingBranch ? "Creating..." : "Create"}
+            {isCreatingWorkspace ? "Creating..." : "Create"}
           </button>
         </div>
-        {isCreatingBranch && (
+        {isCreatingWorkspace && (
           <p style={{ marginTop: 10, color: "var(--text-muted)", fontSize: 12 }}>
             Workspace creation is running and cannot be interrupted once started.
           </p>
@@ -1345,11 +1321,11 @@ function ProjectDetail() {
 
       {/* Delete Workspace Confirmation */}
       <ConfirmDialog
-        open={deletingBranch !== null}
-        onClose={() => setDeletingBranch(null)}
-        onConfirm={handleDeleteBranch}
+        open={deletingWorkspace !== null}
+        onClose={() => setDeletingWorkspace(null)}
+        onConfirm={handleDeleteWorkspace}
         title="Delete Workspace"
-        message={`Delete workspace "${deletingBranch}"? This will also delete associated service workspaces.`}
+        message={`Delete workspace "${deletingWorkspace}"? This will also delete associated service workspaces.`}
         confirmLabel="Delete"
         danger
         loading={actionLoading === "delete"}
@@ -1369,13 +1345,13 @@ function ProjectDetail() {
 
       {/* Connection Info Modal */}
       <Modal
-        open={connInfoBranch !== null}
+        open={connInfoWorkspace !== null}
         onClose={() => {
-          setConnInfoBranch(null);
+          setConnInfoWorkspace(null);
           setConnInfo({});
           setConnInfoContainers({});
         }}
-        title={`Connection Info — ${connInfoBranch}`}
+        title={`Connection Info — ${connInfoWorkspace}`}
         width={560}
       >
         {Object.keys(connInfo).length === 0 ? (
@@ -1573,8 +1549,8 @@ function ProjectDetail() {
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, cursor: "pointer" }}>
             <input
               type="checkbox"
-              checked={addSvcAutoBranch}
-              onChange={(e) => setAddSvcAutoBranch(e.target.checked)}
+              checked={addSvcAutoWorkspace}
+              onChange={(e) => setAddSvcAutoWorkspace(e.target.checked)}
             />
             <span style={{ color: "var(--text-primary)" }}>Auto-workspace on git checkout</span>
           </label>

@@ -80,7 +80,6 @@ pub async fn create_terminal(
     state: State<'_, AppState>,
     project_path: Option<String>,
     workspace_name: Option<String>,
-    service_name: Option<String>,
 ) -> Result<TerminalSessionInfo, String> {
     // Determine working directory
     let working_dir = if let (Some(ref pp), Some(ref workspace)) = (&project_path, &workspace_name)
@@ -123,11 +122,7 @@ pub async fn create_terminal(
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "project".to_string());
-        if let Some(ref svc) = service_name {
-            format!("{}:{}/{}", svc, project_name, workspace)
-        } else {
-            format!("{}/{}", project_name, workspace)
-        }
+        format!("{}/{}", project_name, workspace)
     } else if let Some(ref pp) = project_path {
         Path::new(pp)
             .file_name()
@@ -150,7 +145,6 @@ pub async fn create_terminal(
         label: label.clone(),
         project_path: project_path.clone(),
         workspace_name: workspace_name.clone(),
-        service_name: service_name.clone(),
     };
 
     let (info, mut output_rx) = state
