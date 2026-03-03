@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::cow_worktree;
-use super::{BranchInfo, VcsProvider, WorktreeInfo};
+use super::{BranchInfo, VcsProvider, WorktreeCreateResult, WorktreeInfo};
 
 pub struct GitRepository {
     repo: Repository,
@@ -523,8 +523,31 @@ impl VcsProvider for GitRepository {
         Ok(result)
     }
 
-    fn create_worktree(&self, branch: &str, path: &Path) -> Result<()> {
+    fn create_worktree(&self, branch: &str, path: &Path) -> Result<WorktreeCreateResult> {
         let wt_name = Self::worktree_name_for_branch(branch);
+
+        // If stale worktree metadata exists for this name (path removed on disk),
+        // prune it first so creation can proceed.
+        if let Ok(existing_wt) = self.repo.find_worktree(&wt_name) {
+            let existing_path = existing_wt.path().to_path_buf();
+            if !existing_path.exists() {
+                log::warn!(
+                    "Pruning stale worktree metadata '{}' at '{}'",
+                    wt_name,
+                    existing_path.display()
+                );
+                let mut prune_opts = WorktreePruneOptions::new();
+                prune_opts.valid(true);
+                prune_opts.working_tree(true);
+                existing_wt.prune(Some(&mut prune_opts)).with_context(|| {
+                    format!(
+                        "Failed to prune stale worktree '{}' at '{}'",
+                        wt_name,
+                        existing_path.display()
+                    )
+                })?;
+            }
+        }
 
         // Check if the branch already exists
         let branch_exists = self.branch_exists(branch)?;
@@ -551,7 +574,7 @@ impl VcsProvider for GitRepository {
                     branch,
                     path.display()
                 );
-                return Ok(());
+                return Ok(WorktreeCreateResult { cow_used: true });
             }
             Ok(false) => {
                 log::debug!("CoW not available, falling back to git2 worktree creation");
@@ -581,7 +604,7 @@ impl VcsProvider for GitRepository {
                 )
             })?;
 
-        Ok(())
+        Ok(WorktreeCreateResult { cow_used: false })
     }
 
     fn remove_worktree(&self, path: &Path) -> Result<()> {

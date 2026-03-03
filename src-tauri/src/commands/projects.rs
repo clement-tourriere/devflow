@@ -85,8 +85,7 @@ pub struct VcsInfo {
 #[tauri::command]
 pub async fn detect_vcs_info(path: String) -> Result<VcsInfo, String> {
     let dir = std::path::Path::new(&path);
-    let existing_vcs = devflow_core::vcs::detect_vcs_kind(dir)
-        .map(|k| k.to_string());
+    let existing_vcs = devflow_core::vcs::detect_vcs_kind(dir).map(|k| k.to_string());
     let available_tools = devflow_core::vcs::available_vcs_tools()
         .into_iter()
         .map(|k| k.to_string())
@@ -237,8 +236,7 @@ pub async fn add_or_init_project(
         // Config exists — add worktree config if not already present
         if let Ok(mut config) = devflow_core::config::Config::from_file(&config_path) {
             if config.worktree.is_none() {
-                config.worktree =
-                    Some(devflow_core::config::WorktreeConfig::recommended_default());
+                config.worktree = Some(devflow_core::config::WorktreeConfig::recommended_default());
                 config
                     .save_to_file(&config_path)
                     .map_err(|e| format!("Failed to update config: {}", e))?;
@@ -299,9 +297,7 @@ pub async fn get_project_detail(project_path: String) -> Result<ProjectDetail, S
     };
 
     // Derive current devflow branch: VCS branch → normalize → look up in registry
-    let vcs_branch = vcs
-        .as_ref()
-        .and_then(|v| v.current_branch().ok().flatten());
+    let vcs_branch = vcs.as_ref().and_then(|v| v.current_branch().ok().flatten());
 
     let normalized_branch = vcs_branch.as_deref().map(|b| {
         config
@@ -366,8 +362,7 @@ pub async fn destroy_project(project_path: String) -> Result<DestroyResult, Stri
     let local_config_path = path.join(".devflow.local.yml");
 
     let mut config = if config_path.exists() {
-        devflow_core::config::Config::from_file(&config_path)
-            .map_err(|e| e.to_string())?
+        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?
     } else {
         devflow_core::config::Config::default()
     };
@@ -557,9 +552,7 @@ pub async fn detect_orphan_projects() -> Result<Vec<OrphanProjectEntry>, String>
 }
 
 #[tauri::command]
-pub async fn cleanup_orphan_project(
-    project_name: String,
-) -> Result<OrphanCleanupResult, String> {
+pub async fn cleanup_orphan_project(project_name: String) -> Result<OrphanCleanupResult, String> {
     let orphans = orphan::detect_orphans()
         .await
         .map_err(|e| format!("Failed to detect orphans: {}", e))?;

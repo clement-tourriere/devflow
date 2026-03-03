@@ -92,7 +92,12 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
             for container in &containers {
                 let targets = extract_proxy_targets(container, &config.domain_suffix);
                 for target in targets {
-                    log::info!("  {} -> {}:{}", target.domain, target.container_ip, target.port);
+                    log::info!(
+                        "  {} -> {}:{}",
+                        target.domain,
+                        target.container_ip,
+                        target.port
+                    );
                     router.upsert(target).await;
                 }
             }
@@ -155,7 +160,9 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
     let https_ca = ca.clone();
     let https_shutdown = shutdown_rx.clone();
     tokio::spawn(async move {
-        if let Err(e) = server::run_https_server(https_addr, https_router, https_ca, https_shutdown).await {
+        if let Err(e) =
+            server::run_https_server(https_addr, https_router, https_ca, https_shutdown).await
+        {
             log::error!("HTTPS server error: {}", e);
         }
     });
@@ -166,7 +173,9 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
     let http_shutdown = shutdown_rx.clone();
     let https_port = config.https_port;
     tokio::spawn(async move {
-        if let Err(e) = server::run_http_server(http_addr, https_port, http_router, http_shutdown).await {
+        if let Err(e) =
+            server::run_http_server(http_addr, https_port, http_router, http_shutdown).await
+        {
             log::error!("HTTP server error: {}", e);
         }
     });
@@ -177,12 +186,26 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
     let api_cache = cert_cache.clone();
     let api_shutdown = shutdown_rx.clone();
     tokio::spawn(async move {
-        if let Err(e) = api::run_api_server(api_addr, api_router, api_cache, https_port, config.http_port, api_shutdown).await {
+        if let Err(e) = api::run_api_server(
+            api_addr,
+            api_router,
+            api_cache,
+            https_port,
+            config.http_port,
+            api_shutdown,
+        )
+        .await
+        {
             log::error!("API server error: {}", e);
         }
     });
 
-    log::info!("Proxy started — HTTPS:{} HTTP:{} API:{}", config.https_port, config.http_port, config.api_port);
+    log::info!(
+        "Proxy started — HTTPS:{} HTTP:{} API:{}",
+        config.https_port,
+        config.http_port,
+        config.api_port
+    );
 
     Ok(ProxyHandle { shutdown_tx })
 }

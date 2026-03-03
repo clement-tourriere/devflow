@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair,
-    KeyUsagePurpose, SanType,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, KeyUsagePurpose,
+    SanType,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -79,12 +79,10 @@ impl CertificateAuthority {
     pub fn load(cert_path: &Path, key_path: &Path) -> Result<Self> {
         log::info!("Loading CA from {:?}", cert_path);
 
-        let ca_cert_pem =
-            fs::read_to_string(cert_path).context("Failed to read CA certificate")?;
+        let ca_cert_pem = fs::read_to_string(cert_path).context("Failed to read CA certificate")?;
         let ca_key_pem = fs::read_to_string(key_path).context("Failed to read CA key")?;
 
-        let key_pair =
-            KeyPair::from_pem(&ca_key_pem).context("Failed to parse CA private key")?;
+        let key_pair = KeyPair::from_pem(&ca_key_pem).context("Failed to parse CA private key")?;
 
         let params = CertificateParams::from_ca_cert_pem(&ca_cert_pem)
             .context("Failed to parse CA certificate parameters")?;

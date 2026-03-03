@@ -25,6 +25,9 @@ pub struct DevflowBranch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Whether Copy-on-Write (APFS clone / reflink) was used for the worktree.
+    #[serde(default)]
+    pub cow_used: bool,
     /// AI agent tool used for this branch (e.g., "claude", "codex").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_tool: Option<String>,
@@ -343,6 +346,24 @@ impl LocalStateManager {
         self.unregister_branch(&project_dir.join(".devflow.yml"), name)
     }
 
+    /// Get project branches, initializing the default branch when empty.
+    ///
+    /// This is the common branch-loading path used by CLI/TUI/GUI so all
+    /// surfaces share the same bootstrap behavior.
+    pub fn get_or_init_branches_by_dir(
+        &mut self,
+        project_dir: &Path,
+        main_branch: &str,
+    ) -> Result<Vec<DevflowBranch>> {
+        let branches = self.get_branches_by_dir(project_dir);
+        if !branches.is_empty() {
+            return Ok(branches);
+        }
+
+        self.ensure_default_branch(project_dir, main_branch)?;
+        Ok(self.get_branches_by_dir(project_dir))
+    }
+
     /// Ensure a default devflow branch exists for this project.
     ///
     /// If the branch registry is empty, registers `main_branch` as the
@@ -360,6 +381,7 @@ impl LocalStateManager {
             parent: None,
             worktree_path: None,
             created_at: chrono::Utc::now(),
+            cow_used: false,
             agent_tool: None,
             agent_status: None,
             agent_started_at: None,

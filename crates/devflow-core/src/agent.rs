@@ -114,9 +114,7 @@ pub fn generate_opencode_config(config: &Config, _project_dir: &Path) -> Result<
     content.push_str("## Start Work on a New Task\n\n");
     content.push_str("```bash\n");
     content.push_str("TASK_ID=\"issue-123\"\n");
-    content.push_str(
-        "devflow --json --non-interactive switch -c \"agent/$TASK_ID\" --no-verify\n",
-    );
+    content.push_str("devflow --json --non-interactive switch -c \"agent/$TASK_ID\" --no-verify\n");
     content.push_str("CONN=$(devflow --json connection \"agent/$TASK_ID\")\n");
     content.push_str("```\n\n");
 
@@ -141,8 +139,7 @@ pub fn generate_opencode_config(config: &Config, _project_dir: &Path) -> Result<
         "- `service create`, `service delete`, and `switch` return non-zero exit code on failure\n",
     );
     content.push_str("- `destroy` and `remove` require `--force` in `--non-interactive` mode\n");
-    content
-        .push_str("- Use `devflow --json capabilities` for a machine-readable summary\n");
+    content.push_str("- Use `devflow --json capabilities` for a machine-readable summary\n");
 
     Ok(content)
 }
@@ -154,9 +151,7 @@ pub fn generate_cursor_rules(config: &Config, _project_dir: &Path) -> Result<Str
 
     let mut content = String::new();
     content.push_str(&format!("# devflow rules for {}\n\n", project_name));
-    content.push_str(
-        "This project uses devflow for branch-isolated development environments.\n\n",
-    );
+    content.push_str("This project uses devflow for branch-isolated development environments.\n\n");
 
     content.push_str("## Key Commands\n\n");
     content.push_str("- Create isolated branch: `devflow switch -c <branch>`\n");
@@ -202,10 +197,7 @@ pub async fn generate_agent_context(
             md.push_str(&format!("# Agent Context: {}\n\n", branch_name));
             md.push_str(&format!("**Branch**: {}\n", context.branch));
             md.push_str(&format!("**Repo**: {}\n", context.repo));
-            md.push_str(&format!(
-                "**Default Branch**: {}\n",
-                context.default_branch
-            ));
+            md.push_str(&format!("**Default Branch**: {}\n", context.default_branch));
             if let Some(ref wt) = context.worktree_path {
                 md.push_str(&format!("**Worktree**: {}\n", wt));
             }

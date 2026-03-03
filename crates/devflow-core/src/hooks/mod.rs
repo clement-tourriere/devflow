@@ -215,19 +215,21 @@ pub async fn build_hook_context(config: &crate::config::Config, branch_name: &st
         .unwrap_or_default();
 
     // Detect worktree path if we're inside a VCS worktree
-    let worktree_path = crate::vcs::detect_vcs_provider(".").ok().and_then(|vcs_repo| {
-        if vcs_repo.is_worktree() {
-            std::env::current_dir()
-                .ok()
-                .map(|p| p.to_string_lossy().to_string())
-        } else {
-            vcs_repo
-                .worktree_path(branch_name)
-                .ok()
-                .flatten()
-                .map(|p| p.to_string_lossy().to_string())
-        }
-    });
+    let worktree_path = crate::vcs::detect_vcs_provider(".")
+        .ok()
+        .and_then(|vcs_repo| {
+            if vcs_repo.is_worktree() {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.to_string_lossy().to_string())
+            } else {
+                vcs_repo
+                    .worktree_path(branch_name)
+                    .ok()
+                    .flatten()
+                    .map(|p| p.to_string_lossy().to_string())
+            }
+        });
 
     // Build service map from all configured services
     let mut service = HashMap::new();
@@ -236,9 +238,10 @@ pub async fn build_hook_context(config: &crate::config::Config, branch_name: &st
         crate::services::factory::get_all_connection_info(config, branch_name).await
     {
         for (name, info) in conn_infos {
-            let url = info.connection_string.clone().unwrap_or_else(|| {
-                format!("{}:{}", info.host, info.port)
-            });
+            let url = info
+                .connection_string
+                .clone()
+                .unwrap_or_else(|| format!("{}:{}", info.host, info.port));
             service.insert(
                 name,
                 ServiceContext {

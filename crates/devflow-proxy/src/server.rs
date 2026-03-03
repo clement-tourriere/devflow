@@ -184,14 +184,12 @@ async fn handle_request(
     _peer_addr: SocketAddr,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     // Determine the target host from SNI or Host header
-    let host = sni_hostname
-        .map(|s| s.to_string())
-        .or_else(|| {
-            req.headers()
-                .get(hyper::header::HOST)
-                .and_then(|h| h.to_str().ok())
-                .map(|h| h.split(':').next().unwrap_or(h).to_string())
-        });
+    let host = sni_hostname.map(|s| s.to_string()).or_else(|| {
+        req.headers()
+            .get(hyper::header::HOST)
+            .and_then(|h| h.to_str().ok())
+            .map(|h| h.split(':').next().unwrap_or(h).to_string())
+    });
 
     let hostname = match host {
         Some(h) => h,
@@ -221,7 +219,10 @@ async fn handle_request(
         "http://{}:{}{}",
         upstream.ip,
         upstream.port,
-        req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/")
+        req.uri()
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/")
     );
 
     // Build a TCP connection to the upstream
@@ -275,7 +276,9 @@ async fn handle_request(
     // Copy headers
     for (key, value) in &parts.headers {
         if key != hyper::header::HOST {
-            upstream_req.headers_mut().insert(key.clone(), value.clone());
+            upstream_req
+                .headers_mut()
+                .insert(key.clone(), value.clone());
         }
     }
     // Set correct Host header for upstream

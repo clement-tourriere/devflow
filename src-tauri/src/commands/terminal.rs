@@ -19,10 +19,7 @@ struct TerminalExitEvent {
 
 /// Build environment variables for a terminal session by gathering
 /// connection info from all configured services.
-async fn build_service_env(
-    project_path: &str,
-    branch_name: &str,
-) -> HashMap<String, String> {
+async fn build_service_env(project_path: &str, branch_name: &str) -> HashMap<String, String> {
     let mut env = HashMap::new();
 
     let config_path = Path::new(project_path).join(".devflow.yml");
@@ -53,10 +50,7 @@ async fn build_service_env(
 
         let prefix = svc.name.to_uppercase().replace('-', "_");
         env.insert(format!("DEVFLOW_{}_HOST", prefix), info.host.clone());
-        env.insert(
-            format!("DEVFLOW_{}_PORT", prefix),
-            info.port.to_string(),
-        );
+        env.insert(format!("DEVFLOW_{}_PORT", prefix), info.port.to_string());
         env.insert(
             format!("DEVFLOW_{}_DATABASE", prefix),
             info.database.clone(),
@@ -223,10 +217,7 @@ pub async fn resize_terminal(
 }
 
 #[tauri::command]
-pub async fn close_terminal(
-    state: State<'_, AppState>,
-    session_id: String,
-) -> Result<(), String> {
+pub async fn close_terminal(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
     state
         .terminals
         .close_session(&session_id)

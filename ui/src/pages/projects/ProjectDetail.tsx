@@ -81,6 +81,7 @@ function ProjectDetail() {
   const [addSvcError, setAddSvcError] = useState<string | null>(null);
 
   // Danger zone state
+  const [showRemoveConfirm, setShowRemoveConfirm] = useState(false);
   const [showDestroyConfirm, setShowDestroyConfirm] = useState(false);
   const [destroyConfirmText, setDestroyConfirmText] = useState("");
 
@@ -90,6 +91,7 @@ function ProjectDetail() {
 
   // Loading state
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const isCreatingBranch = actionLoading === "create";
 
   const fetchServiceBranches = useCallback(
     async (svcs: ServiceEntry[]) => {
@@ -155,7 +157,7 @@ function ProjectDetail() {
   }, [reload]);
 
   const handleCreateBranch = async () => {
-    if (!newBranchName.trim()) return;
+    if (!newBranchName.trim() || isCreatingBranch) return;
     setActionLoading("create");
     try {
       await createBranch(
@@ -335,6 +337,7 @@ function ProjectDetail() {
       alert(`Failed to remove project: ${e}`);
     } finally {
       setActionLoading(null);
+      setShowRemoveConfirm(false);
     }
   };
 
@@ -515,20 +518,20 @@ function ProjectDetail() {
         {branches.length === 0 ? (
           <p style={{ color: "var(--text-secondary)" }}>No branches found.</p>
         ) : (
-          <table className="table">
+          <table className="table" style={{ tableLayout: "fixed", width: "100%" }}>
             <thead>
               <tr>
-                <th>Branch</th>
-                <th>Parent</th>
-                <th>Created</th>
-                <th>Worktree</th>
-                <th style={{ textAlign: "right" }}>Actions</th>
+                <th style={{ width: "25%" }}>Branch</th>
+                <th style={{ width: "15%" }}>Parent</th>
+                <th style={{ width: "12%" }}>Created</th>
+                <th style={{ width: "26%" }}>Worktree</th>
+                <th style={{ textAlign: "right", width: "22%" }}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {branches.map((b) => (
                 <tr key={b.name}>
-                  <td>
+                  <td style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={b.name}>
                     <span style={{ fontWeight: b.is_default ? 600 : 400 }}>
                       {b.name}
                     </span>
@@ -564,14 +567,36 @@ function ProjectDetail() {
                   <td style={{ color: "var(--text-muted)", fontSize: 12 }}>
                     {b.created_at || "-"}
                   </td>
-                  <td
-                    className="mono"
-                    style={{ color: "var(--text-muted)", fontSize: 12 }}
-                  >
-                    {b.worktree_path || "-"}
+                  <td style={{ overflow: "hidden" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, width: "100%" }}>
+                      <span
+                        className="mono"
+                        style={{
+                          color: "var(--text-muted)",
+                          fontSize: 12,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                          flex: 1,
+                          minWidth: 0,
+                        }}
+                        title={b.worktree_path || undefined}
+                      >
+                        {b.worktree_path || "-"}
+                      </span>
+                      {b.worktree_path && b.cow_used && (
+                        <span
+                          className="badge badge-success"
+                          style={{ fontSize: 10, flexShrink: 0 }}
+                          title="Worktree created using APFS Copy-on-Write clone (near-zero disk usage)"
+                        >
+                          CoW
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td style={{ textAlign: "right" }}>
-                    <div className="flex gap-2" style={{ justifyContent: "flex-end" }}>
+                    <div className="flex gap-2" style={{ justifyContent: "flex-end", flexWrap: "wrap", rowGap: 6 }}>
                       <button
                         className="btn"
                         style={{ padding: "2px 10px", fontSize: 12 }}
@@ -587,22 +612,68 @@ function ProjectDetail() {
                       </button>
                       <button
                         className="btn"
-                        style={{ padding: "2px 10px", fontSize: 12 }}
+                        style={{
+                          width: 28,
+                          height: 24,
+                          padding: 0,
+                          justifyContent: "center",
+                        }}
                         onClick={() => {
                           setFromBranch(b.name);
                           setNewBranchName("");
                           setShowCreateBranch(true);
                         }}
+                        title="Branch from this branch"
+                        aria-label={`Branch from ${b.name}`}
                       >
-                        Branch from
+                        <svg
+                          viewBox="0 0 16 16"
+                          width="12"
+                          height="12"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          aria-hidden="true"
+                        >
+                          <circle cx="4" cy="3" r="2" />
+                          <circle cx="12" cy="8" r="2" />
+                          <circle cx="4" cy="13" r="2" />
+                          <path d="M6 3h2a4 4 0 0 1 4 4" />
+                          <path d="M4 5v6" />
+                        </svg>
                       </button>
                       {!b.is_default && (
                         <button
                           className="btn btn-danger"
-                          style={{ padding: "2px 10px", fontSize: 12 }}
+                          style={{
+                            width: 28,
+                            height: 24,
+                            padding: 0,
+                            justifyContent: "center",
+                          }}
                           onClick={() => setDeletingBranch(b.name)}
+                          title={`Delete branch ${b.name}`}
+                          aria-label={`Delete branch ${b.name}`}
                         >
-                          Delete
+                          <svg
+                            viewBox="0 0 16 16"
+                            width="12"
+                            height="12"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="1.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                          >
+                            <path d="M2.5 4h11" />
+                            <path d="M6 2.5h4" />
+                            <path d="M5 4v8.5h6V4" />
+                            <path d="M7 6.5v4" />
+                            <path d="M9 6.5v4" />
+                          </svg>
                         </button>
                       )}
                     </div>
@@ -1037,7 +1108,7 @@ function ProjectDetail() {
           <button
             className="btn btn-danger"
             style={{ marginLeft: 16, whiteSpace: "nowrap" }}
-            onClick={handleRemoveProject}
+            onClick={() => setShowRemoveConfirm(true)}
             disabled={actionLoading === "remove"}
           >
             {actionLoading === "remove" ? "Removing..." : "Remove"}
@@ -1127,7 +1198,11 @@ function ProjectDetail() {
       {/* Create Branch Modal */}
       <Modal
         open={showCreateBranch}
-        onClose={() => setShowCreateBranch(false)}
+        onClose={() => {
+          if (!isCreatingBranch) {
+            setShowCreateBranch(false);
+          }
+        }}
         title="Create Branch"
       >
         <div style={{ marginBottom: 12 }}>
@@ -1147,7 +1222,11 @@ function ProjectDetail() {
             onChange={(e) => setNewBranchName(e.target.value)}
             placeholder="feature/my-branch"
             style={{ width: "100%" }}
-            onKeyDown={(e) => e.key === "Enter" && handleCreateBranch()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !isCreatingBranch) {
+                handleCreateBranch();
+              }
+            }}
             autoFocus
             autoCapitalize="off"
             autoCorrect="off"
@@ -1189,18 +1268,36 @@ function ProjectDetail() {
           <button
             className="btn"
             onClick={() => setShowCreateBranch(false)}
+            disabled={isCreatingBranch}
           >
             Cancel
           </button>
           <button
             className="btn btn-primary"
             onClick={handleCreateBranch}
-            disabled={!newBranchName.trim() || actionLoading === "create"}
+            disabled={!newBranchName.trim() || isCreatingBranch}
           >
-            {actionLoading === "create" ? "Creating..." : "Create"}
+            {isCreatingBranch ? "Creating..." : "Create"}
           </button>
         </div>
+        {isCreatingBranch && (
+          <p style={{ marginTop: 10, color: "var(--text-muted)", fontSize: 12 }}>
+            Branch creation is running and cannot be interrupted once started.
+          </p>
+        )}
       </Modal>
+
+      {/* Remove Project Confirmation */}
+      <ConfirmDialog
+        open={showRemoveConfirm}
+        onClose={() => setShowRemoveConfirm(false)}
+        onConfirm={handleRemoveProject}
+        title="Remove Project"
+        message={`Remove "${detail?.name}" from devflow? This only removes it from devflow's registry and does not delete project files.`}
+        confirmLabel="Remove"
+        danger
+        loading={actionLoading === "remove"}
+      />
 
       {/* Delete Branch Confirmation */}
       <ConfirmDialog

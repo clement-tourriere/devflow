@@ -99,8 +99,7 @@ fn main() {
                     let config = state.proxy_config.read().await.clone();
                     match devflow_proxy::run_proxy(config.clone()).await {
                         Ok(proxy_handle) => {
-                            *state.proxy.write().await =
-                                Some(std::sync::Arc::new(proxy_handle));
+                            *state.proxy.write().await = Some(std::sync::Arc::new(proxy_handle));
                             let ca_installed =
                                 devflow_proxy::platform::verify_system_trust().unwrap_or(false);
                             let status = commands::proxy::ProxyStatus {
@@ -153,8 +152,9 @@ fn build_tray(app: &tauri::App) -> Result<tauri::tray::TrayIcon, Box<dyn std::er
     let separator1 = PredefinedMenuItem::separator(app)?;
 
     // Proxy section
-    let proxy_status_item =
-        MenuItemBuilder::with_id("proxy_status", "Proxy: Stopped").enabled(false).build(app)?;
+    let proxy_status_item = MenuItemBuilder::with_id("proxy_status", "Proxy: Stopped")
+        .enabled(false)
+        .build(app)?;
     let proxy_toggle = MenuItemBuilder::with_id("proxy_toggle", "Start Proxy").build(app)?;
     let separator2 = PredefinedMenuItem::separator(app)?;
 
@@ -164,16 +164,15 @@ fn build_tray(app: &tauri::App) -> Result<tauri::tray::TrayIcon, Box<dyn std::er
         let state: &AppState = app.state::<AppState>().inner();
         let settings = tauri::async_runtime::block_on(state.settings.read());
         if settings.projects.is_empty() {
-            let empty =
-                MenuItemBuilder::with_id("no_projects", "No projects").enabled(false).build(app)?;
+            let empty = MenuItemBuilder::with_id("no_projects", "No projects")
+                .enabled(false)
+                .build(app)?;
             builder = builder.item(&empty);
         } else {
             for project in &settings.projects {
-                let item = MenuItemBuilder::with_id(
-                    &format!("project:{}", project.path),
-                    &project.name,
-                )
-                .build(app)?;
+                let item =
+                    MenuItemBuilder::with_id(&format!("project:{}", project.path), &project.name)
+                        .build(app)?;
                 builder = builder.item(&item);
             }
         }
@@ -334,8 +333,7 @@ pub fn update_tray_menu(app: &tauri::AppHandle) {
             .unwrap();
         let sep2 = PredefinedMenuItem::separator(&handle).unwrap();
 
-        let mut projects_builder =
-            SubmenuBuilder::with_id(&handle, "projects_menu", "Projects");
+        let mut projects_builder = SubmenuBuilder::with_id(&handle, "projects_menu", "Projects");
         if settings.projects.is_empty() {
             let empty = MenuItemBuilder::with_id("no_projects", "No projects")
                 .enabled(false)
@@ -344,12 +342,10 @@ pub fn update_tray_menu(app: &tauri::AppHandle) {
             projects_builder = projects_builder.item(&empty);
         } else {
             for project in &settings.projects {
-                let item = MenuItemBuilder::with_id(
-                    &format!("project:{}", project.path),
-                    &project.name,
-                )
-                .build(&handle)
-                .unwrap();
+                let item =
+                    MenuItemBuilder::with_id(&format!("project:{}", project.path), &project.name)
+                        .build(&handle)
+                        .unwrap();
                 projects_builder = projects_builder.item(&item);
             }
         }

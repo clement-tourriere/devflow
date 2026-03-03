@@ -173,22 +173,20 @@ pub async fn detect_orphans() -> Result<Vec<OrphanInfo>> {
                         }
                     }
 
-                    let branch_count =
-                        store.list_branches(&proj.id).map(|b| b.len()).unwrap_or(0);
+                    let branch_count = store.list_branches(&proj.id).map(|b| b.len()).unwrap_or(0);
 
-                    let entry =
-                        orphans
-                            .entry(proj.name.clone())
-                            .or_insert_with(|| OrphanInfo {
-                                project_name: proj.name.clone(),
-                                project_path: proj.project_path.clone(),
-                                sources: Vec::new(),
-                                sqlite_project_id: None,
-                                sqlite_branch_count: 0,
-                                container_names: Vec::new(),
-                                local_state_service_count: 0,
-                                local_state_branch_count: 0,
-                            });
+                    let entry = orphans
+                        .entry(proj.name.clone())
+                        .or_insert_with(|| OrphanInfo {
+                            project_name: proj.name.clone(),
+                            project_path: proj.project_path.clone(),
+                            sources: Vec::new(),
+                            sqlite_project_id: None,
+                            sqlite_branch_count: 0,
+                            container_names: Vec::new(),
+                            local_state_service_count: 0,
+                            local_state_branch_count: 0,
+                        });
                     if !entry.sources.contains(&OrphanSource::Sqlite) {
                         entry.sources.push(OrphanSource::Sqlite);
                     }
@@ -247,19 +245,18 @@ pub async fn detect_orphans() -> Result<Vec<OrphanInfo>> {
                     continue;
                 }
 
-                let entry =
-                    orphans
-                        .entry(project_name.clone())
-                        .or_insert_with(|| OrphanInfo {
-                            project_name: project_name.clone(),
-                            project_path: None,
-                            sources: Vec::new(),
-                            sqlite_project_id: None,
-                            sqlite_branch_count: 0,
-                            container_names: Vec::new(),
-                            local_state_service_count: 0,
-                            local_state_branch_count: 0,
-                        });
+                let entry = orphans
+                    .entry(project_name.clone())
+                    .or_insert_with(|| OrphanInfo {
+                        project_name: project_name.clone(),
+                        project_path: None,
+                        sources: Vec::new(),
+                        sqlite_project_id: None,
+                        sqlite_branch_count: 0,
+                        container_names: Vec::new(),
+                        local_state_service_count: 0,
+                        local_state_branch_count: 0,
+                    });
                 if !entry.sources.contains(&OrphanSource::Docker) {
                     entry.sources.push(OrphanSource::Docker);
                 }
@@ -294,9 +291,10 @@ pub async fn cleanup_orphan(orphan: &OrphanInfo) -> CleanupResult {
         for container_name in &orphan.container_names {
             match remove_docker_container(container_name).await {
                 Ok(_) => result.containers_removed += 1,
-                Err(e) => result
-                    .errors
-                    .push(format!("Failed to remove container '{}': {}", container_name, e)),
+                Err(e) => result.errors.push(format!(
+                    "Failed to remove container '{}': {}",
+                    container_name, e
+                )),
             }
         }
 
@@ -396,7 +394,10 @@ fn open_sqlite_store() -> Result<super::postgres::local::state::Store> {
         .join("devflow");
     let db_path = data_root.join("state.db");
     if !db_path.exists() {
-        anyhow::bail!("SQLite state database does not exist at {}", db_path.display());
+        anyhow::bail!(
+            "SQLite state database does not exist at {}",
+            db_path.display()
+        );
     }
     super::postgres::local::state::Store::open(&db_path)
 }
@@ -418,8 +419,7 @@ async fn list_devflow_containers() -> Result<Vec<(String, String)>> {
     use bollard::query_parameters::ListContainersOptions;
     use bollard::Docker;
 
-    let docker = Docker::connect_with_local_defaults()
-        .context("failed to connect to Docker")?;
+    let docker = Docker::connect_with_local_defaults().context("failed to connect to Docker")?;
 
     let options = ListContainersOptions {
         all: true,
@@ -477,12 +477,14 @@ async fn remove_docker_container(container_name: &str) -> Result<()> {
     use bollard::query_parameters::RemoveContainerOptions;
     use bollard::Docker;
 
-    let docker = Docker::connect_with_local_defaults()
-        .context("failed to connect to Docker")?;
+    let docker = Docker::connect_with_local_defaults().context("failed to connect to Docker")?;
 
     // Stop first (ignore errors — may already be stopped)
     let _ = docker
-        .stop_container(container_name, None::<bollard::query_parameters::StopContainerOptions>)
+        .stop_container(
+            container_name,
+            None::<bollard::query_parameters::StopContainerOptions>,
+        )
         .await;
 
     docker

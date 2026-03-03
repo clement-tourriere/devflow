@@ -1,23 +1,13 @@
 import { useState, useEffect } from "react";
 import { useParams, Link } from "react-router-dom";
 import { runDoctor } from "../../utils/invoke";
-
-interface DoctorCheck {
-  name: string;
-  available: boolean;
-  detail: string;
-}
-
-interface ServiceReport {
-  service: string;
-  checks: DoctorCheck[];
-}
+import type { DoctorReport, DoctorServiceReport } from "../../types";
 
 function DoctorPage() {
   const { "*": splat } = useParams();
   const projectPath = splat ? decodeURIComponent(splat) : "";
 
-  const [reports, setReports] = useState<ServiceReport[]>([]);
+  const [report, setReport] = useState<DoctorReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -26,12 +16,54 @@ function DoctorPage() {
     setLoading(true);
     runDoctor(projectPath)
       .then((results) => {
-        setReports(results as ServiceReport[]);
+        setReport(results);
         setError(null);
       })
       .catch((e) => setError(`Doctor failed: ${e}`))
       .finally(() => setLoading(false));
   }, [projectPath]);
+
+  const renderServiceReport = (entry: DoctorServiceReport, title: string) => (
+    <div className="card" key={entry.service}>
+      <div className="card-title">{title}</div>
+      <table className="table">
+        <thead>
+          <tr>
+            <th style={{ width: 40 }}>Status</th>
+            <th>Check</th>
+            <th>Detail</th>
+          </tr>
+        </thead>
+        <tbody>
+          {entry.checks.map((check) => (
+            <tr key={check.name}>
+              <td>
+                <span
+                  style={{
+                    color: check.available ? "var(--success)" : "var(--danger)",
+                    fontWeight: 600,
+                    fontSize: 16,
+                  }}
+                >
+                  {check.available ? "\u2713" : "\u2717"}
+                </span>
+              </td>
+              <td style={{ fontWeight: 500 }}>{check.name}</td>
+              <td
+                className="mono"
+                style={{
+                  color: "var(--text-secondary)",
+                  fontSize: 12,
+                }}
+              >
+                {check.detail}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 
   return (
     <div>
@@ -63,58 +95,24 @@ function DoctorPage() {
         </div>
       )}
 
-      {!loading && !error && reports.length === 0 && (
+      {!loading && !error && report &&
+        renderServiceReport(
+          { service: "__general__", checks: report.general },
+          "General"
+        )}
+
+      {!loading && !error && report && report.services.length === 0 && (
         <div className="card">
           <p style={{ color: "var(--text-secondary)" }}>
-            No services to diagnose.
+            No services configured for this project.
           </p>
         </div>
       )}
 
-      {!loading &&
-        reports.map((report) => (
-          <div className="card" key={report.service}>
-            <div className="card-title">{report.service}</div>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th style={{ width: 40 }}>Status</th>
-                  <th>Check</th>
-                  <th>Detail</th>
-                </tr>
-              </thead>
-              <tbody>
-                {report.checks.map((check) => (
-                  <tr key={check.name}>
-                    <td>
-                      <span
-                        style={{
-                          color: check.available
-                            ? "var(--success)"
-                            : "var(--danger)",
-                          fontWeight: 600,
-                          fontSize: 16,
-                        }}
-                      >
-                        {check.available ? "\u2713" : "\u2717"}
-                      </span>
-                    </td>
-                    <td style={{ fontWeight: 500 }}>{check.name}</td>
-                    <td
-                      className="mono"
-                      style={{
-                        color: "var(--text-secondary)",
-                        fontSize: 12,
-                      }}
-                    >
-                      {check.detail}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ))}
+      {!loading && !error && report &&
+        report.services.map((serviceReport) =>
+          renderServiceReport(serviceReport, serviceReport.service)
+        )}
     </div>
   );
 }

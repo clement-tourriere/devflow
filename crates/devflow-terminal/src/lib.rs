@@ -86,9 +86,7 @@ impl TerminalManager {
             pixel_height: 0,
         };
 
-        let pair = pty_system
-            .openpty(pty_size)
-            .context("Failed to open PTY")?;
+        let pair = pty_system.openpty(pty_size).context("Failed to open PTY")?;
 
         let shell = config.shell.unwrap_or_else(default_shell);
         let mut cmd = CommandBuilder::new(&shell);
@@ -204,9 +202,7 @@ impl TerminalManager {
         let sessions = self.sessions.read().await;
         let session = sessions.get(session_id).context("Session not found")?;
         let mut s = session.lock().await;
-        s.writer
-            .write_all(data)
-            .context("Failed to write to PTY")?;
+        s.writer.write_all(data).context("Failed to write to PTY")?;
         Ok(())
     }
 

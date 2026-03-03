@@ -8,6 +8,7 @@ pub struct BranchEntry {
     pub is_current: bool,
     pub is_default: bool,
     pub worktree_path: Option<String>,
+    pub cow_used: bool,
     pub parent: Option<String>,
     pub created_at: Option<String>,
     pub agent_tool: Option<String>,
@@ -47,15 +48,9 @@ pub async fn list_branches(project_path: String) -> Result<BranchesResponse, Str
     // Read devflow branch registry
     let mut state_mgr = LocalStateManager::new().map_err(|e| e.to_string())?;
 
-    // Auto-migration: if registry is empty but config exists, register the default branch
-    if config_path.exists() {
-        let branches = state_mgr.get_branches_by_dir(project_dir);
-        if branches.is_empty() {
-            let _ = state_mgr.ensure_default_branch(project_dir, &main_branch);
-        }
-    }
-
-    let devflow_branches = state_mgr.get_branches_by_dir(project_dir);
+    let devflow_branches = state_mgr
+        .get_or_init_branches_by_dir(project_dir, &main_branch)
+        .map_err(|e| e.to_string())?;
 
     // Determine current git branch to find active devflow branch
     let vcs_provider = vcs::detect_vcs_provider(&project_path).ok();
@@ -99,6 +94,7 @@ pub async fn list_branches(project_path: String) -> Result<BranchesResponse, Str
                 is_current,
                 is_default,
                 worktree_path,
+                cow_used: b.cow_used,
                 parent: b.parent,
                 created_at: Some(b.created_at.format("%Y-%m-%d %H:%M").to_string()),
                 agent_tool: b.agent_tool,
@@ -125,8 +121,8 @@ pub async fn get_connection_info(
     service_name: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(|e| e.to_string())?;
+    let config =
+        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
 
     let named_services = config.resolve_services();
     let service_name = service_name.unwrap_or_else(|| "default".to_string());
@@ -136,10 +132,9 @@ pub async fn get_connection_info(
         .find(|s| s.name == service_name)
         .or(named_services.first())
     {
-        let provider =
-            services::factory::create_provider_from_named_config(&config, svc)
-                .await
-                .map_err(|e| e.to_string())?;
+        let provider = services::factory::create_provider_from_named_config(&config, svc)
+            .await
+            .map_err(|e| e.to_string())?;
 
         let info = provider
             .get_connection_info(&branch_name)
@@ -156,6 +151,7 @@ pub async fn get_connection_info(
 pub struct CreateBranchResult {
     pub services: Vec<OrchestrationResultDto>,
     pub worktree_path: Option<String>,
+    pub cow_used: bool,
 }
 
 #[tauri::command]
@@ -165,8 +161,7 @@ pub async fn create_branch(
     from_branch: Option<String>,
 ) -> Result<CreateBranchResult, String> {
     let project_dir = std::path::Path::new(&project_path);
-    let vcs_provider =
-        vcs::detect_vcs_provider(&project_path).map_err(|e| e.to_string())?;
+    let vcs_provider = vcs::detect_vcs_provider(&project_path).map_err(|e| e.to_string())?;
 
     // Load config if it exists
     let config_path = project_dir.join(".devflow.yml");
@@ -200,11 +195,10 @@ pub async fn create_branch(
 
     // Create worktree if enabled
     let mut worktree_path: Option<String> = None;
+    let mut cow_used = false;
     if worktree_enabled && vcs_provider.supports_worktrees() {
         // Check if a worktree already exists for this branch
-        let existing = vcs_provider
-            .worktree_path(&branch_name)
-            .unwrap_or(None);
+        let existing = vcs_provider.worktree_path(&branch_name).unwrap_or(None);
 
         if let Some(existing_path) = existing {
             worktree_path = Some(existing_path.display().to_string());
@@ -230,9 +224,10 @@ pub async fn create_branch(
                 wt_path
             };
 
-            vcs_provider
+            let wt_result = vcs_provider
                 .create_worktree(&branch_name, &wt_path)
                 .map_err(|e| format!("Failed to create worktree: {}", e))?;
+            cow_used = wt_result.cow_used;
 
             // Copy configured files from main worktree
             if let Some(wt_cfg) = wt_config {
@@ -240,7 +235,9 @@ pub async fn create_branch(
                     .main_worktree_dir()
                     .unwrap_or_else(|| project_dir.to_path_buf());
 
-                // Copy explicitly listed files
+                // Copy explicitly listed files.
+                // When CoW was used, these already exist as clones — overwrite with
+                // independent copies so they can diverge between branches.
                 for file in &wt_cfg.copy_files {
                     let src = main_dir.join(file);
                     let dst = wt_path.join(file);
@@ -248,14 +245,18 @@ pub async fn create_branch(
                         if let Some(parent) = dst.parent() {
                             std::fs::create_dir_all(parent).ok();
                         }
+                        // Remove existing clone first so the new copy is independent
+                        if cow_used && dst.exists() {
+                            let _ = std::fs::remove_file(&dst);
+                        }
                         if let Err(e) = std::fs::copy(&src, &dst) {
                             log::warn!("Failed to copy '{}' to worktree: {}", file, e);
                         }
                     }
                 }
 
-                // Copy gitignored files when copy_ignored is enabled
-                if wt_cfg.copy_ignored {
+                // Copy gitignored files — skip when CoW already cloned everything
+                if !cow_used && wt_cfg.copy_ignored {
                     if let Ok(ignored_files) = vcs_provider.list_ignored_files() {
                         for rel_path in &ignored_files {
                             let src = main_dir.join(rel_path);
@@ -277,17 +278,17 @@ pub async fn create_branch(
                 }
             }
 
-            let resolved = std::fs::canonicalize(&wt_path)
-                .unwrap_or(wt_path);
+            let resolved = std::fs::canonicalize(&wt_path).unwrap_or(wt_path);
             worktree_path = Some(resolved.display().to_string());
         }
     }
 
     // Orchestrate service branches if config exists
     let service_results = if let Some(ref cfg) = cfg {
-        let results = services::factory::orchestrate_create(cfg, &branch_name, from_branch.as_deref())
-            .await
-            .map_err(|e| e.to_string())?;
+        let results =
+            services::factory::orchestrate_create(cfg, &branch_name, from_branch.as_deref())
+                .await
+                .map_err(|e| e.to_string())?;
         results
             .into_iter()
             .map(|r| OrchestrationResultDto {
@@ -302,11 +303,21 @@ pub async fn create_branch(
 
     // Register the new branch in devflow state
     if let Ok(mut state_mgr) = LocalStateManager::new() {
+        let final_cow_used = if cow_used {
+            true
+        } else {
+            state_mgr
+                .get_branch_by_dir(project_dir, &normalized_name)
+                .map(|existing| existing.cow_used)
+                .unwrap_or(false)
+        };
+
         let branch = DevflowBranch {
             name: normalized_name,
             parent: normalized_parent,
             worktree_path: worktree_path.clone(),
             created_at: chrono::Utc::now(),
+            cow_used: final_cow_used,
             agent_tool: None,
             agent_status: None,
             agent_started_at: None,
@@ -319,6 +330,7 @@ pub async fn create_branch(
     Ok(CreateBranchResult {
         services: service_results,
         worktree_path,
+        cow_used,
     })
 }
 
@@ -327,8 +339,7 @@ pub async fn switch_branch(
     project_path: String,
     branch_name: String,
 ) -> Result<Vec<OrchestrationResultDto>, String> {
-    let vcs_provider =
-        vcs::detect_vcs_provider(&project_path).map_err(|e| e.to_string())?;
+    let vcs_provider = vcs::detect_vcs_provider(&project_path).map_err(|e| e.to_string())?;
 
     // Checkout VCS branch
     vcs_provider
@@ -361,8 +372,7 @@ pub async fn delete_branch(
     branch_name: String,
 ) -> Result<Vec<OrchestrationResultDto>, String> {
     let project_dir = std::path::Path::new(&project_path);
-    let vcs_provider =
-        vcs::detect_vcs_provider(&project_path).map_err(|e| e.to_string())?;
+    let vcs_provider = vcs::detect_vcs_provider(&project_path).map_err(|e| e.to_string())?;
 
     // 1. Remove worktree if one exists for this branch
     if let Ok(Some(wt_path)) = vcs_provider.worktree_path(&branch_name) {

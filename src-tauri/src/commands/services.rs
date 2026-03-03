@@ -2,6 +2,7 @@ use devflow_core::config::{
     ClickHouseConfig, GenericDockerConfig, LocalServiceConfig, MySQLConfig, NamedServiceConfig,
 };
 use devflow_core::services;
+use devflow_core::state::LocalStateManager;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -36,8 +37,8 @@ pub async fn add_service(
     request: AddServiceRequest,
 ) -> Result<ServiceEntry, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let mut config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(|e| e.to_string())?;
+    let mut config =
+        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
 
     // Ensure config.name is set so container names derive from the project, not cwd
     if config.name.is_none() {
@@ -177,8 +178,8 @@ fn build_named_config(request: &AddServiceRequest) -> Result<NamedServiceConfig,
 #[tauri::command]
 pub async fn list_services(project_path: String) -> Result<Vec<ServiceEntry>, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(|e| e.to_string())?;
+    let config =
+        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
 
     let named_services = config.resolve_services();
     Ok(named_services
@@ -199,8 +200,8 @@ pub async fn start_service(
     branch_name: String,
 ) -> Result<(), String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(|e| e.to_string())?;
+    let config =
+        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -225,8 +226,8 @@ pub async fn stop_service(
     branch_name: String,
 ) -> Result<(), String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(|e| e.to_string())?;
+    let config =
+        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -246,27 +247,193 @@ pub async fn stop_service(
 
 #[tauri::command]
 pub async fn run_doctor(project_path: String) -> Result<serde_json::Value, String> {
+    fn check(name: &str, available: bool, detail: impl Into<String>) -> services::DoctorCheck {
+        services::DoctorCheck {
+            name: name.to_string(),
+            available,
+            detail: detail.into(),
+        }
+    }
+
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(|e| e.to_string())?;
+    let project_dir = std::path::Path::new(&project_path);
 
-    let named_services = config.resolve_services();
-    let mut reports = Vec::new();
+    let mut general_checks: Vec<services::DoctorCheck> = Vec::new();
 
-    for svc in &named_services {
-        if let Ok(provider) =
-            services::factory::create_provider_from_named_config(&config, svc).await
-        {
-            if let Ok(report) = provider.doctor().await {
-                reports.push(serde_json::json!({
-                    "service": svc.name,
-                    "checks": report.checks,
-                }));
+    // Config file + parsing
+    if config_path.exists() {
+        general_checks.push(check(
+            "Config file",
+            true,
+            format!("Found {}", config_path.display()),
+        ));
+    } else {
+        general_checks.push(check(
+            "Config file",
+            false,
+            "Missing .devflow.yml (run devflow init)",
+        ));
+    }
+
+    let config = match devflow_core::config::Config::from_file(&config_path) {
+        Ok(cfg) => {
+            general_checks.push(check("Config syntax", true, "Configuration is valid"));
+            Some(cfg)
+        }
+        Err(e) => {
+            general_checks.push(check("Config syntax", false, format!("{}", e)));
+            None
+        }
+    };
+
+    // VCS repository detection
+    let vcs_repo = match devflow_core::vcs::detect_vcs_provider(&project_path) {
+        Ok(vcs) => {
+            general_checks.push(check(
+                "VCS repository",
+                true,
+                format!("Detected {} repository", vcs.provider_name()),
+            ));
+            Some(vcs)
+        }
+        Err(e) => {
+            general_checks.push(check("VCS repository", false, format!("{}", e)));
+            None
+        }
+    };
+
+    // Hooks installation (best effort)
+    let hooks_dir = project_dir.join(".git").join("hooks");
+    let has_hooks = if hooks_dir.exists() {
+        let post_checkout = hooks_dir.join("post-checkout");
+        let post_merge = hooks_dir.join("post-merge");
+        if let Some(ref vcs) = vcs_repo {
+            (post_checkout.exists() && vcs.is_devflow_hook(&post_checkout).unwrap_or(false))
+                || (post_merge.exists() && vcs.is_devflow_hook(&post_merge).unwrap_or(false))
+        } else {
+            post_checkout.exists() || post_merge.exists()
+        }
+    } else {
+        false
+    };
+
+    general_checks.push(check(
+        "VCS hooks",
+        has_hooks,
+        if has_hooks {
+            "devflow hooks installed".to_string()
+        } else {
+            "Hooks not installed (run devflow install-hooks)".to_string()
+        },
+    ));
+
+    // Worktree metadata health
+    if let Some(ref vcs) = vcs_repo {
+        if vcs.supports_worktrees() {
+            match vcs.list_worktrees() {
+                Ok(worktrees) => {
+                    let stale: Vec<_> = worktrees
+                        .iter()
+                        .filter(|wt| !wt.is_main && !wt.path.exists())
+                        .collect();
+
+                    if stale.is_empty() {
+                        general_checks.push(check("Worktree metadata", true, "No stale entries"));
+                    } else {
+                        let examples = stale
+                            .iter()
+                            .take(3)
+                            .map(|wt| wt.path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        general_checks.push(check(
+                            "Worktree metadata",
+                            false,
+                            format!(
+                                "{} stale entr{} (run `git worktree prune`): {}",
+                                stale.len(),
+                                if stale.len() == 1 { "y" } else { "ies" },
+                                examples
+                            ),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    general_checks.push(check(
+                        "Worktree metadata",
+                        false,
+                        format!("Inspection failed: {}", e),
+                    ));
+                }
             }
         }
     }
 
-    Ok(serde_json::Value::Array(reports))
+    // Branch registry stale paths
+    match LocalStateManager::new() {
+        Ok(state) => {
+            let missing: Vec<_> = state
+                .get_branches_by_dir(project_dir)
+                .into_iter()
+                .filter_map(|b| b.worktree_path.map(|p| (b.name, p)))
+                .filter(|(_, p)| !std::path::Path::new(p).exists())
+                .collect();
+
+            if missing.is_empty() {
+                general_checks.push(check("Branch registry paths", true, "No stale entries"));
+            } else {
+                let examples = missing
+                    .iter()
+                    .take(3)
+                    .map(|(branch, p)| format!("{} -> {}", branch, p))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                general_checks.push(check(
+                    "Branch registry paths",
+                    false,
+                    format!(
+                        "{} stale entr{}: {}",
+                        missing.len(),
+                        if missing.len() == 1 { "y" } else { "ies" },
+                        examples
+                    ),
+                ));
+            }
+        }
+        Err(e) => {
+            general_checks.push(check(
+                "Branch registry paths",
+                false,
+                format!("Inspection failed: {}", e),
+            ));
+        }
+    }
+
+    let named_services = config
+        .as_ref()
+        .map(|c| c.resolve_services())
+        .unwrap_or_default();
+    let mut reports = Vec::new();
+
+    for svc in &named_services {
+        if let Some(ref cfg) = config {
+            if let Ok(provider) =
+                services::factory::create_provider_from_named_config(cfg, svc).await
+            {
+                if let Ok(report) = provider.doctor().await {
+                    reports.push(serde_json::json!({
+                        "service": svc.name,
+                        "checks": report.checks,
+                    }));
+                }
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "general": general_checks,
+        "services": reports,
+    }))
 }
 
 #[tauri::command]
@@ -276,8 +443,8 @@ pub async fn get_service_logs(
     branch_name: String,
 ) -> Result<String, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(|e| e.to_string())?;
+    let config =
+        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -302,8 +469,8 @@ pub async fn reset_service(
     branch_name: String,
 ) -> Result<(), String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(|e| e.to_string())?;
+    let config =
+        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -336,8 +503,8 @@ pub async fn list_service_branches(
     service_name: String,
 ) -> Result<Vec<ServiceBranchInfo>, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(|e| e.to_string())?;
+    let config =
+        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -349,10 +516,7 @@ pub async fn list_service_branches(
         .await
         .map_err(|e| e.to_string())?;
 
-    let branches = provider
-        .list_branches()
-        .await
-        .map_err(|e| e.to_string())?;
+    let branches = provider.list_branches().await.map_err(|e| e.to_string())?;
 
     Ok(branches
         .into_iter()
@@ -373,8 +537,8 @@ pub async fn get_service_status(
     branch_name: String,
 ) -> Result<ServiceBranchStatus, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(|e| e.to_string())?;
+    let config =
+        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -386,10 +550,7 @@ pub async fn get_service_status(
         .await
         .map_err(|e| e.to_string())?;
 
-    let branches = provider
-        .list_branches()
-        .await
-        .map_err(|e| e.to_string())?;
+    let branches = provider.list_branches().await.map_err(|e| e.to_string())?;
 
     let state = branches
         .iter()

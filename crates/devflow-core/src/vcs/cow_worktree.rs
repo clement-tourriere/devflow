@@ -38,6 +38,33 @@ pub fn detect_cow_capability(path: &Path) -> CowCapability {
     CowCapability::None
 }
 
+/// Detect CoW capability across two directories (source → target).
+///
+/// Unlike `detect_cow_capability` which tests within a single directory,
+/// this creates a probe file in `source_dir` and attempts to clone it into
+/// `target_parent`. This catches cross-volume failures where source and target
+/// reside on different filesystems (e.g. different APFS volumes).
+pub fn detect_cow_capability_cross(source_dir: &Path, target_parent: &Path) -> CowCapability {
+    #[cfg(target_os = "macos")]
+    {
+        if test_apfs_clone_cross(source_dir, target_parent) {
+            return CowCapability::Apfs;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if test_reflink_cross(source_dir, target_parent) {
+            return CowCapability::Reflink;
+        }
+    }
+
+    let _ = source_dir;
+    let _ = target_parent;
+
+    CowCapability::None
+}
+
 /// Generate a unique probe directory name using PID + timestamp (avoids
 /// depending on the optional `uuid` crate).
 fn probe_dir_name() -> String {
@@ -71,6 +98,35 @@ fn test_apfs_clone(path: &Path) -> bool {
     result
 }
 
+#[cfg(target_os = "macos")]
+fn test_apfs_clone_cross(source_dir: &Path, target_parent: &Path) -> bool {
+    use std::process::Command;
+
+    let src_probe = source_dir.join(probe_dir_name());
+    let dst_probe = target_parent.join(probe_dir_name());
+    let _ = std::fs::create_dir_all(&src_probe);
+    let _ = std::fs::create_dir_all(&dst_probe);
+
+    let src_file = src_probe.join("src");
+    let dst_file = dst_probe.join("dst");
+
+    let result = (|| -> bool {
+        if std::fs::write(&src_file, b"devflow").is_err() {
+            return false;
+        }
+        let status = Command::new("cp")
+            .args(["-c"])
+            .arg(&src_file)
+            .arg(&dst_file)
+            .output();
+        matches!(status, Ok(output) if output.status.success())
+    })();
+
+    let _ = std::fs::remove_dir_all(&src_probe);
+    let _ = std::fs::remove_dir_all(&dst_probe);
+    result
+}
+
 #[cfg(target_os = "linux")]
 fn test_reflink(path: &Path) -> bool {
     use std::process::Command;
@@ -97,22 +153,58 @@ fn test_reflink(path: &Path) -> bool {
     result
 }
 
+#[cfg(target_os = "linux")]
+fn test_reflink_cross(source_dir: &Path, target_parent: &Path) -> bool {
+    use std::process::Command;
+
+    let src_probe = source_dir.join(probe_dir_name());
+    let dst_probe = target_parent.join(probe_dir_name());
+    let _ = std::fs::create_dir_all(&src_probe);
+    let _ = std::fs::create_dir_all(&dst_probe);
+
+    let src_file = src_probe.join("src");
+    let dst_file = dst_probe.join("dst");
+
+    let result = (|| -> bool {
+        if std::fs::write(&src_file, b"devflow").is_err() {
+            return false;
+        }
+        let status = Command::new("cp")
+            .args(["--reflink=always"])
+            .arg(&src_file)
+            .arg(&dst_file)
+            .output();
+        matches!(status, Ok(output) if output.status.success())
+    })();
+
+    let _ = std::fs::remove_dir_all(&src_probe);
+    let _ = std::fs::remove_dir_all(&dst_probe);
+    result
+}
+
 /// Create a worktree using Copy-on-Write if the filesystem supports it.
-/// Falls back gracefully — returns `Ok(false)` when CoW is unavailable so the
-/// caller can use the standard git2 worktree path.
 ///
 /// The CoW fast path:
 /// 1. `git worktree add --no-checkout <path> <branch>` — registers worktree
 ///    without performing a full checkout.
 /// 2. For each top-level entry in the source (excluding `.git`):
-///    `cp -cR` (macOS) or `cp -a --reflink=auto` (Linux).
+///    `cp -cR` (macOS) or `cp -a --reflink=always` (Linux).
 /// 3. `git -C <path> reset --no-refresh` — rebuilds the index to match the
 ///    copied working tree.
 ///
 /// Returns `Ok(true)` if CoW was used, `Ok(false)` if the caller should fall
-/// back to the standard git2 worktree creation.
+/// back to the standard git2 worktree creation (CoW not available).
+/// Returns `Err` if CoW was attempted but failed mid-way (worktree is cleaned up).
 pub fn create_cow_worktree(source_dir: &Path, target_path: &Path, branch: &str) -> Result<bool> {
-    let cow = detect_cow_capability(source_dir);
+    // Resolve the target's parent directory for the cross-directory probe.
+    // Ensure it exists so the probe can write into it.
+    let target_parent = target_path.parent().unwrap_or(target_path);
+    if !target_parent.exists() {
+        std::fs::create_dir_all(target_parent)
+            .context("Failed to create target parent directory for CoW probe")?;
+    }
+
+    let cow = detect_cow_capability_cross(source_dir, target_parent);
 
     if cow == CowCapability::None {
         return Ok(false); // Caller should use standard worktree creation
@@ -175,95 +267,55 @@ pub fn create_cow_worktree(source_dir: &Path, target_path: &Path, branch: &str) 
 }
 
 /// Copy all top-level entries from source to target using CoW, skipping `.git`.
+///
+/// Uses a single `cp` invocation with all entries to avoid per-entry process
+/// spawning overhead. Fails fast if the copy fails — no silent fallback.
+/// The caller is responsible for cleaning up and falling back to git2.
 fn cow_copy_working_tree(source: &Path, target: &Path, cow: CowCapability) -> Result<()> {
-    let entries: Vec<_> = std::fs::read_dir(source)
+    let src_paths: Vec<_> = std::fs::read_dir(source)
         .context("Failed to read source directory")?
         .filter_map(|e| e.ok())
         .filter(|e| {
             let name = e.file_name();
-            name != ".git"
+            // Skip .git and anything that already exists in the target
+            // (e.g. the .git file created by worktree add)
+            name != ".git" && !target.join(&name).exists()
         })
+        .map(|e| e.path())
         .collect();
 
-    for entry in &entries {
-        let src_path = entry.path();
-        let file_name = entry.file_name();
-        let dst_path = target.join(&file_name);
-
-        // Skip if destination already exists (e.g. .git file created by worktree add)
-        if dst_path.exists() {
-            continue;
-        }
-
-        let result = match cow {
-            CowCapability::Apfs => std::process::Command::new("cp")
-                .arg("-cR")
-                .arg(&src_path)
-                .arg(&dst_path)
-                .output(),
-            CowCapability::Reflink => std::process::Command::new("cp")
-                .args(["-a", "--reflink=auto"])
-                .arg(&src_path)
-                .arg(&dst_path)
-                .output(),
-            CowCapability::None => unreachable!(),
-        };
-
-        match result {
-            Ok(output) if output.status.success() => {
-                log::debug!("CoW copied: {}", file_name.to_string_lossy());
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                log::warn!(
-                    "CoW copy failed for '{}': {}; falling back to regular copy",
-                    file_name.to_string_lossy(),
-                    stderr.trim()
-                );
-                copy_recursive(&src_path, &dst_path)?;
-            }
-            Err(e) => {
-                log::warn!(
-                    "CoW copy failed for '{}': {}; falling back to regular copy",
-                    file_name.to_string_lossy(),
-                    e
-                );
-                copy_recursive(&src_path, &dst_path)?;
-            }
-        }
+    if src_paths.is_empty() {
+        return Ok(());
     }
 
-    Ok(())
-}
+    log::debug!(
+        "CoW copying {} top-level entries in a single invocation",
+        src_paths.len()
+    );
 
-/// Recursive file copy fallback when CoW fails for an individual entry.
-fn copy_recursive(src: &Path, dst: &Path) -> Result<()> {
-    if src.is_dir() {
-        std::fs::create_dir_all(dst)?;
-        for entry in std::fs::read_dir(src)? {
-            let entry = entry?;
-            let src_child = entry.path();
-            let dst_child = dst.join(entry.file_name());
-            copy_recursive(&src_child, &dst_child)?;
+    // Single cp invocation: cp -cR src1 src2 ... target/
+    let mut cmd = std::process::Command::new("cp");
+    match cow {
+        CowCapability::Apfs => {
+            cmd.arg("-cR");
         }
-    } else if src.is_symlink() {
-        let link_target = std::fs::read_link(src)?;
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&link_target, dst)?;
-        #[cfg(windows)]
-        {
-            if link_target.is_dir() {
-                std::os::windows::fs::symlink_dir(&link_target, dst)?;
-            } else {
-                std::os::windows::fs::symlink_file(&link_target, dst)?;
-            }
+        CowCapability::Reflink => {
+            cmd.args(["-a", "--reflink=always"]);
         }
-    } else {
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::copy(src, dst)?;
+        CowCapability::None => unreachable!(),
     }
+    for path in &src_paths {
+        cmd.arg(path);
+    }
+    cmd.arg(target);
+
+    let output = cmd.output().context("Failed to run cp for CoW copy")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("CoW copy failed: {}", stderr.trim());
+    }
+
     Ok(())
 }
 
@@ -284,42 +336,25 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_cow_capability_cross_same_volume() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src_dir");
+        let dst = tmp.path().join("dst_dir");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+
+        let cap = detect_cow_capability_cross(&src, &dst);
+        // Same temp volume — should match single-dir detection
+        let single = detect_cow_capability(tmp.path());
+        assert_eq!(cap, single);
+    }
+
+    #[test]
     fn test_probe_dir_name_is_unique() {
         let a = probe_dir_name();
         // Small sleep to ensure timestamp changes
         std::thread::sleep(std::time::Duration::from_millis(1));
         let b = probe_dir_name();
         assert_ne!(a, b);
-    }
-
-    #[test]
-    fn test_copy_recursive_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let src = tmp.path().join("src.txt");
-        let dst = tmp.path().join("dst.txt");
-        std::fs::write(&src, b"hello").unwrap();
-        copy_recursive(&src, &dst).unwrap();
-        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "hello");
-    }
-
-    #[test]
-    fn test_copy_recursive_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let src_dir = tmp.path().join("srcdir");
-        std::fs::create_dir_all(src_dir.join("sub")).unwrap();
-        std::fs::write(src_dir.join("a.txt"), b"aaa").unwrap();
-        std::fs::write(src_dir.join("sub").join("b.txt"), b"bbb").unwrap();
-
-        let dst_dir = tmp.path().join("dstdir");
-        copy_recursive(&src_dir, &dst_dir).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(dst_dir.join("a.txt")).unwrap(),
-            "aaa"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dst_dir.join("sub").join("b.txt")).unwrap(),
-            "bbb"
-        );
     }
 }

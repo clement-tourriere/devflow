@@ -15,6 +15,7 @@ import type {
   OrchestrationResult,
   CreateBranchResult,
   DestroyResult,
+  DoctorReport,
   OrphanProjectEntry,
   OrphanCleanupResult,
   VcsInfo,
@@ -83,7 +84,7 @@ export const stopService = (
   branchName: string
 ) => invoke<void>("stop_service", { projectPath, serviceName, branchName });
 export const runDoctor = (projectPath: string) =>
-  invoke<unknown[]>("run_doctor", { projectPath });
+  invoke<DoctorReport>("run_doctor", { projectPath });
 export const getServiceLogs = (
   projectPath: string,
   serviceName: string,

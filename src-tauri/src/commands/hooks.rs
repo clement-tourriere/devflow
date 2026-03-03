@@ -17,8 +17,8 @@ pub struct HookInfo {
 #[tauri::command]
 pub async fn list_hooks(project_path: String) -> Result<Vec<HookPhaseEntry>, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(|e| e.to_string())?;
+    let config =
+        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
 
     let hooks_config = config.hooks.unwrap_or_default();
     let mut entries = Vec::new();
@@ -52,8 +52,8 @@ pub async fn render_template(
     branch_name: Option<String>,
 ) -> Result<String, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(|e| e.to_string())?;
+    let config =
+        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
 
     let branch = branch_name.unwrap_or_else(|| "main".to_string());
     let context = hooks::build_hook_context(&config, &branch).await;
@@ -70,8 +70,8 @@ pub async fn get_hook_variables(
     branch_name: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(|e| e.to_string())?;
+    let config =
+        devflow_core::config::Config::from_file(&config_path).map_err(|e| e.to_string())?;
 
     let branch = branch_name.unwrap_or_else(|| "main".to_string());
     let context = hooks::build_hook_context(&config, &branch).await;

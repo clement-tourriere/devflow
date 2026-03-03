@@ -94,11 +94,16 @@ impl DevflowContext {
     /// Returns a HashMap<branch_name, Option<parent_name>> from the local state.
     pub fn snapshot_branch_registry(&self) -> HashMap<String, Option<String>> {
         let mut map = HashMap::new();
-        if let Ok(state_manager) = LocalStateManager::new() {
+        if let Ok(mut state_manager) = LocalStateManager::new() {
             if let Some(ref path) = self.config_path {
-                let branches = state_manager.get_branches(path);
-                for branch in branches {
-                    map.insert(branch.name, branch.parent);
+                if let Some(project_dir) = path.parent() {
+                    let branches = state_manager
+                        .get_or_init_branches_by_dir(project_dir, &self.config.git.main_branch)
+                        .unwrap_or_else(|_| state_manager.get_branches(path));
+
+                    for branch in branches {
+                        map.insert(branch.name, branch.parent);
+                    }
                 }
             }
         }
@@ -162,12 +167,14 @@ impl DevflowContext {
                     .as_ref()
                     .and_then(|b| b.parent.clone())
                     .or(normalized_parent);
+                let cow_used = existing.as_ref().map(|b| b.cow_used).unwrap_or(false);
 
                 let branch = DevflowBranch {
                     name: normalized_branch,
                     parent,
                     worktree_path,
                     created_at,
+                    cow_used,
                     agent_tool: None,
                     agent_status: None,
                     agent_started_at: None,

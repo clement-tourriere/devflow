@@ -13,7 +13,7 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::{BranchInfo, VcsProvider, WorktreeInfo};
+use super::{BranchInfo, VcsProvider, WorktreeCreateResult, WorktreeInfo};
 
 /// A Jujutsu repository.
 pub struct JjRepository {
@@ -274,7 +274,7 @@ impl VcsProvider for JjRepository {
         Ok(worktrees)
     }
 
-    fn create_worktree(&self, branch: &str, path: &Path) -> Result<()> {
+    fn create_worktree(&self, branch: &str, path: &Path) -> Result<WorktreeCreateResult> {
         let workspace_name = Self::workspace_name_for_branch(branch);
         let path_str = path.to_str().context("Worktree path is not valid UTF-8")?;
 
@@ -307,7 +307,7 @@ impl VcsProvider for JjRepository {
             }
         }
 
-        Ok(())
+        Ok(WorktreeCreateResult { cow_used: false })
     }
 
     fn remove_worktree(&self, path: &Path) -> Result<()> {

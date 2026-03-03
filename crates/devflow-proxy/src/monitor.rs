@@ -22,8 +22,7 @@ pub struct DockerMonitor {
 impl DockerMonitor {
     /// Create a new Docker monitor.
     pub fn new() -> Result<Self> {
-        let docker =
-            Docker::connect_with_defaults().context("Failed to connect to Docker")?;
+        let docker = Docker::connect_with_defaults().context("Failed to connect to Docker")?;
         Ok(Self {
             docker: Arc::new(docker),
         })

@@ -21,6 +21,13 @@ pub struct BranchInfo {
     pub is_default: bool,
 }
 
+/// Result of a worktree creation operation.
+#[derive(Debug, Clone, Copy)]
+pub struct WorktreeCreateResult {
+    /// Whether Copy-on-Write (APFS clone / reflink) was used.
+    pub cow_used: bool,
+}
+
 /// Information about a Git worktree.
 #[derive(Debug, Clone)]
 pub struct WorktreeInfo {
@@ -59,7 +66,7 @@ pub trait VcsProvider: Send {
     fn supports_worktrees(&self) -> bool;
     fn is_worktree(&self) -> bool;
     fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>>;
-    fn create_worktree(&self, branch: &str, path: &Path) -> Result<()>;
+    fn create_worktree(&self, branch: &str, path: &Path) -> Result<WorktreeCreateResult>;
     fn remove_worktree(&self, path: &Path) -> Result<()>;
     fn worktree_path(&self, branch: &str) -> Result<Option<PathBuf>>;
     fn main_worktree_dir(&self) -> Option<PathBuf>;

@@ -19,6 +19,7 @@ export interface BranchEntry {
   is_current: boolean;
   is_default: boolean;
   worktree_path: string | null;
+  cow_used: boolean;
   parent: string | null;
   created_at: string | null;
   agent_tool: string | null;
@@ -51,6 +52,22 @@ export interface ServiceBranchInfo {
   state: string | null;
 }
 
+export interface DoctorCheck {
+  name: string;
+  available: boolean;
+  detail: string;
+}
+
+export interface DoctorServiceReport {
+  service: string;
+  checks: DoctorCheck[];
+}
+
+export interface DoctorReport {
+  general: DoctorCheck[];
+  services: DoctorServiceReport[];
+}
+
 export interface ConnectionInfo {
   host: string;
   port: number;
@@ -69,6 +86,7 @@ export interface OrchestrationResult {
 export interface CreateBranchResult {
   services: OrchestrationResult[];
   worktree_path: string | null;
+  cow_used: boolean;
 }
 
 export interface HookPhaseEntry {

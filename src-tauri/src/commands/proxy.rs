@@ -64,10 +64,7 @@ pub async fn start_proxy(
 }
 
 #[tauri::command]
-pub async fn stop_proxy(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn stop_proxy(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let mut proxy = state.proxy.write().await;
     if let Some(handle) = proxy.take() {
         handle.stop();
