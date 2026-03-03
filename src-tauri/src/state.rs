@@ -16,6 +16,18 @@ pub struct AppSettings {
     pub proxy_auto_start: bool,
     #[serde(default)]
     pub proxy_config: Option<devflow_proxy::ProxyConfig>,
+    #[serde(default = "default_terminal_renderer")]
+    pub terminal_renderer: String,
+    #[serde(default = "default_terminal_font_size")]
+    pub terminal_font_size: u16,
+}
+
+fn default_terminal_renderer() -> String {
+    "auto".to_string()
+}
+
+fn default_terminal_font_size() -> u16 {
+    14
 }
 
 impl Default for AppSettings {
@@ -24,6 +36,8 @@ impl Default for AppSettings {
             projects: Vec::new(),
             proxy_auto_start: false,
             proxy_config: None,
+            terminal_renderer: default_terminal_renderer(),
+            terminal_font_size: default_terminal_font_size(),
         }
     }
 }
@@ -64,20 +78,19 @@ pub struct AppState {
     pub proxy: RwLock<Option<Arc<devflow_proxy::ProxyHandle>>>,
     pub proxy_config: Arc<RwLock<devflow_proxy::ProxyConfig>>,
     pub tray: std::sync::Mutex<Option<tauri::tray::TrayIcon>>,
+    pub terminals: devflow_terminal::TerminalManager,
 }
 
 impl AppState {
     pub fn new() -> Self {
         let settings = AppSettings::load();
-        let proxy_config = settings
-            .proxy_config
-            .clone()
-            .unwrap_or_default();
+        let proxy_config = settings.proxy_config.clone().unwrap_or_default();
         Self {
             settings: Arc::new(RwLock::new(settings)),
             proxy: RwLock::new(None),
             proxy_config: Arc::new(RwLock::new(proxy_config)),
             tray: std::sync::Mutex::new(None),
+            terminals: devflow_terminal::TerminalManager::new(),
         }
     }
 }

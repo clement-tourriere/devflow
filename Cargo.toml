@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/devflow-core", "crates/devflow-proxy", "src-tauri"]
+members = [".", "crates/devflow-core", "crates/devflow-proxy", "crates/devflow-terminal", "src-tauri"]
 resolver = "2"
 
 [package]

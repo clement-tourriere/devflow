@@ -3,11 +3,14 @@ import { Outlet, NavLink, useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
 import { getProxyStatus, listProjects } from "../utils/invoke";
 import type { ProjectEntry, ProxyStatus } from "../types";
+import TerminalPanel from "./TerminalPanel";
+import { useTerminal } from "../context/TerminalContext";
 
 function Layout() {
   const [proxyStatus, setProxyStatus] = useState<ProxyStatus | null>(null);
   const [projects, setProjects] = useState<ProjectEntry[]>([]);
   const navigate = useNavigate();
+  const { isVisible, toggle, pendingTerminal, clearPending } = useTerminal();
 
   useEffect(() => {
     getProxyStatus()
@@ -33,6 +36,18 @@ function Layout() {
       unlistenNav.then((fn) => fn());
     };
   }, [navigate]);
+
+  // Keyboard shortcut: Ctrl+` to toggle terminal
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.key === "`") {
+        e.preventDefault();
+        toggle();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [toggle]);
 
   return (
     <div className="app">
@@ -82,6 +97,16 @@ function Layout() {
           >
             Proxy
           </NavLink>
+          <a
+            className={`nav-item${isVisible ? " active" : ""}`}
+            onClick={(e) => {
+              e.preventDefault();
+              toggle();
+            }}
+            style={{ cursor: "pointer" }}
+          >
+            Terminal
+          </a>
 
           <div className="nav-section">App</div>
           <NavLink
@@ -102,9 +127,17 @@ function Layout() {
         </div>
       </aside>
 
-      <main className="content">
-        <Outlet />
-      </main>
+      <div className="main-area">
+        <main className="content">
+          <Outlet />
+        </main>
+        <TerminalPanel
+          isVisible={isVisible}
+          onToggle={toggle}
+          pendingTerminal={pendingTerminal}
+          onPendingTerminalHandled={clearPending}
+        />
+      </div>
     </div>
   );
 }

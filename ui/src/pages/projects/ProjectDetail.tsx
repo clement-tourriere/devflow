@@ -30,11 +30,13 @@ import type {
 } from "../../types";
 import Modal from "../../components/Modal";
 import ConfirmDialog from "../../components/ConfirmDialog";
+import { useTerminal } from "../../context/TerminalContext";
 
 function ProjectDetail() {
   const { "*": splat } = useParams();
   const projectPath = splat ? decodeURIComponent(splat) : "";
   const navigate = useNavigate();
+  const { openTerminal } = useTerminal();
 
   const [detail, setDetail] = useState<ProjectDetailType | null>(null);
   const [branches, setBranches] = useState<BranchEntry[]>([]);
@@ -549,6 +551,19 @@ function ProjectDetail() {
                       <button
                         className="btn"
                         style={{ padding: "2px 10px", fontSize: 12 }}
+                        onClick={() =>
+                          openTerminal({
+                            projectPath,
+                            branchName: b.name,
+                          })
+                        }
+                        title="Open terminal"
+                      >
+                        &gt;_
+                      </button>
+                      <button
+                        className="btn"
+                        style={{ padding: "2px 10px", fontSize: 12 }}
                         onClick={() => {
                           setFromBranch(b.name);
                           setNewBranchName("");
@@ -804,6 +819,23 @@ function ProjectDetail() {
                                         justifyContent: "flex-end",
                                       }}
                                     >
+                                      <button
+                                        className="btn"
+                                        style={{
+                                          padding: "2px 10px",
+                                          fontSize: 12,
+                                        }}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          openTerminal({
+                                            projectPath,
+                                            branchName: b.name,
+                                            serviceName: s.name,
+                                          });
+                                        }}
+                                      >
+                                        Terminal
+                                      </button>
                                       <button
                                         className="btn"
                                         style={{

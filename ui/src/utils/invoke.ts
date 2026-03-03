@@ -18,6 +18,7 @@ import type {
   OrphanProjectEntry,
   OrphanCleanupResult,
   VcsInfo,
+  TerminalSessionInfo,
 } from "../types";
 
 // Projects
@@ -168,3 +169,26 @@ export const cleanupOrphanProject = (projectName: string) =>
 export const getSettings = () => invoke<AppSettings>("get_settings");
 export const saveSettings = (settings: AppSettings) =>
   invoke<void>("save_settings", { settings });
+
+// Terminal
+export const createTerminal = (
+  projectPath?: string,
+  branchName?: string,
+  serviceName?: string
+) =>
+  invoke<TerminalSessionInfo>("create_terminal", {
+    projectPath,
+    branchName,
+    serviceName,
+  });
+export const listTerminals = () =>
+  invoke<TerminalSessionInfo[]>("list_terminals");
+export const writeTerminal = (sessionId: string, data: string) =>
+  invoke<void>("write_terminal", { sessionId, data });
+export const resizeTerminal = (
+  sessionId: string,
+  rows: number,
+  cols: number
+) => invoke<void>("resize_terminal", { sessionId, rows, cols });
+export const closeTerminal = (sessionId: string) =>
+  invoke<void>("close_terminal", { sessionId });

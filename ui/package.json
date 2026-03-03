@@ -14,7 +14,8 @@
     "@tauri-apps/plugin-shell": "^2.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.28.0"
+    "react-router-dom": "^6.28.0",
+    "restty": "^0.1.34"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",

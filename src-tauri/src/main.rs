@@ -67,6 +67,12 @@ fn main() {
             // Settings
             commands::settings::get_settings,
             commands::settings::save_settings,
+            // Terminal
+            commands::terminal::create_terminal,
+            commands::terminal::list_terminals,
+            commands::terminal::write_terminal,
+            commands::terminal::resize_terminal,
+            commands::terminal::close_terminal,
         ])
         .setup(move |app| {
             log::info!("Application setup complete");
@@ -132,9 +138,11 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app_handle, event| {
+        .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
-                log::info!("Application exiting");
+                log::info!("Application exiting — cleaning up terminals");
+                let state: &AppState = app_handle.state::<AppState>().inner();
+                tauri::async_runtime::block_on(state.terminals.close_all());
             }
         });
 }

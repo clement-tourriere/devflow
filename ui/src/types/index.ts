@@ -122,7 +122,11 @@ export interface AppSettings {
     api_port: number;
     domain_suffix: string;
   } | null;
+  terminal_renderer: TerminalRenderer;
+  terminal_font_size: number;
 }
+
+export type TerminalRenderer = "auto" | "webgpu" | "webgl2";
 
 export interface DestroyResult {
   services_destroyed: ServiceDestroyResult[];
@@ -161,4 +165,23 @@ export interface OrphanCleanupResult {
 export interface VcsInfo {
   existing_vcs: string | null;
   available_tools: string[];
+}
+
+export interface TerminalSessionInfo {
+  id: string;
+  label: string;
+  project_path: string | null;
+  branch_name: string | null;
+  service_name: string | null;
+  working_directory: string;
+  status: "Running" | "Exited";
+}
+
+export interface TerminalOutputEvent {
+  session_id: string;
+  data: string; // base64
+}
+
+export interface TerminalExitEvent {
+  session_id: string;
 }

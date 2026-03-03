@@ -1,0 +1,15 @@
+[package]
+name = "devflow-terminal"
+version = "0.4.0"
+edition = "2021"
+description = "PTY-backed terminal session manager for devflow GUI"
+authors = ["Clement Tourriere <clement.tourriere@gmail.com>"]
+license = "MIT"
+
+[dependencies]
+portable-pty = "0.8"
+tokio = { version = "1.46", features = ["rt", "sync", "io-util", "time"] }
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+anyhow = "1.0"
+uuid = { version = "1", features = ["v4"] }

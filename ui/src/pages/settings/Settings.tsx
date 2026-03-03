@@ -6,7 +6,13 @@ import {
   detectOrphanProjects,
   cleanupOrphanProject,
 } from "../../utils/invoke";
-import type { AppSettings, ProjectEntry, OrphanProjectEntry, OrphanCleanupResult } from "../../types";
+import type {
+  AppSettings,
+  ProjectEntry,
+  OrphanProjectEntry,
+  OrphanCleanupResult,
+  TerminalRenderer,
+} from "../../types";
 
 function Settings() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -29,6 +35,9 @@ function Settings() {
     if (!settings) return;
     try {
       await saveSettings(settings);
+      window.dispatchEvent(
+        new CustomEvent("devflow:settings-updated", { detail: settings })
+      );
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (e) {
@@ -69,7 +78,21 @@ function Settings() {
     }
   };
 
+  const setRenderer = (renderer: TerminalRenderer) => {
+    setSettings((prev) => (prev ? { ...prev, terminal_renderer: renderer } : prev));
+  };
+
+  const setFontSize = (value: number) => {
+    if (!Number.isFinite(value)) return;
+    const clamped = Math.max(11, Math.min(24, Math.round(value)));
+    setSettings((prev) =>
+      prev ? { ...prev, terminal_font_size: clamped } : prev
+    );
+  };
+
   if (!settings) return <div>Loading...</div>;
+
+  const prefersWebGpu = settings.terminal_renderer !== "webgl2";
 
   return (
     <div>
@@ -256,6 +279,93 @@ function Settings() {
             ))}
           </div>
         )}
+      </div>
+
+      <div className="card">
+        <div className="card-title">Terminal</div>
+        <p style={{ color: "var(--text-secondary)", marginBottom: 12 }}>
+          Embedded terminal rendering is powered by libghostty-vt with restty.
+          Keep WebGPU enabled for best performance, with automatic fallback when
+          unavailable.
+        </p>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            padding: "10px 12px",
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            background: "var(--bg-primary)",
+          }}
+        >
+          <div>
+            <div style={{ fontWeight: 500, marginBottom: 2 }}>Prefer WebGPU</div>
+            <div style={{ color: "var(--text-muted)", fontSize: 12 }}>
+              Off forces WebGL2 renderer.
+            </div>
+          </div>
+          <label
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              color: "var(--text-secondary)",
+              fontSize: 13,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={prefersWebGpu}
+              onChange={(e) =>
+                setRenderer(e.target.checked ? "auto" : "webgl2")
+              }
+            />
+            {prefersWebGpu ? "On" : "Off"}
+          </label>
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            padding: "10px 12px",
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            background: "var(--bg-primary)",
+            marginTop: 10,
+          }}
+        >
+          <div>
+            <div style={{ fontWeight: 500, marginBottom: 2 }}>Font Size</div>
+            <div style={{ color: "var(--text-muted)", fontSize: 12 }}>
+              Controls terminal text size across all tabs.
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="range"
+              min={11}
+              max={24}
+              value={settings.terminal_font_size}
+              onChange={(e) => setFontSize(Number(e.target.value))}
+            />
+            <input
+              type="number"
+              min={11}
+              max={24}
+              value={settings.terminal_font_size}
+              onChange={(e) => setFontSize(Number(e.target.value))}
+              style={{ width: 64 }}
+            />
+            <span className="mono" style={{ fontSize: 12, minWidth: 40 }}>
+              {settings.terminal_font_size}px
+            </span>
+          </div>
+        </div>
       </div>
 
       <div className="card">
