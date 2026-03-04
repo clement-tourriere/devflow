@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>devflow — Universal Development Environment Branching Tool</title>
+<title>devflow — Universal Development Environment Tool</title>
 <meta name="description" content="Isolated dev environments for every Git workspace — automatically. Worktrees, databases, caches, and stateful services that sync with your Git workflow.">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" id="hljs-light">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" id="hljs-dark" disabled>
@@ -614,6 +614,9 @@ hr {
     <a href="#worktrees">Worktrees</a>
     <a href="#hooks">Hooks</a>
     <a href="#seeding">Seeding</a>
+    <a href="#reverse-proxy">Reverse Proxy</a>
+    <a href="#desktop-gui">Desktop GUI</a>
+    <a href="#tui-dashboard">TUI Dashboard</a>
     <a href="#ai-automation">AI &amp; Automation</a>
     <a href="#agent-integration" class="nav-sub">Agent Integration</a>
     <a href="#vcs-support">VCS Support</a>
@@ -633,7 +636,7 @@ hr {
   <h1>Isolated dev environments for<br>every Git workspace &mdash; <span>automatically</span>.</h1>
   <p class="tagline">
     devflow gives each Git workspace its own worktree, databases, caches, and stateful services.
-    Workspace your entire development environment with a single command.
+    Isolate your entire development environment with a single command.
   </p>
 
   <div class="hero-features">
@@ -656,6 +659,10 @@ hr {
     <div class="hero-feature">
       <div class="icon green">&#9878;</div>
       <div><strong>AI-Ready</strong><br>JSON output, <a href="#ai-automation" style="color: var(--green); text-decoration: underline;">llms.txt</a>, and agent scripts &mdash; built for autonomous coding agents</div>
+    </div>
+    <div class="hero-feature">
+      <div class="icon purple">&#9783;</div>
+      <div><strong>Three Interfaces</strong><br>CLI, <a href="#tui-dashboard" style="color: var(--purple); text-decoration: underline;">TUI dashboard</a>, and <a href="#desktop-gui" style="color: var(--purple); text-decoration: underline;">desktop GUI</a> &mdash; choose your workflow</div>
     </div>
   </div>
 
@@ -2118,10 +2125,191 @@ devflow service seed main -s app-db --from dump.sql</code></pre>
 </section>
 
 <!-- ================================================================== -->
+<!-- REVERSE PROXY                                                       -->
+<!-- ================================================================== -->
+<section class="section" id="reverse-proxy">
+  <h2><span class="number">09</span> Reverse Proxy</h2>
+  <p class="section-desc">
+    devflow includes a native HTTPS reverse proxy that auto-discovers Docker containers and serves them via <code>*.localhost</code> domains with auto-generated TLS certificates.
+  </p>
+
+  <h3>How It Works</h3>
+  <p>The proxy monitors Docker events in real time. When a container starts, devflow automatically maps it to a <code>*.localhost</code> domain, generates a TLS certificate signed by a local CA, and begins forwarding HTTPS traffic to the container.</p>
+
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div>Run <code>devflow proxy trust install</code> once to trust the local CA system-wide. After that, all <code>*.localhost</code> domains work with HTTPS &mdash; no browser warnings or <code>-k</code> flags needed.</div>
+  </div>
+
+  <h3>Quick Start</h3>
+<pre><code class="language-bash"># Start the proxy
+devflow proxy start
+
+# Trust the CA (one-time setup)
+devflow proxy trust install
+
+# See what's being proxied
+devflow proxy list
+
+# Start in background (daemon mode)
+devflow proxy start --daemon
+
+# Stop the proxy
+devflow proxy stop</code></pre>
+
+  <h3>Domain Patterns</h3>
+  <p>Containers are automatically assigned domains based on their type:</p>
+  <table>
+    <thead>
+      <tr><th>Container Type</th><th>Domain Pattern</th><th>Example</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Standalone</td><td><code>container_name.localhost</code></td><td><code>redis.localhost</code></td></tr>
+      <tr><td>Compose service</td><td><code>service.project.localhost</code></td><td><code>api.myapp.localhost</code></td></tr>
+      <tr><td>devflow service</td><td><code>service.workspace.project.localhost</code></td><td><code>app-db.feature-auth.myapp.localhost</code></td></tr>
+      <tr><td>Custom label</td><td>value of <code>devproxy.domain</code> label</td><td><code>custom.localhost</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Custom Ports</h3>
+<pre><code class="language-bash">devflow proxy start --https-port 8443    # Custom HTTPS port
+devflow proxy start --http-port 8080     # Custom HTTP port
+devflow proxy start --api-port 2020      # Custom API port</code></pre>
+
+  <h3>CA Trust Management</h3>
+<pre><code class="language-bash">devflow proxy trust install               # Install CA to system trust
+devflow proxy trust verify                # Check if CA is trusted
+devflow proxy trust remove                # Remove CA from system trust
+devflow proxy trust info                  # Platform-specific instructions</code></pre>
+
+  <h3>API Endpoints</h3>
+  <p>The proxy exposes a local API (default port 2019, localhost only):</p>
+  <table>
+    <thead>
+      <tr><th>Endpoint</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>/api/status</code></td><td>Proxy status and configuration</td></tr>
+      <tr><td><code>/api/targets</code></td><td>Current routing table (all proxied containers)</td></tr>
+      <tr><td><code>/api/ca</code></td><td>Certificate Authority information</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ================================================================== -->
+<!-- DESKTOP GUI                                                         -->
+<!-- ================================================================== -->
+<section class="section" id="desktop-gui">
+  <h2><span class="number">10</span> Desktop GUI</h2>
+  <p class="section-desc">
+    A native desktop application (Tauri 2 + React) for graphical management of projects, workspaces, services, hooks, proxy, and configuration.
+  </p>
+
+  <h3>Getting Started</h3>
+<pre><code class="language-bash"># Development mode (hot-reload)
+mise run gui
+
+# Production build
+mise run gui:build
+
+# Install frontend dependencies only
+mise run gui:install</code></pre>
+  <p>Requires <a href="https://bun.sh">bun</a> (or Node.js 18+) and the <a href="https://v2.tauri.app/start/prerequisites/">Tauri CLI</a>.</p>
+
+  <h3>Features</h3>
+  <div class="card-grid">
+    <div class="card">
+      <h4>Dashboard</h4>
+      <p>Project overview with configuration status, workspace counts, service counts, and proxy status at a glance.</p>
+    </div>
+    <div class="card">
+      <h4>Workspace Management</h4>
+      <p>Create, switch, and delete workspaces. View worktree paths, parent relationships, and connection info. Choose between branch or worktree creation mode.</p>
+    </div>
+    <div class="card">
+      <h4>Service Control</h4>
+      <p>Start, stop, and reset service instances. View logs, check health diagnostics, and manage the full service lifecycle per workspace.</p>
+    </div>
+    <div class="card">
+      <h4>Hook Editor</h4>
+      <p>Three-panel hook management: phase list, hook entries with run/edit/delete, and live MiniJinja template preview with variable browser.</p>
+    </div>
+    <div class="card">
+      <h4>Proxy Dashboard</h4>
+      <p>Proxy status, container discovery table with HTTPS links, and one-click CA trust management. Filter containers by domain, name, or project.</p>
+    </div>
+    <div class="card">
+      <h4>Configuration Editor</h4>
+      <p>Section-based form editor (General, Git, Worktree, Services, Hooks, Agent, Commit) &mdash; no raw YAML editing needed. Validation before save.</p>
+    </div>
+  </div>
+
+  <h3>System Tray</h3>
+  <p>The GUI runs in the system tray with quick access to:</p>
+  <ul>
+    <li>Dashboard toggle</li>
+    <li>Proxy start/stop</li>
+    <li>Project list with workspace shortcuts</li>
+    <li>Workspace activation (with worktree indicator)</li>
+  </ul>
+</section>
+
+<!-- ================================================================== -->
+<!-- TUI DASHBOARD                                                       -->
+<!-- ================================================================== -->
+<section class="section" id="tui-dashboard">
+  <h2><span class="number">11</span> TUI Dashboard</h2>
+  <p class="section-desc">
+    An interactive terminal dashboard for managing workspaces, services, and system diagnostics &mdash; without leaving your terminal.
+  </p>
+
+  <h3>Launch</h3>
+<pre><code class="language-bash">devflow tui</code></pre>
+
+  <h3>Tabs</h3>
+  <table>
+    <thead>
+      <tr><th>Tab</th><th>What it shows</th><th>Key actions</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Environments</strong></td>
+        <td>Workspace tree with parent/child relationships, service states, worktree paths</td>
+        <td>Switch workspace, start/stop services, press <code>o</code> to open workspace and exit</td>
+      </tr>
+      <tr>
+        <td><strong>System</strong></td>
+        <td>Configuration overview, hook list with template variable reference and scaffold snippets, doctor diagnostics</td>
+        <td>Browse hooks, view template context, check system health</td>
+      </tr>
+      <tr>
+        <td><strong>Logs</strong></td>
+        <td>Service container logs with workspace and service picker</td>
+        <td>Select workspace/service, filter logs, keyboard navigation</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Navigation</h3>
+  <ul>
+    <li><strong>Tab / Shift+Tab</strong> &mdash; Switch between tabs</li>
+    <li><strong>Arrow keys</strong> &mdash; Navigate within tab</li>
+    <li><strong>Enter</strong> &mdash; Select / confirm action</li>
+    <li><strong>o</strong> &mdash; Open selected workspace (exits TUI and cd's into worktree)</li>
+    <li><strong>q / Esc</strong> &mdash; Quit</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div>With shell integration enabled (<code>eval "$(devflow shell-init)"</code>), pressing <code>o</code> in the TUI automatically <code>cd</code>s your shell into the selected workspace's worktree directory.</div>
+  </div>
+</section>
+
+<!-- ================================================================== -->
 <!-- AI & AUTOMATION                                                     -->
 <!-- ================================================================== -->
 <section class="section" id="ai-automation">
-  <h2><span class="number">09</span> AI &amp; Automation</h2>
+  <h2><span class="number">12</span> AI &amp; Automation</h2>
   <p class="section-desc">
     devflow is designed for both human developers and autonomous agents. It provides AI-powered commit messages, structured JSON output for CI/CD pipelines, and first-class support for AI coding agents that need isolated database sandboxes.
   </p>
@@ -2196,6 +2384,29 @@ devflow service seed main -s app-db --from dump.sql</code></pre>
     <span class="callout-icon">&#9432;</span>
     <div>The <code>AGENTS.md</code> file is the recommended entry point for any AI agent. It contains the essential flags (<code>--json --non-interactive</code>), bootstrap scripts, and the automation contract that agents should follow.</div>
   </div>
+
+  <h3>Agent Commands</h3>
+  <p>devflow includes built-in commands for managing AI agents in isolated workspaces:</p>
+
+<pre><code class="language-bash"># Start an AI agent in a new isolated workspace
+devflow agent start fix-login -- 'Fix the login timeout bug'
+devflow agent start fix-login --command codex    # Use a specific agent
+devflow agent start fix-login --dry-run          # Preview without executing
+
+# Check agent workspaces
+devflow agent status
+
+# Get project context for the current workspace
+devflow agent context
+devflow agent context --format json
+
+# Generate skills/rules for AI coding tools
+devflow agent skill                              # All tools (Claude, Cursor, OpenCode)
+devflow agent skill --target claude              # .claude/skills/devflow/SKILL.md
+devflow agent skill --target cursor              # .cursor/rules/devflow.md
+
+# Generate AGENTS.md for this project
+devflow agent docs</code></pre>
 
   <h3>AI Commit Messages</h3>
   <p>Generate conventional commit messages from your staged changes using any OpenAI-compatible LLM:</p>
@@ -2361,7 +2572,7 @@ jobs:
 <!-- VCS SUPPORT                                                         -->
 <!-- ================================================================== -->
 <section class="section" id="vcs-support">
-  <h2><span class="number">10</span> VCS Support</h2>
+  <h2><span class="number">13</span> VCS Support</h2>
   <p class="section-desc">
     devflow supports both Git and Jujutsu (jj) version control systems through a unified provider abstraction.
   </p>
@@ -2424,7 +2635,7 @@ jobs:
 <!-- CLI REFERENCE                                                       -->
 <!-- ================================================================== -->
 <section class="section" id="cli-reference">
-  <h2><span class="number">11</span> CLI Reference</h2>
+  <h2><span class="number">14</span> CLI Reference</h2>
   <p class="section-desc">
     Complete reference for all devflow commands, organized by category. Core automation commands support <code>--json</code> and <code>--non-interactive</code> global flags.
   </p>
@@ -2670,8 +2881,70 @@ devflow hook run post-create --workspace feat/x  # For a different workspace</co
 
   <h4><code>devflow hook approvals</code></h4>
   <p>Manage the hook approval store.</p>
-<pre><code class="language-bash">devflow hook approvals                    # List approved hooks
+<pre><code class="language-bash">devflow hook approvals list               # List approved hooks
+devflow hook approvals add "npm test"     # Approve a command
 devflow hook approvals clear              # Clear all approvals</code></pre>
+
+  <h4><code>devflow hook triggers</code></h4>
+  <p>Show the VCS event to hook phase mapping.</p>
+
+  <h4><code>devflow hook actions</code></h4>
+  <p>List built-in action types (shell, replace, write-file, write-env, copy, docker-exec, http).</p>
+
+  <hr>
+
+  <h3>AI Agents</h3>
+
+  <h4><code>devflow agent start &lt;task&gt;</code></h4>
+  <p>Start an AI agent in a new isolated workspace.</p>
+<pre><code class="language-bash">devflow agent start fix-login -- 'Fix the login timeout bug'
+devflow agent start fix-login --command codex
+devflow agent start fix-login --dry-run</code></pre>
+
+  <h4><code>devflow agent status</code></h4>
+  <p>Show agent status across all workspaces.</p>
+
+  <h4><code>devflow agent context</code></h4>
+  <p>Output project context for AI agents.</p>
+<pre><code class="language-bash">devflow agent context                    # Markdown format
+devflow agent context --format json
+devflow agent context --workspace feat/x</code></pre>
+
+  <h4><code>devflow agent skill</code></h4>
+  <p>Generate project-specific skills/rules for AI tools.</p>
+<pre><code class="language-bash">devflow agent skill                      # All tools
+devflow agent skill --target claude      # .claude/skills/devflow/SKILL.md
+devflow agent skill --target cursor      # .cursor/rules/devflow.md
+devflow agent skill --target opencode    # AGENTS.md</code></pre>
+
+  <h4><code>devflow agent docs</code></h4>
+  <p>Generate an <code>AGENTS.md</code> tailored to this project.</p>
+
+  <hr>
+
+  <h3>Reverse Proxy</h3>
+
+  <h4><code>devflow proxy start</code></h4>
+  <p>Start the native HTTPS reverse proxy.</p>
+<pre><code class="language-bash">devflow proxy start                      # Foreground
+devflow proxy start --daemon             # Background
+devflow proxy start --https-port 8443    # Custom HTTPS port</code></pre>
+
+  <h4><code>devflow proxy stop</code></h4>
+  <p>Stop the proxy daemon.</p>
+
+  <h4><code>devflow proxy status</code></h4>
+  <p>Show proxy status.</p>
+
+  <h4><code>devflow proxy list</code></h4>
+  <p>List proxied containers with HTTPS URLs.</p>
+
+  <h4><code>devflow proxy trust</code></h4>
+  <p>Manage CA certificate trust.</p>
+<pre><code class="language-bash">devflow proxy trust install              # Install CA to system trust
+devflow proxy trust verify               # Check if CA is trusted
+devflow proxy trust remove               # Remove CA from system trust
+devflow proxy trust info                 # Platform-specific instructions</code></pre>
 
   <hr>
 
@@ -2694,13 +2967,37 @@ devflow plugin init my-plugin --lang python  # Python scaffold</code></pre>
 
   <h4><code>devflow worktree-setup</code></h4>
   <p>Set up devflow in an existing Git worktree (copy files, create service workspaces).</p>
+
+  <hr>
+
+  <h3>Other</h3>
+
+  <h4><code>devflow destroy</code></h4>
+  <p>Tear down the entire devflow project (inverse of <code>init</code>). Requires <code>--force</code> in non-interactive mode.</p>
+
+  <h4><code>devflow service discover</code></h4>
+  <p>Auto-discover running Docker containers and suggest adding them as services.</p>
+<pre><code class="language-bash">devflow service discover
+devflow service discover --service-type postgres</code></pre>
+
+  <h4><code>devflow gc</code></h4>
+  <p>Garbage collection &mdash; detect and clean up orphaned projects.</p>
+<pre><code class="language-bash">devflow gc                               # Interactive cleanup
+devflow gc --list                        # List orphans only
+devflow gc --all                         # Clean all orphans
+devflow gc --force                       # Skip confirmation</code></pre>
+
+  <h4><code>devflow capabilities</code></h4>
+  <p>Show machine-readable automation contract summary.</p>
+<pre><code class="language-bash">devflow capabilities
+devflow --json capabilities</code></pre>
 </section>
 
 <!-- ================================================================== -->
 <!-- EXAMPLES & RECIPES                                                  -->
 <!-- ================================================================== -->
 <section class="section" id="examples">
-  <h2><span class="number">12</span> Examples &amp; Recipes</h2>
+  <h2><span class="number">15</span> Examples &amp; Recipes</h2>
   <p class="section-desc">
     Real-world configuration examples for different frameworks, stacks, and workflows. Copy, paste, and adapt.
   </p>
@@ -3028,7 +3325,7 @@ devflow merge --cleanup
 <!-- TROUBLESHOOTING                                                     -->
 <!-- ================================================================== -->
 <section class="section" id="troubleshooting">
-  <h2><span class="number">13</span> Troubleshooting</h2>
+  <h2><span class="number">16</span> Troubleshooting</h2>
   <p class="section-desc">
     Common issues and how to resolve them. Start with <code>devflow doctor</code> for automated diagnostics.
   </p>

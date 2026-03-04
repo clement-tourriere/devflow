@@ -1,15 +1,15 @@
-# devflow — Universal Development Environment Branching Tool
+# devflow — Universal Development Environment Tool
 
 ## Overview
-devflow is a Rust-based tool that provides branching support for development services (PostgreSQL, ClickHouse, MySQL, Redis, and more) that automatically synchronize with Git workspaces. It manages Git worktrees, Docker containers with Copy-on-Write storage, cloud database workspaces, and lifecycle hooks — from a CLI, TUI, or desktop GUI. It also includes a native reverse proxy that auto-discovers Docker containers and provides HTTPS access via `*.localhost` domains.
+devflow is a Rust-based tool that provides per-workspace isolation for development services (PostgreSQL, ClickHouse, MySQL, Redis, and more) that automatically synchronize with Git workspaces. It manages Git worktrees, Docker containers with Copy-on-Write storage, cloud database workspaces, and lifecycle hooks — from a CLI, TUI, or desktop GUI. It also includes a native reverse proxy that auto-discovers Docker containers and provides HTTPS access via `*.localhost` domains.
 
 ## Core Concepts
-- **Service branching**: Each Git workspace gets its own isolated set of services (databases, caches, etc.)
+- **Workspace isolation**: Each Git workspace gets its own isolated set of services (databases, caches, etc.)
 - **Git worktree integration**: Optionally creates worktree directories per workspace for true parallel development
 - **Multi-provider**: Local Docker containers, PostgreSQL TEMPLATE, Neon, DBLab, Xata, or custom plugins
 - **Multi-service**: A single project can manage multiple services (e.g., PostgreSQL + ClickHouse + Redis)
 - **Lifecycle hooks**: MiniJinja-templated commands that run at specific phases (post-create, pre-merge, etc.)
-- **Copy-on-Write storage**: Uses APFS clones (macOS), ZFS snapshots, Btrfs/XFS reflinks for near-instant branching
+- **Copy-on-Write storage**: Uses APFS clones (macOS), ZFS snapshots, Btrfs/XFS reflinks for near-instant workspace creation
 
 ## Key Features
 - **Automatic Git integration**: Creates/switches service workspaces on `git checkout` via Git hooks
@@ -140,7 +140,13 @@ The project is organized as a Cargo workspace with four crates:
 
 ### Root crate (`devflow`) — CLI binary
 - `src/main.rs` — CLI entry point with custom help template
-- `src/cli.rs` — All command implementations (~7800 lines), including proxy subcommands
+- `src/cli/mod.rs` — Command enum and dispatch
+- `src/cli/workspace.rs` — Workspace operations (switch, list, graph, link, remove, merge, cleanup)
+- `src/cli/service.rs` — Service operations (add, create, delete, start, stop, reset, seed, logs, discover)
+- `src/cli/agent.rs` — AI agent commands (start, status, context, skill, docs)
+- `src/cli/proxy.rs` — Proxy commands (start, stop, status, list, trust)
+- `src/cli/hook.rs` — Hook commands (show, run, explain, vars, render, approvals, triggers, actions)
+- `src/cli/commit.rs` — VCS commit with AI message generation
 - `src/tui/` — Terminal UI (ratatui-based dashboard)
 
 ### `crates/devflow-core/` — Shared library

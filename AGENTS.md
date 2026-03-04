@@ -26,7 +26,7 @@ devflow --json install-hooks
 devflow --json capabilities
 ```
 
-## Start Work on a New Subject
+## Start Work on a New Task
 
 ```bash
 TASK_ID="issue-123"
@@ -36,9 +36,9 @@ TASK_ID="issue-123"
 Equivalent manual flow:
 
 ```bash
-BRANCH="agent/$TASK_ID"
-devflow --json --non-interactive switch -c "$BRANCH" --no-verify
-devflow --json service connection "$BRANCH"
+WORKSPACE="agent/$TASK_ID"
+devflow --json --non-interactive switch -c "$WORKSPACE" --no-verify
+devflow --json service connection "$WORKSPACE"
 ```
 
 ## Agent Commands
@@ -89,17 +89,19 @@ devflow hook explain post-create
 ## Suggested Agent Loop
 
 ```bash
+WORKSPACE="agent/$TASK_ID"
+
 # 1) Create/switch isolated environment for this task
-devflow --json --non-interactive switch -c "agent/$TASK_ID" --no-verify
+devflow --json --non-interactive switch -c "$WORKSPACE" --no-verify
 
 # 2) Read connection info and run the task
-CONN=$(devflow --json service connection "agent/$TASK_ID" | jq -r '.connection_string')
+CONN=$(devflow --json service connection "$WORKSPACE" | jq -r '.connection_string')
 
 # 3) Optional reset for retries
-devflow --json --non-interactive service reset "agent/$TASK_ID"
+devflow --json --non-interactive service reset "$WORKSPACE"
 
 # 4) Cleanup when done
-devflow --json --non-interactive service delete "agent/$TASK_ID"
+devflow --json --non-interactive service delete "$WORKSPACE"
 ```
 
 ## AI Commit Messages

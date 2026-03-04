@@ -1,3 +1,5 @@
+> **Note:** This is a historical roadmap. Many items have been implemented. For current documentation, see [README.md](README.md).
+
 # devflow Unified Environment Roadmap
 
 ## Objective

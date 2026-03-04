@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2025-03-04
+
+### Added
+
+- **Desktop GUI** — Tauri 2 desktop app with React frontend for managing projects, workspaces, services, hooks, proxy, and configuration. Includes system tray integration.
+- **Native reverse proxy** — Auto-discovers Docker containers and serves them via HTTPS `*.localhost` domains with auto-generated certificates. Includes CA trust management.
+- **Section-based config editor** — GUI replaces raw YAML editing with a form-based configuration editor organized by section (General, Git, Worktree, Services, Hooks, Agent, Commit).
+- **`devflow service discover`** — Auto-discover running Docker containers and suggest adding them as services.
+- **`devflow agent skill`** — Generate project-specific skills/rules for AI coding tools (Claude Code, Cursor, OpenCode). Installable from CLI, GUI, and TUI.
+- **`devflow agent docs`** — Generate project-tailored AGENTS.md documentation.
+- **`devflow gc`** — Garbage collection for orphaned projects.
+- **`devflow hook triggers`** — Show VCS event to hook phase mapping.
+- **`devflow hook actions`** — List built-in hook action types.
+- **Proxy commands** — `proxy start`, `proxy stop`, `proxy status`, `proxy list`, `proxy trust {install, verify, remove, info}`.
+- **TUI proxy tab** — Proxy status and container discovery in the terminal dashboard.
+
+### Changed
+
+- CLI split from single `src/cli.rs` into modules: `src/cli/mod.rs`, `workspace.rs`, `service.rs`, `agent.rs`, `proxy.rs`, `hook.rs`, `commit.rs`.
+- Documentation reworked: slim README + separate `docs/CLI.md` reference + updated `docs/index.html` with Proxy, GUI, and TUI sections.
+- Terminology standardized to "workspace" throughout documentation (replacing legacy "branch" references for devflow concepts).
+
 ## [0.3.0] - 2025-02-27
 
 ### Added

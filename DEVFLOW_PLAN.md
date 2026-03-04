@@ -1,4 +1,6 @@
-# devflow — Universal Development Environment Branching Tool
+> **Note:** This is a historical design document from the early development of devflow. For current documentation, see [README.md](README.md) and [docs/CLI.md](docs/CLI.md).
+
+# devflow — Universal Development Environment Tool
 
 ## Vision
 
