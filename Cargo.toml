@@ -84,7 +84,7 @@ nix = { version = "0.30", default-features = false, features = ["signal"] }
 
 # TUI framework
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"], optional = true }
-crossterm = { version = "0.28", default-features = false, features = ["events", "use-dev-tty"], optional = true }
+crossterm = { version = "0.29", default-features = false, features = ["events", "use-dev-tty"], optional = true }
 
 [profile.release]
 # Aggressive size optimization
