@@ -20,7 +20,7 @@ pub fn render_help(frame: &mut Frame) {
             "Global",
             vec![
                 ("q / Ctrl+c", "Quit"),
-                ("1/2/3", "Go to view"),
+                ("1-5", "Go to view"),
                 ("Tab / Shift+Tab", "Next / Previous view"),
                 ("[ / ]", "Previous / Next view"),
                 ("?", "Toggle this help"),
@@ -28,7 +28,7 @@ pub fn render_help(frame: &mut Frame) {
             ],
         ),
         (
-            "Environments View (1)",
+            "Workspaces (1)",
             vec![
                 ("j/k / Up/Down", "Navigate tree"),
                 ("Space", "Collapse/expand node"),
@@ -42,12 +42,30 @@ pub fn render_help(frame: &mut Frame) {
                 ("R", "Reset focused service"),
                 ("A / X", "Start/stop all services"),
                 ("l", "Logs for focused service"),
-                ("/", "Filter environments"),
+                ("/", "Filter workspaces"),
                 ("Esc", "Clear filter"),
             ],
         ),
         (
-            "System View (2)",
+            "Services (2)",
+            vec![
+                ("j/k / Up/Down", "Navigate services"),
+                ("n / p", "Cycle workspace within service"),
+                ("S", "Start service for focused workspace"),
+                ("x", "Stop service for focused workspace"),
+                ("l", "View logs"),
+            ],
+        ),
+        (
+            "Proxy (3)",
+            vec![
+                ("j/k / Up/Down", "Navigate routing table"),
+                ("s", "Start proxy"),
+                ("x", "Stop proxy"),
+            ],
+        ),
+        (
+            "System (4)",
             vec![
                 (
                     "1/2/3/4",
@@ -63,7 +81,7 @@ pub fn render_help(frame: &mut Frame) {
             ],
         ),
         (
-            "Logs View (3)",
+            "Logs (5)",
             vec![
                 ("f", "Toggle picker/content focus"),
                 ("j/k / Up/Down", "Navigate picker or scroll logs"),

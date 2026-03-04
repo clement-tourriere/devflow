@@ -913,6 +913,114 @@ impl VcsProvider for GitRepository {
 
         Ok(())
     }
+
+    fn merge_branch(&self, source: &str) -> Result<()> {
+        let annotated = self
+            .repo
+            .find_branch(source, git2::BranchType::Local)
+            .with_context(|| format!("Workspace '{}' not found", source))?
+            .into_reference()
+            .peel_to_commit()
+            .context("Source workspace does not point to a commit")?;
+        let annotated_commit = self
+            .repo
+            .find_annotated_commit(annotated.id())
+            .context("Failed to create annotated commit for merge")?;
+
+        let (analysis, _) = self
+            .repo
+            .merge_analysis(&[&annotated_commit])
+            .context("Failed to perform merge analysis")?;
+
+        if analysis.is_up_to_date() {
+            return Ok(());
+        }
+
+        if analysis.is_fast_forward() {
+            // Fast-forward: just move HEAD to the target commit
+            let refname = format!("refs/heads/{}", self.current_workspace()?.unwrap_or_default());
+            self.repo
+                .find_reference(&refname)
+                .and_then(|mut r| r.set_target(annotated.id(), "devflow: fast-forward merge"))
+                .with_context(|| format!("Failed to fast-forward to '{}'", source))?;
+            self.repo
+                .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+                .context("Failed to checkout after fast-forward")?;
+            return Ok(());
+        }
+
+        if analysis.is_normal() {
+            // Normal merge
+            self.repo
+                .merge(&[&annotated_commit], None, None)
+                .with_context(|| format!("Failed to merge '{}'", source))?;
+
+            // Check for conflicts
+            let mut index = self.repo.index().context("Failed to get index")?;
+            if index.has_conflicts() {
+                anyhow::bail!(
+                    "Merge conflicts detected. Resolve conflicts and commit manually."
+                );
+            }
+
+            // Create merge commit
+            let sig = self
+                .repo
+                .signature()
+                .context("Failed to get default signature")?;
+            let tree_oid = index.write_tree().context("Failed to write tree")?;
+            let tree = self.repo.find_tree(tree_oid)?;
+            let head_commit = self
+                .repo
+                .head()?
+                .peel_to_commit()
+                .context("HEAD is not a commit")?;
+            self.repo
+                .commit(
+                    Some("HEAD"),
+                    &sig,
+                    &sig,
+                    &format!("Merge workspace '{}' into HEAD", source),
+                    &tree,
+                    &[&head_commit, &annotated],
+                )
+                .context("Failed to create merge commit")?;
+
+            self.repo.cleanup_state()?;
+            return Ok(());
+        }
+
+        anyhow::bail!("Cannot merge '{}': merge analysis returned unexpected result", source);
+    }
+
+    fn detach_head(&self) -> Result<()> {
+        let head = self
+            .repo
+            .head()
+            .context("Failed to get HEAD")?;
+        let commit = head
+            .peel_to_commit()
+            .context("HEAD does not point to a commit")?;
+        self.repo
+            .set_head_detached(commit.id())
+            .context("Failed to detach HEAD")?;
+        Ok(())
+    }
+
+    fn prune_worktrees(&self) -> Result<()> {
+        // git2 doesn't expose worktree pruning directly, use git CLI
+        let root = self.get_repo_root();
+        let output = std::process::Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(root)
+            .output()
+            .context("Failed to prune worktrees")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("git worktree prune failed: {}", stderr);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -11,10 +11,12 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use super::action::*;
-use super::components::environments::EnvironmentsComponent;
 use super::components::help;
 use super::components::logs::LogsComponent;
+use super::components::proxy_tab::ProxyTabComponent;
+use super::components::services_tab::ServicesTabComponent;
 use super::components::system::SystemComponent;
+use super::components::workspaces::WorkspacesComponent;
 use super::components::Component;
 use super::context::DevflowContext;
 use super::event::{AppEvent, EventHandler};
@@ -39,9 +41,11 @@ enum ModalState {
 
 /// Main TUI application
 pub struct App {
-    context: DevflowContext,
-    // Components (3 tabs)
-    environments: EnvironmentsComponent,
+    pub(super) context: DevflowContext,
+    // Components (5 tabs)
+    workspaces: WorkspacesComponent,
+    services_tab: ServicesTabComponent,
+    proxy_tab: ProxyTabComponent,
     system: SystemComponent,
     logs: LogsComponent,
     // State
@@ -59,11 +63,13 @@ pub struct App {
 
 impl App {
     pub fn new(context: DevflowContext) -> Self {
-        let tab_names = vec!["Environments", "System", "Logs"];
+        let tab_names = vec!["Workspaces", "Services", "Proxy", "System", "Logs"];
         let (bg_tx, bg_rx) = mpsc::unbounded_channel();
         Self {
             context,
-            environments: EnvironmentsComponent::new(),
+            workspaces: WorkspacesComponent::new(),
+            services_tab: ServicesTabComponent::new(),
+            proxy_tab: ProxyTabComponent::new(),
             system: SystemComponent::new(),
             logs: LogsComponent::new(),
             active_tab: 0,
@@ -87,6 +93,7 @@ impl App {
         self.spawn_fetch_branches();
         self.spawn_fetch_services();
         self.spawn_fetch_capabilities();
+        self.spawn_fetch_proxy_status();
         self.load_sync_data();
     }
 
@@ -164,6 +171,31 @@ impl App {
                 }
                 Err(e) => {
                     let _ = tx.send(Action::Error(format!("Failed to load capabilities: {}", e)));
+                }
+            }
+        });
+    }
+
+    /// Spawn a background task to fetch proxy status + targets.
+    fn spawn_fetch_proxy_status(&self) {
+        let tx = self.bg_tx.clone();
+        tokio::spawn(async move {
+            match DevflowContext::fetch_proxy_status_bg().await {
+                Ok((status, targets)) => {
+                    let _ = tx.send(Action::DataLoaded(DataPayload::ProxyStatus(status)));
+                    let _ = tx.send(Action::DataLoaded(DataPayload::ProxyTargets(targets)));
+                }
+                Err(_) => {
+                    // Proxy not running is not an error — just set a "not running" state
+                    let status = super::components::proxy_tab::ProxyStatusData {
+                        running: false,
+                        https_port: 0,
+                        http_port: 0,
+                        api_port: 0,
+                        ca_installed: false,
+                    };
+                    let _ = tx.send(Action::DataLoaded(DataPayload::ProxyStatus(status)));
+                    let _ = tx.send(Action::DataLoaded(DataPayload::ProxyTargets(vec![])));
                 }
             }
         });
@@ -309,9 +341,6 @@ impl App {
                 }
                 ServiceOp::Reset => {
                     DevflowContext::reset_service_bg(&config, &service, &workspace).await
-                }
-                ServiceOp::Delete => {
-                    DevflowContext::delete_service_branch_bg(&config, &service, &workspace).await
                 }
             };
             match result {
@@ -462,12 +491,14 @@ impl App {
         }
 
         // Tab selection: number keys switch top-level views, except inside
-        // the System tab where 1/2/3 are reserved for sub-sections.
-        if self.active_tab != 1 {
+        // the System tab where 1-4 are reserved for sub-sections.
+        if self.active_tab != 3 {
             match key.code {
                 KeyCode::Char('1') => return Action::SelectTab(0),
                 KeyCode::Char('2') => return Action::SelectTab(1),
                 KeyCode::Char('3') => return Action::SelectTab(2),
+                KeyCode::Char('4') => return Action::SelectTab(3),
+                KeyCode::Char('5') => return Action::SelectTab(4),
                 _ => {}
             }
         }
@@ -477,14 +508,18 @@ impl App {
             KeyCode::F(1) => return Action::SelectTab(0),
             KeyCode::F(2) => return Action::SelectTab(1),
             KeyCode::F(3) => return Action::SelectTab(2),
+            KeyCode::F(4) => return Action::SelectTab(3),
+            KeyCode::F(5) => return Action::SelectTab(4),
             _ => {}
         }
 
         // Delegate to active component
         match self.active_tab {
-            0 => self.environments.handle_key_event(key),
-            1 => self.system.handle_key_event(key),
-            2 => self.logs.handle_key_event(key),
+            0 => self.workspaces.handle_key_event(key),
+            1 => self.services_tab.handle_key_event(key),
+            2 => self.proxy_tab.handle_key_event(key),
+            3 => self.system.handle_key_event(key),
+            4 => self.logs.handle_key_event(key),
             _ => Action::None,
         }
     }
@@ -496,17 +531,21 @@ impl App {
         }
         // Blur old tab
         match self.active_tab {
-            0 => self.environments.on_blur(),
-            1 => self.system.on_blur(),
-            2 => self.logs.on_blur(),
+            0 => self.workspaces.on_blur(),
+            1 => self.services_tab.on_blur(),
+            2 => self.proxy_tab.on_blur(),
+            3 => self.system.on_blur(),
+            4 => self.logs.on_blur(),
             _ => {}
         }
         self.active_tab = new_tab;
         // Focus new tab
         match self.active_tab {
-            0 => self.environments.on_focus(),
-            1 => self.system.on_focus(),
-            2 => self.logs.on_focus(),
+            0 => self.workspaces.on_focus(),
+            1 => self.services_tab.on_focus(),
+            2 => self.proxy_tab.on_focus(),
+            3 => self.system.on_focus(),
+            4 => self.logs.on_focus(),
             _ => {}
         }
     }
@@ -631,16 +670,6 @@ impl App {
                 );
                 self.spawn_service_op(service.clone(), workspace.clone(), ServiceOp::Reset);
             }
-            Action::DeleteServiceWorkspace {
-                ref service,
-                ref workspace,
-            } => {
-                self.set_status(
-                    format!("Deleting {} workspace '{}'...", service, workspace),
-                    false,
-                );
-                self.spawn_service_op(service.clone(), workspace.clone(), ServiceOp::Delete);
-            }
             Action::ViewLogs {
                 ref service,
                 ref workspace,
@@ -694,7 +723,7 @@ impl App {
                             }
                         }
                         InputTarget::FilterBranches => {
-                            self.environments.set_filter(text);
+                            self.workspaces.set_filter(text);
                         }
                         InputTarget::FilterLogsPicker => {
                             self.logs.set_filter(text);
@@ -718,7 +747,7 @@ impl App {
                 self.set_status(msg.clone(), true);
             }
             Action::StartAllServices(ref workspace) => {
-                let services = self.environments.services_for_branch(workspace);
+                let services = self.workspaces.services_for_branch(workspace);
                 if services.is_empty() {
                     self.set_status(
                         format!("No services to start on workspace '{}'", workspace),
@@ -739,7 +768,7 @@ impl App {
                 }
             }
             Action::StopAllServices(ref workspace) => {
-                let services = self.environments.services_for_branch(workspace);
+                let services = self.workspaces.services_for_branch(workspace);
                 if services.is_empty() {
                     self.set_status(
                         format!("No services to stop on workspace '{}'", workspace),
@@ -759,17 +788,52 @@ impl App {
                     }
                 }
             }
-            // Actions that are handled internally by components or unused at app level
-            Action::CollapseToggle(_) | Action::SelectSubSection(_) => {
-                self.dispatch_action(&action);
+            // Proxy actions — spawn background fetch from proxy API
+            Action::StartProxy => {
+                self.set_status("Starting proxy...".to_string(), false);
+                let tx = self.bg_tx.clone();
+                tokio::spawn(async move {
+                    match DevflowContext::start_proxy_bg().await {
+                        Ok(msg) => {
+                            let _ = tx.send(Action::OperationComplete {
+                                success: true,
+                                message: msg,
+                            });
+                            let _ = tx.send(Action::Refresh);
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Action::Error(format!("Proxy start failed: {}", e)));
+                        }
+                    }
+                });
             }
-            Action::Tick | Action::None => {}
+            Action::StopProxy => {
+                self.set_status("Stopping proxy...".to_string(), false);
+                let tx = self.bg_tx.clone();
+                tokio::spawn(async move {
+                    match DevflowContext::stop_proxy_bg().await {
+                        Ok(msg) => {
+                            let _ = tx.send(Action::OperationComplete {
+                                success: true,
+                                message: msg,
+                            });
+                            let _ = tx.send(Action::Refresh);
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Action::Error(format!("Proxy stop failed: {}", e)));
+                        }
+                    }
+                });
+            }
+            Action::None => {}
         }
     }
 
     /// Dispatch an action to all components.
     fn dispatch_action(&mut self, action: &Action) {
-        self.environments.update(action);
+        self.workspaces.update(action);
+        self.services_tab.update(action);
+        self.proxy_tab.update(action);
         self.system.update(action);
         self.logs.update(action);
     }
@@ -853,9 +917,11 @@ impl App {
 
     fn render_content(&self, frame: &mut Frame, area: Rect) {
         match self.active_tab {
-            0 => self.environments.render(frame, area, self.spinner_frame()),
-            1 => self.system.render(frame, area, self.spinner_frame()),
-            2 => self.logs.render(frame, area, self.spinner_frame()),
+            0 => self.workspaces.render(frame, area, self.spinner_frame()),
+            1 => self.services_tab.render(frame, area, self.spinner_frame()),
+            2 => self.proxy_tab.render(frame, area, self.spinner_frame()),
+            3 => self.system.render(frame, area, self.spinner_frame()),
+            4 => self.logs.render(frame, area, self.spinner_frame()),
             _ => {}
         }
     }
@@ -863,7 +929,7 @@ impl App {
     fn render_status(&self, frame: &mut Frame, area: Rect) {
         // Build the status line: left = hints, right = status message (or nothing)
         let tab_hints = theme::tab_hints(self.active_tab);
-        let global_hints = "q:Quit  ?:Help  Tab/Shift+Tab:Views  1-3:View";
+        let global_hints = "q:Quit  ?:Help  Tab/Shift+Tab:Views  1-5:View";
 
         match &self.status_message {
             Some((msg, is_error, _)) => {
@@ -906,7 +972,6 @@ enum ServiceOp {
     Start,
     Stop,
     Reset,
-    Delete,
 }
 
 impl std::fmt::Display for ServiceOp {
@@ -915,7 +980,6 @@ impl std::fmt::Display for ServiceOp {
             ServiceOp::Start => write!(f, "Start"),
             ServiceOp::Stop => write!(f, "Stop"),
             ServiceOp::Reset => write!(f, "Reset"),
-            ServiceOp::Delete => write!(f, "Delete"),
         }
     }
 }

@@ -1,29 +1,24 @@
 pub mod capabilities;
 pub mod config_view;
 pub mod doctor;
-pub mod environments;
 pub mod help;
 pub mod hooks;
 pub mod logs;
+pub mod proxy_tab;
+pub mod services_tab;
 pub mod system;
+pub mod workspaces;
 
 use super::action::Action;
-use crossterm::event::{KeyEvent, MouseEvent};
+use crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
 use ratatui::Frame;
 
 /// Trait for TUI components. Each tab/panel implements this.
-#[allow(dead_code)]
 pub trait Component {
     /// Handle a key event. Return an action if the event was consumed.
     fn handle_key_event(&mut self, key: KeyEvent) -> Action {
         let _ = key;
-        Action::None
-    }
-
-    /// Handle a mouse event.
-    fn handle_mouse_event(&mut self, mouse: MouseEvent) -> Action {
-        let _ = mouse;
         Action::None
     }
 
@@ -41,7 +36,4 @@ pub trait Component {
 
     /// Called when this component loses focus.
     fn on_blur(&mut self) {}
-
-    /// Short title for the tab bar.
-    fn title(&self) -> &str;
 }

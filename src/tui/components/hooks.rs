@@ -322,10 +322,6 @@ impl HooksComponent {
 }
 
 impl Component for HooksComponent {
-    fn title(&self) -> &str {
-        "Hooks"
-    }
-
     fn handle_key_event(&mut self, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {

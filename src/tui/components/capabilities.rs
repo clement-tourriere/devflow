@@ -75,10 +75,6 @@ impl CapabilitiesComponent {
 }
 
 impl Component for CapabilitiesComponent {
-    fn title(&self) -> &str {
-        "Capabilities"
-    }
-
     fn handle_key_event(&mut self, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {

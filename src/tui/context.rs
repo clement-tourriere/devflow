@@ -6,19 +6,16 @@ use devflow_core::config::{Config, NamedServiceConfig};
 use devflow_core::hooks::HookEntry;
 use devflow_core::services::factory;
 use devflow_core::state::{DevflowWorkspace, LocalStateManager};
-use devflow_core::vcs::{self, VcsProvider, WorkspaceInfo, WorktreeInfo};
+use devflow_core::vcs::{self, VcsProvider, WorktreeInfo};
 
 use super::action::*;
 
 /// Snapshot of VCS data captured synchronously from the main thread.
 /// All fields are `Send + Clone` so they can be passed to background tasks.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct VcsSnapshot {
-    pub workspaces: Vec<WorkspaceInfo>,
     pub current_workspace: Option<String>,
     pub default_workspace: Option<String>,
-    pub supports_worktrees: bool,
     pub worktrees: Vec<WorktreeInfo>,
 }
 
@@ -28,7 +25,6 @@ pub struct VcsSnapshot {
 /// VCS operations run synchronously (they're local + fast).
 /// Provider/network operations are exposed as static `_bg()` methods
 /// that take a `Config` clone and run on background tasks.
-#[allow(dead_code)]
 pub struct DevflowContext {
     pub config: Config,
     pub config_path: Option<PathBuf>,
@@ -36,7 +32,6 @@ pub struct DevflowContext {
     vcs_snapshot: VcsSnapshot,
 }
 
-#[allow(dead_code)]
 impl DevflowContext {
     /// Load config, inject state services, detect VCS, snapshot VCS data.
     pub fn new() -> Result<Self> {
@@ -67,20 +62,16 @@ impl DevflowContext {
 
     /// Take a snapshot of VCS state. All calls here are synchronous.
     fn take_vcs_snapshot(vcs: &dyn VcsProvider) -> VcsSnapshot {
-        let workspaces = vcs.list_workspaces().unwrap_or_default();
         let current_workspace = vcs.current_workspace().ok().flatten();
         let default_workspace = vcs.default_workspace().ok().flatten();
-        let supports_worktrees = vcs.supports_worktrees();
-        let worktrees = if supports_worktrees {
+        let worktrees = if vcs.supports_worktrees() {
             vcs.list_worktrees().unwrap_or_default()
         } else {
             Vec::new()
         };
         VcsSnapshot {
-            workspaces,
             current_workspace,
             default_workspace,
-            supports_worktrees,
             worktrees,
         }
     }
@@ -363,8 +354,6 @@ impl DevflowContext {
 
         Ok(BranchesData {
             workspaces: enriched,
-            current_workspace: context_branch.or(vcs.current_workspace),
-            default_workspace: vcs.default_workspace,
         })
     }
 
@@ -389,16 +378,12 @@ impl DevflowContext {
                             state: b.state,
                             parent_workspace: b.parent_workspace,
                             database_name: b.database_name,
-                            created_at: b
-                                .created_at
-                                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string()),
                         });
                     }
                 }
 
                 if let Some(info) = provider.project_info() {
                     project_info = Some(ProjectInfoEntry {
-                        name: info.name,
                         storage_driver: info.storage_driver,
                         image: info.image,
                     });
@@ -409,8 +394,6 @@ impl DevflowContext {
                 name: named_config.name.clone(),
                 provider_type: named_config.provider_type.clone(),
                 service_type: named_config.service_type.clone(),
-                auto_workspace: named_config.auto_workspace,
-                is_default: named_config.default,
                 workspaces,
                 project_info,
             });
@@ -710,17 +693,120 @@ impl DevflowContext {
         ))
     }
 
-    /// Delete a service workspace.
-    pub async fn delete_service_branch_bg(
-        config: &Config,
-        service_name: &str,
-        workspace_name: &str,
-    ) -> Result<String> {
-        let named = factory::resolve_provider(config, Some(service_name)).await?;
-        named.provider.delete_workspace(workspace_name).await?;
-        Ok(format!(
-            "Deleted workspace '{}' on {}",
-            workspace_name, service_name
-        ))
+    // ── Proxy background methods ────────────────────────────────────
+
+    /// Fetch proxy status and routing targets from the proxy API.
+    pub async fn fetch_proxy_status_bg() -> Result<(
+        super::components::proxy_tab::ProxyStatusData,
+        Vec<super::components::proxy_tab::ProxyTargetEntry>,
+    )> {
+        use super::components::proxy_tab::{ProxyStatusData, ProxyTargetEntry};
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()?;
+
+        // Fetch status
+        let status_resp: serde_json::Value = client
+            .get("http://127.0.0.1:2019/api/status")
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        let status = ProxyStatusData {
+            running: status_resp["running"].as_bool().unwrap_or(false),
+            https_port: status_resp["https_port"].as_u64().unwrap_or(443) as u16,
+            http_port: status_resp["http_port"].as_u64().unwrap_or(80) as u16,
+            api_port: status_resp["api_port"].as_u64().unwrap_or(2019) as u16,
+            ca_installed: status_resp["ca_installed"].as_bool().unwrap_or(false),
+        };
+
+        // Fetch targets
+        let targets_resp: serde_json::Value = client
+            .get("http://127.0.0.1:2019/api/targets")
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        let targets = targets_resp
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .map(|t| ProxyTargetEntry {
+                        domain: t["domain"].as_str().unwrap_or("-").to_string(),
+                        container_name: t["container_name"].as_str().unwrap_or("-").to_string(),
+                        container_ip: t["container_ip"].as_str().unwrap_or("-").to_string(),
+                        port: t["port"].as_u64().unwrap_or(0) as u16,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok((status, targets))
+    }
+
+    /// Start the proxy in daemon mode.
+    pub async fn start_proxy_bg() -> Result<String> {
+        let config = devflow_proxy::ProxyConfig {
+            https_port: 443,
+            http_port: 80,
+            api_port: 2019,
+            domain_suffix: "localhost".to_string(),
+        };
+
+        let exe = std::env::current_exe()?;
+        let child = std::process::Command::new(exe)
+            .args([
+                "proxy",
+                "start",
+                "--https-port",
+                &config.https_port.to_string(),
+                "--http-port",
+                &config.http_port.to_string(),
+                "--api-port",
+                &config.api_port.to_string(),
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+
+        let pid_path = devflow_proxy::ca::default_ca_cert_path()
+            .parent()
+            .unwrap()
+            .join("proxy.pid");
+        std::fs::write(&pid_path, child.id().to_string())?;
+
+        Ok(format!("Proxy started (pid: {})", child.id()))
+    }
+
+    /// Stop the proxy daemon.
+    pub async fn stop_proxy_bg() -> Result<String> {
+        let pid_path = devflow_proxy::ca::default_ca_cert_path()
+            .parent()
+            .unwrap()
+            .join("proxy.pid");
+
+        if !pid_path.exists() {
+            anyhow::bail!("Proxy is not running (no PID file)");
+        }
+
+        let pid_str = std::fs::read_to_string(&pid_path)?;
+        let pid: i32 = pid_str
+            .trim()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid PID file"))?;
+
+        #[cfg(unix)]
+        {
+            use nix::sys::signal::{kill, Signal};
+            use nix::unistd::Pid;
+            let _ = kill(Pid::from_raw(pid), Signal::SIGTERM);
+        }
+
+        std::fs::remove_file(&pid_path)?;
+        Ok(format!("Proxy stopped (pid: {})", pid))
     }
 }

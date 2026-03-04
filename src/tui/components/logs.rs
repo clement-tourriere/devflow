@@ -141,7 +141,7 @@ impl LogsComponent {
                 let color = theme::state_color(state_str);
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        format!("{}", entry.service_name),
+                        entry.service_name.to_string(),
                         Style::default().fg(theme::SERVICE_TYPE),
                     ),
                     Span::styled(" / ", Style::default().fg(theme::TEXT_MUTED)),
@@ -289,10 +289,6 @@ impl LogsComponent {
 }
 
 impl Component for LogsComponent {
-    fn title(&self) -> &str {
-        "Logs"
-    }
-
     fn handle_key_event(&mut self, key: KeyEvent) -> Action {
         match key.code {
             // Focus toggle between picker and content

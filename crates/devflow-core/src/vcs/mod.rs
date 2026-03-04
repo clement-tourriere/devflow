@@ -35,16 +35,15 @@ impl WorktreeCreateResult {
 
 /// Information about a Git worktree.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct WorktreeInfo {
     /// Filesystem path to the worktree
     pub path: PathBuf,
     /// Workspace checked out in this worktree (None for detached HEAD)
     pub workspace: Option<String>,
     /// Whether this is the main (bare) worktree
-    #[allow(dead_code)]
     pub is_main: bool,
     /// Whether the worktree is locked
-    #[allow(dead_code)]
     pub is_locked: bool,
 }
 
@@ -52,7 +51,6 @@ pub struct WorktreeInfo {
 ///
 /// Git is the primary implementation. jj (Jujutsu) is also supported
 /// via `JjRepository`.
-#[allow(dead_code)]
 pub trait VcsProvider: Send {
     // ── Workspace operations ──────────────────────────────────────────
     fn current_workspace(&self) -> Result<Option<String>>;
@@ -143,6 +141,34 @@ pub trait VcsProvider: Send {
     fn ensure_initial_commit(&self) -> Result<()> {
         Ok(())
     }
+
+    // ── Merge operations ────────────────────────────────────────────
+
+    /// Merge a source workspace into the current HEAD.
+    ///
+    /// Returns `Ok(())` on success.  For git this performs a fast-forward
+    /// or normal merge using `git2`.
+    fn merge_branch(&self, _source: &str) -> Result<()> {
+        anyhow::bail!(
+            "{} does not support merge_branch",
+            self.provider_name()
+        )
+    }
+
+    /// Detach HEAD from the current workspace.
+    ///
+    /// Needed before deleting the currently checked-out workspace.
+    fn detach_head(&self) -> Result<()> {
+        anyhow::bail!(
+            "{} does not support detach_head",
+            self.provider_name()
+        )
+    }
+
+    /// Clean up stale worktree entries.
+    fn prune_worktrees(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Which VCS was detected.
@@ -197,7 +223,6 @@ pub fn detect_vcs_provider<P: AsRef<Path>>(path: P) -> Result<Box<dyn VcsProvide
 }
 
 /// Detect which VCS kind is present without constructing a provider.
-#[allow(dead_code)]
 pub fn detect_vcs_kind<P: AsRef<Path>>(path: P) -> Option<VcsKind> {
     let (has_jj, has_git) = find_vcs_markers(path.as_ref());
     match (has_jj, has_git) {
@@ -209,13 +234,7 @@ pub fn detect_vcs_kind<P: AsRef<Path>>(path: P) -> Option<VcsKind> {
 
 /// Check whether a CLI tool is available on PATH.
 fn tool_available(name: &str) -> bool {
-    std::process::Command::new(name)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    which::which(name).is_ok()
 }
 
 /// Return which VCS tools are available on the system.

@@ -1,18 +1,17 @@
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyEvent, MouseEvent};
+use crossterm::event::{self, Event, KeyEvent};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// Terminal events that the TUI processes.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum AppEvent {
     /// A key was pressed
     Key(KeyEvent),
     /// Mouse activity
-    Mouse(MouseEvent),
+    Mouse(()),
     /// Terminal was resized
-    Resize(u16, u16),
+    Resize((), ()),
     /// Periodic tick for background refresh
     Tick,
 }
@@ -42,7 +41,7 @@ impl EventHandler {
 
                 if has_event {
                     // Read the event (blocking but should be immediate since poll returned true)
-                    let evt = tokio::task::spawn_blocking(|| event::read())
+                    let evt = tokio::task::spawn_blocking(event::read)
                         .await
                         .ok()
                         .and_then(|r| r.ok());
@@ -50,8 +49,8 @@ impl EventHandler {
                     if let Some(evt) = evt {
                         let app_event = match evt {
                             Event::Key(key) => Some(AppEvent::Key(key)),
-                            Event::Mouse(mouse) => Some(AppEvent::Mouse(mouse)),
-                            Event::Resize(w, h) => Some(AppEvent::Resize(w, h)),
+                            Event::Mouse(_) => Some(AppEvent::Mouse(())),
+                            Event::Resize(_, _) => Some(AppEvent::Resize((), ())),
                             _ => None,
                         };
                         if let Some(e) = app_event {

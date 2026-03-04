@@ -58,10 +58,6 @@ impl DoctorComponent {
 }
 
 impl Component for DoctorComponent {
-    fn title(&self) -> &str {
-        "Doctor"
-    }
-
     fn handle_key_event(&mut self, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {

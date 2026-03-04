@@ -55,18 +55,33 @@ pub async fn run() -> Result<()> {
     run_result?;
 
     if let Some(workspace_name) = app.take_open_branch_on_exit() {
-        let exe = std::env::current_exe()?;
-        let status = tokio::process::Command::new(exe)
-            .arg("switch")
-            .arg(&workspace_name)
-            .status()
-            .await?;
-        if !status.success() {
-            anyhow::bail!(
-                "Failed to open workspace '{}' from TUI (switch exited with code {})",
-                workspace_name,
-                status.code().unwrap_or(-1)
-            );
+        let config = &app.context.config;
+        let project_dir = app
+            .context
+            .config_path
+            .as_ref()
+            .and_then(|p: &std::path::PathBuf| p.parent().map(|d| d.to_path_buf()))
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+        let options = devflow_core::workspace::switch::SwitchOptions {
+            lifecycle: devflow_core::workspace::LifecycleOptions::default(),
+            create_if_missing: true,
+            ..Default::default()
+        };
+
+        let result = devflow_core::workspace::switch::switch_workspace(
+            config,
+            &project_dir,
+            &workspace_name,
+            &options,
+        )
+        .await?;
+
+        // Print results to stdout (terminal already restored)
+        println!("Switched to workspace '{}'", result.workspace);
+        if let Some(ref wt) = result.worktree {
+            println!("Worktree: {}", wt.path.display());
         }
     }
 

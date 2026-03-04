@@ -40,16 +40,10 @@ pub const TREE_LINE: Color = Color::DarkGray;
 pub const TREE_COLLAPSED: Color = Color::Yellow;
 
 // Services
-#[allow(dead_code)]
-pub const SERVICE_DEFAULT: Color = Color::Yellow;
 pub const SERVICE_TYPE: Color = Color::Blue;
-#[allow(dead_code)]
-pub const SERVICE_AUTO: Color = Color::Green;
 
 // Data values
 pub const VALUE_DATABASE: Color = Color::Blue;
-#[allow(dead_code)]
-pub const VALUE_PROVIDER: Color = Color::Blue;
 pub const VALUE_PARENT: Color = Color::Magenta;
 pub const VALUE_PATH: Color = Color::Cyan;
 
@@ -106,8 +100,10 @@ pub fn highlight_style() -> Style {
 pub fn tab_hints(tab_index: usize) -> &'static str {
     match tab_index {
         0 => "j/k:Navigate  n/p:Service  Enter:SvcAlign  o:Open  S/x:Svc  A/X:All  c:Create  d:Delete  Space:Expand  /:Filter  r:Refresh",
-        1 => "1:Config  2:Hooks  3:Doctor  4:Caps  j/k:Scroll  v/s:HookTpl  r:Refresh",
-        2 => "f:Focus  /:Filter  j/k:Scroll  g/G:Top/Bottom  PgUp/PgDn:Page  r:Refresh",
+        1 => "j/k:Navigate  n/p:Workspace  S:Start  x:Stop  l:Logs  r:Refresh",
+        2 => "j/k:Navigate  s:Start  x:Stop  r:Refresh",
+        3 => "1:Config  2:Hooks  3:Doctor  4:Caps  j/k:Scroll  v/s:HookTpl  r:Refresh",
+        4 => "f:Focus  /:Filter  j/k:Scroll  g/G:Top/Bottom  PgUp/PgDn:Page  r:Refresh",
         _ => "",
     }
 }

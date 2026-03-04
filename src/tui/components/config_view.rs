@@ -93,10 +93,6 @@ impl ConfigViewComponent {
 }
 
 impl Component for ConfigViewComponent {
-    fn title(&self) -> &str {
-        "Config"
-    }
-
     fn handle_key_event(&mut self, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {

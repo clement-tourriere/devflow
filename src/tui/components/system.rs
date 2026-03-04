@@ -127,10 +127,6 @@ impl SystemComponent {
 }
 
 impl Component for SystemComponent {
-    fn title(&self) -> &str {
-        "System"
-    }
-
     fn handle_key_event(&mut self, key: KeyEvent) -> Action {
         // Section switching keys
         match key.code {

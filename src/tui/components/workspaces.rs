@@ -31,7 +31,7 @@ struct TreeRow {
     has_children: bool,
 }
 
-pub struct EnvironmentsComponent {
+pub struct WorkspacesComponent {
     data: Option<BranchesData>,
     tree_rows: Vec<TreeRow>,
     list_state: ListState,
@@ -42,7 +42,7 @@ pub struct EnvironmentsComponent {
     service_focus: HashMap<String, usize>,
 }
 
-impl EnvironmentsComponent {
+impl WorkspacesComponent {
     pub fn new() -> Self {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
@@ -179,7 +179,7 @@ impl EnvironmentsComponent {
         tree_rows: &mut Vec<TreeRow>,
     ) {
         let children = children_map.get(&workspace.name);
-        let has_children = children.map_or(false, |c| !c.is_empty());
+        let has_children = children.is_some_and(|c| !c.is_empty());
         let is_collapsed = collapsed.contains(&workspace.name);
 
         // Apply filter
@@ -635,11 +635,7 @@ impl EnvironmentsComponent {
     }
 }
 
-impl Component for EnvironmentsComponent {
-    fn title(&self) -> &str {
-        "Environments"
-    }
-
+impl Component for WorkspacesComponent {
     fn handle_key_event(&mut self, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
@@ -888,7 +884,7 @@ impl Component for EnvironmentsComponent {
     fn on_blur(&mut self) {}
 }
 
-impl EnvironmentsComponent {
+impl WorkspacesComponent {
     pub fn services_for_branch(&self, workspace_name: &str) -> Vec<String> {
         let mut names = Vec::new();
 

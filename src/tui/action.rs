@@ -3,7 +3,6 @@
 /// Components emit actions in response to events; the App dispatches
 /// them back to all components via `update()`.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum Action {
     // ── Navigation ──
     Quit,
@@ -49,10 +48,6 @@ pub enum Action {
         service: String,
         workspace: String,
     },
-    DeleteServiceWorkspace {
-        service: String,
-        workspace: String,
-    },
     ViewLogs {
         service: String,
         workspace: String,
@@ -60,16 +55,14 @@ pub enum Action {
     RunDoctor,
 
     // ── Environments tree actions ──
-    /// Toggle collapse/expand of a tree node
-    CollapseToggle(String),
     /// Start all services for a workspace
     StartAllServices(String),
     /// Stop all services for a workspace
     StopAllServices(String),
 
-    // ── System tab actions ──
-    /// Switch sub-section within the System tab (0=Config, 1=Hooks, 2=Doctor, 3=Capabilities)
-    SelectSubSection(usize),
+    // ── Proxy actions ──
+    StartProxy,
+    StopProxy,
 
     // ── Confirmation dialog ──
     ShowConfirm {
@@ -89,7 +82,6 @@ pub enum Action {
     CancelInput,
 
     // ── Misc ──
-    Tick,
     None,
 }
 
@@ -103,16 +95,16 @@ pub enum InputTarget {
 
 /// Async data payloads that come back from background tasks.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum DataPayload {
     Branches(BranchesData),
     Services(ServicesData),
     Capabilities(CapabilitiesData),
-    ConnectionInfo(Vec<ConnectionInfoEntry>),
     DoctorResults(Vec<DoctorEntry>),
     Logs { service: String, content: String },
     ConfigYaml(String),
     HooksData(HooksData),
+    ProxyStatus(super::components::proxy_tab::ProxyStatusData),
+    ProxyTargets(Vec<super::components::proxy_tab::ProxyTargetEntry>),
 }
 
 /// Enriched workspace info combining VCS + service data.
@@ -139,39 +131,29 @@ pub struct BranchServiceState {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct BranchesData {
     pub workspaces: Vec<EnrichedBranch>,
-    pub current_workspace: Option<String>,
-    pub default_workspace: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ServiceEntry {
     pub name: String,
     pub provider_type: String,
     pub service_type: String,
-    pub auto_workspace: bool,
-    pub is_default: bool,
     pub workspaces: Vec<ServiceWorkspaceEntry>,
     pub project_info: Option<ProjectInfoEntry>,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ServiceWorkspaceEntry {
     pub name: String,
     pub state: Option<String>,
     pub parent_workspace: Option<String>,
     pub database_name: String,
-    pub created_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ProjectInfoEntry {
-    pub name: String,
     pub storage_driver: Option<String>,
     pub image: Option<String>,
 }
@@ -193,18 +175,6 @@ pub struct ServiceCapabilityEntry {
     pub service_name: String,
     pub provider_name: String,
     pub capabilities: devflow_core::services::ServiceCapabilities,
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct ConnectionInfoEntry {
-    pub service_name: String,
-    pub host: String,
-    pub port: u16,
-    pub database: String,
-    pub user: String,
-    pub password: Option<String>,
-    pub connection_string: Option<String>,
 }
 
 #[derive(Debug, Clone)]
