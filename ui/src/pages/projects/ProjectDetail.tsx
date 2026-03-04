@@ -19,6 +19,7 @@ import {
   destroyProject,
   listContainers,
   getProxyStatus,
+  runDoctor,
 } from "../../utils/invoke";
 import type {
   ProjectDetail as ProjectDetailType,
@@ -47,6 +48,7 @@ function ProjectDetail() {
   const [services, setServices] = useState<ServiceEntry[]>([]);
   const [currentWorkspace, setCurrentWorkspace] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [setupIssueCount, setSetupIssueCount] = useState(0);
 
   // Service workspace tracking: { "service-name": ServiceWorkspaceInfo[] }
   const [serviceWorkspaces, setServiceWorkspaces] = useState<
@@ -163,6 +165,17 @@ function ProjectDetail() {
   useEffect(() => {
     reload();
   }, [reload]);
+
+  // Background doctor check for badge
+  useEffect(() => {
+    if (!detail?.has_config || !projectPath) return;
+    runDoctor(projectPath)
+      .then((report) => {
+        const failCount = report.general.filter((c) => !c.available).length;
+        setSetupIssueCount(failCount);
+      })
+      .catch(() => setSetupIssueCount(0));
+  }, [detail?.has_config, projectPath]);
 
   const handleCreateWorkspace = async () => {
     if (!newWorkspaceName.trim() || isCreatingWorkspace) return;
@@ -489,10 +502,19 @@ function ProjectDetail() {
           </Link>
           {detail.has_config && (
             <Link
-              to={`/doctor/${encodeURIComponent(projectPath)}`}
+              to={`/setup/${encodeURIComponent(projectPath)}`}
               className="btn"
+              style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
             >
-              Doctor
+              Setup
+              {setupIssueCount > 0 && (
+                <span
+                  className="badge badge-warning"
+                  style={{ fontSize: 10, minWidth: 18, textAlign: "center", padding: "1px 5px" }}
+                >
+                  {setupIssueCount}
+                </span>
+              )}
             </Link>
           )}
         </div>

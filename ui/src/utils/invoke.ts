@@ -9,6 +9,7 @@ import type {
   AddServiceRequest,
   DiscoveredContainer,
   DestroyServiceResult,
+  AgentSkillsStatus,
   HookPhaseEntry,
   VcsHooksActionResult,
   ActionTypeInfo,
@@ -155,6 +156,12 @@ export const discoverDockerContainers = (serviceType?: string) =>
   invoke<DiscoveredContainer[]>("discover_docker_containers", {
     serviceType,
   });
+export const installAgentSkills = (projectPath: string) =>
+  invoke<string[]>("install_agent_skills", { projectPath });
+export const uninstallAgentSkills = (projectPath: string) =>
+  invoke<void>("uninstall_agent_skills", { projectPath });
+export const checkAgentSkills = (projectPath: string) =>
+  invoke<AgentSkillsStatus>("check_agent_skills", { projectPath });
 
 // Hooks
 export const listHooks = (projectPath: string) =>

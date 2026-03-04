@@ -8,12 +8,38 @@ use std::path::Path;
 
 use crate::config::Config;
 
+/// The standard skills directory (Agent Skills open standard, supported by Claude Code, Cursor, OpenCode).
+const SKILLS_DIR: &str = ".agents/skills";
+
+/// A generated skill file with its relative path and content.
+#[derive(Debug, Clone)]
+pub struct SkillFile {
+    /// Relative path under `.agents/skills/devflow/`, e.g. `SKILL.md` or `workspace-list/SKILL.md`
+    pub relative_path: String,
+    pub content: String,
+}
+
+/// Status of agent skill installation for a project.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SkillInstallStatus {
+    pub installed: bool,
+    pub installed_skills: Vec<String>,
+    pub missing_skills: Vec<String>,
+}
+
 /// Generate a Claude Code skill file for this project.
 pub fn generate_claude_skill(config: &Config, _project_dir: &Path) -> Result<String> {
     let project_name = config.project_name();
     let services = config.resolve_services();
 
     let mut skill = String::new();
+    skill.push_str("---\n");
+    skill.push_str("name: devflow\n");
+    skill.push_str(&format!(
+        "description: devflow workspace management overview for {}\n",
+        project_name
+    ));
+    skill.push_str("---\n\n");
     skill.push_str(&format!("# devflow - {}\n\n", project_name));
     skill.push_str(
         "This project uses **devflow** for workspace-isolated development environments.\n\n",
@@ -92,95 +118,269 @@ pub fn generate_claude_skill(config: &Config, _project_dir: &Path) -> Result<Str
     Ok(skill)
 }
 
-/// Generate an OpenCode / AGENTS.md configuration for this project.
-pub fn generate_opencode_config(config: &Config, _project_dir: &Path) -> Result<String> {
-    let project_name = config.project_name();
-    let services = config.resolve_services();
+/// Generate individual workspace management skills (Agent Skills open standard).
+///
+/// Each skill is a separate top-level directory under `.agents/skills/`.
+pub fn generate_workspace_skills() -> Vec<SkillFile> {
+    vec![
+        SkillFile {
+            relative_path: "devflow-workspace-list/SKILL.md".to_string(),
+            content: r#"---
+name: devflow-workspace-list
+description: List all devflow workspaces with their status, services, and worktree paths.
+---
 
-    let mut content = String::new();
-    content.push_str(&format!("# devflow for {}\n\n", project_name));
-    content.push_str("This guide is for autonomous coding agents and CI runners.\n\n");
+## When to use
 
-    content.push_str("## Goal\n\n");
-    content.push_str("Use devflow to create an isolated development workspace environment per task, with machine-readable output and deterministic behavior.\n\n");
+- You need to see which workspaces exist in the project
+- You want to check service statuses across workspaces
+- You need to find a workspace's worktree path before navigating to it
+- You want to verify workspace state after creating or switching
 
-    content.push_str("## Recommended Flags\n\n");
-    content.push_str("- `--json`: structured output on stdout\n");
-    content.push_str("- `--non-interactive`: disable prompts in automation\n");
-    content.push_str(
-        "- `--no-verify` on `switch`: skip lifecycle hooks when approval prompts are possible\n\n",
-    );
+## Instructions
 
-    content.push_str("## Start Work on a New Task\n\n");
-    content.push_str("```bash\n");
-    content.push_str("TASK_ID=\"issue-123\"\n");
-    content.push_str("devflow --json --non-interactive switch -c \"agent/$TASK_ID\" --no-verify\n");
-    content.push_str("CONN=$(devflow --json connection \"agent/$TASK_ID\")\n");
-    content.push_str("```\n\n");
+1. Run `devflow --json list` to get structured workspace data
+2. Parse the JSON array — each object contains:
+   - `name` — workspace identifier
+   - `is_current` — boolean, whether this is the active workspace
+   - `is_default` — boolean, whether this is the default (main) workspace
+   - `worktree_path` — filesystem path to the worktree directory (if any)
+   - `parent` — parent workspace name
+   - `services` — array of service objects with `name`, `status`, `service_type`
+3. Present the results clearly, highlighting the current workspace
 
-    if !services.is_empty() {
-        content.push_str("## Available Services\n\n");
-        for svc in &services {
-            content.push_str(&format!(
-                "- **{}** ({}): `devflow --json connection <workspace> -s {}`\n",
-                svc.name, svc.service_type, svc.name
-            ));
-        }
-        content.push('\n');
-    }
+Use `devflow list` (without `--json`) for human-readable output when not parsing programmatically.
 
-    content.push_str("## Cleanup\n\n");
-    content.push_str("```bash\n");
-    content.push_str("devflow --json --non-interactive remove \"agent/$TASK_ID\" --force\n");
-    content.push_str("```\n\n");
+## Examples
 
-    content.push_str("## Automation Contract\n\n");
-    content.push_str(
-        "- `service create`, `service delete`, and `switch` return non-zero exit code on failure\n",
-    );
-    content.push_str("- `destroy` and `remove` require `--force` in `--non-interactive` mode\n");
-    content.push_str("- Use `devflow --json capabilities` for a machine-readable summary\n");
+List all workspaces as JSON:
 
-    Ok(content)
+```bash
+devflow --json list
+```
+
+List workspaces in human-readable format:
+
+```bash
+devflow list
+```
+
+Check which workspace is currently active:
+
+```bash
+devflow --json list | jq '.[] | select(.is_current) | .name'
+```
+"#
+            .to_string(),
+        },
+        SkillFile {
+            relative_path: "devflow-workspace-switch/SKILL.md".to_string(),
+            content: r#"---
+name: devflow-workspace-switch
+description: Switch to an existing devflow workspace and its isolated services.
+---
+
+## When to use
+
+- You need to change the active workspace to work on a different task
+- You want to switch services (databases, caches) to match a specific workspace
+- After listing workspaces, you want to activate one of them
+
+## Instructions
+
+1. The workspace name is provided in `$ARGUMENTS`
+2. Run `devflow switch $ARGUMENTS --non-interactive --no-verify` to switch
+3. Verify the switch succeeded with `devflow status`
+4. If the workspace has services, retrieve connection info with `devflow --json connection $ARGUMENTS`
+5. Report the new workspace state and any connection strings to the user
+
+Always use `--non-interactive` to avoid prompts and `--no-verify` to skip hook approval when running as an agent.
+
+## Examples
+
+Switch to an existing workspace:
+
+```bash
+devflow switch my-feature --non-interactive --no-verify
+```
+
+Verify the switch and get connection info:
+
+```bash
+devflow status
+devflow --json connection my-feature
+```
+"#
+            .to_string(),
+        },
+        SkillFile {
+            relative_path: "devflow-workspace-create/SKILL.md".to_string(),
+            content: r#"---
+name: devflow-workspace-create
+description: Create a new devflow workspace with isolated services for a task or feature.
+---
+
+## When to use
+
+- You are starting work on a new task or feature that needs isolated services
+- You need a fresh database or cache instance that won't affect other workspaces
+- You want to set up a parallel development environment with its own worktree
+
+## Instructions
+
+1. The workspace name is provided in `$ARGUMENTS`
+2. Run `devflow switch -c $ARGUMENTS --non-interactive --no-verify` to create and switch
+   - The `-c` flag creates the workspace if it doesn't exist
+   - This provisions isolated service instances (databases, caches) automatically
+   - If worktrees are enabled, a new Git worktree directory is created
+3. Retrieve connection info with `devflow --json connection $ARGUMENTS`
+4. Report the new workspace details including service connection strings to the user
+
+Use a descriptive name like `feature/auth-refactor` or `agent/task-123` for the workspace.
+
+## Examples
+
+Create a new workspace for a feature:
+
+```bash
+devflow switch -c feature/my-task --non-interactive --no-verify
+```
+
+Get connection strings for the new workspace:
+
+```bash
+devflow --json connection feature/my-task
+```
+
+Create a workspace and immediately get full context:
+
+```bash
+devflow switch -c agent/task-42 --non-interactive --no-verify
+devflow --json connection agent/task-42
+devflow agent context
+```
+"#
+            .to_string(),
+        },
+    ]
 }
 
-/// Generate Cursor rules for this project.
-pub fn generate_cursor_rules(config: &Config, _project_dir: &Path) -> Result<String> {
-    let project_name = config.project_name();
-    let services = config.resolve_services();
+/// All top-level skill directory names managed by devflow.
+const MANAGED_SKILL_DIRS: &[&str] = &[
+    "devflow-workspace-list",
+    "devflow-workspace-switch",
+    "devflow-workspace-create",
+];
 
-    let mut content = String::new();
-    content.push_str(&format!("# devflow rules for {}\n\n", project_name));
-    content
-        .push_str("This project uses devflow for workspace-isolated development environments.\n\n");
+/// Install all agent skills into `.agents/skills/` under the project directory.
+///
+/// Uses the Agent Skills open standard (agentskills.io), compatible with
+/// Cursor, OpenCode, and other tools that support the standard.
+///
+/// Also creates per-skill symlinks in `.claude/skills/` pointing back to
+/// `.agents/skills/` so Claude Code picks them up too.
+///
+/// Returns the list of written file paths.
+pub fn install_agent_skills(_config: &Config, project_dir: &Path) -> Result<Vec<String>> {
+    let skills_dir = project_dir.join(SKILLS_DIR);
 
-    content.push_str("## Key Commands\n\n");
-    content.push_str("- Create isolated workspace: `devflow switch -c <workspace>`\n");
-    content.push_str("- Get connection info: `devflow --json connection <workspace>`\n");
-    content.push_str("- Show status: `devflow status`\n");
-    content.push_str("- AI commit: `devflow commit --ai`\n");
-    content.push_str("- Show template vars: `devflow hook vars`\n\n");
+    let mut written = Vec::new();
 
-    if !services.is_empty() {
-        content.push_str("## Services\n\n");
-        for svc in &services {
-            content.push_str(&format!(
-                "- {}: {} ({})\n",
-                svc.name, svc.service_type, svc.provider_type
-            ));
+    // Write individual workspace skills
+    for skill_file in generate_workspace_skills() {
+        let full_path = skills_dir.join(&skill_file.relative_path);
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
-        content.push('\n');
+        std::fs::write(&full_path, &skill_file.content)?;
+        written.push(full_path.display().to_string());
     }
 
-    content.push_str("## Rules\n\n");
-    content.push_str("- Always use `devflow --json` for machine-readable output\n");
-    content.push_str(
-        "- Use `devflow connection <workspace>` to get database URLs, never hardcode them\n",
-    );
-    content.push_str("- Use `devflow switch -c` to create new workspaces with isolated services\n");
-    content.push_str("- Use `devflow commit --ai` for consistent commit messages\n");
+    // Symlink each skill dir in .claude/skills/ → ../../.agents/skills/<name>
+    ensure_claude_skill_symlinks(project_dir)?;
 
-    Ok(content)
+    Ok(written)
+}
+
+/// Create a symlink in `.claude/skills/<name>` → `../../.agents/skills/<name>`
+/// for each devflow-managed skill directory.
+fn ensure_claude_skill_symlinks(project_dir: &Path) -> Result<()> {
+    let claude_skills_dir = project_dir.join(".claude").join("skills");
+    std::fs::create_dir_all(&claude_skills_dir)?;
+
+    for dir_name in MANAGED_SKILL_DIRS {
+        let claude_link = claude_skills_dir.join(dir_name);
+        let relative_target = Path::new("..")
+            .join("..")
+            .join(SKILLS_DIR)
+            .join(dir_name);
+
+        if claude_link.is_symlink() {
+            if let Ok(target) = std::fs::read_link(&claude_link) {
+                if target == relative_target {
+                    continue;
+                }
+            }
+            std::fs::remove_file(&claude_link)?;
+        } else if claude_link.exists() {
+            std::fs::remove_dir_all(&claude_link)?;
+        }
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&relative_target, &claude_link)?;
+
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&relative_target, &claude_link)?;
+    }
+
+    Ok(())
+}
+
+/// Remove all devflow-managed skills from `.agents/skills/` and their Claude symlinks.
+pub fn uninstall_agent_skills(project_dir: &Path) -> Result<()> {
+    let skills_dir = project_dir.join(SKILLS_DIR);
+    let claude_skills_dir = project_dir.join(".claude").join("skills");
+
+    for dir_name in MANAGED_SKILL_DIRS {
+        // Remove canonical directory
+        let dir = skills_dir.join(dir_name);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+
+        // Remove Claude symlink or copy
+        let claude_link = claude_skills_dir.join(dir_name);
+        if claude_link.is_symlink() {
+            std::fs::remove_file(&claude_link)?;
+        } else if claude_link.exists() {
+            std::fs::remove_dir_all(&claude_link)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Check whether agent skills are installed for a project.
+pub fn check_agent_skills_installed(project_dir: &Path) -> SkillInstallStatus {
+    let skills_dir = project_dir.join(SKILLS_DIR);
+
+    let mut installed_skills = Vec::new();
+    let mut missing_skills = Vec::new();
+
+    for dir_name in MANAGED_SKILL_DIRS {
+        let skill_file = skills_dir.join(dir_name).join("SKILL.md");
+        if skill_file.exists() {
+            installed_skills.push(dir_name.to_string());
+        } else {
+            missing_skills.push(dir_name.to_string());
+        }
+    }
+
+    SkillInstallStatus {
+        installed: missing_skills.is_empty(),
+        installed_skills,
+        missing_skills,
+    }
 }
 
 /// Generate project context for agents (JSON or markdown).

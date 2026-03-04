@@ -98,6 +98,9 @@ fn main() {
             commands::services::delete_service_workspace,
             commands::services::destroy_service,
             commands::services::discover_docker_containers,
+            commands::services::install_agent_skills,
+            commands::services::uninstall_agent_skills,
+            commands::services::check_agent_skills,
             // Hooks
             commands::hooks::list_hooks,
             commands::hooks::render_template,

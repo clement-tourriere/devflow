@@ -53,6 +53,7 @@ pub enum Action {
         workspace: String,
     },
     RunDoctor,
+    InstallAgentSkills,
 
     // ── Environments tree actions ──
     /// Start all services for a workspace

@@ -291,7 +291,7 @@ Examples:
     // ── AI Agent ──
     #[command(
         about = "AI agent integration (start, status, context, skill)",
-        long_about = "AI agent integration.\n\nManage AI coding agents that work in isolated workspace environments.\nLaunch agents into worktrees, track their status, and generate\nproject-specific skills/rules for different AI tools.\n\nExamples:\n  devflow agent start fix-login -- 'Fix the login timeout bug'\n  devflow agent status\n  devflow agent context\n  devflow agent skill\n  devflow agent docs"
+        long_about = "AI agent integration.\n\nManage AI coding agents that work in isolated workspace environments.\nLaunch agents into worktrees, track their status, and install\nproject-specific skills.\n\nExamples:\n  devflow agent start fix-login -- 'Fix the login timeout bug'\n  devflow agent status\n  devflow agent context\n  devflow agent skill"
     )]
     Agent {
         #[command(subcommand)]
@@ -595,22 +595,10 @@ pub enum AgentCommands {
         workspace: Option<String>,
     },
     #[command(
-        about = "Generate AI tool skills/rules for this project",
-        long_about = "Generate project-specific configuration files for AI tools.\n\nGenerates skills, rules, or configuration for Claude Code, OpenCode,\nCursor, or all tools at once.\n\nExamples:\n  devflow agent skill                   # Generate for all tools\n  devflow agent skill --target claude    # Claude Code only\n  devflow agent skill --target cursor    # Cursor only"
+        about = "Install agent skills for this project",
+        long_about = "Install devflow workspace skills into .agents/skills/ (Agent Skills standard).\n\nSkills are automatically available in Claude Code, Cursor, OpenCode,\nand any tool supporting the agentskills.io standard.\n\nExamples:\n  devflow agent skill"
     )]
-    Skill {
-        #[arg(
-            long,
-            default_value = "all",
-            help = "Target: claude, opencode, cursor, or all"
-        )]
-        target: String,
-    },
-    #[command(
-        about = "Generate AGENTS.md for this project",
-        long_about = "Generate a comprehensive AGENTS.md tailored to this project.\n\nIncludes actual service names, connection patterns, hook phases,\nand project-specific agent workflow examples."
-    )]
-    Docs,
+    Skill,
 }
 
 /// Subcommands for `devflow proxy`.

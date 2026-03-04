@@ -262,6 +262,12 @@ export interface OrphanCleanupResult {
   errors: string[];
 }
 
+export interface AgentSkillsStatus {
+  installed: boolean;
+  installed_skills: string[];
+  missing_skills: string[];
+}
+
 export interface VcsInfo {
   existing_vcs: string | null;
   available_tools: string[];

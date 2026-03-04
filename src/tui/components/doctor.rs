@@ -69,6 +69,7 @@ impl Component for DoctorComponent {
                 Action::None
             }
             KeyCode::Char('r') | KeyCode::Char('D') => Action::RunDoctor,
+            KeyCode::Char('s') => Action::InstallAgentSkills,
             _ => Action::None,
         }
     }
@@ -203,6 +204,10 @@ impl Component for DoctorComponent {
         lines.push(Line::from(vec![
             Span::styled("  D/r", Style::default().fg(theme::KEY_HINT)),
             Span::raw("  Re-run doctor checks"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  s", Style::default().fg(theme::KEY_HINT)),
+            Span::raw("    Install agent skills"),
         ]));
 
         let detail = Paragraph::new(lines)

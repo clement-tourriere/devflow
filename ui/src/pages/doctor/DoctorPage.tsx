@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
-import { runDoctor, installVcsHooks, uninstallVcsHooks, pruneWorktrees } from "../../utils/invoke";
+import { runDoctor, installVcsHooks, uninstallVcsHooks, pruneWorktrees, installAgentSkills, uninstallAgentSkills } from "../../utils/invoke";
 import type { DoctorReport, DoctorServiceReport } from "../../types";
 
 function DoctorPage() {
@@ -15,6 +15,7 @@ function DoctorPage() {
   >(null);
   const [hookActionError, setHookActionError] = useState<string | null>(null);
   const [pruneLoading, setPruneLoading] = useState(false);
+  const [skillsLoading, setSkillsLoading] = useState<"install" | "uninstall" | null>(null);
 
   const reloadDoctor = useCallback(async () => {
     if (!projectPath) {
@@ -79,6 +80,34 @@ function DoctorPage() {
     }
   };
 
+  const handleInstallSkills = async () => {
+    if (!projectPath || skillsLoading) return;
+    setHookActionError(null);
+    setSkillsLoading("install");
+    try {
+      await installAgentSkills(projectPath);
+      await reloadDoctor();
+    } catch (e) {
+      setHookActionError(`Failed to install agent skills: ${e}`);
+    } finally {
+      setSkillsLoading(null);
+    }
+  };
+
+  const handleUninstallSkills = async () => {
+    if (!projectPath || skillsLoading) return;
+    setHookActionError(null);
+    setSkillsLoading("uninstall");
+    try {
+      await uninstallAgentSkills(projectPath);
+      await reloadDoctor();
+    } catch (e) {
+      setHookActionError(`Failed to uninstall agent skills: ${e}`);
+    } finally {
+      setSkillsLoading(null);
+    }
+  };
+
   const renderServiceReport = (
     entry: DoctorServiceReport,
     title: string,
@@ -92,13 +121,14 @@ function DoctorPage() {
             <th style={{ width: 40 }}>Status</th>
             <th>Check</th>
             <th>Detail</th>
-            {showHookActions && <th style={{ width: 220, textAlign: "right" }}>Actions</th>}
+            {showHookActions && <th style={{ width: 120, textAlign: "right" }}>Actions</th>}
           </tr>
         </thead>
         <tbody>
           {entry.checks.map((check) => {
             const isHooksCheck = showHookActions && check.name === "VCS hooks";
             const isWorktreeCheck = showHookActions && check.name === "Worktree metadata";
+            const isSkillsCheck = showHookActions && check.name === "Agent skills";
             return (
               <tr key={check.name}>
                 <td>
@@ -125,24 +155,25 @@ function DoctorPage() {
                 {showHookActions && (
                   <td style={{ textAlign: "right" }}>
                     {isHooksCheck ? (
-                      <div className="flex gap-2" style={{ justifyContent: "flex-end" }}>
+                      check.available ? (
                         <button
-                          className="btn"
-                          onClick={handleInstallHooks}
-                          disabled={hookActionLoading !== null || check.available}
-                          style={{ padding: "4px 10px", fontSize: 12 }}
-                        >
-                          {hookActionLoading === "install" ? "Installing..." : "Install hooks"}
-                        </button>
-                        <button
-                          className="btn btn-danger"
+                          className="btn-link"
                           onClick={handleRemoveHooks}
-                          disabled={hookActionLoading !== null || !check.available}
-                          style={{ padding: "4px 10px", fontSize: 12 }}
+                          disabled={hookActionLoading !== null}
+                          style={{ fontSize: 12, color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}
                         >
-                          {hookActionLoading === "remove" ? "Removing..." : "Remove hooks"}
+                          {hookActionLoading === "remove" ? "Removing..." : "Uninstall"}
                         </button>
-                      </div>
+                      ) : (
+                        <button
+                          className="btn btn-primary"
+                          onClick={handleInstallHooks}
+                          disabled={hookActionLoading !== null}
+                          style={{ padding: "4px 12px", fontSize: 12 }}
+                        >
+                          {hookActionLoading === "install" ? "Installing..." : "Install"}
+                        </button>
+                      )
                     ) : isWorktreeCheck && !check.available ? (
                       <button
                         className="btn"
@@ -152,6 +183,26 @@ function DoctorPage() {
                       >
                         {pruneLoading ? "Pruning..." : "Prune"}
                       </button>
+                    ) : isSkillsCheck ? (
+                      check.available ? (
+                        <button
+                          className="btn-link"
+                          onClick={handleUninstallSkills}
+                          disabled={skillsLoading !== null}
+                          style={{ fontSize: 12, color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}
+                        >
+                          {skillsLoading === "uninstall" ? "Removing..." : "Uninstall"}
+                        </button>
+                      ) : (
+                        <button
+                          className="btn btn-primary"
+                          onClick={handleInstallSkills}
+                          disabled={skillsLoading !== null}
+                          style={{ padding: "4px 12px", fontSize: 12 }}
+                        >
+                          {skillsLoading === "install" ? "Installing..." : "Install"}
+                        </button>
+                      )
                     ) : (
                       <span style={{ color: "var(--text-muted)", fontSize: 12 }}>-</span>
                     )}
@@ -179,7 +230,7 @@ function DoctorPage() {
       >
         &larr; Back to project
       </Link>
-      <h1 className="page-title">Doctor</h1>
+      <h1 className="page-title">Setup</h1>
       <p
         className="mono"
         style={{ color: "var(--text-secondary)", marginBottom: 16 }}

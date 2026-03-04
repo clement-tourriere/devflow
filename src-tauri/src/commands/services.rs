@@ -410,6 +410,18 @@ pub async fn run_doctor(project_path: String) -> Result<serde_json::Value, Strin
         }
     }
 
+    // Agent skills check
+    let skill_status = devflow_core::agent::check_agent_skills_installed(project_dir);
+    general_checks.push(check(
+        "Agent skills",
+        skill_status.installed,
+        if skill_status.installed {
+            format!("{} skills installed", skill_status.installed_skills.len())
+        } else {
+            "Not installed".to_string()
+        },
+    ));
+
     let named_services = config
         .as_ref()
         .map(|c| c.resolve_services())
@@ -696,4 +708,30 @@ pub async fn discover_docker_containers(
             compose_service: c.compose_service,
         })
         .collect())
+}
+
+#[tauri::command]
+pub async fn install_agent_skills(project_path: String) -> Result<Vec<String>, String> {
+    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
+    let project_dir = std::path::Path::new(&project_path);
+    let config =
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
+
+    devflow_core::agent::install_agent_skills(&config, project_dir)
+        .map_err(crate::commands::format_error)
+}
+
+#[tauri::command]
+pub async fn uninstall_agent_skills(project_path: String) -> Result<(), String> {
+    let project_dir = std::path::Path::new(&project_path);
+    devflow_core::agent::uninstall_agent_skills(project_dir)
+        .map_err(crate::commands::format_error)
+}
+
+#[tauri::command]
+pub async fn check_agent_skills(
+    project_path: String,
+) -> Result<devflow_core::agent::SkillInstallStatus, String> {
+    let project_dir = std::path::Path::new(&project_path);
+    Ok(devflow_core::agent::check_agent_skills_installed(project_dir))
 }

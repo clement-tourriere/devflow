@@ -264,79 +264,18 @@ pub(super) async fn handle_agent_command(
             Ok(())
         }
 
-        super::AgentCommands::Skill { target } => {
+        super::AgentCommands::Skill => {
             let project_dir = std::env::current_dir()?;
-            let targets: Vec<&str> = if target == "all" {
-                vec!["claude", "opencode", "cursor"]
+            let written = devflow_core::agent::install_agent_skills(config, &project_dir)?;
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({"paths": written}))?
+                );
             } else {
-                vec![target.as_str()]
-            };
-
-            for t in targets {
-                match t {
-                    "claude" => {
-                        let skill =
-                            devflow_core::agent::generate_claude_skill(config, &project_dir)?;
-                        let skill_dir = project_dir.join(".claude").join("skills").join("devflow");
-                        std::fs::create_dir_all(&skill_dir)?;
-                        let skill_path = skill_dir.join("SKILL.md");
-                        std::fs::write(&skill_path, &skill)?;
-                        if !json_output {
-                            println!("Generated: {}", skill_path.display());
-                        }
-                    }
-                    "opencode" => {
-                        let content =
-                            devflow_core::agent::generate_opencode_config(config, &project_dir)?;
-                        let path = project_dir.join("AGENTS.md");
-                        std::fs::write(&path, &content)?;
-                        if !json_output {
-                            println!("Generated: {}", path.display());
-                        }
-                    }
-                    "cursor" => {
-                        let rules =
-                            devflow_core::agent::generate_cursor_rules(config, &project_dir)?;
-                        let rules_dir = project_dir.join(".cursor").join("rules");
-                        std::fs::create_dir_all(&rules_dir)?;
-                        let rules_path = rules_dir.join("devflow.md");
-                        std::fs::write(&rules_path, &rules)?;
-                        if !json_output {
-                            println!("Generated: {}", rules_path.display());
-                        }
-                    }
-                    _ => {
-                        eprintln!(
-                            "Unknown target: {}. Use: claude, opencode, cursor, or all",
-                            t
-                        );
-                    }
+                for path in &written {
+                    println!("Installed: {}", path);
                 }
-            }
-
-            if json_output {
-                println!(
-                    "{}",
-                    serde_json::to_string(&serde_json::json!({"generated": true}))?
-                );
-            }
-            Ok(())
-        }
-
-        super::AgentCommands::Docs => {
-            let project_dir = std::env::current_dir()?;
-            let content = devflow_core::agent::generate_opencode_config(config, &project_dir)?;
-            let path = project_dir.join("AGENTS.md");
-            std::fs::write(&path, &content)?;
-            if json_output {
-                println!(
-                    "{}",
-                    serde_json::to_string(
-                        &serde_json::json!({"path": path.display().to_string()})
-                    )?
-                );
-            } else {
-                println!("Generated: {}", path.display());
             }
             Ok(())
         }

@@ -98,7 +98,7 @@ function App() {
         <Route path="proxy" element={<ProxyDashboard />} />
         <Route path="hooks/*" element={<HookManager />} />
         <Route path="config/*" element={<ConfigEditor />} />
-        <Route path="doctor/*" element={<DoctorPage />} />
+        <Route path="setup/*" element={<DoctorPage />} />
         <Route path="settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

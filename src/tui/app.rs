@@ -825,6 +825,36 @@ impl App {
                     }
                 });
             }
+            Action::InstallAgentSkills => {
+                self.set_status("Installing agent skills...".to_string(), false);
+                let config = self.context.config.clone();
+                let project_dir = self
+                    .context
+                    .config_path
+                    .as_ref()
+                    .and_then(|p| p.parent())
+                    .map(|d| d.to_path_buf())
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                let tx = self.bg_tx.clone();
+                tokio::spawn(async move {
+                    match devflow_core::agent::install_agent_skills(&config, &project_dir) {
+                        Ok(paths) => {
+                            let _ = tx.send(Action::OperationComplete {
+                                success: true,
+                                message: format!("Installed {} agent skill files", paths.len()),
+                            });
+                            let _ = tx.send(Action::RunDoctor);
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Action::Error(format!(
+                                "Failed to install agent skills: {}",
+                                e
+                            )));
+                        }
+                    }
+                });
+            }
             Action::None => {}
         }
     }
