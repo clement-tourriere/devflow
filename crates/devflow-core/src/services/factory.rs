@@ -4,8 +4,6 @@ use super::postgres::dblab::DBLabProvider;
 use super::postgres::local::LocalProvider;
 #[cfg(feature = "service-neon")]
 use super::postgres::neon::NeonProvider;
-#[cfg(feature = "service-postgres-template")]
-use super::postgres::template::PostgresTemplateProvider;
 #[cfg(feature = "service-xata")]
 use super::postgres::xata::XataProvider;
 
@@ -25,8 +23,6 @@ use anyhow::{Context, Result};
 pub enum ProviderType {
     #[cfg(feature = "service-local")]
     Local,
-    #[cfg(feature = "service-postgres-template")]
-    PostgresTemplate,
     #[cfg(feature = "service-neon")]
     Neon,
     #[cfg(feature = "service-dblab")]
@@ -43,11 +39,6 @@ impl ProviderType {
             #[cfg(not(feature = "service-local"))]
             "local" | "docker" => anyhow::bail!("Local provider not compiled. Rebuild with --features service-local"),
 
-            #[cfg(feature = "service-postgres-template")]
-            "postgres_template" | "postgres" | "postgresql" => Ok(ProviderType::PostgresTemplate),
-            #[cfg(not(feature = "service-postgres-template"))]
-            "postgres_template" | "postgres" | "postgresql" => anyhow::bail!("PostgreSQL template provider not compiled. Rebuild with --features service-postgres-template"),
-
             #[cfg(feature = "service-neon")]
             "neon" => Ok(ProviderType::Neon),
             #[cfg(not(feature = "service-neon"))]
@@ -63,7 +54,7 @@ impl ProviderType {
             #[cfg(not(feature = "service-xata"))]
             "xata" | "xata_lite" => anyhow::bail!("Xata provider not compiled. Rebuild with --features service-xata"),
 
-            _ => anyhow::bail!("Unknown provider type: {}. Valid types: local, postgres_template, neon, dblab, xata", s),
+            _ => anyhow::bail!("Unknown provider type: {}. Valid types: local, neon, dblab, xata", s),
         }
     }
 
@@ -183,13 +174,6 @@ async fn create_postgres_provider(
                 .context("Failed to create local provider")?;
             Ok(Box::new(provider))
         }
-        #[cfg(feature = "service-postgres-template")]
-        ProviderType::PostgresTemplate => {
-            let provider = PostgresTemplateProvider::new(config)
-                .await
-                .context("Failed to create PostgreSQL template provider")?;
-            Ok(Box::new(provider))
-        }
         #[cfg(feature = "service-neon")]
         ProviderType::Neon => {
             if let Some(ref neon_config) = named.neon {
@@ -287,49 +271,6 @@ pub async fn create_all_providers(config: &Config) -> Result<Vec<NamedService>> 
     }
 
     Ok(result)
-}
-
-/// Auto-detect provider when no config section is present.
-#[allow(dead_code)]
-async fn create_provider_default(config: &Config) -> Result<Box<dyn ServiceProvider>> {
-    // If database config differs from defaults,
-    // use postgres_template provider
-    #[cfg(feature = "service-postgres-template")]
-    if config.database.host != "localhost"
-        || config.database.port != 5432
-        || config.database.template_database != "template0"
-    {
-        let provider = PostgresTemplateProvider::new(config)
-            .await
-            .context("Failed to create PostgreSQL template provider")?;
-        return Ok(Box::new(provider));
-    }
-
-    #[cfg(not(feature = "service-postgres-template"))]
-    if config.database.host != "localhost"
-        || config.database.port != 5432
-        || config.database.template_database != "template0"
-    {
-        anyhow::bail!("PostgreSQL template provider not compiled. Rebuild with --features service-postgres-template");
-    }
-
-    // Default to local provider — derive name from cwd
-    #[cfg(feature = "service-local")]
-    {
-        let default_name = std::env::current_dir()
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-            .unwrap_or_else(|| "default".to_string());
-        let provider = LocalProvider::new(&default_name, config, None)
-            .await
-            .context("Failed to create local provider")?;
-        Ok(Box::new(provider))
-    }
-
-    #[cfg(not(feature = "service-local"))]
-    {
-        anyhow::bail!("Local provider not compiled. Rebuild with --features service-local");
-    }
 }
 
 /// Instantiate only services with `auto_workspace: true`.

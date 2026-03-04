@@ -4,7 +4,5 @@ pub mod dblab;
 pub mod local;
 #[cfg(feature = "service-neon")]
 pub mod neon;
-#[cfg(feature = "service-postgres-template")]
-pub mod template;
 #[cfg(feature = "service-xata")]
 pub mod xata;

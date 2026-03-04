@@ -328,12 +328,7 @@ pub(super) fn show_effective_config(effective_config: &EffectiveConfig) -> Resul
         || effective_config
             .env_config
             .current_workspace_disabled
-            .is_some()
-        || effective_config.env_config.database_host.is_some()
-        || effective_config.env_config.database_port.is_some()
-        || effective_config.env_config.database_user.is_some()
-        || effective_config.env_config.database_password.is_some()
-        || effective_config.env_config.database_prefix.is_some();
+            .is_some();
 
     if !has_env_overrides {
         println!("  (none)");
@@ -359,21 +354,6 @@ pub(super) fn show_effective_config(effective_config: &EffectiveConfig) -> Resul
         if let Some(current_disabled) = effective_config.env_config.current_workspace_disabled {
             println!("  DEVFLOW_CURRENT_BRANCH_DISABLED: {}", current_disabled);
         }
-        if let Some(ref host) = effective_config.env_config.database_host {
-            println!("  DEVFLOW_DATABASE_HOST: {}", host);
-        }
-        if let Some(port) = effective_config.env_config.database_port {
-            println!("  DEVFLOW_DATABASE_PORT: {}", port);
-        }
-        if let Some(ref user) = effective_config.env_config.database_user {
-            println!("  DEVFLOW_DATABASE_USER: {}", user);
-        }
-        if effective_config.env_config.database_password.is_some() {
-            println!("  DEVFLOW_DATABASE_PASSWORD: [hidden]");
-        }
-        if let Some(ref prefix) = effective_config.env_config.database_prefix {
-            println!("  DEVFLOW_DATABASE_PREFIX: {}", prefix);
-        }
     }
 
     println!();
@@ -384,7 +364,6 @@ pub(super) fn show_effective_config(effective_config: &EffectiveConfig) -> Resul
         println!("  ✅ Local config file found (.devflow.local.yml)");
         if local_config.disabled.is_some()
             || local_config.disabled_workspaces.is_some()
-            || local_config.database.is_some()
             || local_config.git.is_some()
             || local_config.behavior.is_some()
         {

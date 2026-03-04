@@ -7,9 +7,8 @@ authors = ["Clément Tourrière <clement.tourriere@gmail.com>"]
 license = "MIT"
 
 [features]
-default = ["service-local", "service-postgres-template", "service-neon", "service-dblab", "service-xata", "llm"]
+default = ["service-local", "service-neon", "service-dblab", "service-xata", "llm"]
 service-local = ["dep:bollard", "dep:rusqlite", "dep:rust-s3", "dep:tar", "dep:bytes", "dep:futures-util", "dep:tempfile", "dep:uuid", "dep:url"]
-service-postgres-template = ["dep:tokio-postgres"]
 service-neon = ["dep:reqwest"]
 service-dblab = ["dep:reqwest"]
 service-xata = ["dep:reqwest"]
@@ -23,9 +22,6 @@ serde_json = "1.0"
 
 # Async runtime
 tokio = { version = "1.46", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "macros", "process", "fs"] }
-
-# Database (for postgres_template backend)
-tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"], optional = true }
 
 # Error handling
 anyhow = "1.0"

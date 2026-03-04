@@ -6,7 +6,6 @@ import type { FilledConfig } from "../../types/config";
 import GeneralSection from "./sections/GeneralSection";
 import GitSection from "./sections/GitSection";
 import BehaviorSection from "./sections/BehaviorSection";
-import DatabaseSection from "./sections/DatabaseSection";
 import WorktreeSection from "./sections/WorktreeSection";
 import ServicesSection from "./sections/ServicesSection";
 import AgentSection from "./sections/AgentSection";
@@ -17,7 +16,6 @@ type Section =
   | "general"
   | "git"
   | "behavior"
-  | "database"
   | "worktree"
   | "services"
   | "agent"
@@ -28,7 +26,6 @@ const SECTIONS: { key: Section; label: string }[] = [
   { key: "general", label: "General" },
   { key: "git", label: "Git" },
   { key: "behavior", label: "Behavior" },
-  { key: "database", label: "Database" },
   { key: "worktree", label: "Worktrees" },
   { key: "services", label: "Services" },
   { key: "agent", label: "Agent" },
@@ -213,9 +210,6 @@ function ConfigEditor() {
               )}
               {activeSection === "behavior" && (
                 <BehaviorSection config={config} onChange={handleChange} />
-              )}
-              {activeSection === "database" && (
-                <DatabaseSection config={config} onChange={handleChange} />
               )}
               {activeSection === "worktree" && (
                 <WorktreeSection config={config} onChange={handleChange} />

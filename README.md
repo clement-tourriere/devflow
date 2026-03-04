@@ -199,9 +199,7 @@ git:
 
 ```yaml
 behavior:
-  auto_cleanup: false               # Auto-cleanup old workspaces
   max_workspaces: 10                  # Max workspaces before cleanup
-  naming_strategy: prefix           # prefix, suffix, or replace
 ```
 
 #### Worktrees
@@ -257,11 +255,6 @@ DEVFLOW_AUTO_SWITCH=false            # Override auto_switch_on_workspace
 DEVFLOW_BRANCH_FILTER_REGEX=...      # Override workspace filtering
 DEVFLOW_DISABLED_BRANCHES=main,release/*  # Disable for specific workspaces
 DEVFLOW_CURRENT_BRANCH_DISABLED=true # Disable for current workspace only
-DEVFLOW_DATABASE_HOST=...            # Override database host
-DEVFLOW_DATABASE_PORT=...            # Override database port
-DEVFLOW_DATABASE_USER=...            # Override database user
-DEVFLOW_DATABASE_PASSWORD=...        # Override database password
-DEVFLOW_DATABASE_PREFIX=...          # Override database prefix
 DEVFLOW_ZFS_DATASET=...              # Force a specific ZFS dataset
 DEVFLOW_LLM_API_KEY=...              # API key for AI commit messages
 DEVFLOW_LLM_API_URL=...              # LLM endpoint URL

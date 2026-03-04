@@ -14,8 +14,6 @@ pub struct Config {
     /// Overrides the global `default_vcs` when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_vcs: Option<crate::vcs::VcsKind>,
-    #[serde(default, skip_serializing_if = "DatabaseConfig::is_default")]
-    pub database: DatabaseConfig,
     #[serde(default)]
     pub git: GitConfig,
     #[serde(default)]
@@ -346,44 +344,6 @@ impl WorktreeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DatabaseConfig {
-    pub host: String,
-    pub port: u16,
-    pub user: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub password: Option<String>,
-    pub template_database: String,
-    pub database_prefix: String,
-    pub auth: AuthConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthConfig {
-    pub methods: Vec<AuthMethod>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pgpass_file: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service_name: Option<String>,
-    pub prompt_for_password: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AuthMethod {
-    #[serde(rename = "password")]
-    Password,
-    #[serde(rename = "pgpass")]
-    Pgpass,
-    #[serde(rename = "environment")]
-    Environment,
-    #[serde(rename = "service")]
-    Service,
-    #[serde(rename = "prompt")]
-    Prompt,
-    #[serde(rename = "system")]
-    System,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitConfig {
     #[serde(default = "default_true", alias = "auto_create_on_branch")]
     pub auto_create_on_workspace: bool,
@@ -442,43 +402,25 @@ fn default_respect_gitignore() -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BehaviorConfig {
-    #[serde(default)]
-    pub auto_cleanup: bool,
     #[serde(
         default,
         alias = "max_branches",
         skip_serializing_if = "Option::is_none"
     )]
     pub max_workspaces: Option<usize>,
-    #[serde(default)]
-    pub naming_strategy: NamingStrategy,
 }
 
 impl Default for BehaviorConfig {
     fn default() -> Self {
         Self {
-            auto_cleanup: false,
             max_workspaces: Some(10),
-            naming_strategy: NamingStrategy::Prefix,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub enum NamingStrategy {
-    #[serde(rename = "prefix")]
-    #[default]
-    Prefix,
-    #[serde(rename = "suffix")]
-    Suffix,
-    #[serde(rename = "replace")]
-    Replace,
 }
 
 // Local configuration that can override the main config
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LocalConfig {
-    pub database: Option<LocalDatabaseConfig>,
     pub git: Option<LocalGitConfig>,
     pub behavior: Option<LocalBehaviorConfig>,
     pub disabled: Option<bool>,
@@ -487,25 +429,6 @@ pub struct LocalConfig {
     /// Override the project-level `default_vcs` locally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_vcs: Option<crate::vcs::VcsKind>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct LocalDatabaseConfig {
-    pub host: Option<String>,
-    pub port: Option<u16>,
-    pub user: Option<String>,
-    pub password: Option<String>,
-    pub template_database: Option<String>,
-    pub database_prefix: Option<String>,
-    pub auth: Option<LocalAuthConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct LocalAuthConfig {
-    pub methods: Option<Vec<AuthMethod>>,
-    pub pgpass_file: Option<String>,
-    pub service_name: Option<String>,
-    pub prompt_for_password: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -526,10 +449,8 @@ pub struct LocalGitConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LocalBehaviorConfig {
-    pub auto_cleanup: Option<bool>,
     #[serde(alias = "max_branches")]
     pub max_workspaces: Option<usize>,
-    pub naming_strategy: Option<NamingStrategy>,
 }
 
 // Environment variable configuration
@@ -542,11 +463,6 @@ pub struct EnvConfig {
     pub workspace_filter_regex: Option<String>,
     pub disabled_workspaces: Option<Vec<String>>,
     pub current_workspace_disabled: Option<bool>,
-    pub database_host: Option<String>,
-    pub database_port: Option<u16>,
-    pub database_user: Option<String>,
-    pub database_password: Option<String>,
-    pub database_prefix: Option<String>,
 }
 
 /// Global user-level configuration, stored at `~/.config/devflow/config.yml`.
@@ -614,48 +530,11 @@ pub struct EffectiveConfig {
     pub current_workspace_disabled: bool,
 }
 
-impl Default for DatabaseConfig {
-    fn default() -> Self {
-        DatabaseConfig {
-            host: "localhost".to_string(),
-            port: 5432,
-            user: "postgres".to_string(),
-            password: None,
-            template_database: "template0".to_string(),
-            database_prefix: "devflow".to_string(),
-            auth: AuthConfig {
-                methods: vec![
-                    AuthMethod::Environment,
-                    AuthMethod::Pgpass,
-                    AuthMethod::Password,
-                    AuthMethod::Prompt,
-                ],
-                pgpass_file: None,
-                service_name: None,
-                prompt_for_password: false,
-            },
-        }
-    }
-}
-
-impl DatabaseConfig {
-    pub fn is_default(&self) -> bool {
-        let default = DatabaseConfig::default();
-        self.host == default.host
-            && self.port == default.port
-            && self.user == default.user
-            && self.password.is_none()
-            && self.template_database == default.template_database
-            && self.database_prefix == default.database_prefix
-    }
-}
-
 impl Default for Config {
     fn default() -> Self {
         Config {
             name: None,
             default_vcs: None,
-            database: DatabaseConfig::default(),
             git: GitConfig {
                 auto_create_on_workspace: true,
                 auto_switch_on_workspace: true,
@@ -665,9 +544,7 @@ impl Default for Config {
                 exclude_workspaces: vec!["main".to_string(), "master".to_string()],
             },
             behavior: BehaviorConfig {
-                auto_cleanup: false,
                 max_workspaces: Some(10),
-                naming_strategy: NamingStrategy::Prefix,
             },
             services: None,
             worktree: None,
@@ -744,34 +621,8 @@ impl Config {
         Ok(None)
     }
 
-    pub fn get_database_name(&self, workspace_name: &str) -> String {
-        // For main workspace marker, use the template database name directly
-        if workspace_name == "_main" {
-            return self.database.template_database.clone();
-        }
-
-        // For excluded workspaces (main/master), use the template database name directly
-        if self
-            .git
-            .exclude_workspaces
-            .contains(&workspace_name.to_string())
-        {
-            return self.database.template_database.clone();
-        }
-
-        let sanitized_branch = Self::sanitize_workspace_name(workspace_name);
-
-        let full_name = match self.behavior.naming_strategy {
-            NamingStrategy::Prefix => {
-                format!("{}_{}", self.database.database_prefix, sanitized_branch)
-            }
-            NamingStrategy::Suffix => {
-                format!("{}_{}", sanitized_branch, self.database.database_prefix)
-            }
-            NamingStrategy::Replace => sanitized_branch,
-        };
-
-        Self::ensure_valid_postgres_name(&full_name)
+    pub fn get_normalized_workspace_name(&self, workspace_name: &str) -> String {
+        Self::sanitize_workspace_name(workspace_name)
     }
 
     fn sanitize_workspace_name(workspace_name: &str) -> String {
@@ -780,9 +631,7 @@ impl Config {
 
         for ch in workspace_name.to_lowercase().chars() {
             match ch {
-                // Valid PostgreSQL identifier characters
                 'a'..='z' | '0'..='9' | '_' | '$' => sanitized.push(ch),
-                // Replace everything else with underscore
                 _ => sanitized.push('_'),
             }
         }
@@ -800,36 +649,11 @@ impl Config {
         // Remove trailing underscore
         sanitized = sanitized.trim_end_matches('_').to_string();
 
-        // Ensure we have something if everything got removed
         if sanitized.is_empty() {
             sanitized = "workspace".to_string();
         }
 
         sanitized
-    }
-
-    fn ensure_valid_postgres_name(name: &str) -> String {
-        const MAX_POSTGRES_NAME_LENGTH: usize = 63;
-
-        if name.len() <= MAX_POSTGRES_NAME_LENGTH {
-            return name.to_string();
-        }
-
-        // If name is too long, truncate and add hash to avoid collisions
-        let hash = Self::calculate_name_hash(name);
-        let hash_suffix = format!("_{:x}", hash);
-        let max_prefix_len = MAX_POSTGRES_NAME_LENGTH - hash_suffix.len();
-
-        format!("{}{}", &name[..max_prefix_len], hash_suffix)
-    }
-
-    fn calculate_name_hash(name: &str) -> u32 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        name.hash(&mut hasher);
-        (hasher.finish() as u32) & 0xFFFF // Use 16 bits for shorter hash
     }
 
     pub fn should_create_workspace(&self, workspace_name: &str) -> bool {
@@ -895,10 +719,6 @@ impl Config {
         } else {
             true
         }
-    }
-
-    pub fn get_normalized_workspace_name(&self, workspace_name: &str) -> String {
-        Self::sanitize_workspace_name(workspace_name)
     }
 
     /// Resolve the list of named services from the `services` config.
@@ -1060,13 +880,6 @@ impl EnvConfig {
             auto_switch: Self::parse_bool_env("DEVFLOW_AUTO_SWITCH")?,
             current_workspace_disabled: Self::parse_bool_env("DEVFLOW_CURRENT_BRANCH_DISABLED")?,
             workspace_filter_regex: env::var("DEVFLOW_BRANCH_FILTER_REGEX").ok(),
-            database_host: env::var("DEVFLOW_DATABASE_HOST").ok(),
-            database_user: env::var("DEVFLOW_DATABASE_USER").ok(),
-            database_password: env::var("DEVFLOW_DATABASE_PASSWORD").ok(),
-            database_prefix: env::var("DEVFLOW_DATABASE_PREFIX").ok(),
-            database_port: env::var("DEVFLOW_DATABASE_PORT")
-                .ok()
-                .and_then(|s| s.parse().ok()),
             disabled_workspaces: env::var("DEVFLOW_DISABLED_BRANCHES")
                 .ok()
                 .map(|s| s.split(',').map(|s| s.trim().to_string()).collect()),
@@ -1212,41 +1025,6 @@ impl EffectiveConfig {
 
         // Apply local config overrides
         if let Some(ref local_config) = self.local_config {
-            if let Some(ref local_db) = local_config.database {
-                if let Some(ref host) = local_db.host {
-                    merged.database.host = host.clone();
-                }
-                if let Some(port) = local_db.port {
-                    merged.database.port = port;
-                }
-                if let Some(ref user) = local_db.user {
-                    merged.database.user = user.clone();
-                }
-                if let Some(ref password) = local_db.password {
-                    merged.database.password = Some(password.clone());
-                }
-                if let Some(ref template_db) = local_db.template_database {
-                    merged.database.template_database = template_db.clone();
-                }
-                if let Some(ref prefix) = local_db.database_prefix {
-                    merged.database.database_prefix = prefix.clone();
-                }
-                if let Some(ref auth) = local_db.auth {
-                    if let Some(ref methods) = auth.methods {
-                        merged.database.auth.methods = methods.clone();
-                    }
-                    if let Some(ref pgpass_file) = auth.pgpass_file {
-                        merged.database.auth.pgpass_file = Some(pgpass_file.clone());
-                    }
-                    if let Some(ref service_name) = auth.service_name {
-                        merged.database.auth.service_name = Some(service_name.clone());
-                    }
-                    if let Some(prompt_for_password) = auth.prompt_for_password {
-                        merged.database.auth.prompt_for_password = prompt_for_password;
-                    }
-                }
-            }
-
             if let Some(ref local_git) = local_config.git {
                 if let Some(auto_create) = local_git.auto_create_on_workspace {
                     merged.git.auto_create_on_workspace = auto_create;
@@ -1269,14 +1047,8 @@ impl EffectiveConfig {
             }
 
             if let Some(ref local_behavior) = local_config.behavior {
-                if let Some(auto_cleanup) = local_behavior.auto_cleanup {
-                    merged.behavior.auto_cleanup = auto_cleanup;
-                }
                 if let Some(max_workspaces) = local_behavior.max_workspaces {
                     merged.behavior.max_workspaces = Some(max_workspaces);
-                }
-                if let Some(ref naming_strategy) = local_behavior.naming_strategy {
-                    merged.behavior.naming_strategy = naming_strategy.clone();
                 }
             }
 
@@ -1291,21 +1063,6 @@ impl EffectiveConfig {
         }
 
         // Apply environment config overrides
-        if let Some(ref host) = self.env_config.database_host {
-            merged.database.host = host.clone();
-        }
-        if let Some(port) = self.env_config.database_port {
-            merged.database.port = port;
-        }
-        if let Some(ref user) = self.env_config.database_user {
-            merged.database.user = user.clone();
-        }
-        if let Some(ref password) = self.env_config.database_password {
-            merged.database.password = Some(password.clone());
-        }
-        if let Some(ref prefix) = self.env_config.database_prefix {
-            merged.database.database_prefix = prefix.clone();
-        }
         if let Some(auto_create) = self.env_config.auto_create {
             merged.git.auto_create_on_workspace = auto_create;
         }
@@ -1332,9 +1089,7 @@ git:
   auto_switch_on_workspace: true
   main_workspace: main
   exclude_workspaces: [main, master]
-behavior:
-  auto_cleanup: false
-  naming_strategy: prefix
+behavior: {}
 hooks:
   post-service-create:
     install: "npm ci"
@@ -1367,9 +1122,7 @@ git:
   auto_switch_on_workspace: true
   main_workspace: main
   exclude_workspaces: [main]
-behavior:
-  auto_cleanup: false
-  naming_strategy: prefix
+behavior: {}
 hooks:
   post-switch:
     setup:
@@ -1414,9 +1167,7 @@ git:
   auto_switch_on_workspace: true
   main_workspace: main
   exclude_workspaces: [main]
-behavior:
-  auto_cleanup: false
-  naming_strategy: prefix
+behavior: {}
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
         assert!(config.hooks.is_none());
@@ -1429,9 +1180,7 @@ git:
   auto_create_on_workspace: true
   main_workspace: main
   exclude_workspaces: [main]
-behavior:
-  auto_cleanup: false
-  naming_strategy: prefix
+behavior: {}
 services:
   - name: db
     type: local
@@ -1519,9 +1268,7 @@ git:
   auto_create_on_workspace: true
   main_workspace: main
   exclude_workspaces: [main]
-behavior:
-  auto_cleanup: false
-  naming_strategy: prefix
+behavior: {}
 services:
   - name: ch
     type: local
@@ -1544,9 +1291,7 @@ git:
   auto_create_on_workspace: true
   main_workspace: main
   exclude_workspaces: [main]
-behavior:
-  auto_cleanup: false
-  naming_strategy: prefix
+behavior: {}
 services:
   - name: mysql
     type: local
@@ -1569,9 +1314,7 @@ git:
   auto_create_on_workspace: true
   main_workspace: main
   exclude_workspaces: [main]
-behavior:
-  auto_cleanup: false
-  naming_strategy: prefix
+behavior: {}
 services:
   - name: mq
     type: local
@@ -1608,9 +1351,7 @@ git:
   auto_create_on_workspace: true
   main_workspace: main
   exclude_workspaces: [main]
-behavior:
-  auto_cleanup: false
-  naming_strategy: prefix
+behavior: {}
 services:
   - name: mydb
     type: local
@@ -1628,9 +1369,7 @@ git:
   auto_create_on_workspace: true
   main_workspace: main
   exclude_workspaces: [main]
-behavior:
-  auto_cleanup: false
-  naming_strategy: prefix
+behavior: {}
 services:
   - name: primary
     type: local
@@ -1659,9 +1398,7 @@ git:
   auto_create_on_workspace: true
   main_workspace: main
   exclude_workspaces: [main]
-behavior:
-  auto_cleanup: false
-  naming_strategy: prefix
+behavior: {}
 services:
   - name: my-redis
     service_type: plugin

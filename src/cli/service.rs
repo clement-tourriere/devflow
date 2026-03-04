@@ -83,7 +83,6 @@ pub(super) async fn handle_service_dispatch(
                 let provider_options: Vec<&str> = match service_type.as_str() {
                     "postgres" => vec![
                         "local               — Docker container on this machine",
-                        "postgres_template    — Connect to existing PostgreSQL (template-based branching)",
                         "neon                 — Neon serverless Postgres (cloud)",
                         "dblab               — Database Lab Engine (clone-based branching)",
                         "xata                — Xata serverless database (cloud)",
@@ -172,48 +171,6 @@ pub(super) async fn handle_service_dispatch(
             };
 
             let is_local = services::factory::ProviderType::is_local(&provider_type);
-            let is_postgres_template = matches!(
-                provider_type.as_str(),
-                "postgres_template" | "postgres" | "postgresql"
-            );
-
-            // For postgres_template provider, look for Docker Compose files
-            if is_postgres_template && !json_output {
-                let compose_files = docker::find_docker_compose_files();
-                if !compose_files.is_empty() {
-                    println!("Found Docker Compose files: {}", compose_files.join(", "));
-
-                    if let Ok(Some(postgres_config)) =
-                        docker::parse_postgres_config_from_files(&compose_files)
-                    {
-                        let use_postgres_config = if non_interactive {
-                            false
-                        } else {
-                            docker::prompt_user_for_config_usage(&postgres_config).unwrap_or(false)
-                        };
-
-                        if use_postgres_config {
-                            if let Some(host) = postgres_config.host {
-                                config.database.host = host;
-                            }
-                            if let Some(port) = postgres_config.port {
-                                config.database.port = port;
-                            }
-                            if let Some(user) = postgres_config.user {
-                                config.database.user = user;
-                            }
-                            if let Some(password) = postgres_config.password {
-                                config.database.password = Some(password);
-                            }
-                            if let Some(database) = postgres_config.database {
-                                config.database.template_database = database;
-                            }
-
-                            println!("Using PostgreSQL configuration from Docker Compose");
-                        }
-                    }
-                }
-            }
 
             // Apply discovered container image if available
             let discovered_image = discovered.as_ref().map(|(img, _, _)| img.clone());

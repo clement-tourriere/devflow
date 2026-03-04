@@ -1,13 +1,10 @@
 // TypeScript interfaces mirroring the Rust Config structs in devflow-core
 
 export type VcsKind = "git" | "jj";
-export type NamingStrategy = "prefix" | "suffix" | "replace";
-export type AuthMethod = "password" | "pgpass" | "environment" | "service" | "prompt" | "system";
 
 export interface DevflowConfig {
   name?: string | null;
   default_vcs?: VcsKind | null;
-  database?: DatabaseConfig;
   git?: GitConfig;
   behavior?: BehaviorConfig;
   services?: NamedServiceConfig[] | null;
@@ -28,26 +25,7 @@ export interface GitConfig {
 }
 
 export interface BehaviorConfig {
-  auto_cleanup: boolean;
   max_workspaces?: number | null;
-  naming_strategy: NamingStrategy;
-}
-
-export interface DatabaseConfig {
-  host: string;
-  port: number;
-  user: string;
-  password?: string | null;
-  template_database: string;
-  database_prefix: string;
-  auth: AuthConfig;
-}
-
-export interface AuthConfig {
-  methods: AuthMethod[];
-  pgpass_file?: string | null;
-  service_name?: string | null;
-  prompt_for_password: boolean;
 }
 
 export interface WorktreeConfig {
@@ -157,21 +135,6 @@ export interface CommitGenerationConfig {
 
 // Defaults matching Rust Default impls — used to fill fields omitted by skip_serializing_if
 
-const DEFAULT_DATABASE: DatabaseConfig = {
-  host: "localhost",
-  port: 5432,
-  user: "postgres",
-  password: null,
-  template_database: "template0",
-  database_prefix: "devflow",
-  auth: {
-    methods: ["environment", "pgpass", "password", "prompt"],
-    pgpass_file: null,
-    service_name: null,
-    prompt_for_password: false,
-  },
-};
-
 const DEFAULT_GIT: GitConfig = {
   auto_create_on_workspace: true,
   auto_switch_on_workspace: true,
@@ -182,14 +145,11 @@ const DEFAULT_GIT: GitConfig = {
 };
 
 const DEFAULT_BEHAVIOR: BehaviorConfig = {
-  auto_cleanup: false,
   max_workspaces: 10,
-  naming_strategy: "prefix",
 };
 
 /** DevflowConfig with all required fields filled in */
 export type FilledConfig = DevflowConfig & {
-  database: DatabaseConfig;
   git: GitConfig;
   behavior: BehaviorConfig;
 };
@@ -198,9 +158,6 @@ export type FilledConfig = DevflowConfig & {
 export function withDefaults(cfg: DevflowConfig): FilledConfig {
   return {
     ...cfg,
-    database: cfg.database
-      ? { ...DEFAULT_DATABASE, ...cfg.database, auth: { ...DEFAULT_DATABASE.auth, ...cfg.database.auth } }
-      : { ...DEFAULT_DATABASE },
     git: cfg.git ? { ...DEFAULT_GIT, ...cfg.git } : { ...DEFAULT_GIT },
     behavior: cfg.behavior
       ? { ...DEFAULT_BEHAVIOR, ...cfg.behavior }

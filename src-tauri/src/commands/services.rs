@@ -123,7 +123,7 @@ fn build_named_config(request: &AddServiceRequest) -> Result<NamedServiceConfig,
                     postgres_db: None,
                 });
             }
-            // For neon, dblab, xata, postgres_template: cloud providers
+            // For neon, dblab, xata: cloud providers
             // require API keys configured separately, so we just set the type
         }
         "clickhouse" => {

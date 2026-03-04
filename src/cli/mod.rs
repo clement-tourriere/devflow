@@ -376,7 +376,7 @@ pub enum ServiceCommands {
         name: Option<String>,
         #[arg(
             long,
-            help = "Provider type (local, postgres_template, neon, dblab, xata)"
+            help = "Provider type (local, neon, dblab, xata)"
         )]
         provider: Option<String>,
         #[arg(

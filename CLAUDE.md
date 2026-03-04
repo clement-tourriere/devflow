@@ -41,11 +41,6 @@ The tool is configured via `.devflow.yml` in your Git repository root (created b
 - `DEVFLOW_BRANCH_FILTER_REGEX=...` — Override workspace filtering
 - `DEVFLOW_DISABLED_BRANCHES=main,release/*` — Disable for specific workspaces
 - `DEVFLOW_CURRENT_BRANCH_DISABLED=true` — Disable for current workspace only
-- `DEVFLOW_DATABASE_HOST=...` — Override database host
-- `DEVFLOW_DATABASE_PORT=...` — Override database port
-- `DEVFLOW_DATABASE_USER=...` — Override database user
-- `DEVFLOW_DATABASE_PASSWORD=...` — Override database password
-- `DEVFLOW_DATABASE_PREFIX=...` — Override database prefix
 - `DEVFLOW_ZFS_DATASET=...` — Force a specific ZFS dataset
 - `DEVFLOW_LLM_API_KEY=...` — API key for AI commit messages
 - `DEVFLOW_LLM_API_URL=...` — LLM endpoint URL
@@ -64,9 +59,7 @@ git:
   exclude_workspaces: [main, master]  # Never create workspaces for these
 
 behavior:
-  auto_cleanup: false
   max_workspaces: 10
-  naming_strategy: prefix           # prefix, suffix, or replace
 
 # Multi-provider setup
 services:

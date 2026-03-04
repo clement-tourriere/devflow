@@ -1,6 +1,4 @@
 pub mod config;
-#[cfg(feature = "service-postgres-template")]
-pub mod database;
 pub mod docker;
 pub mod hooks;
 #[cfg(feature = "llm")]

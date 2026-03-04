@@ -398,7 +398,6 @@ pub async fn build_hook_context(
     project_dir: &Path,
     workspace_name: &str,
 ) -> HookContext {
-    let db_name = config.get_database_name(workspace_name);
     let canonical_project_dir = project_dir
         .canonicalize()
         .unwrap_or_else(|_| project_dir.to_path_buf());
@@ -453,34 +452,6 @@ pub async fn build_hook_context(
                 },
             );
         }
-    }
-
-    // Fallback: if no services populated the service map, use legacy config.database
-    if service.is_empty() {
-        let url = format!(
-            "postgresql://{}{}@{}:{}/{}",
-            config.database.user,
-            config
-                .database
-                .password
-                .as_ref()
-                .map(|p| format!(":{}", p))
-                .unwrap_or_default(),
-            config.database.host,
-            config.database.port,
-            db_name,
-        );
-        service.insert(
-            "db".to_string(),
-            ServiceContext {
-                host: config.database.host.clone(),
-                port: config.database.port,
-                database: db_name.clone(),
-                user: config.database.user.clone(),
-                password: config.database.password.clone(),
-                url,
-            },
-        );
     }
 
     // Resolve HEAD commit via git2
