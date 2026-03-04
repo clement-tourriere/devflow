@@ -13,6 +13,8 @@ import {
   getServiceLogs,
   getConnectionInfo,
   listServiceWorkspaces,
+  deleteServiceWorkspace,
+  destroyService,
   removeProject,
   destroyProject,
   listContainers,
@@ -73,6 +75,11 @@ function ProjectDetail() {
     name: string;
     workspace: string;
   } | null>(null);
+  const [deleteServiceWsTarget, setDeleteServiceWsTarget] = useState<{
+    name: string;
+    workspace: string;
+  } | null>(null);
+  const [destroyServiceTarget, setDestroyServiceTarget] = useState<string | null>(null);
 
   // Add Service modal state
   const [showAddService, setShowAddService] = useState(false);
@@ -326,6 +333,50 @@ function ProjectDetail() {
       setLogContent(logs || "(no log output)");
     } catch (e) {
       setLogContent(`Error: ${e}`);
+    }
+  };
+
+  const handleDeleteServiceWorkspace = async () => {
+    if (!deleteServiceWsTarget) return;
+    setActionLoading("delete-svc-ws");
+    try {
+      await deleteServiceWorkspace(
+        projectPath,
+        deleteServiceWsTarget.name,
+        deleteServiceWsTarget.workspace
+      );
+      // Refresh workspaces for this service
+      try {
+        const ws = await listServiceWorkspaces(
+          projectPath,
+          deleteServiceWsTarget.name
+        );
+        setServiceWorkspaces((prev) => ({
+          ...prev,
+          [deleteServiceWsTarget.name]: ws,
+        }));
+      } catch {
+        // ignore
+      }
+      setDeleteServiceWsTarget(null);
+    } catch (e) {
+      alert(`${e}`);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleDestroyService = async () => {
+    if (!destroyServiceTarget) return;
+    setActionLoading("destroy-service");
+    try {
+      await destroyService(projectPath, destroyServiceTarget);
+      setDestroyServiceTarget(null);
+      await reload();
+    } catch (e) {
+      alert(`${e}`);
+    } finally {
+      setActionLoading(null);
     }
   };
 
@@ -835,6 +886,25 @@ function ProjectDetail() {
                           {runningCount} running
                         </span>
                       )}
+                      {s.provider_type === "local" && (
+                        <button
+                          className="btn btn-danger"
+                          style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDestroyServiceTarget(s.name);
+                          }}
+                          title={`Destroy service ${s.name}`}
+                        >
+                          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <path d="M2.5 4h11" />
+                            <path d="M6 2.5h4" />
+                            <path d="M5 4v8.5h6V4" />
+                            <path d="M7 6.5v4" />
+                            <path d="M9 6.5v4" />
+                          </svg>
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -900,110 +970,115 @@ function ProjectDetail() {
                                   </td>
                                   <td style={{ textAlign: "right" }}>
                                     <div
-                                      className="flex gap-2"
+                                      className="flex gap-1"
                                       style={{
                                         justifyContent: "flex-end",
                                       }}
                                     >
+                                      {/* Connect */}
                                       <button
                                         className="btn"
-                                        style={{
-                                          padding: "2px 10px",
-                                          fontSize: 12,
-                                        }}
+                                        style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
                                         onClick={(e) => {
                                           e.stopPropagation();
-                                          handleConnectionInfo(
-                                            s.name,
-                                            b.name
-                                          );
+                                          handleConnectionInfo(s.name, b.name);
                                         }}
+                                        title="Connection info"
                                       >
-                                        Connect
+                                        <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                          <path d="M6 10l-3 3" />
+                                          <path d="M10 6l3-3" />
+                                          <path d="M9 7l-2 2" />
+                                          <circle cx="4.5" cy="11.5" r="2" />
+                                          <circle cx="11.5" cy="4.5" r="2" />
+                                        </svg>
                                       </button>
                                       {s.provider_type === "local" && (
                                         <>
+                                          {/* Start */}
                                           {isStopped && (
                                             <button
                                               className="btn"
-                                              style={{
-                                                padding: "2px 10px",
-                                                fontSize: 12,
-                                              }}
+                                              style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
                                               onClick={(e) => {
                                                 e.stopPropagation();
-                                                handleStartService(
-                                                  s.name,
-                                                  b.name
-                                                );
+                                                handleStartService(s.name, b.name);
                                               }}
-                                              disabled={
-                                                actionLoading ===
-                                                `start:${s.name}:${b.name}`
-                                              }
+                                              disabled={actionLoading === `start:${s.name}:${b.name}`}
+                                              title="Start"
                                             >
-                                              {actionLoading ===
-                                              `start:${s.name}:${b.name}`
-                                                ? "..."
-                                                : "Start"}
+                                              <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+                                                <path d="M4 2.5v11l9-5.5z" fill="currentColor" />
+                                              </svg>
                                             </button>
                                           )}
+                                          {/* Stop */}
                                           {isRunning && (
                                             <button
                                               className="btn"
-                                              style={{
-                                                padding: "2px 10px",
-                                                fontSize: 12,
-                                              }}
+                                              style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
                                               onClick={(e) => {
                                                 e.stopPropagation();
-                                                handleStopService(
-                                                  s.name,
-                                                  b.name
-                                                );
+                                                handleStopService(s.name, b.name);
                                               }}
-                                              disabled={
-                                                actionLoading ===
-                                                `stop:${s.name}:${b.name}`
-                                              }
+                                              disabled={actionLoading === `stop:${s.name}:${b.name}`}
+                                              title="Stop"
                                             >
-                                              {actionLoading ===
-                                              `stop:${s.name}:${b.name}`
-                                                ? "..."
-                                                : "Stop"}
+                                              <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+                                                <rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor" />
+                                              </svg>
                                             </button>
                                           )}
+                                          {/* Reset */}
                                           <button
                                             className="btn"
-                                            style={{
-                                              padding: "2px 10px",
-                                              fontSize: 12,
-                                            }}
+                                            style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
                                             onClick={(e) => {
                                               e.stopPropagation();
-                                              setResetTarget({
-                                                name: s.name,
-                                                workspace: b.name,
-                                              });
+                                              setResetTarget({ name: s.name, workspace: b.name });
                                             }}
+                                            title="Reset"
                                           >
-                                            Reset
+                                            <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                              <path d="M2 8a6 6 0 0 1 10.2-4.2" />
+                                              <path d="M14 8a6 6 0 0 1-10.2 4.2" />
+                                              <path d="M10 2l2.2 1.8L14 2" />
+                                              <path d="M6 14l-2.2-1.8L2 14" />
+                                            </svg>
                                           </button>
+                                          {/* Logs */}
                                           <button
                                             className="btn"
-                                            style={{
-                                              padding: "2px 10px",
-                                              fontSize: 12,
-                                            }}
+                                            style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
                                             onClick={(e) => {
                                               e.stopPropagation();
-                                              handleViewLogs(
-                                                s.name,
-                                                b.name
-                                              );
+                                              handleViewLogs(s.name, b.name);
                                             }}
+                                            title="Logs"
                                           >
-                                            Logs
+                                            <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                              <rect x="2" y="2" width="12" height="12" rx="2" />
+                                              <path d="M5 9l2 2 2-2" />
+                                              <path d="M5 6h6" />
+                                            </svg>
+                                          </button>
+                                          {/* Delete service workspace */}
+                                          <button
+                                            className="btn btn-danger"
+                                            style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              setDeleteServiceWsTarget({ name: s.name, workspace: b.name });
+                                            }}
+                                            title={`Delete workspace ${b.name}`}
+                                          >
+                                            <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                              <path d="M2.5 4h11" />
+                                              <path d="M6 2.5h4" />
+                                              <path d="M5 4v8.5h6V4" />
+                                              <path d="M7 6.5v4" />
+                                              <path d="M9 6.5v4" />
+                                            </svg>
                                           </button>
                                         </>
                                       )}
@@ -1436,6 +1511,30 @@ function ProjectDetail() {
         confirmLabel="Reset"
         danger
         loading={actionLoading === "reset"}
+      />
+
+      {/* Delete Service Workspace Confirmation */}
+      <ConfirmDialog
+        open={deleteServiceWsTarget !== null}
+        onClose={() => setDeleteServiceWsTarget(null)}
+        onConfirm={handleDeleteServiceWorkspace}
+        title="Delete Service Workspace"
+        message={`Delete workspace "${deleteServiceWsTarget?.workspace}" for service "${deleteServiceWsTarget?.name}"? This will destroy all data for this workspace.`}
+        confirmLabel="Delete"
+        danger
+        loading={actionLoading === "delete-svc-ws"}
+      />
+
+      {/* Destroy Service Confirmation */}
+      <ConfirmDialog
+        open={destroyServiceTarget !== null}
+        onClose={() => setDestroyServiceTarget(null)}
+        onConfirm={handleDestroyService}
+        title="Destroy Service"
+        message={`Destroy service "${destroyServiceTarget}"? This permanently deletes all workspaces, containers, data, and removes it from config.`}
+        confirmLabel="Destroy"
+        danger
+        loading={actionLoading === "destroy-service"}
       />
 
       {/* Connection Info Modal */}

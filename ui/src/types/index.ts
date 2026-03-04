@@ -219,6 +219,11 @@ export interface ServiceDestroyResult {
   error: string | null;
 }
 
+export interface DestroyServiceResult {
+  service_name: string;
+  destroyed_workspaces: string[];
+}
+
 export interface OrphanProjectEntry {
   project_name: string;
   project_path: string | null;

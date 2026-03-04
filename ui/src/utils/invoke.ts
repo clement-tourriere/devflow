@@ -7,6 +7,7 @@ import type {
   ServiceWorkspaceStatus,
   ServiceWorkspaceInfo,
   AddServiceRequest,
+  DestroyServiceResult,
   HookPhaseEntry,
   VcsHooksActionResult,
   ActionTypeInfo,
@@ -131,6 +132,21 @@ export const listServiceWorkspaces = (
   serviceName: string
 ) =>
   invoke<ServiceWorkspaceInfo[]>("list_service_workspaces", {
+    projectPath,
+    serviceName,
+  });
+export const deleteServiceWorkspace = (
+  projectPath: string,
+  serviceName: string,
+  workspaceName: string
+) =>
+  invoke<void>("delete_service_workspace", {
+    projectPath,
+    serviceName,
+    workspaceName,
+  });
+export const destroyService = (projectPath: string, serviceName: string) =>
+  invoke<DestroyServiceResult>("destroy_service", {
     projectPath,
     serviceName,
   });

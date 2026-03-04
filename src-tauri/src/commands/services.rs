@@ -488,6 +488,88 @@ pub async fn reset_service(
         .map_err(crate::commands::format_error)
 }
 
+#[tauri::command]
+pub async fn delete_service_workspace(
+    project_path: String,
+    service_name: String,
+    workspace_name: String,
+) -> Result<(), String> {
+    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
+    let config =
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
+
+    let named_services = config.resolve_services();
+    let svc = named_services
+        .iter()
+        .find(|s| s.name == service_name)
+        .ok_or("Service not found")?;
+
+    let provider = services::factory::create_provider_from_named_config(&config, svc)
+        .await
+        .map_err(crate::commands::format_error)?;
+
+    provider
+        .delete_workspace(&workspace_name)
+        .await
+        .map_err(crate::commands::format_error)
+}
+
+#[derive(Serialize)]
+pub struct DestroyServiceResult {
+    pub service_name: String,
+    pub destroyed_workspaces: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn destroy_service(
+    project_path: String,
+    service_name: String,
+) -> Result<DestroyServiceResult, String> {
+    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
+    let mut config =
+        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
+
+    let named_services = config.resolve_services();
+    let svc = named_services
+        .iter()
+        .find(|s| s.name == service_name)
+        .ok_or("Service not found")?
+        .clone();
+
+    let provider = services::factory::create_provider_from_named_config(&config, &svc)
+        .await
+        .map_err(crate::commands::format_error)?;
+
+    if !provider.supports_destroy() {
+        return Err(format!(
+            "Service '{}' (provider: {}) does not support destruction",
+            service_name, svc.provider_type
+        ));
+    }
+
+    let destroyed_workspaces = provider
+        .destroy_project()
+        .await
+        .map_err(crate::commands::format_error)?;
+
+    // Remove from local state
+    let path = std::path::Path::new(&project_path);
+    if let Ok(mut state_mgr) = LocalStateManager::new() {
+        let _ = state_mgr.remove_service(path, &service_name);
+    }
+
+    // Remove from config and save
+    config.remove_service(&service_name);
+    config
+        .save_to_file(&config_path)
+        .map_err(crate::commands::format_error)?;
+
+    Ok(DestroyServiceResult {
+        service_name,
+        destroyed_workspaces,
+    })
+}
+
 #[derive(Serialize)]
 pub struct ServiceWorkspaceInfo {
     pub name: String,

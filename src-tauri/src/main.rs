@@ -95,6 +95,8 @@ fn main() {
             commands::services::get_service_logs,
             commands::services::reset_service,
             commands::services::get_service_status,
+            commands::services::delete_service_workspace,
+            commands::services::destroy_service,
             // Hooks
             commands::hooks::list_hooks,
             commands::hooks::render_template,
