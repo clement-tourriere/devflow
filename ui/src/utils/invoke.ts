@@ -227,6 +227,14 @@ export const installCertificate = () => invoke<void>("install_certificate");
 export const removeCertificate = () => invoke<void>("remove_certificate");
 
 // Config
+export const getConfigJson = (projectPath: string) =>
+  invoke<import("../types/config").DevflowConfig>("get_config_json", {
+    projectPath,
+  });
+export const saveConfigJson = (
+  projectPath: string,
+  config: import("../types/config").DevflowConfig
+) => invoke<void>("save_config_json", { projectPath, config });
 export const getConfigYaml = (projectPath: string) =>
   invoke<string>("get_config_yaml", { projectPath });
 export const saveConfigYaml = (projectPath: string, content: string) =>

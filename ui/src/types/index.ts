@@ -1,3 +1,5 @@
+export type { DevflowConfig } from "./config";
+
 export interface ProjectEntry {
   path: string;
   name: string;

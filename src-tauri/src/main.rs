@@ -119,6 +119,8 @@ fn main() {
             commands::proxy::install_certificate,
             commands::proxy::remove_certificate,
             // Config
+            commands::config::get_config_json,
+            commands::config::save_config_json,
             commands::config::get_config_yaml,
             commands::config::save_config_yaml,
             commands::config::validate_config_yaml,

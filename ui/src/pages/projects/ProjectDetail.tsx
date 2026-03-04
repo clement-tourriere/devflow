@@ -5,7 +5,6 @@ import {
   listWorkspaces,
   listServices,
   addService,
-  discoverDockerContainers,
   createWorkspace,
   deleteWorkspace,
   startService,
@@ -28,13 +27,13 @@ import type {
   ServiceWorkspaceInfo,
   ConnectionInfo,
   AddServiceRequest,
-  DiscoveredContainer,
   ContainerEntry,
   ProxyStatus,
   WorkspaceCreationMode,
 } from "../../types";
 import Modal from "../../components/Modal";
 import ConfirmDialog from "../../components/ConfirmDialog";
+import AddServiceModal from "../../components/AddServiceModal";
 import { useTerminal } from "../../context/TerminalContext";
 
 function ProjectDetail() {
@@ -85,19 +84,6 @@ function ProjectDetail() {
 
   // Add Service modal state
   const [showAddService, setShowAddService] = useState(false);
-  const [addSvcType, setAddSvcType] = useState("postgres");
-  const [addSvcProvider, setAddSvcProvider] = useState("local");
-  const [addSvcName, setAddSvcName] = useState("app-db");
-  const [addSvcImage, setAddSvcImage] = useState("postgres:17");
-  const [addSvcSeed, setAddSvcSeed] = useState("");
-  const [addSvcAutoWorkspace, setAddSvcAutoWorkspace] = useState(true);
-  const [addSvcError, setAddSvcError] = useState<string | null>(null);
-
-  // Docker discovery state
-  const [discoveredContainers, setDiscoveredContainers] = useState<DiscoveredContainer[]>([]);
-  const [discoveryLoading, setDiscoveryLoading] = useState(false);
-  const [discoveryExpanded, setDiscoveryExpanded] = useState(true);
-  const [selectedDiscovery, setSelectedDiscovery] = useState<string | null>(null);
 
   // Danger zone state
   const [showRemoveConfirm, setShowRemoveConfirm] = useState(false);
@@ -428,111 +414,9 @@ function ProjectDetail() {
     }
   };
 
-  const defaultImageForType = (type: string) => {
-    switch (type) {
-      case "postgres": return "postgres:17";
-      case "clickhouse": return "clickhouse/clickhouse-server:latest";
-      case "mysql": return "mysql:8";
-      default: return "";
-    }
-  };
-
-  const defaultNameForType = (type: string) => {
-    switch (type) {
-      case "postgres": return "app-db";
-      case "clickhouse": return "analytics";
-      case "mysql": return "app-db";
-      case "generic": return "cache";
-      default: return "service";
-    }
-  };
-
-  const runDiscovery = useCallback(async (serviceType: string) => {
-    setDiscoveryLoading(true);
-    setDiscoveredContainers([]);
-    setSelectedDiscovery(null);
-    try {
-      const containers = await discoverDockerContainers(serviceType);
-      setDiscoveredContainers(containers);
-    } catch {
-      // Docker not available or other error — silently hide discovery
-      setDiscoveredContainers([]);
-    } finally {
-      setDiscoveryLoading(false);
-    }
-  }, []);
-
-  const handleSelectDiscoveredContainer = (container: DiscoveredContainer) => {
-    if (selectedDiscovery === container.container_id) {
-      // Deselect
-      setSelectedDiscovery(null);
-      setAddSvcImage(defaultImageForType(addSvcType));
-      setAddSvcSeed("");
-      setAddSvcName(defaultNameForType(addSvcType));
-      return;
-    }
-    setSelectedDiscovery(container.container_id);
-    setAddSvcImage(container.image);
-    setAddSvcSeed(container.connection_url);
-    // Derive a name from container
-    const name = container.compose_service || container.container_name.replace(/[^a-zA-Z0-9-]/g, "-");
-    setAddSvcName(name);
-  };
-
-  const openAddServiceModal = () => {
-    setAddSvcType("postgres");
-    setAddSvcProvider("local");
-    setAddSvcName("app-db");
-    setAddSvcImage("postgres:17");
-    setAddSvcSeed("");
-    setAddSvcAutoWorkspace(true);
-    setAddSvcError(null);
-    setSelectedDiscovery(null);
-    setDiscoveryExpanded(true);
-    setShowAddService(true);
-    runDiscovery("postgres");
-  };
-
-  const handleServiceTypeChange = (type: string) => {
-    setAddSvcType(type);
-    setAddSvcName(defaultNameForType(type));
-    setAddSvcImage(defaultImageForType(type));
-    setSelectedDiscovery(null);
-    // Non-postgres types only support local provider
-    if (type !== "postgres") {
-      setAddSvcProvider("local");
-    }
-    runDiscovery(type);
-  };
-
-  const handleAddService = async () => {
-    if (!addSvcName.trim()) {
-      setAddSvcError("Service name is required");
-      return;
-    }
-    if (addSvcType === "generic" && !addSvcImage.trim()) {
-      setAddSvcError("Docker image is required for generic services");
-      return;
-    }
-    setAddSvcError(null);
-    setActionLoading("add-service");
-    try {
-      const request: AddServiceRequest = {
-        name: addSvcName.trim(),
-        service_type: addSvcType,
-        provider_type: addSvcProvider,
-        auto_workspace: addSvcAutoWorkspace,
-        image: addSvcImage.trim() || undefined,
-        seed_from: addSvcSeed.trim() || undefined,
-      };
-      await addService(projectPath, request);
-      setShowAddService(false);
-      await reload();
-    } catch (e) {
-      setAddSvcError(`${e}`);
-    } finally {
-      setActionLoading(null);
-    }
+  const handleAddService = async (request: AddServiceRequest) => {
+    await addService(projectPath, request);
+    await reload();
   };
 
   if (error) {
@@ -807,7 +691,7 @@ function ProjectDetail() {
           {detail.has_config && (
             <button
               className="btn btn-primary"
-              onClick={openAddServiceModal}
+              onClick={() => setShowAddService(true)}
               style={{ padding: "4px 12px", fontSize: 13 }}
             >
               Add Service
@@ -826,7 +710,7 @@ function ProjectDetail() {
             {detail.has_config ? (
               <button
                 className="btn btn-primary"
-                onClick={openAddServiceModal}
+                onClick={() => setShowAddService(true)}
               >
                 Add Service
               </button>
@@ -1677,223 +1561,11 @@ function ProjectDetail() {
       </Modal>
 
       {/* Add Service Modal */}
-      <Modal
+      <AddServiceModal
         open={showAddService}
         onClose={() => setShowAddService(false)}
-        title="Add Service"
-        width={500}
-      >
-        {/* Service Type */}
-        <div style={{ marginBottom: 16 }}>
-          <label style={{ display: "block", marginBottom: 6, fontSize: 13, color: "var(--text-secondary)", fontWeight: 500 }}>
-            Service Type
-          </label>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            {(["postgres", "clickhouse", "mysql", "generic"] as const).map((t) => (
-              <button
-                key={t}
-                onClick={() => handleServiceTypeChange(t)}
-                style={{
-                  padding: "10px 12px",
-                  border: `2px solid ${addSvcType === t ? "var(--accent)" : "var(--border)"}`,
-                  borderRadius: 8,
-                  background: addSvcType === t ? "var(--bg-hover)" : "var(--bg-primary)",
-                  color: "var(--text-primary)",
-                  cursor: "pointer",
-                  textAlign: "left",
-                  fontSize: 14,
-                  fontWeight: addSvcType === t ? 600 : 400,
-                }}
-              >
-                {{ postgres: "PostgreSQL", clickhouse: "ClickHouse", mysql: "MySQL", generic: "Generic Docker" }[t]}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Detected Docker Containers */}
-        {(discoveryLoading || discoveredContainers.length > 0) && (
-          <div style={{ marginBottom: 16 }}>
-            <button
-              onClick={() => setDiscoveryExpanded(!discoveryExpanded)}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                background: "none",
-                border: "none",
-                color: "var(--text-secondary)",
-                cursor: "pointer",
-                padding: 0,
-                fontSize: 13,
-                fontWeight: 500,
-                marginBottom: discoveryExpanded ? 8 : 0,
-              }}
-            >
-              <span style={{ transform: discoveryExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s", display: "inline-block" }}>&#9654;</span>
-              Detected Docker Containers
-              {discoveredContainers.length > 0 && (
-                <span style={{ background: "var(--accent)", color: "#fff", borderRadius: 10, padding: "1px 7px", fontSize: 11, fontWeight: 600, marginLeft: 4 }}>
-                  {discoveredContainers.length}
-                </span>
-              )}
-            </button>
-            {discoveryExpanded && (
-              <div>
-                {discoveryLoading ? (
-                  <div style={{ color: "var(--text-muted)", fontSize: 13, padding: "8px 0" }}>
-                    Scanning Docker containers...
-                  </div>
-                ) : discoveredContainers.length === 0 ? (
-                  <div style={{ color: "var(--text-muted)", fontSize: 13, padding: "4px 0" }}>
-                    No matching containers found.
-                  </div>
-                ) : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    {discoveredContainers.map((c) => (
-                      <button
-                        key={c.container_id}
-                        onClick={() => handleSelectDiscoveredContainer(c)}
-                        style={{
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: 2,
-                          padding: "8px 12px",
-                          border: `2px solid ${selectedDiscovery === c.container_id ? "var(--accent)" : "var(--border)"}`,
-                          borderRadius: 8,
-                          background: selectedDiscovery === c.container_id ? "var(--bg-hover)" : "var(--bg-primary)",
-                          color: "var(--text-primary)",
-                          cursor: "pointer",
-                          textAlign: "left",
-                          fontSize: 13,
-                        }}
-                      >
-                        <div style={{ fontWeight: 600 }}>
-                          {c.container_name}
-                          {c.is_compose && c.compose_project && (
-                            <span style={{ fontWeight: 400, color: "var(--text-muted)", marginLeft: 6, fontSize: 11 }}>
-                              compose: {c.compose_project}
-                            </span>
-                          )}
-                        </div>
-                        <div style={{ color: "var(--text-secondary)", fontSize: 12 }}>
-                          {c.image} &middot; {c.host}:{c.port}
-                          {c.username && <span> &middot; {c.username}</span>}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Provider (only for postgres) */}
-        {addSvcType === "postgres" && (
-          <div style={{ marginBottom: 16 }}>
-            <label style={{ display: "block", marginBottom: 4, fontSize: 13, color: "var(--text-secondary)", fontWeight: 500 }}>
-              Provider
-            </label>
-            <select
-              value={addSvcProvider}
-              onChange={(e) => setAddSvcProvider(e.target.value)}
-              style={{
-                width: "100%",
-                background: "var(--bg-primary)",
-                color: "var(--text-primary)",
-                border: "1px solid var(--border)",
-                borderRadius: 6,
-                padding: "6px 12px",
-                fontSize: 14,
-              }}
-            >
-              <option value="local">Local Docker</option>
-              <option value="neon">Neon</option>
-              <option value="dblab">DBLab</option>
-              <option value="xata">Xata</option>
-              <option value="postgres_template">PostgreSQL Template</option>
-            </select>
-          </div>
-        )}
-
-        {/* Name */}
-        <div style={{ marginBottom: 12 }}>
-          <label style={{ display: "block", marginBottom: 4, fontSize: 13, color: "var(--text-secondary)", fontWeight: 500 }}>
-            Service Name
-          </label>
-          <input
-            type="text"
-            value={addSvcName}
-            onChange={(e) => setAddSvcName(e.target.value)}
-            placeholder="e.g. app-db"
-            style={{ width: "100%" }}
-          />
-        </div>
-
-        {/* Docker Image (only for local-ish providers) */}
-        {(addSvcProvider === "local" || addSvcType !== "postgres") && (
-          <div style={{ marginBottom: 12 }}>
-            <label style={{ display: "block", marginBottom: 4, fontSize: 13, color: "var(--text-secondary)", fontWeight: 500 }}>
-              Docker Image
-            </label>
-            <input
-              type="text"
-              value={addSvcImage}
-              onChange={(e) => setAddSvcImage(e.target.value)}
-              placeholder={addSvcType === "generic" ? "e.g. redis:7" : defaultImageForType(addSvcType)}
-              style={{ width: "100%" }}
-            />
-          </div>
-        )}
-
-        {/* Seed From */}
-        <div style={{ marginBottom: 12 }}>
-          <label style={{ display: "block", marginBottom: 4, fontSize: 13, color: "var(--text-secondary)", fontWeight: 500 }}>
-            Seed From <span style={{ fontWeight: 400, color: "var(--text-muted)" }}>(optional)</span>
-          </label>
-          <input
-            type="text"
-            value={addSvcSeed}
-            onChange={(e) => setAddSvcSeed(e.target.value)}
-            placeholder="URL, file path, or s3://..."
-            style={{ width: "100%" }}
-          />
-        </div>
-
-        {/* Auto-workspace toggle */}
-        <div style={{ marginBottom: 16 }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, cursor: "pointer" }}>
-            <input
-              type="checkbox"
-              checked={addSvcAutoWorkspace}
-              onChange={(e) => setAddSvcAutoWorkspace(e.target.checked)}
-            />
-            <span style={{ color: "var(--text-primary)" }}>Auto-workspace on git checkout</span>
-          </label>
-        </div>
-
-        {/* Error message */}
-        {addSvcError && (
-          <div style={{ marginBottom: 12, padding: "8px 12px", background: "var(--danger-bg, rgba(255,0,0,0.1))", border: "1px solid var(--danger)", borderRadius: 6, color: "var(--danger)", fontSize: 13 }}>
-            {addSvcError}
-          </div>
-        )}
-
-        {/* Footer */}
-        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-          <button className="btn" onClick={() => setShowAddService(false)}>
-            Cancel
-          </button>
-          <button
-            className="btn btn-primary"
-            onClick={handleAddService}
-            disabled={!addSvcName.trim() || actionLoading === "add-service"}
-          >
-            {actionLoading === "add-service" ? "Adding..." : "Add Service"}
-          </button>
-        </div>
-      </Modal>
+        onAdd={handleAddService}
+      />
     </div>
   );
 }
