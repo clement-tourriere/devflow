@@ -133,7 +133,7 @@ Examples:
     // ── Services ──
     #[command(
         about = "Manage services (create, delete, start, stop, reset, ...)",
-        long_about = "Manage service providers and their workspaces.\n\nService commands operate on the configured service providers (local Docker,\nNeon, DBLab, etc.) to create, delete, and manage workspace-isolated environments.\n\nExamples:\n  devflow service add                       # Interactive wizard\n  devflow service add mydb --provider local # Add with explicit options\n  devflow service create feature-auth       # Create service workspace\n  devflow service delete feature-auth       # Delete service workspace\n  devflow service cleanup --max-count 10    # Cleanup old service workspaces\n  devflow service start feature-auth        # Start a stopped container\n  devflow service stop feature-auth         # Stop a running container\n  devflow service reset feature-auth        # Reset to parent state\n  devflow service connection feature-auth   # Show connection info\n  devflow service status                    # Show service status\n  devflow service list                      # List configured services\n  devflow service remove mydb               # Remove a service config\n  devflow service logs feature-auth         # Show container logs\n  devflow service seed main --from dump.sql # Seed from external source\n  devflow service destroy                   # Destroy all data"
+        long_about = "Manage service providers and their workspaces.\n\nService commands operate on the configured service providers (local Docker,\nNeon, DBLab, etc.) to create, delete, and manage workspace-isolated environments.\n\nExamples:\n  devflow service add                       # Interactive wizard\n  devflow service add mydb --provider local # Add with explicit options\n  devflow service create feature-auth       # Create service workspace\n  devflow service delete feature-auth       # Delete service workspace\n  devflow service cleanup --max-count 10    # Cleanup old service workspaces\n  devflow service start feature-auth        # Start a stopped container\n  devflow service stop feature-auth         # Stop a running container\n  devflow service reset feature-auth        # Reset to parent state\n  devflow service connection feature-auth   # Show connection info\n  devflow service status                    # Show service status\n  devflow service list                      # List configured services\n  devflow service remove mydb               # Remove a service config\n  devflow service logs feature-auth         # Show container logs\n  devflow service seed main --from dump.sql # Seed from external source\n  devflow service discover                  # Discover running Docker containers\n  devflow service destroy                   # Destroy all data"
     )]
     Service {
         #[command(subcommand)]
@@ -452,6 +452,15 @@ pub enum ServiceCommands {
             help = "Source to seed from (PostgreSQL URL, file path, or s3:// URL)"
         )]
         from: String,
+    },
+
+    #[command(
+        about = "Discover running Docker containers matching known service types",
+        long_about = "Discover running Docker containers matching known service types.\n\nScans Docker for running containers that appear to be databases or caches\n(PostgreSQL, ClickHouse, MySQL, Redis). Excludes devflow-managed containers.\n\nExamples:\n  devflow service discover                          # Discover all service containers\n  devflow service discover --service-type postgres   # Only PostgreSQL containers"
+    )]
+    Discover {
+        #[arg(long, help = "Filter by service type (postgres, clickhouse, mysql, generic)")]
+        service_type: Option<String>,
     },
 }
 

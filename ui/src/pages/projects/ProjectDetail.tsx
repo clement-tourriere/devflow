@@ -5,6 +5,7 @@ import {
   listWorkspaces,
   listServices,
   addService,
+  discoverDockerContainers,
   createWorkspace,
   deleteWorkspace,
   startService,
@@ -27,6 +28,7 @@ import type {
   ServiceWorkspaceInfo,
   ConnectionInfo,
   AddServiceRequest,
+  DiscoveredContainer,
   ContainerEntry,
   ProxyStatus,
   WorkspaceCreationMode,
@@ -90,6 +92,12 @@ function ProjectDetail() {
   const [addSvcSeed, setAddSvcSeed] = useState("");
   const [addSvcAutoWorkspace, setAddSvcAutoWorkspace] = useState(true);
   const [addSvcError, setAddSvcError] = useState<string | null>(null);
+
+  // Docker discovery state
+  const [discoveredContainers, setDiscoveredContainers] = useState<DiscoveredContainer[]>([]);
+  const [discoveryLoading, setDiscoveryLoading] = useState(false);
+  const [discoveryExpanded, setDiscoveryExpanded] = useState(true);
+  const [selectedDiscovery, setSelectedDiscovery] = useState<string | null>(null);
 
   // Danger zone state
   const [showRemoveConfirm, setShowRemoveConfirm] = useState(false);
@@ -439,6 +447,38 @@ function ProjectDetail() {
     }
   };
 
+  const runDiscovery = useCallback(async (serviceType: string) => {
+    setDiscoveryLoading(true);
+    setDiscoveredContainers([]);
+    setSelectedDiscovery(null);
+    try {
+      const containers = await discoverDockerContainers(serviceType);
+      setDiscoveredContainers(containers);
+    } catch {
+      // Docker not available or other error — silently hide discovery
+      setDiscoveredContainers([]);
+    } finally {
+      setDiscoveryLoading(false);
+    }
+  }, []);
+
+  const handleSelectDiscoveredContainer = (container: DiscoveredContainer) => {
+    if (selectedDiscovery === container.container_id) {
+      // Deselect
+      setSelectedDiscovery(null);
+      setAddSvcImage(defaultImageForType(addSvcType));
+      setAddSvcSeed("");
+      setAddSvcName(defaultNameForType(addSvcType));
+      return;
+    }
+    setSelectedDiscovery(container.container_id);
+    setAddSvcImage(container.image);
+    setAddSvcSeed(container.connection_url);
+    // Derive a name from container
+    const name = container.compose_service || container.container_name.replace(/[^a-zA-Z0-9-]/g, "-");
+    setAddSvcName(name);
+  };
+
   const openAddServiceModal = () => {
     setAddSvcType("postgres");
     setAddSvcProvider("local");
@@ -447,17 +487,22 @@ function ProjectDetail() {
     setAddSvcSeed("");
     setAddSvcAutoWorkspace(true);
     setAddSvcError(null);
+    setSelectedDiscovery(null);
+    setDiscoveryExpanded(true);
     setShowAddService(true);
+    runDiscovery("postgres");
   };
 
   const handleServiceTypeChange = (type: string) => {
     setAddSvcType(type);
     setAddSvcName(defaultNameForType(type));
     setAddSvcImage(defaultImageForType(type));
+    setSelectedDiscovery(null);
     // Non-postgres types only support local provider
     if (type !== "postgres") {
       setAddSvcProvider("local");
     }
+    runDiscovery(type);
   };
 
   const handleAddService = async () => {
@@ -1665,6 +1710,84 @@ function ProjectDetail() {
             ))}
           </div>
         </div>
+
+        {/* Detected Docker Containers */}
+        {(discoveryLoading || discoveredContainers.length > 0) && (
+          <div style={{ marginBottom: 16 }}>
+            <button
+              onClick={() => setDiscoveryExpanded(!discoveryExpanded)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                background: "none",
+                border: "none",
+                color: "var(--text-secondary)",
+                cursor: "pointer",
+                padding: 0,
+                fontSize: 13,
+                fontWeight: 500,
+                marginBottom: discoveryExpanded ? 8 : 0,
+              }}
+            >
+              <span style={{ transform: discoveryExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s", display: "inline-block" }}>&#9654;</span>
+              Detected Docker Containers
+              {discoveredContainers.length > 0 && (
+                <span style={{ background: "var(--accent)", color: "#fff", borderRadius: 10, padding: "1px 7px", fontSize: 11, fontWeight: 600, marginLeft: 4 }}>
+                  {discoveredContainers.length}
+                </span>
+              )}
+            </button>
+            {discoveryExpanded && (
+              <div>
+                {discoveryLoading ? (
+                  <div style={{ color: "var(--text-muted)", fontSize: 13, padding: "8px 0" }}>
+                    Scanning Docker containers...
+                  </div>
+                ) : discoveredContainers.length === 0 ? (
+                  <div style={{ color: "var(--text-muted)", fontSize: 13, padding: "4px 0" }}>
+                    No matching containers found.
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {discoveredContainers.map((c) => (
+                      <button
+                        key={c.container_id}
+                        onClick={() => handleSelectDiscoveredContainer(c)}
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 2,
+                          padding: "8px 12px",
+                          border: `2px solid ${selectedDiscovery === c.container_id ? "var(--accent)" : "var(--border)"}`,
+                          borderRadius: 8,
+                          background: selectedDiscovery === c.container_id ? "var(--bg-hover)" : "var(--bg-primary)",
+                          color: "var(--text-primary)",
+                          cursor: "pointer",
+                          textAlign: "left",
+                          fontSize: 13,
+                        }}
+                      >
+                        <div style={{ fontWeight: 600 }}>
+                          {c.container_name}
+                          {c.is_compose && c.compose_project && (
+                            <span style={{ fontWeight: 400, color: "var(--text-muted)", marginLeft: 6, fontSize: 11 }}>
+                              compose: {c.compose_project}
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ color: "var(--text-secondary)", fontSize: 12 }}>
+                          {c.image} &middot; {c.host}:{c.port}
+                          {c.username && <span> &middot; {c.username}</span>}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Provider (only for postgres) */}
         {addSvcType === "postgres" && (

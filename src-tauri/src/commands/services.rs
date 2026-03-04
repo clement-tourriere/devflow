@@ -1,6 +1,7 @@
 use devflow_core::config::{
     ClickHouseConfig, GenericDockerConfig, LocalServiceConfig, MySQLConfig, NamedServiceConfig,
 };
+use devflow_core::docker::discovery;
 use devflow_core::services;
 use devflow_core::state::LocalStateManager;
 use serde::{Deserialize, Serialize};
@@ -650,4 +651,49 @@ pub async fn get_service_status(
         workspace_name,
         state,
     })
+}
+
+#[derive(Serialize)]
+pub struct DiscoveredContainerEntry {
+    pub container_id: String,
+    pub container_name: String,
+    pub image: String,
+    pub service_type: String,
+    pub host: String,
+    pub port: u16,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub database: Option<String>,
+    pub connection_url: String,
+    pub is_compose: bool,
+    pub compose_project: Option<String>,
+    pub compose_service: Option<String>,
+}
+
+#[tauri::command]
+pub async fn discover_docker_containers(
+    service_type: Option<String>,
+) -> Result<Vec<DiscoveredContainerEntry>, String> {
+    let containers = discovery::discover_containers(service_type.as_deref())
+        .await
+        .map_err(crate::commands::format_error)?;
+
+    Ok(containers
+        .into_iter()
+        .map(|c| DiscoveredContainerEntry {
+            container_id: c.container_id,
+            container_name: c.container_name,
+            image: c.image,
+            service_type: format!("{:?}", c.service_type).to_lowercase(),
+            host: c.host,
+            port: c.port,
+            username: c.username,
+            password: c.password,
+            database: c.database,
+            connection_url: c.connection_url,
+            is_compose: c.is_compose,
+            compose_project: c.compose_project,
+            compose_service: c.compose_service,
+        })
+        .collect())
 }

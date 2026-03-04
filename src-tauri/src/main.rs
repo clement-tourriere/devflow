@@ -97,6 +97,7 @@ fn main() {
             commands::services::get_service_status,
             commands::services::delete_service_workspace,
             commands::services::destroy_service,
+            commands::services::discover_docker_containers,
             // Hooks
             commands::hooks::list_hooks,
             commands::hooks::render_template,

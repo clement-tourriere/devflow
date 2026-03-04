@@ -181,6 +181,22 @@ export interface CertificateStatus {
   info: string;
 }
 
+export interface DiscoveredContainer {
+  container_id: string;
+  container_name: string;
+  image: string;
+  service_type: string;
+  host: string;
+  port: number;
+  username: string | null;
+  password: string | null;
+  database: string | null;
+  connection_url: string;
+  is_compose: boolean;
+  compose_project: string | null;
+  compose_service: string | null;
+}
+
 export interface AddServiceRequest {
   name: string;
   service_type: string;

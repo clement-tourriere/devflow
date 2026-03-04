@@ -132,6 +132,9 @@ pub(super) async fn handle_service_dispatch(
                 }
             };
 
+            // 2.5. Docker container discovery (pre-fill defaults when applicable)
+            let discovered = offer_discovered_containers(&service_type, non_interactive, json_output).await;
+
             // 3. Service name
             let name = if let Some(n) = name {
                 n
@@ -139,12 +142,16 @@ pub(super) async fn handle_service_dispatch(
                 anyhow::bail!("Service name is required in non-interactive mode. Usage: devflow service add <name>");
             } else {
                 use inquire::Text;
-                let default_name = match service_type.as_str() {
-                    "clickhouse" => "analytics",
-                    "mysql" => "mysql",
-                    "generic" => "app",
-                    "plugin" => "plugin",
-                    _ => "db",
+                let default_name = if let Some((_, _, ref disc_name)) = discovered {
+                    disc_name.as_str()
+                } else {
+                    match service_type.as_str() {
+                        "clickhouse" => "analytics",
+                        "mysql" => "mysql",
+                        "generic" => "app",
+                        "plugin" => "plugin",
+                        _ => "db",
+                    }
                 };
                 let input = Text::new("Service name:")
                     .with_default(default_name)
@@ -208,6 +215,10 @@ pub(super) async fn handle_service_dispatch(
                 }
             }
 
+            // Apply discovered container image if available
+            let discovered_image = discovered.as_ref().map(|(img, _, _)| img.clone());
+            let discovered_seed = discovered.as_ref().map(|(_, seed, _)| seed.clone());
+
             // Build named service config
             let named_cfg = devflow_core::config::NamedServiceConfig {
                 name: name.clone(),
@@ -217,7 +228,7 @@ pub(super) async fn handle_service_dispatch(
                 default: false,
                 local: if is_local {
                     Some(devflow_core::config::LocalServiceConfig {
-                        image: None,
+                        image: discovered_image.clone(),
                         data_root: None,
                         storage: None,
                         port_range_start: None,
@@ -233,7 +244,7 @@ pub(super) async fn handle_service_dispatch(
                 xata: None,
                 clickhouse: if service_type == "clickhouse" {
                     Some(devflow_core::config::ClickHouseConfig {
-                        image: "clickhouse/clickhouse-server:latest".to_string(),
+                        image: discovered_image.clone().unwrap_or_else(|| "clickhouse/clickhouse-server:latest".to_string()),
                         port_range_start: None,
                         data_root: None,
                         user: "default".to_string(),
@@ -244,7 +255,7 @@ pub(super) async fn handle_service_dispatch(
                 },
                 mysql: if service_type == "mysql" {
                     Some(devflow_core::config::MySQLConfig {
-                        image: "mysql:8".to_string(),
+                        image: discovered_image.unwrap_or_else(|| "mysql:8".to_string()),
                         port_range_start: None,
                         data_root: None,
                         root_password: "dev".to_string(),
@@ -265,6 +276,9 @@ pub(super) async fn handle_service_dispatch(
             if !json_output {
                 println!("Added service '{}' to local state", name);
             }
+
+            // Use explicit seed source or discovered container's connection URL
+            let effective_seed = from.or(discovered_seed);
 
             // Create main workspace for local providers
             if is_local {
@@ -298,7 +312,7 @@ pub(super) async fn handle_service_dispatch(
                         super::init::init_local_service_main(
                             &config_with_service,
                             &updated_cfg,
-                            from.as_deref(),
+                            effective_seed.as_deref(),
                             json_output,
                         )
                         .await;
@@ -306,7 +320,7 @@ pub(super) async fn handle_service_dispatch(
                         super::init::init_local_service_main(
                             &config_with_service,
                             &named_cfg,
-                            from.as_deref(),
+                            effective_seed.as_deref(),
                             json_output,
                         )
                         .await;
@@ -315,7 +329,7 @@ pub(super) async fn handle_service_dispatch(
                     super::init::init_local_service_main(
                         &config_with_service,
                         &named_cfg,
-                        from.as_deref(),
+                        effective_seed.as_deref(),
                         json_output,
                     )
                     .await;
@@ -325,7 +339,7 @@ pub(super) async fn handle_service_dispatch(
                     super::init::init_local_service_main(
                         &config_with_service,
                         &named_cfg,
-                        from.as_deref(),
+                        effective_seed.as_deref(),
                         json_output,
                     )
                     .await;
@@ -517,6 +531,9 @@ pub(super) async fn handle_service_dispatch(
                     }
                 }
             }
+        }
+        super::ServiceCommands::Discover { service_type } => {
+            handle_discover(service_type.as_deref(), json_output).await?;
         }
         // Provider operations: delegate to handle_service_provider_command
         other => {
@@ -1973,4 +1990,108 @@ pub(super) fn enrich_branch_list_json(
     }
 
     serde_json::Value::Array(entries)
+}
+
+/// Handle `devflow service discover` subcommand.
+async fn handle_discover(service_type: Option<&str>, json_output: bool) -> Result<()> {
+    let containers = docker::discovery::discover_containers(service_type).await?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&containers)?);
+        return Ok(());
+    }
+
+    if containers.is_empty() {
+        println!("No matching Docker containers found.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<25} {:<40} {:<25} {}",
+        "NAME", "IMAGE", "HOST:PORT", "TYPE"
+    );
+    println!("{}", "-".repeat(100));
+    for c in &containers {
+        let compose_label = if c.is_compose {
+            format!(
+                " ({})",
+                c.compose_project.as_deref().unwrap_or("compose")
+            )
+        } else {
+            String::new()
+        };
+        println!(
+            "{:<25} {:<40} {:<25} {}{}",
+            c.container_name,
+            c.image,
+            format!("{}:{}", c.host, c.port),
+            format!("{:?}", c.service_type).to_lowercase(),
+            compose_label,
+        );
+    }
+
+    Ok(())
+}
+
+/// Offer discovered Docker containers to the user during `service add` interactive wizard.
+/// Returns `(image, seed_url, name_suggestion)` if user picks a container, or `None` to skip.
+pub(super) async fn offer_discovered_containers(
+    service_type: &str,
+    non_interactive: bool,
+    json_output: bool,
+) -> Option<(String, String, String)> {
+    if non_interactive || json_output {
+        return None;
+    }
+
+    let containers = match docker::discovery::discover_containers(Some(service_type)).await {
+        Ok(c) if !c.is_empty() => c,
+        _ => return None,
+    };
+
+    let options: Vec<String> = containers
+        .iter()
+        .map(|c| {
+            let compose_tag = if c.is_compose {
+                format!(
+                    " [{}]",
+                    c.compose_project.as_deref().unwrap_or("compose")
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                "{} — {} ({}:{}){}",
+                c.container_name, c.image, c.host, c.port, compose_tag
+            )
+        })
+        .collect();
+
+    let mut all_options = vec!["Skip — configure manually".to_string()];
+    all_options.extend(options);
+
+    let selection = inquire::Select::new(
+        "Detected running Docker containers. Import settings?",
+        all_options,
+    )
+    .with_help_message("Select a container to pre-fill image, seed URL, and name")
+    .prompt();
+
+    match selection {
+        Ok(s) if s.starts_with("Skip") => None,
+        Ok(s) => {
+            // Find which container was selected
+            let idx = containers
+                .iter()
+                .position(|c| s.starts_with(&c.container_name))
+                .unwrap_or(0);
+            let c = &containers[idx];
+            let name = c
+                .compose_service
+                .clone()
+                .unwrap_or_else(|| c.container_name.replace(|ch: char| !ch.is_alphanumeric() && ch != '-', "-"));
+            Some((c.image.clone(), c.connection_url.clone(), name))
+        }
+        Err(_) => None,
+    }
 }

@@ -7,6 +7,7 @@ import type {
   ServiceWorkspaceStatus,
   ServiceWorkspaceInfo,
   AddServiceRequest,
+  DiscoveredContainer,
   DestroyServiceResult,
   HookPhaseEntry,
   VcsHooksActionResult,
@@ -149,6 +150,10 @@ export const destroyService = (projectPath: string, serviceName: string) =>
   invoke<DestroyServiceResult>("destroy_service", {
     projectPath,
     serviceName,
+  });
+export const discoverDockerContainers = (serviceType?: string) =>
+  invoke<DiscoveredContainer[]>("discover_docker_containers", {
+    serviceType,
   });
 
 // Hooks
