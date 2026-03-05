@@ -26,8 +26,9 @@ export interface WorkspaceEntry {
   worktree_path: string | null;
   parent: string | null;
   created_at: string | null;
-  agent_tool: string | null;
-  agent_status: string | null;
+  executed_command: string | null;
+  execution_status: string | null;
+  sandboxed: boolean;
 }
 
 export interface WorkspacesResponse {

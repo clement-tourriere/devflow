@@ -163,9 +163,10 @@ impl DevflowContext {
                     parent,
                     worktree_path,
                     created_at,
-                    agent_tool: None,
-                    agent_status: None,
-                    agent_started_at: None,
+                    executed_command: None,
+                    execution_status: None,
+                    executed_at: None,
+                    sandboxed: existing.as_ref().map(|b| b.sandboxed).unwrap_or(false),
                 };
 
                 if let Err(e) = state.register_workspace(config_path, workspace) {

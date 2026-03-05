@@ -124,9 +124,10 @@ pub(super) fn register_workspace_in_state(
             parent: final_parent,
             worktree_path: final_worktree,
             created_at,
-            agent_tool: None,
-            agent_status: None,
-            agent_started_at: None,
+            executed_command: None,
+            execution_status: None,
+            executed_at: None,
+            sandboxed: existing.as_ref().map(|b| b.sandboxed).unwrap_or(false),
         },
     )?;
 
@@ -242,6 +243,11 @@ fn print_enriched_branch_list(
         .iter()
         .map(|b| (b.name.clone(), b.parent.clone()))
         .collect();
+    let sandbox_lookup: HashSet<String> = registry_branches
+        .iter()
+        .filter(|b| b.sandboxed)
+        .map(|b| b.name.clone())
+        .collect();
 
     let context = resolve_branch_context(config);
 
@@ -347,6 +353,7 @@ fn print_enriched_branch_list(
         service_branches: &[services::WorkspaceInfo],
         service_names: &HashSet<String>,
         wt_lookup: &HashMap<String, PathBuf>,
+        sandbox_lookup: &HashSet<String>,
         config: &Config,
         #[allow(unused_variables)] git_branches: &[devflow_core::vcs::WorkspaceInfo],
     ) {
@@ -364,6 +371,7 @@ fn print_enriched_branch_list(
             .and_then(|b| b.state.as_deref());
 
         let wt_path = wt_lookup.get(name);
+        let is_sandboxed = sandbox_lookup.contains(name) || sandbox_lookup.contains(&normalized);
 
         let mut parts = Vec::new();
         if let Some(state) = service_state {
@@ -376,6 +384,9 @@ fn print_enriched_branch_list(
         }
         if is_context {
             parts.push("context".to_string());
+        }
+        if is_sandboxed {
+            parts.push("sandboxed".to_string());
         }
 
         let suffix = if parts.is_empty() {
@@ -415,6 +426,7 @@ fn print_enriched_branch_list(
                     service_branches,
                     service_names,
                     wt_lookup,
+                    sandbox_lookup,
                     config,
                     git_branches,
                 );
@@ -434,6 +446,7 @@ fn print_enriched_branch_list(
             service_branches,
             &service_names,
             &wt_lookup,
+            &sandbox_lookup,
             config,
             &git_branches,
         );
@@ -989,15 +1002,33 @@ pub(super) async fn handle_branch_command(
             create,
             from,
             execute,
+            detach,
+            execute_args,
             no_services,
             no_verify,
             template,
             dry_run,
             no_respect_gitignore,
+            sandboxed,
+            no_sandbox,
         } => {
+            let sandbox_resolved = if sandboxed || no_sandbox {
+                Some(devflow_core::sandbox::resolve_sandbox_enabled(
+                    sandboxed,
+                    no_sandbox,
+                    false,
+                    config.sandbox.as_ref(),
+                ))
+            } else {
+                let is_sandboxed = devflow_core::sandbox::resolve_sandbox_enabled(
+                    false, false, false, config.sandbox.as_ref(),
+                );
+                if is_sandboxed { Some(true) } else { None }
+            };
+
             if dry_run {
-                if let Some(workspace) = workspace_name {
-                    let normalized_branch = config.get_normalized_workspace_name(&workspace);
+                if let Some(ref workspace) = workspace_name {
+                    let normalized_branch = config.get_normalized_workspace_name(workspace);
                     let worktree_enabled = config.worktree.as_ref().is_some_and(|wt| wt.enabled);
                     let context = resolve_branch_context(config);
                     let default_parent = if create {
@@ -1122,8 +1153,8 @@ pub(super) async fn handle_branch_command(
                     None,
                 )
                 .await?;
-            } else if let Some(workspace) = workspace_name {
-                if workspace == config.git.main_workspace {
+            } else if let Some(ref workspace) = workspace_name {
+                if workspace == &config.git.main_workspace {
                     handle_switch_to_main(
                         config,
                         config_path,
@@ -1153,6 +1184,7 @@ pub(super) async fn handle_branch_command(
                         } else {
                             None
                         },
+                        sandbox_resolved,
                     )
                     .await?;
                 }
@@ -1164,25 +1196,20 @@ pub(super) async fn handle_branch_command(
                 handle_interactive_switch(config, config_path).await?;
             }
 
-            // Execute post-switch command if requested
+            // Execute command in workspace if requested
             if let Some(ref cmd) = execute {
-                if json_output {
-                    eprintln!("Running post-switch command: {}", cmd);
-                } else {
-                    println!("Running post-switch command: {}", cmd);
-                }
-                let status = tokio::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(cmd)
-                    .status()
-                    .await
-                    .context("Failed to execute post-switch command")?;
-                if !status.success() {
-                    anyhow::bail!(
-                        "Post-switch command failed with exit code: {}",
-                        status.code().unwrap_or(-1)
-                    );
-                }
+                let workspace = workspace_name.as_deref().unwrap_or(&config.git.main_workspace);
+                execute_in_workspace(
+                    config,
+                    config_path,
+                    workspace,
+                    cmd,
+                    &execute_args,
+                    detach,
+                    sandbox_resolved,
+                    json_output,
+                )
+                .await?;
             }
         }
         super::Commands::Remove {
@@ -1397,6 +1424,7 @@ async fn handle_interactive_switch(
                     None,
                     None,
                     None, // copy_ignored — use config default
+                    None, // sandboxed — use config default
                 )
                 .await?;
             } else if selected_branch == config.git.main_workspace {
@@ -1416,6 +1444,7 @@ async fn handle_interactive_switch(
                     None,
                     None,
                     None, // copy_ignored — use config default
+                    None, // sandboxed — use existing state
                 )
                 .await?;
             }
@@ -1608,9 +1637,10 @@ async fn link_branch_internal(
                 .as_ref()
                 .map(|b| b.created_at)
                 .unwrap_or_else(chrono::Utc::now),
-            agent_tool: existing.as_ref().and_then(|b| b.agent_tool.clone()),
-            agent_status: existing.as_ref().and_then(|b| b.agent_status.clone()),
-            agent_started_at: existing.as_ref().and_then(|b| b.agent_started_at),
+            executed_command: existing.as_ref().and_then(|b| b.executed_command.clone()),
+            execution_status: existing.as_ref().and_then(|b| b.execution_status.clone()),
+            executed_at: existing.as_ref().and_then(|b| b.executed_at),
+            sandboxed: existing.as_ref().map(|b| b.sandboxed).unwrap_or(false),
         };
         if let Err(e) = state_mgr.register_workspace_by_dir(&project_dir, workspace) {
             log::warn!("Failed to register workspace in devflow state: {}", e);
@@ -1856,6 +1886,7 @@ pub(super) async fn handle_switch_command(
     trigger_source: Option<&str>,
     vcs_event: Option<&str>,
     copy_ignored_override: Option<bool>,
+    sandboxed: Option<bool>,
 ) -> Result<()> {
     // Resolve parent via CLI-specific interactive prompt (if needed)
     let from_workspace = if create {
@@ -1900,6 +1931,7 @@ pub(super) async fn handle_switch_command(
         from_workspace,
         copy_files: None,
         copy_ignored: copy_ignored_override,
+        sandboxed,
     };
 
     let result = devflow_core::workspace::switch::switch_workspace(
@@ -2045,8 +2077,200 @@ pub(super) async fn handle_switch_to_main(
         trigger_source,
         vcs_event,
         None, // copy_ignored — use config default
+        None, // sandboxed — main workspace is never sandboxed
     )
     .await
+}
+
+// ── Execute in workspace ────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_in_workspace(
+    config: &Config,
+    config_path: &Option<PathBuf>,
+    workspace_name: &str,
+    cmd: &str,
+    execute_args: &[String],
+    detach: bool,
+    sandbox_resolved: Option<bool>,
+    json_output: bool,
+) -> Result<()> {
+    // Build full command from -x value + trailing args
+    let full_cmd = if execute_args.is_empty() {
+        cmd.to_string()
+    } else {
+        format!("{} {}", cmd, execute_args.join(" "))
+    };
+
+    // Resolve worktree path
+    let work_dir = vcs::detect_vcs_provider(".")
+        .ok()
+        .and_then(|repo| repo.worktree_path(workspace_name).ok().flatten())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    // Build sandbox policy if workspace is sandboxed
+    let is_sandboxed = sandbox_resolved.unwrap_or(false);
+    let sandbox_policy = if is_sandboxed {
+        let sandbox_config = config.sandbox.clone().unwrap_or_default();
+        Some(devflow_core::sandbox::SandboxPolicy::from_config(
+            &sandbox_config,
+            &work_dir,
+        ))
+    } else {
+        None
+    };
+
+    // Validate command against sandbox policy
+    if let Some(ref policy) = sandbox_policy {
+        policy.validate_command(&full_cmd)?;
+    }
+
+    if !json_output && is_sandboxed {
+        println!(
+            "Sandbox: enabled (platform: {})",
+            sandbox_policy
+                .as_ref()
+                .map(|p| p.platform.to_string())
+                .unwrap_or_else(|| "none".to_string())
+        );
+    }
+
+    // Record execution state
+    let normalized = config.get_normalized_workspace_name(workspace_name);
+    if let Some(ref path) = config_path {
+        if let Ok(mut state) = LocalStateManager::new() {
+            if let Some(mut ws) = state.get_workspace(path, &normalized) {
+                ws.executed_command = Some(full_cmd.clone());
+                ws.execution_status = Some(if detach { "detached" } else { "running" }.to_string());
+                ws.executed_at = Some(chrono::Utc::now());
+                if let Err(e) = state.register_workspace(path, ws) {
+                    log::warn!("Failed to record execution state: {}", e);
+                }
+            }
+        }
+    }
+
+    if detach {
+        // Detached execution via configured multiplexer
+        let template = config
+            .execute
+            .as_ref()
+            .and_then(|e| e.detach_command.clone())
+            .or_else(|| {
+                if which::which("tmux").is_ok() {
+                    Some("tmux new-session -d -s {session} -c {dir} sh -c {cmd}".to_string())
+                } else {
+                    None
+                }
+            });
+
+        let Some(template) = template else {
+            anyhow::bail!(
+                "No multiplexer available for --detach. Install tmux or configure execute.detach_command in .devflow.yml"
+            );
+        };
+
+        let session = normalized.replace('/', "-");
+
+        // Shell-escape the command for embedding in the template
+        let escaped_cmd = full_cmd.replace('\'', "'\\''");
+        let quoted_cmd = format!("'{}'", escaped_cmd);
+
+        let expanded = template
+            .replace("{session}", &session)
+            .replace("{dir}", &work_dir.display().to_string())
+            .replace("{cmd}", &quoted_cmd);
+
+        if !json_output {
+            println!("Detaching: {}", expanded);
+        }
+
+        let status = tokio::process::Command::new("sh")
+            .args(["-c", &expanded])
+            .status()
+            .await
+            .context("Failed to launch detached session")?;
+
+        if !status.success() {
+            anyhow::bail!(
+                "Detach command failed with exit code: {}",
+                status.code().unwrap_or(-1)
+            );
+        }
+
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "workspace": normalized,
+                    "command": full_cmd,
+                    "session": session,
+                    "worktree": work_dir.display().to_string(),
+                    "sandboxed": is_sandboxed,
+                    "detached": true,
+                }))?
+            );
+        }
+    } else {
+        // Foreground execution
+        if json_output {
+            eprintln!("Running: {}", full_cmd);
+        } else {
+            println!("Running: {}", full_cmd);
+        }
+
+        let status = if let Some(ref policy) = sandbox_policy {
+            let (prog, args) = policy.wrap_command_string(&full_cmd);
+            let mut cmd = tokio::process::Command::new(&prog);
+            cmd.args(&args).current_dir(&work_dir);
+            cmd.status()
+                .await
+                .context("Failed to execute sandboxed command")?
+        } else {
+            tokio::process::Command::new("sh")
+                .args(["-c", &full_cmd])
+                .current_dir(&work_dir)
+                .status()
+                .await
+                .context("Failed to execute command")?
+        };
+
+        // Update state on completion
+        let execution_status = if status.success() { "done" } else { "failed" };
+        if let Some(ref path) = config_path {
+            if let Ok(mut state_mgr) = LocalStateManager::new() {
+                if let Some(mut ws) = state_mgr.get_workspace(path, &normalized) {
+                    ws.execution_status = Some(execution_status.to_string());
+                    if let Err(e) = state_mgr.register_workspace(path, ws) {
+                        log::warn!("Failed to update execution state: {}", e);
+                    }
+                }
+            }
+        }
+
+        if !status.success() {
+            anyhow::bail!(
+                "Command failed with exit code: {}",
+                status.code().unwrap_or(-1)
+            );
+        }
+
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "workspace": normalized,
+                    "command": full_cmd,
+                    "exit_code": status.code(),
+                    "worktree": work_dir.display().to_string(),
+                    "sandboxed": is_sandboxed,
+                    "detached": false,
+                }))?
+            );
+        }
+    }
+
+    Ok(())
 }
 
 // ── Remove ─────────────────────────────────────────────────────────────────────

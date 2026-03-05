@@ -25,15 +25,18 @@ pub struct DevflowWorkspace {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
-    /// AI agent tool used for this workspace (e.g., "claude", "codex").
+    /// Command executed in this workspace (e.g., "claude", "npm run migrate").
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_tool: Option<String>,
-    /// Agent status marker (e.g., "running", "idle", "done").
+    pub executed_command: Option<String>,
+    /// Execution status (e.g., "running", "detached", "done", "failed").
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_status: Option<String>,
-    /// When the agent was started.
+    pub execution_status: Option<String>,
+    /// When the command was executed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_started_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub executed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether this workspace runs in sandboxed mode.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sandboxed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -386,9 +389,10 @@ impl LocalStateManager {
             parent: None,
             worktree_path: None,
             created_at: chrono::Utc::now(),
-            agent_tool: None,
-            agent_status: None,
-            agent_started_at: None,
+            executed_command: None,
+            execution_status: None,
+            executed_at: None,
+            sandboxed: false,
         };
 
         self.register_workspace(&config_path, workspace)

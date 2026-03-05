@@ -54,6 +54,10 @@ pub fn generate_claude_skill(config: &Config, _project_dir: &Path) -> Result<Str
     skill.push_str("```bash\n");
     skill.push_str("# Switch to a workspace (creates isolated services)\n");
     skill.push_str("devflow switch -c <workspace-name>\n\n");
+    skill.push_str("# Run a command in a workspace\n");
+    skill.push_str("devflow switch -c <workspace-name> -x 'command' -- 'args'\n\n");
+    skill.push_str("# Run in background (detached)\n");
+    skill.push_str("devflow switch -c <workspace-name> -x 'command' --detach -- 'args'\n\n");
     if !services.is_empty() {
         skill.push_str("# Get connection info\n");
         skill.push_str("devflow connection <workspace-name>\n");
@@ -109,12 +113,16 @@ pub fn generate_claude_skill(config: &Config, _project_dir: &Path) -> Result<Str
     // Agent workflow
     skill.push_str("## Agent Workflow\n\n");
     skill.push_str("When working on a task:\n\n");
-    skill.push_str("1. Create an isolated workspace:\n");
+    skill.push_str("1. Create an isolated workspace and run a command:\n");
+    skill.push_str("   ```bash\n");
+    skill.push_str("   # Sandboxed AI agent in a new workspace\n");
+    skill.push_str("   devflow switch -c --sandboxed agent/<task-id> -x claude -- 'Fix the bug'\n\n");
+    skill.push_str("   # Or detached in background\n");
+    skill.push_str("   devflow switch -c --sandboxed agent/<task-id> -x claude --detach -- 'Fix the bug'\n");
+    skill.push_str("   ```\n");
+    skill.push_str("2. Or create workspace first, then work interactively:\n");
     skill.push_str("   ```bash\n");
     skill.push_str("   OUTPUT=$(devflow --json --non-interactive switch -c agent/<task-id>)\n");
-    skill.push_str("   ```\n");
-    skill.push_str("2. If worktrees are enabled, switch to the worktree directory:\n");
-    skill.push_str("   ```bash\n");
     skill.push_str(
         "   WORKTREE=$(echo \"$OUTPUT\" | jq -r '.worktree_path // empty')\n",
     );
@@ -263,8 +271,9 @@ description: Create a new devflow workspace with isolated services for a task or
 ## Instructions
 
 1. The workspace name is provided in `$ARGUMENTS`
-2. Run `devflow --json --non-interactive switch -c $ARGUMENTS` to create and switch
+2. Run `devflow --json --non-interactive switch -c --sandboxed $ARGUMENTS` to create and switch
    - The `-c` flag creates the workspace if it doesn't exist
+   - The `--sandboxed` flag enables sandbox mode — restricting filesystem access and blocking dangerous commands (git push, npm publish, sudo, ssh, etc.)
    - This provisions isolated service instances (databases, caches) automatically
    - If worktrees are enabled, a new Git worktree directory is created
    - Lifecycle hooks (e.g. `post-create`, `post-switch`) run automatically
@@ -279,12 +288,22 @@ Use a descriptive name like `feature/auth-refactor` or `agent/task-123` for the 
 
 **Important**: Do NOT use `--no-verify` — it skips all lifecycle hooks (migrations, env setup, etc.) which are usually needed for a working environment.
 
-## Examples
+### Sandbox mode
 
-Create a new workspace for a feature:
+By default, always use `--sandboxed` when creating workspaces. This provides OS-level filesystem isolation and blocks dangerous commands.
+
+If the user explicitly asks you to create a workspace **without** sandbox restrictions (e.g. they need `git push` access or SSH), use `--no-sandbox` instead:
 
 ```bash
-OUTPUT=$(devflow --json --non-interactive switch -c feature/my-task)
+devflow --json --non-interactive switch -c --no-sandbox $ARGUMENTS
+```
+
+## Examples
+
+Create a new sandboxed workspace for a feature:
+
+```bash
+OUTPUT=$(devflow --json --non-interactive switch -c --sandboxed feature/my-task)
 
 # If worktrees are enabled, switch to the worktree directory
 WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
@@ -297,10 +316,16 @@ Get connection strings for the new workspace:
 devflow --json connection feature/my-task
 ```
 
+Create a workspace and run a command in it:
+
+```bash
+devflow switch -c --sandboxed agent/task-42 -x claude -- 'Implement the auth feature'
+```
+
 Create a workspace and immediately get full context:
 
 ```bash
-OUTPUT=$(devflow --json --non-interactive switch -c agent/task-42)
+OUTPUT=$(devflow --json --non-interactive switch -c --sandboxed agent/task-42)
 WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
 [ -n "$WORKTREE" ] && cd "$WORKTREE"
 devflow --json connection agent/task-42

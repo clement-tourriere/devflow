@@ -80,6 +80,7 @@ function ProjectDetail() {
   const [creationMode, setCreationMode] = useState<WorkspaceCreationMode>("branch");
   const [copyFiles, setCopyFiles] = useState<string[]>([]);
   const [copyIgnored, setCopyIgnored] = useState(false);
+  const [sandboxed, setSandboxed] = useState(false);
   const [deletingWorkspace, setDeletingWorkspace] = useState<string | null>(null);
   const [connInfoWorkspace, setConnInfoWorkspace] = useState<string | null>(null);
   const [connInfo, setConnInfo] = useState<Record<string, ConnectionInfo>>({});
@@ -236,7 +237,8 @@ function ProjectDetail() {
         fromWorkspace || undefined,
         creationMode,
         creationMode === "worktree" ? copyFiles : undefined,
-        creationMode === "worktree" ? copyIgnored : undefined
+        creationMode === "worktree" ? copyIgnored : undefined,
+        sandboxed || undefined
       );
       setShowCreateWorkspace(false);
       setNewWorkspaceName("");
@@ -244,6 +246,7 @@ function ProjectDetail() {
       setCreationMode(projectDefaultCreationMode);
       setCopyFiles(detail?.worktree_copy_files ?? []);
       setCopyIgnored(detail?.worktree_copy_ignored ?? false);
+      setSandboxed(false);
       await reload();
     } catch (e) {
       alert(`${e}`);
@@ -711,14 +714,17 @@ function ProjectDetail() {
                       {b.is_default && (
                         <span className="badge badge-info" style={{ fontSize: 10 }}>default</span>
                       )}
-                      {b.agent_status && (
+                      {b.execution_status && (
                         <span
-                          className={`badge${b.agent_status === "running" ? " badge-success" : ""}`}
+                          className={`badge${b.execution_status === "running" ? " badge-success" : ""}`}
                           style={{ fontSize: 10 }}
-                          title={b.agent_tool ? `Agent: ${b.agent_tool}` : undefined}
+                          title={b.executed_command ? `Command: ${b.executed_command}` : undefined}
                         >
-                          {b.agent_status}
+                          {b.execution_status}
                         </span>
+                      )}
+                      {b.sandboxed && (
+                        <span className="badge" style={{ fontSize: 10 }} title="Sandboxed: restricted filesystem and command access">sandboxed</span>
                       )}
                     </div>
                   </td>
@@ -1503,6 +1509,28 @@ function ProjectDetail() {
             </p>
           </div>
         )}
+        <div style={{ marginBottom: 16 }}>
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              fontSize: 13,
+              color: "var(--text-secondary)",
+              cursor: "pointer",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={sandboxed}
+              onChange={(e) => setSandboxed(e.target.checked)}
+            />
+            Sandboxed workspace
+          </label>
+          <p style={{ marginTop: 4, color: "var(--text-muted)", fontSize: 12 }}>
+            Restricts filesystem access and blocks dangerous commands (git push, npm publish, etc.).
+          </p>
+        </div>
         <div style={{ marginBottom: 16 }}>
           <label
             style={{

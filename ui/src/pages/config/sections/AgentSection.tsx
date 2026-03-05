@@ -7,8 +7,6 @@ interface Props {
 }
 
 const DEFAULT_AGENT: AgentConfig = {
-  command: null,
-  workspace_prefix: "agent/",
   auto_context: true,
 };
 
@@ -53,26 +51,6 @@ function AgentSection({ config, onChange }: Props) {
   return (
     <div>
       <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>Agent</h2>
-
-      <FormField label="Command" description="Command to launch the AI agent (e.g., claude, codex)">
-        <input
-          type="text"
-          value={agent.command || ""}
-          onChange={(e) => update({ command: e.target.value || null })}
-          placeholder="claude"
-          style={{ width: "100%", fontSize: 13 }}
-        />
-      </FormField>
-
-      <FormField label="Workspace prefix" description="Prefix for agent-created workspaces">
-        <input
-          type="text"
-          value={agent.workspace_prefix}
-          onChange={(e) => update({ workspace_prefix: e.target.value })}
-          placeholder="agent/"
-          style={{ width: "100%", fontSize: 13 }}
-        />
-      </FormField>
 
       <FormField
         label="Auto-context"

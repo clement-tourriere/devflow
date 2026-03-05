@@ -89,6 +89,10 @@ Examples:
         from: Option<String>,
         #[arg(short = 'x', long, help = "Run a command after switching")]
         execute: Option<String>,
+        #[arg(long, short = 'd', help = "Run -x command in a detached multiplexer session")]
+        detach: bool,
+        #[arg(last = true, help = "Arguments passed to the -x command")]
+        execute_args: Vec<String>,
         #[arg(long, help = "Skip service branching (only VCS switch)")]
         no_services: bool,
         #[arg(long, help = "Skip hook execution")]
@@ -99,6 +103,10 @@ Examples:
         dry_run: bool,
         #[arg(long, help = "Include gitignored files in worktree (overrides config)")]
         no_respect_gitignore: bool,
+        #[arg(long, help = "Create workspace in sandboxed mode (restricted filesystem + commands)")]
+        sandboxed: bool,
+        #[arg(long, help = "Disable sandbox even if default is enabled")]
+        no_sandbox: bool,
     },
     #[command(
         about = "Remove a workspace, its worktree, and associated service workspaces",
@@ -607,21 +615,7 @@ pub enum PluginCommands {
 /// Subcommands for `devflow agent`.
 #[derive(Subcommand)]
 pub enum AgentCommands {
-    #[command(
-        about = "Start an AI agent in a new workspace",
-        long_about = "Start an AI agent in a new isolated workspace.\n\nCreates a worktree workspace and launches the configured agent tool.\n\nExamples:\n  devflow agent start fix-login -- 'Fix the login timeout'\n  devflow agent start fix-login --command claude\n  devflow agent start fix-login --dry-run"
-    )]
-    Start {
-        #[arg(help = "Workspace name (will be prefixed with agent/ by default)")]
-        workspace: String,
-        #[arg(long, help = "Agent command to launch (overrides config)")]
-        command: Option<String>,
-        #[arg(last = true, help = "Prompt to pass to the agent")]
-        prompt: Vec<String>,
-        #[arg(long, help = "Show what would be done without executing")]
-        dry_run: bool,
-    },
-    #[command(about = "Show agent status across all workspaces")]
+    #[command(about = "Show execution status across all workspaces")]
     Status,
     #[command(
         about = "Output project context for the current workspace",

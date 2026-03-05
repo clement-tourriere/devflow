@@ -27,6 +27,8 @@ pub struct CreateOptions {
     pub copy_files: Option<Vec<String>>,
     /// Override the config `worktree.copy_ignored` for this creation.
     pub copy_ignored: Option<bool>,
+    /// Whether the workspace should be sandboxed.
+    pub sandboxed: Option<bool>,
 }
 
 impl Default for CreateOptions {
@@ -37,6 +39,7 @@ impl Default for CreateOptions {
             from_workspace: None,
             copy_files: None,
             copy_ignored: None,
+            sandboxed: None,
         }
     }
 }
@@ -140,6 +143,7 @@ pub async fn create_workspace(
         &normalized_name,
         normalized_parent.as_deref(),
         worktree_result.as_ref(),
+        options.sandboxed,
     );
 
     // 7. Post-create + post-switch hooks
@@ -178,6 +182,7 @@ fn register_workspace_state(
     normalized_name: &str,
     normalized_parent: Option<&str>,
     worktree: Option<&WorktreeSetupResult>,
+    sandboxed: Option<bool>,
 ) {
     let Ok(mut state_mgr) = LocalStateManager::new() else {
         return;
@@ -198,9 +203,10 @@ fn register_workspace_state(
             .as_ref()
             .map(|b| b.created_at)
             .unwrap_or_else(chrono::Utc::now),
-        agent_tool: existing.as_ref().and_then(|b| b.agent_tool.clone()),
-        agent_status: existing.as_ref().and_then(|b| b.agent_status.clone()),
-        agent_started_at: existing.as_ref().and_then(|b| b.agent_started_at),
+        executed_command: existing.as_ref().and_then(|b| b.executed_command.clone()),
+        execution_status: existing.as_ref().and_then(|b| b.execution_status.clone()),
+        executed_at: existing.as_ref().and_then(|b| b.executed_at),
+        sandboxed: sandboxed.unwrap_or_else(|| existing.as_ref().map(|b| b.sandboxed).unwrap_or(false)),
     };
 
     if let Err(e) = state_mgr.register_workspace_by_dir(project_dir, workspace) {

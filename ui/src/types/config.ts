@@ -117,8 +117,6 @@ export interface PluginConfig {
 }
 
 export interface AgentConfig {
-  command?: string | null;
-  workspace_prefix: string;
   auto_context: boolean;
 }
 

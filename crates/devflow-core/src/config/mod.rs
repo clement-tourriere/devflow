@@ -38,6 +38,12 @@ pub struct Config {
     /// Commit message generation configuration (LLM).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<CommitConfig>,
+    /// Sandbox configuration for workspace isolation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<crate::sandbox::SandboxConfig>,
+    /// Execute configuration (detach command template, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execute: Option<ExecuteConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,27 +266,18 @@ pub struct GenericDockerConfig {
 /// Configuration for AI agent integration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentConfig {
-    /// Command to launch the agent (e.g., "claude", "codex").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    /// Workspace prefix for agent-created workspaces (default: "agent/").
-    #[serde(
-        default = "default_agent_workspace_prefix",
-        alias = "branch_prefix",
-        skip_serializing_if = "is_default_agent_workspace_prefix"
-    )]
-    pub workspace_prefix: String,
     /// Automatically provide project context to the agent on launch.
     #[serde(default = "default_true")]
     pub auto_context: bool,
 }
 
-fn default_agent_workspace_prefix() -> String {
-    "agent/".to_string()
-}
-
-fn is_default_agent_workspace_prefix(s: &String) -> bool {
-    s == "agent/"
+/// Configuration for command execution in workspaces.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ExecuteConfig {
+    /// Template for detached execution. Placeholders: {session}, {dir}, {cmd}
+    /// Default (when tmux available): "tmux new-session -d -s {session} -c {dir} sh -c {cmd}"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detach_command: Option<String>,
 }
 
 /// Configuration for commit message generation.
@@ -564,6 +561,8 @@ impl Default for Config {
             triggers: None,
             agent: None,
             commit: None,
+            sandbox: None,
+            execute: None,
         }
     }
 }
