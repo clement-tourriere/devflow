@@ -119,6 +119,21 @@ pub fn create_worktree_with_files(
             }
         });
 
+        // Copy AI tool config directories (.claude, .cursor, etc.) if enabled.
+        if wt_config.copy_ai_configs {
+            let ai_dirs: Vec<&str> = crate::config::AI_TOOL_DIRS.to_vec();
+            let extra: Vec<&str> = wt_config.extra_ai_dirs.iter().map(|s| s.as_str()).collect();
+            let all_ai_dirs: Vec<&str> = ai_dirs.into_iter().chain(extra).collect();
+
+            all_ai_dirs.par_iter().for_each(|dir_name| {
+                let src = main_dir.join(dir_name);
+                let dst = wt_path.join(dir_name);
+                if src.is_dir() && !dst.exists() {
+                    reflink_copy_dir(&src, &dst);
+                }
+            });
+        }
+
         // Copy gitignored entries (node_modules, .venv, target, etc.) from the
         // main worktree using parallel reflink.
         //

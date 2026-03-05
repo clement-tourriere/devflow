@@ -15,7 +15,8 @@ devflow is a Rust-based tool that provides per-workspace isolation for developme
 - **Automatic Git integration**: Creates/switches service workspaces on `git checkout` via Git hooks
 - **Git worktree management**: Creates worktree directories with configurable path templates and file copying
 - **Multi-service support**: PostgreSQL, ClickHouse, MySQL, generic Docker, and plugin providers
-- **Hook engine**: MiniJinja templates with custom filters (`sanitize`, `sanitize_db`, `hash_port`)
+- **Hook engine**: MiniJinja templates with custom filters (`sanitize`, `sanitize_db`, `hash_port`) + installable hook recipes
+- **AI tool config sync**: Auto-copies `.claude/`, `.cursor/`, `.opencode/`, `.agents/` into worktrees; `devflow sync-ai-configs` merges settings back to main
 - **Seed support**: Seed databases from PostgreSQL URLs, local dump files, or S3
 - **Shell integration**: `eval "$(devflow shell-init)"` for automatic `cd` into worktrees
 - **JSON output + non-interactive mode**: For CI/CD and AI agent workflows
@@ -83,6 +84,8 @@ worktree:
   path_template: "../{repo}.{workspace}"
   copy_files: [".env.local", ".env"]
   copy_ignored: true
+  copy_ai_configs: true              # Auto-copy .claude/, .cursor/, etc. into worktrees
+  extra_ai_dirs: []                  # Additional AI tool dirs to copy
 
 # Lifecycle hooks (MiniJinja templates)
 hooks:
@@ -145,7 +148,8 @@ The project is organized as a Cargo workspace with four crates:
 - `src/cli/service.rs` — Service operations (add, create, delete, start, stop, reset, seed, logs, discover)
 - `src/cli/agent.rs` — AI agent commands (start, status, context, skill, docs)
 - `src/cli/proxy.rs` — Proxy commands (start, stop, status, list, trust)
-- `src/cli/hook.rs` — Hook commands (show, run, explain, vars, render, approvals, triggers, actions)
+- `src/cli/hook.rs` — Hook commands (show, run, explain, vars, render, approvals, triggers, actions, recipes, install)
+- `src/cli/sync_ai_configs.rs` — AI tool config sync command (merge .claude/.cursor settings back to main)
 - `src/cli/commit.rs` — VCS commit with AI message generation
 - `src/tui/` — Terminal UI (ratatui-based dashboard)
 
@@ -162,7 +166,7 @@ The project is organized as a Cargo workspace with four crates:
 - `src/vcs/git.rs` — Git implementation (workspaces, worktrees, hooks)
 - `src/vcs/cow_worktree.rs` — Copy-on-Write worktree support (APFS, ZFS, Btrfs, XFS)
 - `src/vcs/jj.rs` — Jujutsu VCS implementation
-- `src/hooks/` — Hook engine (executor, approval, templates)
+- `src/hooks/` — Hook engine (executor, approval, templates, recipes)
 - `src/state/` — Local state persistence (`~/.local/share/devflow/`)
 - `src/docker.rs` — Docker helper utilities
 - `src/agent.rs` — AI agent integration (skill generation, context, rules)

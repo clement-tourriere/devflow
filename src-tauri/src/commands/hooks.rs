@@ -720,6 +720,93 @@ pub async fn run_hook(
     }))
 }
 
+// ── Hook recipes ───────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct RecipeInfo {
+    pub name: String,
+    pub description: String,
+    pub category: String,
+    pub hooks_preview: Vec<RecipeHookPreview>,
+}
+
+#[derive(Serialize)]
+pub struct RecipeHookPreview {
+    pub phase: String,
+    pub hook_name: String,
+    pub command_summary: String,
+}
+
+#[derive(Serialize)]
+pub struct InstallRecipeResult {
+    pub hooks_added: usize,
+    pub hooks_skipped: usize,
+}
+
+#[tauri::command]
+pub async fn get_recipes() -> Result<Vec<RecipeInfo>, String> {
+    let recipes = devflow_core::hooks::recipes::builtin_recipes();
+    Ok(recipes
+        .iter()
+        .map(|r| {
+            let info = r.to_info();
+            RecipeInfo {
+                name: info.name,
+                description: info.description,
+                category: info.category,
+                hooks_preview: info
+                    .hooks_preview
+                    .into_iter()
+                    .map(|h| RecipeHookPreview {
+                        phase: h.phase,
+                        hook_name: h.hook_name,
+                        command_summary: h.command_summary,
+                    })
+                    .collect(),
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn install_recipe(
+    project_path: String,
+    recipe_name: String,
+) -> Result<InstallRecipeResult, String> {
+    let recipe = devflow_core::hooks::recipes::find_recipe(&recipe_name)
+        .ok_or_else(|| format!("Recipe '{}' not found", recipe_name))?;
+
+    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
+    let config = devflow_core::config::Config::from_file(&config_path)
+        .map_err(crate::commands::format_error)?;
+
+    let mut hooks_config = config.hooks.unwrap_or_default();
+    let result =
+        devflow_core::hooks::recipes::merge_recipe_into_config(&mut hooks_config, &recipe);
+
+    if result.hooks_added > 0 {
+        // Write back to config
+        let content = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&content).map_err(|e| e.to_string())?;
+        let hooks_yaml =
+            serde_yaml_ng::to_value(&hooks_config).map_err(|e| e.to_string())?;
+        if let serde_yaml_ng::Value::Mapping(ref mut map) = doc {
+            map.insert(
+                serde_yaml_ng::Value::String("hooks".to_string()),
+                hooks_yaml,
+            );
+        }
+        let output = serde_yaml_ng::to_string(&doc).map_err(|e| e.to_string())?;
+        std::fs::write(&config_path, output).map_err(|e| e.to_string())?;
+    }
+
+    Ok(InstallRecipeResult {
+        hooks_added: result.hooks_added,
+        hooks_skipped: result.hooks_skipped,
+    })
+}
+
 /// Get VCS trigger mappings.
 #[tauri::command]
 pub async fn get_trigger_mappings(project_path: String) -> Result<serde_json::Value, String> {

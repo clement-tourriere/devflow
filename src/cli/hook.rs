@@ -84,6 +84,12 @@ pub(super) async fn handle_hook_command(
         super::HookCommands::Actions => {
             handle_hook_actions(json_output)?;
         }
+        super::HookCommands::Recipes => {
+            handle_hook_recipes(json_output)?;
+        }
+        super::HookCommands::Install { recipe } => {
+            handle_hook_install(&recipe, json_output, non_interactive)?;
+        }
     }
     Ok(())
 }
@@ -828,6 +834,147 @@ fn handle_hook_actions(json_output: bool) -> Result<()> {
     println!("          path: .env.local");
     println!("          vars:");
     println!("            DATABASE_URL: \"{{{{ service['app-db'].url }}}}\"");
+
+    Ok(())
+}
+
+/// `devflow hook recipes` — list available hook recipes.
+fn handle_hook_recipes(json_output: bool) -> Result<()> {
+    use devflow_core::hooks::recipes;
+
+    let all_recipes = recipes::builtin_recipes();
+
+    if json_output {
+        let infos: Vec<recipes::RecipeInfo> = all_recipes.iter().map(|r| r.to_info()).collect();
+        println!("{}", serde_json::to_string_pretty(&infos)?);
+        return Ok(());
+    }
+
+    println!("Available Hook Recipes");
+    println!("{}", "─".repeat(50));
+    println!();
+
+    let mut current_category = "";
+    for recipe in &all_recipes {
+        if recipe.category != current_category {
+            if !current_category.is_empty() {
+                println!();
+            }
+            println!("{}:", recipe.category);
+            current_category = recipe.category;
+        }
+
+        println!("  {} — {}", recipe.name, recipe.description);
+        for (phase, hooks) in &recipe.hooks {
+            for (name, entry) in hooks {
+                let cmd = match entry {
+                    devflow_core::hooks::HookEntry::Simple(c) => c.clone(),
+                    devflow_core::hooks::HookEntry::Extended(e) => e.command.clone(),
+                    devflow_core::hooks::HookEntry::Action(a) => {
+                        format!("action: {}", a.action.type_name())
+                    }
+                };
+                println!("    {} → {} ({})", phase, name, cmd);
+            }
+        }
+    }
+
+    println!();
+    println!("Install a recipe: devflow hook install <recipe-name>");
+
+    Ok(())
+}
+
+/// `devflow hook install <recipe>` — install a recipe into .devflow.yml.
+fn handle_hook_install(recipe_name: &str, json_output: bool, non_interactive: bool) -> Result<()> {
+    use devflow_core::hooks::recipes;
+
+    let recipe = recipes::find_recipe(recipe_name)
+        .ok_or_else(|| anyhow::anyhow!(
+            "Recipe '{}' not found. Run 'devflow hook recipes' to see available recipes.",
+            recipe_name
+        ))?;
+
+    let config_file = devflow_core::config::Config::find_config_file()?
+        .ok_or_else(|| anyhow::anyhow!(
+            "No .devflow.yml found. Run 'devflow init' first."
+        ))?;
+
+    let config = devflow_core::config::Config::from_file(&config_file)?;
+    let mut hooks_config = config.hooks.unwrap_or_default();
+
+    // Preview what will be added
+    if !json_output && !non_interactive {
+        println!("Recipe: {} — {}", recipe.name, recipe.description);
+        println!();
+        println!("This will add the following hooks:");
+        for (phase, phase_hooks) in &recipe.hooks {
+            for (name, entry) in phase_hooks {
+                let existing = hooks_config
+                    .get(phase)
+                    .and_then(|h| h.get(name))
+                    .is_some();
+                let cmd = match entry {
+                    devflow_core::hooks::HookEntry::Simple(c) => c.clone(),
+                    devflow_core::hooks::HookEntry::Extended(e) => e.command.clone(),
+                    devflow_core::hooks::HookEntry::Action(a) => {
+                        format!("action: {}", a.action.type_name())
+                    }
+                };
+                if existing {
+                    println!("  {} → {} — SKIP (already exists)", phase, name);
+                } else {
+                    println!("  {} → {} ({})", phase, name, cmd);
+                }
+            }
+        }
+        println!();
+
+        let confirm = inquire::Confirm::new("Install this recipe?")
+            .with_default(true)
+            .prompt()
+            .unwrap_or(false);
+
+        if !confirm {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    let result = recipes::merge_recipe_into_config(&mut hooks_config, &recipe);
+
+    if result.hooks_added == 0 {
+        if json_output {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            println!("All hooks from recipe '{}' are already installed.", recipe_name);
+        }
+        return Ok(());
+    }
+
+    // Write back to config file — update only hooks section
+    let content = std::fs::read_to_string(&config_file)?;
+    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&content)?;
+
+    let hooks_yaml = serde_yaml_ng::to_value(&hooks_config)?;
+    if let serde_yaml_ng::Value::Mapping(ref mut map) = doc {
+        map.insert(
+            serde_yaml_ng::Value::String("hooks".to_string()),
+            hooks_yaml,
+        );
+    }
+
+    let output = serde_yaml_ng::to_string(&doc)?;
+    std::fs::write(&config_file, output)?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!(
+            "Installed recipe '{}': {} hook(s) added, {} skipped.",
+            recipe_name, result.hooks_added, result.hooks_skipped
+        );
+    }
 
     Ok(())
 }

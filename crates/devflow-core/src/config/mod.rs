@@ -5,6 +5,9 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Default AI tool configuration directories to copy into new worktrees.
+pub const AI_TOOL_DIRS: &[&str] = &[".claude", ".cursor", ".opencode", ".agents"];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Project name (derived from `devflow init <name>` or the directory name).
@@ -327,6 +330,13 @@ pub struct WorktreeConfig {
     /// Default: `true` — saves disk space by removing dirs like `node_modules/`, `target/`.
     #[serde(default = "default_respect_gitignore")]
     pub respect_gitignore: bool,
+    /// Whether to copy AI tool config directories (`.claude`, `.cursor`, etc.)
+    /// into new worktrees. Default: `true`.
+    #[serde(default = "default_true")]
+    pub copy_ai_configs: bool,
+    /// Additional AI tool directories to copy (beyond the built-in list).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_ai_dirs: Vec<String>,
 }
 
 impl WorktreeConfig {
@@ -339,6 +349,8 @@ impl WorktreeConfig {
             copy_files: vec![".env".to_string(), ".env.local".to_string()],
             copy_ignored: true,
             respect_gitignore: true,
+            copy_ai_configs: true,
+            extra_ai_dirs: Vec::new(),
         }
     }
 }

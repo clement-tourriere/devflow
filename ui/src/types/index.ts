@@ -157,6 +157,24 @@ export interface TriggerMapping {
   phases: string[];
 }
 
+export interface RecipeInfo {
+  name: string;
+  description: string;
+  category: string;
+  hooks_preview: RecipeHookPreview[];
+}
+
+export interface RecipeHookPreview {
+  phase: string;
+  hook_name: string;
+  command_summary: string;
+}
+
+export interface InstallRecipeResult {
+  hooks_added: number;
+  hooks_skipped: number;
+}
+
 export interface ProxyStatus {
   running: boolean;
   https_port: number;

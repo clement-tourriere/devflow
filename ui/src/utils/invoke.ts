@@ -16,6 +16,8 @@ import type {
   HookRunResult,
   HookPreview,
   TriggerMapping,
+  RecipeInfo,
+  InstallRecipeResult,
   ProxyStatus,
   ContainerEntry,
   CertificateStatus,
@@ -231,6 +233,10 @@ export const runHook = (
   });
 export const getTriggerMappings = (projectPath: string) =>
   invoke<TriggerMapping[]>("get_trigger_mappings", { projectPath });
+export const getRecipes = () =>
+  invoke<RecipeInfo[]>("get_recipes");
+export const installRecipe = (projectPath: string, recipeName: string) =>
+  invoke<InstallRecipeResult>("install_recipe", { projectPath, recipeName });
 
 // Proxy
 export const startProxy = () => invoke<ProxyStatus>("start_proxy");

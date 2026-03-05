@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod approval;
 pub mod executor;
+pub mod recipes;
 pub mod template;
 pub mod triggers;
 

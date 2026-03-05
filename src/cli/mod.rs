@@ -8,6 +8,7 @@ mod init;
 mod plugin;
 mod proxy;
 mod service;
+mod sync_ai_configs;
 pub mod workspace;
 
 use std::path::PathBuf;
@@ -337,6 +338,15 @@ Examples:
     #[command(about = "Launch the interactive terminal UI dashboard")]
     Tui,
 
+    // ── AI Tool Config Sync ──
+    #[command(
+        about = "Sync AI tool configs from current worktree back to main",
+        long_about = "Merge AI tool configuration directories (.claude, .cursor, .opencode, .agents)\nfrom the current worktree back to the main worktree.\n\nFor .claude/settings.local.json: union-merges permission arrays (deduplicated).\nFor other dirs: copies files that don't exist in main (additive only).\n\nExamples:\n  devflow sync-ai-configs",
+        hide = true,
+        name = "sync-ai-configs"
+    )]
+    SyncAiConfigs,
+
     // ── Garbage Collection ──
     #[command(
         about = "Detect and clean up orphaned projects (missing directory, leftover state)",
@@ -544,6 +554,19 @@ pub enum HookCommands {
         long_about = "Show all built-in action types that can be used in hooks.\n\nActions replace shell commands for common operations like writing env files,\nfind-and-replace in files, copying files, HTTP requests, and notifications.\n\nExamples:\n  devflow hook actions"
     )]
     Actions,
+    #[command(
+        about = "List available hook recipes",
+        long_about = "Show all available pre-built hook recipes.\n\nRecipes are curated sets of hooks that can be installed into your project\nwith a single command.\n\nExamples:\n  devflow hook recipes"
+    )]
+    Recipes,
+    #[command(
+        about = "Install a hook recipe into .devflow.yml",
+        long_about = "Install a pre-built hook recipe into your project configuration.\n\nMerges the recipe's hooks into .devflow.yml without overwriting existing hooks.\n\nExamples:\n  devflow hook install sync-ai-configs"
+    )]
+    Install {
+        #[arg(help = "Name of the recipe to install")]
+        recipe: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1081,6 +1104,33 @@ pub async fn handle_command(
                         }
                     }
 
+                    // Step 2.5: Offer sync-ai-configs recipe (only if worktrees are enabled)
+                    if enable_worktrees {
+                        use devflow_core::hooks::recipes;
+
+                        println!();
+                        let install_recipe = inquire::Confirm::new(
+                            "Install AI config sync recipe? (merge .claude/.cursor settings back on workspace removal)",
+                        )
+                        .with_default(true)
+                        .with_help_message("Recommended for AI coding tools. Syncs permissions and settings back to main worktree.")
+                        .prompt()
+                        .unwrap_or(false);
+
+                        if install_recipe {
+                            if let Some(recipe) = recipes::find_recipe("sync-ai-configs") {
+                                let mut hooks_config = init_config.hooks.clone().unwrap_or_default();
+                                let result = recipes::merge_recipe_into_config(&mut hooks_config, &recipe);
+                                init_config.hooks = Some(hooks_config);
+                                init_config.save_to_file(&init_config_path)?;
+                                println!(
+                                    "Installed recipe 'sync-ai-configs': {} hook(s) added",
+                                    result.hooks_added
+                                );
+                            }
+                        }
+                    }
+
                     // Step 3: Offer shell integration (only if worktrees are enabled)
                     if enable_worktrees {
                         println!();
@@ -1476,6 +1526,9 @@ pub async fn handle_command(
         } => {
             commit::handle_commit_command(message, ai, edit, dry_run, json_output, &config_merged)
                 .await?;
+        }
+        Commands::SyncAiConfigs => {
+            sync_ai_configs::handle_sync_ai_configs(json_output)?;
         }
         Commands::Gc { list, all, force } => {
             gc::handle_gc_command(list, all, force, json_output, non_interactive).await?;

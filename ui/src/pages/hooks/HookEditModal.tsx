@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
-import type { ActionTypeInfo, ActionFieldInfo, HookInfo } from "../../types";
-import { saveHooks, listHooks } from "../../utils/invoke";
+import type { ActionTypeInfo, ActionFieldInfo, HookInfo, RecipeInfo } from "../../types";
+import { saveHooks, listHooks, getRecipes, installRecipe } from "../../utils/invoke";
 
 interface ConditionPreset {
   label: string;
@@ -42,6 +42,7 @@ interface Props {
   editingHook?: HookInfo;
   onClose: () => void;
   onSaved: () => void;
+  recipes?: RecipeInfo[];
 }
 
 type Step = "pick-type" | "configure";
@@ -143,6 +144,7 @@ export default function HookEditModal({
   editingHook,
   onClose,
   onSaved,
+  recipes,
 }: Props) {
   const isEditing = !!editingHook;
   const editState = editingHook
@@ -161,6 +163,7 @@ export default function HookEditModal({
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [installingRecipeName, setInstallingRecipeName] = useState<string | null>(null);
 
   // Common hook options
   const [condition, setCondition] = useState(editState?.condition ?? "");
@@ -357,6 +360,83 @@ export default function HookEditModal({
             <p style={{ color: "var(--text-secondary)", fontSize: 13, marginBottom: 16 }}>
               Choose an action type:
             </p>
+
+            {/* From Recipe section */}
+            {(() => {
+              const phaseRecipes = (recipes || []).filter((r) =>
+                r.hooks_preview.some((h) => h.phase === phase)
+              );
+              if (phaseRecipes.length === 0) return null;
+              return (
+                <div style={{ marginBottom: 12 }}>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      textTransform: "uppercase",
+                      color: "var(--text-muted)",
+                      fontWeight: 600,
+                      marginBottom: 6,
+                    }}
+                  >
+                    From Recipe
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {phaseRecipes.map((recipe) => (
+                      <div
+                        key={recipe.name}
+                        style={{
+                          padding: "10px 16px",
+                          border: "1px solid var(--border)",
+                          borderRadius: 8,
+                          background: "var(--bg-primary)",
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontWeight: 600, fontSize: 13 }}>{recipe.name}</div>
+                          <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                            {recipe.description}
+                          </div>
+                        </div>
+                        <button
+                          className="btn btn-primary"
+                          style={{ fontSize: 11, padding: "4px 12px", flexShrink: 0, marginLeft: 12 }}
+                          disabled={installingRecipeName !== null}
+                          onClick={async () => {
+                            setInstallingRecipeName(recipe.name);
+                            try {
+                              await installRecipe(projectPath, recipe.name);
+                              onSaved();
+                            } catch (e) {
+                              setError(String(e));
+                            } finally {
+                              setInstallingRecipeName(null);
+                            }
+                          }}
+                        >
+                          {installingRecipeName === recipe.name ? "Installing..." : "Install Recipe"}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      textTransform: "uppercase",
+                      color: "var(--text-muted)",
+                      fontWeight: 600,
+                      marginTop: 12,
+                      marginBottom: 6,
+                    }}
+                  >
+                    Or choose an action type
+                  </div>
+                </div>
+              );
+            })()}
+
             <div
               style={{
                 display: "grid",
