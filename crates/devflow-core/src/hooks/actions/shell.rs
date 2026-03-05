@@ -6,6 +6,7 @@ use std::process::Command;
 use super::ActionResult;
 use crate::hooks::template::TemplateEngine;
 use crate::hooks::HookContext;
+use crate::sandbox::SandboxPolicy;
 
 /// Execute a shell command (extracted from the old executor for reuse).
 pub fn execute(
@@ -38,7 +39,31 @@ pub fn run_shell_command(
     template_engine: &TemplateEngine,
     print_stdout: bool,
 ) -> Result<()> {
-    let mut cmd = if cfg!(target_os = "windows") {
+    run_shell_command_sandboxed(command, working_dir, environment, context, template_engine, print_stdout, None)
+}
+
+/// Low-level shell command runner with optional sandbox enforcement.
+pub fn run_shell_command_sandboxed(
+    command: &str,
+    working_dir: &Path,
+    environment: Option<&HashMap<String, String>>,
+    context: &HookContext,
+    template_engine: &TemplateEngine,
+    print_stdout: bool,
+    sandbox: Option<&SandboxPolicy>,
+) -> Result<()> {
+    // Validate command against sandbox policy
+    if let Some(policy) = sandbox {
+        policy.validate_command(command)?;
+    }
+
+    let mut cmd = if let Some(policy) = sandbox {
+        // Use sandbox-wrapped command
+        let (prog, args) = policy.wrap_command_string(command);
+        let mut cmd = Command::new(prog);
+        cmd.args(args);
+        cmd
+    } else if cfg!(target_os = "windows") {
         let mut cmd = Command::new("cmd");
         cmd.args(["/C", command]);
         cmd
@@ -57,6 +82,11 @@ pub fn run_shell_command(
                 .unwrap_or_else(|_| value_template.clone());
             cmd.env(key, rendered_value);
         }
+    }
+
+    // Apply platform-level sandbox (e.g., Landlock pre_exec on Linux)
+    if let Some(policy) = sandbox {
+        policy.apply_to_command(&mut cmd)?;
     }
 
     let output = cmd

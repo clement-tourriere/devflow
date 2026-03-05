@@ -6,6 +6,93 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tauri::{Emitter, State};
 
+/// Build shell + args for a sandboxed terminal session.
+/// On macOS, wraps the user's shell with `sandbox-exec -f <profile>`.
+/// On other platforms, returns defaults (command guard only, no OS wrapping).
+fn build_sandboxed_shell(
+    working_dir: &str,
+    project_path: &Option<String>,
+) -> (Option<String>, Option<Vec<String>>) {
+    let workspace_dir = Path::new(working_dir);
+
+    // Load sandbox config from project if available
+    let sandbox_config = project_path.as_ref().and_then(|pp| {
+        let config_path = Path::new(pp).join(".devflow.yml");
+        devflow_core::config::Config::from_file(&config_path)
+            .ok()
+            .and_then(|c| c.sandbox.clone())
+    });
+
+    let (extra_read, extra_write): (Vec<PathBuf>, Vec<PathBuf>) = sandbox_config
+        .as_ref()
+        .and_then(|sc| sc.filesystem.as_ref())
+        .map(|fs| {
+            (
+                fs.extra_read.iter().map(PathBuf::from).collect(),
+                fs.extra_write.iter().map(PathBuf::from).collect(),
+            )
+        })
+        .unwrap_or_default();
+
+    #[cfg(target_os = "macos")]
+    {
+        use devflow_core::sandbox::seatbelt;
+
+        let profile =
+            seatbelt::generate_seatbelt_profile(workspace_dir, &extra_read, &extra_write);
+
+        // Write profile to a persistent location (not tempfile, since the terminal lives long)
+        let profile_dir = dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("devflow")
+            .join("sandbox-profiles");
+        let _ = std::fs::create_dir_all(&profile_dir);
+        let profile_path = profile_dir.join(format!(
+            "terminal-{}-{}.sb",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        if std::fs::write(&profile_path, &profile).is_err() {
+            return (None, None);
+        }
+
+        let user_shell =
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+
+        (
+            Some("sandbox-exec".to_string()),
+            Some(vec![
+                "-f".to_string(),
+                profile_path.display().to_string(),
+                user_shell.clone(),
+                "-l".to_string(),
+            ]),
+        )
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (workspace_dir, extra_read, extra_write);
+        // On non-macOS, no OS-level shell wrapping (command guard applies to devflow commands)
+        (None, None)
+    }
+}
+
+/// Check if a workspace is sandboxed by looking up its state in the registry.
+fn is_workspace_sandboxed(project_path: &str, workspace_name: &str) -> bool {
+    let project_dir = Path::new(project_path);
+    let Ok(state_mgr) = devflow_core::state::LocalStateManager::new() else {
+        return false;
+    };
+    state_mgr
+        .get_workspace_by_dir(project_dir, workspace_name)
+        .map(|ws| ws.sandboxed)
+        .unwrap_or(false)
+}
+
 #[derive(Clone, Serialize)]
 struct TerminalOutputEvent {
     session_id: String,
@@ -132,10 +219,25 @@ pub async fn create_terminal(
         "terminal".to_string()
     };
 
+    // Check if this workspace is sandboxed — if so, wrap the shell with sandbox-exec
+    let sandbox_state = if let (Some(ref pp), Some(ref workspace)) = (&project_path, &workspace_name)
+    {
+        is_workspace_sandboxed(pp, workspace)
+    } else {
+        false
+    };
+
+    let (shell, shell_args) = if sandbox_state {
+        build_sandboxed_shell(&working_dir, &project_path)
+    } else {
+        (None, None)
+    };
+
     let config = TerminalSessionConfig {
         working_directory: PathBuf::from(&working_dir),
         environment: env,
-        shell: None,
+        shell,
+        shell_args,
         initial_command: None,
         rows: 24,
         cols: 80,

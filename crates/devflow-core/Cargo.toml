@@ -7,12 +7,14 @@ authors = ["Clément Tourrière <clement.tourriere@gmail.com>"]
 license = "MIT"
 
 [features]
-default = ["service-local", "service-neon", "service-dblab", "service-xata", "llm"]
+default = ["service-local", "service-neon", "service-dblab", "service-xata", "llm", "sandbox"]
 service-local = ["dep:bollard", "dep:rusqlite", "dep:rust-s3", "dep:tar", "dep:bytes", "dep:futures-util", "dep:tempfile", "dep:uuid", "dep:url"]
 service-neon = ["dep:reqwest"]
 service-dblab = ["dep:reqwest"]
 service-xata = ["dep:reqwest"]
 llm = ["dep:reqwest"]
+sandbox = ["dep:tempfile"]
+sandbox-landlock = ["dep:landlock"]
 
 [dependencies]
 # Serialization
@@ -88,3 +90,6 @@ reflink-copy = "0.1"
 
 # Work-stealing parallelism for directory copies
 rayon = "1.10"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = { version = "0.4", optional = true }

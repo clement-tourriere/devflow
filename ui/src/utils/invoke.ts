@@ -70,7 +70,8 @@ export const createWorkspace = (
   fromWorkspace?: string,
   creationMode?: WorkspaceCreationMode,
   copyFiles?: string[],
-  copyIgnored?: boolean
+  copyIgnored?: boolean,
+  sandboxed?: boolean
 ) =>
   invoke<CreateWorkspaceResult>("create_workspace", {
     projectPath,
@@ -79,6 +80,7 @@ export const createWorkspace = (
     creationMode,
     copyFiles,
     copyIgnored,
+    sandboxed,
   });
 export const switchWorkspace = (projectPath: string, workspaceName: string) =>
   invoke<OrchestrationResult[]>("switch_workspace", {

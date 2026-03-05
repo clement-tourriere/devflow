@@ -6,6 +6,7 @@ use super::actions::shell::run_shell_command;
 use super::approval::ApprovalStore;
 use super::template::TemplateEngine;
 use super::{ActionHookEntry, HookContext, HookEntry, HookPhase, HooksConfig};
+use crate::sandbox;
 
 /// Executes hooks for a given phase, handling template rendering,
 /// approval checks, conditions, and blocking/background dispatch.
@@ -21,6 +22,8 @@ pub struct HookEngine {
     non_interactive: bool,
     /// Whether to suppress hook stdout-friendly output.
     quiet_output: bool,
+    /// Optional sandbox configuration for sandboxed workspaces.
+    sandbox_config: Option<sandbox::SandboxConfig>,
 }
 
 /// Result of running hooks for a phase.
@@ -57,6 +60,7 @@ impl HookEngine {
             require_approval: true,
             non_interactive: false,
             quiet_output: false,
+            sandbox_config: None,
         }
     }
 
@@ -74,6 +78,7 @@ impl HookEngine {
             require_approval: true,
             non_interactive: true,
             quiet_output: false,
+            sandbox_config: None,
         }
     }
 
@@ -87,12 +92,19 @@ impl HookEngine {
             require_approval: false,
             non_interactive: false,
             quiet_output: false,
+            sandbox_config: None,
         }
     }
 
     /// Return a cloned engine configuration with output verbosity configured.
     pub fn with_quiet_output(mut self, quiet: bool) -> Self {
         self.quiet_output = quiet;
+        self
+    }
+
+    /// Set sandbox configuration for sandboxed workspace hooks.
+    pub fn with_sandbox(mut self, sandbox_config: Option<sandbox::SandboxConfig>) -> Self {
+        self.sandbox_config = sandbox_config;
         self
     }
 
@@ -244,6 +256,15 @@ impl HookEngine {
         // Determine if this should run in the background
         let run_background = extended.map(|e| e.background).unwrap_or(false) || !phase_blocking;
 
+        // Validate command against sandbox policy (applies to both background and blocking)
+        if let Some(ref sandbox_cfg) = self.sandbox_config {
+            let guard = sandbox::command_guard::CommandGuard::from_config(
+                &sandbox_cfg.commands.as_ref().map(|c| c.extra_block.clone()).unwrap_or_default(),
+                &sandbox_cfg.commands.as_ref().map(|c| c.allow.clone()).unwrap_or_default(),
+            );
+            guard.check(&rendered_command)?;
+        }
+
         if run_background {
             let cmd = rendered_command.clone();
             let wd = self.working_dir.clone();
@@ -286,14 +307,28 @@ impl HookEngine {
 
         let env_vars = extended.and_then(|e| e.environment.clone());
 
-        run_shell_command(
-            &rendered_command,
-            &working_dir,
-            env_vars.as_ref(),
-            context,
-            &self.template_engine,
-            !self.quiet_output,
-        )?;
+        // Use sandboxed execution when sandbox config is set
+        if let Some(ref sandbox_cfg) = self.sandbox_config {
+            let policy = sandbox::SandboxPolicy::from_config(sandbox_cfg, &working_dir);
+            super::actions::shell::run_shell_command_sandboxed(
+                &rendered_command,
+                &working_dir,
+                env_vars.as_ref(),
+                context,
+                &self.template_engine,
+                !self.quiet_output,
+                Some(&policy),
+            )?;
+        } else {
+            run_shell_command(
+                &rendered_command,
+                &working_dir,
+                env_vars.as_ref(),
+                context,
+                &self.template_engine,
+                !self.quiet_output,
+            )?;
+        }
 
         Ok(HookOutcome::Succeeded)
     }

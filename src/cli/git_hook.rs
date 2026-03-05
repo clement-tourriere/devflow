@@ -166,6 +166,7 @@ pub(super) async fn handle_git_hook(
                         Some("vcs"),
                         Some("post-checkout"),
                         None, // copy_ignored — use config default
+                        None, // sandboxed — use existing state
                     )
                     .await?;
                 } else {

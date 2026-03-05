@@ -12,6 +12,9 @@ pub struct TerminalSessionConfig {
     pub working_directory: PathBuf,
     pub environment: HashMap<String, String>,
     pub shell: Option<String>,
+    /// Custom arguments for the shell program. When set, overrides the default
+    /// login shell flags (`-l`). Used to wrap shells with sandbox-exec, etc.
+    pub shell_args: Option<Vec<String>>,
     pub initial_command: Option<String>,
     pub rows: u16,
     pub cols: u16,
@@ -89,8 +92,12 @@ impl TerminalManager {
         let shell = config.shell.unwrap_or_else(default_shell);
         let mut cmd = CommandBuilder::new(&shell);
 
-        // Login shell flag
-        if shell.ends_with("zsh") || shell.ends_with("bash") {
+        if let Some(args) = config.shell_args {
+            for arg in &args {
+                cmd.arg(arg);
+            }
+        } else if shell.ends_with("zsh") || shell.ends_with("bash") {
+            // Login shell flag
             cmd.arg("-l");
         }
 
