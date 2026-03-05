@@ -41,19 +41,21 @@ This command is designed for both humans and automation:
 
 Examples:
   devflow graph
-  devflow --json graph"
+  devflow --json graph",
+        hide = true
     )]
     Graph,
     #[command(
-        about = "Link an existing VCS workspace into devflow",
-        long_about = "Link an existing VCS workspace into devflow.
+        about = "Link an existing workspace into devflow",
+        long_about = "Link an existing workspace into devflow.
 
 This command records the workspace in the devflow registry and materializes
 service workspaces when auto-workspace services are configured.
 
 Examples:
   devflow link feature/auth
-  devflow link feature/auth --from main"
+  devflow link feature/auth --from main",
+        hide = true
     )]
     Link {
         #[arg(help = "Workspace name to link")]
@@ -99,7 +101,7 @@ Examples:
     },
     #[command(
         about = "Remove a workspace, its worktree, and associated service workspaces",
-        long_about = "Remove a workspace, its worktree, and associated service workspaces.\n\nThis is a comprehensive cleanup command that removes:\n  - The Git workspace\n  - The worktree directory (if any)\n  - All associated service workspaces (containers, cloud workspaces)\n\nUnlike 'devflow service delete' which only removes service workspaces, 'remove'\ncleans up everything related to the workspace.\n\nExamples:\n  devflow remove feature-auth\n  devflow remove feature-auth --force\n  devflow remove feature-auth --keep-services  # Only remove worktree + git workspace"
+        long_about = "Remove a workspace, its worktree, and associated service workspaces.\n\nThis is a comprehensive cleanup command that removes:\n  - The workspace\n  - The worktree directory (if any)\n  - All associated service workspaces (containers, cloud workspaces)\n\nUnlike 'devflow service delete' which only removes service workspaces, 'remove'\ncleans up everything related to the workspace.\n\nExamples:\n  devflow remove feature-auth\n  devflow remove feature-auth --force\n  devflow remove feature-auth --keep-services  # Only remove worktree + workspace"
     )]
     Remove {
         #[arg(help = "Workspace name to remove")]
@@ -111,7 +113,8 @@ Examples:
     },
     #[command(
         about = "Merge current workspace into target (with optional cleanup)",
-        long_about = "Merge current workspace into target (with optional cleanup).\n\nPerforms a git merge of the current workspace into the target workspace (defaults to main).\nWith --cleanup, also removes the source workspace, its worktree, and associated service workspaces.\n\nExamples:\n  devflow merge                        # Merge into main\n  devflow merge develop                # Merge into develop\n  devflow merge --cleanup              # Merge and delete source workspace + services\n  devflow merge --dry-run              # Preview without merging"
+        long_about = "Merge current workspace into target (with optional cleanup).\n\nPerforms a git merge of the current workspace into the target workspace (defaults to main).\nWith --cleanup, also removes the source workspace, its worktree, and associated service workspaces.\n\nExamples:\n  devflow merge                        # Merge into main\n  devflow merge develop                # Merge into develop\n  devflow merge --cleanup              # Merge and delete source workspace + services\n  devflow merge --dry-run              # Preview without merging",
+        hide = true
     )]
     Merge {
         #[arg(help = "Target workspace to merge into (default: main workspace)")]
@@ -123,7 +126,8 @@ Examples:
     },
     #[command(
         about = "Clean up old service workspaces (alias for 'service cleanup')",
-        long_about = "Clean up old service workspaces.\n\nRemoves stale service workspaces that no longer have a corresponding VCS workspace.\nOptionally limit the number of workspaces to retain.\n\nExamples:\n  devflow cleanup                  # Remove orphaned service workspaces\n  devflow cleanup --max-count 10   # Keep at most 10 service workspaces"
+        long_about = "Clean up old service workspaces.\n\nRemoves stale service workspaces that no longer have a corresponding workspace.\nOptionally limit the number of workspaces to retain.\n\nExamples:\n  devflow cleanup                  # Remove orphaned service workspaces\n  devflow cleanup --max-count 10   # Keep at most 10 service workspaces",
+        hide = true
     )]
     Cleanup {
         #[arg(long, help = "Maximum number of workspaces to keep")]
@@ -133,7 +137,8 @@ Examples:
     // ── Services ──
     #[command(
         about = "Manage services (create, delete, start, stop, reset, ...)",
-        long_about = "Manage service providers and their workspaces.\n\nService commands operate on the configured service providers (local Docker,\nNeon, DBLab, etc.) to create, delete, and manage workspace-isolated environments.\n\nExamples:\n  devflow service add                       # Interactive wizard\n  devflow service add mydb --provider local # Add with explicit options\n  devflow service create feature-auth       # Create service workspace\n  devflow service delete feature-auth       # Delete service workspace\n  devflow service cleanup --max-count 10    # Cleanup old service workspaces\n  devflow service start feature-auth        # Start a stopped container\n  devflow service stop feature-auth         # Stop a running container\n  devflow service reset feature-auth        # Reset to parent state\n  devflow service connection feature-auth   # Show connection info\n  devflow service status                    # Show service status\n  devflow service list                      # List configured services\n  devflow service remove mydb               # Remove a service config\n  devflow service logs feature-auth         # Show container logs\n  devflow service seed main --from dump.sql # Seed from external source\n  devflow service discover                  # Discover running Docker containers\n  devflow service destroy                   # Destroy all data"
+        long_about = "Manage service providers and their workspaces.\n\nService commands operate on the configured service providers (local Docker,\nNeon, DBLab, etc.) to create, delete, and manage workspace-isolated environments.\n\nExamples:\n  devflow service add                       # Interactive wizard\n  devflow service add mydb --provider local # Add with explicit options\n  devflow service create feature-auth       # Create service workspace\n  devflow service delete feature-auth       # Delete service workspace\n  devflow service cleanup --max-count 10    # Cleanup old service workspaces\n  devflow service start feature-auth        # Start a stopped container\n  devflow service stop feature-auth         # Stop a running container\n  devflow service reset feature-auth        # Reset to parent state\n  devflow service connection feature-auth   # Show connection info\n  devflow service status                    # Show service status\n  devflow service list                      # List configured services\n  devflow service remove mydb               # Remove a service config\n  devflow service logs feature-auth         # Show container logs\n  devflow service seed main --from dump.sql # Seed from external source\n  devflow service discover                  # Discover running Docker containers\n  devflow service destroy                   # Destroy all data",
+        hide = true
     )]
     Service {
         #[command(subcommand)]
@@ -191,7 +196,8 @@ Examples:
     },
     #[command(
         about = "Tear down the entire devflow project",
-        long_about = "Tear down the entire devflow project.\n\nThis is the inverse of 'devflow init'. It permanently destroys:\n  - All service data (containers, databases, workspaces)\n  - Git worktrees created by devflow\n  - VCS hooks installed by devflow\n  - Workspace registry and local state\n  - Hook approvals\n  - Configuration files (.devflow.yml, .devflow.local.yml)\n\nThis is irreversible. Use --force to skip the confirmation prompt.\n\nExamples:\n  devflow destroy              # Interactive confirmation\n  devflow destroy --force      # Skip confirmation"
+        long_about = "Tear down the entire devflow project.\n\nThis is the inverse of 'devflow init'. It permanently destroys:\n  - All service data (containers, databases, workspaces)\n  - Git worktrees created by devflow\n  - VCS hooks installed by devflow\n  - Workspace registry and local state\n  - Hook approvals\n  - Configuration files (.devflow.yml, .devflow.local.yml)\n\nThis is irreversible. Use --force to skip the confirmation prompt.\n\nExamples:\n  devflow destroy              # Interactive confirmation\n  devflow destroy --force      # Skip confirmation",
+        hide = true
     )]
     Destroy {
         #[arg(long, help = "Skip confirmation prompt")]
@@ -199,7 +205,8 @@ Examples:
     },
     #[command(
         about = "Show current configuration",
-        long_about = "Show current configuration.\n\nDisplays the merged configuration from .devflow.yml, .devflow.local.yml,\nand environment variable overrides. Use -v for detailed precedence info.\n\nExamples:\n  devflow config              # Show merged config YAML\n  devflow config -v           # Show precedence details + env overrides"
+        long_about = "Show current configuration.\n\nDisplays the merged configuration from .devflow.yml, .devflow.local.yml,\nand environment variable overrides. Use -v for detailed precedence info.\n\nExamples:\n  devflow config              # Show merged config YAML\n  devflow config -v           # Show precedence details + env overrides",
+        hide = true
     )]
     Config {
         #[arg(
@@ -216,12 +223,14 @@ Examples:
     Doctor,
     #[command(
         about = "Install Git hooks",
-        long_about = "Install Git hooks.\n\nSets up post-checkout and post-commit Git hooks so devflow\nautomatically creates service workspaces and switches environments\non checkout. Safe to re-run.\n\nExamples:\n  devflow install-hooks"
+        long_about = "Install Git hooks.\n\nSets up post-checkout and post-commit Git hooks so devflow\nautomatically creates service workspaces and switches environments\non checkout. Safe to re-run.\n\nExamples:\n  devflow install-hooks",
+        hide = true
     )]
     InstallHooks,
     #[command(
         about = "Uninstall Git hooks",
-        long_about = "Uninstall Git hooks.\n\nRemoves the devflow Git hooks (post-checkout, post-commit).\nYour existing service workspaces and worktrees are not affected.\n\nExamples:\n  devflow uninstall-hooks"
+        long_about = "Uninstall Git hooks.\n\nRemoves the devflow Git hooks (post-checkout, post-commit).\nYour existing service workspaces and worktrees are not affected.\n\nExamples:\n  devflow uninstall-hooks",
+        hide = true
     )]
     UninstallHooks,
     #[command(about = "Handle Git hook execution", hide = true)]
@@ -234,7 +243,8 @@ Examples:
     #[command(
         name = "shell-init",
         about = "Print shell integration script (eval \"$(devflow shell-init)\")",
-        long_about = "Print shell integration script.\n\nThe shell wrapper enables automatic 'cd' whenever devflow emits DEVFLOW_CD\n(for example: switch to worktrees, open from TUI, init into a new directory).\nWithout it, devflow cannot change your parent shell directory and you must\ncd manually.\n\nAdd to your shell profile:\n  eval \"$(devflow shell-init)\"        # auto-detects shell\n  eval \"$(devflow shell-init bash)\"   # ~/.bashrc\n  eval \"$(devflow shell-init zsh)\"    # ~/.zshrc\n  devflow shell-init fish | source    # ~/.config/fish/config.fish\n\nThis creates a 'devflow' shell wrapper function."
+        long_about = "Print shell integration script.\n\nThe shell wrapper enables automatic 'cd' whenever devflow emits DEVFLOW_CD\n(for example: switch to worktrees, open from TUI, init into a new directory).\nWithout it, devflow cannot change your parent shell directory and you must\ncd manually.\n\nAdd to your shell profile:\n  eval \"$(devflow shell-init)\"        # auto-detects shell\n  eval \"$(devflow shell-init bash)\"   # ~/.bashrc\n  eval \"$(devflow shell-init zsh)\"    # ~/.zshrc\n  devflow shell-init fish | source    # ~/.config/fish/config.fish\n\nThis creates a 'devflow' shell wrapper function.",
+        hide = true
     )]
     ShellInit {
         #[arg(help = "Shell type: bash, zsh, or fish (auto-detected from $SHELL if omitted)")]
@@ -243,12 +253,14 @@ Examples:
     #[command(
         name = "worktree-setup",
         about = "Set up devflow in a Git worktree (copy files, create DB workspace)",
-        long_about = "Set up devflow in a Git worktree.\n\nCopies configuration files and creates service workspaces for the current\nworktree. Normally called automatically by Git hooks, but can be run\nmanually if hooks are not installed.\n\nExamples:\n  devflow worktree-setup"
+        long_about = "Set up devflow in a Git worktree.\n\nCopies configuration files and creates service workspaces for the current\nworktree. Normally called automatically by Git hooks, but can be run\nmanually if hooks are not installed.\n\nExamples:\n  devflow worktree-setup",
+        hide = true
     )]
     WorktreeSetup,
     #[command(
         name = "setup-zfs",
-        about = "Set up a file-backed ZFS pool for Copy-on-Write storage (Linux)"
+        about = "Set up a file-backed ZFS pool for Copy-on-Write storage (Linux)",
+        hide = true
     )]
     SetupZfs {
         #[arg(long, default_value = "devflow", help = "ZFS pool name")]
@@ -266,14 +278,16 @@ for AI agents and CI pipelines.
 
 Examples:
   devflow capabilities
-  devflow --json capabilities"
+  devflow --json capabilities",
+        hide = true
     )]
     Capabilities,
 
     // ── Extensibility ──
     #[command(
         about = "Manage lifecycle hooks",
-        long_about = "Manage lifecycle hooks.\n\nHooks are MiniJinja-templated commands that run at specific lifecycle phases\n(post-create, post-switch, pre-merge, etc.). Configure them in .devflow.yml\nunder the 'hooks' section.\n\nExamples:\n  devflow hook show                  # List all configured hooks\n  devflow hook show post-create      # Show hooks for a specific phase\n  devflow hook run post-create       # Run hooks for a phase manually\n  devflow hook approvals             # List approved hooks\n  devflow hook approvals clear       # Clear all approvals"
+        long_about = "Manage lifecycle hooks.\n\nHooks are MiniJinja-templated commands that run at specific lifecycle phases\n(post-create, post-switch, pre-merge, etc.). Configure them in .devflow.yml\nunder the 'hooks' section.\n\nExamples:\n  devflow hook show                  # List all configured hooks\n  devflow hook show post-create      # Show hooks for a specific phase\n  devflow hook run post-create       # Run hooks for a phase manually\n  devflow hook approvals             # List approved hooks\n  devflow hook approvals clear       # Clear all approvals",
+        hide = true
     )]
     Hook {
         #[command(subcommand)]
@@ -281,7 +295,8 @@ Examples:
     },
     #[command(
         about = "Manage plugin services",
-        long_about = "Manage plugin services.\n\nPlugins extend devflow with custom service providers via JSON-over-stdio protocol.\nAny executable that speaks the protocol can be a provider.\n\nExamples:\n  devflow plugin list                    # List configured plugin services\n  devflow plugin check my-plugin         # Verify a plugin works\n  devflow plugin init my-plugin --lang bash  # Print a plugin scaffold script"
+        long_about = "Manage plugin services.\n\nPlugins extend devflow with custom service providers via JSON-over-stdio protocol.\nAny executable that speaks the protocol can be a provider.\n\nExamples:\n  devflow plugin list                    # List configured plugin services\n  devflow plugin check my-plugin         # Verify a plugin works\n  devflow plugin init my-plugin --lang bash  # Print a plugin scaffold script",
+        hide = true
     )]
     Plugin {
         #[command(subcommand)]
@@ -291,7 +306,8 @@ Examples:
     // ── AI Agent ──
     #[command(
         about = "AI agent integration (start, status, context, skill)",
-        long_about = "AI agent integration.\n\nManage AI coding agents that work in isolated workspace environments.\nLaunch agents into worktrees, track their status, and install\nproject-specific skills.\n\nExamples:\n  devflow agent start fix-login -- 'Fix the login timeout bug'\n  devflow agent status\n  devflow agent context\n  devflow agent skill"
+        long_about = "AI agent integration.\n\nManage AI coding agents that work in isolated workspace environments.\nLaunch agents into worktrees, track their status, and install\nproject-specific skills.\n\nExamples:\n  devflow agent start fix-login -- 'Fix the login timeout bug'\n  devflow agent status\n  devflow agent context\n  devflow agent skill",
+        hide = true
     )]
     Agent {
         #[command(subcommand)]
@@ -301,7 +317,8 @@ Examples:
     // ── Proxy ──
     #[command(
         about = "Local reverse proxy (auto-HTTPS for Docker containers)",
-        long_about = "Local reverse proxy for Docker containers.\n\nAuto-discovers Docker containers and provides HTTPS access via\n*.localhost domains. Uses a local CA for certificate generation.\n\nExamples:\n  devflow proxy start                # Start the proxy\n  devflow proxy start --daemon       # Start in background\n  devflow proxy stop                 # Stop the proxy\n  devflow proxy status               # Show proxy status\n  devflow proxy list                 # List proxied containers\n  devflow proxy trust install        # Install CA certificate\n  devflow proxy trust verify         # Check if CA is trusted\n  devflow proxy trust remove         # Remove CA from trust store\n  devflow proxy trust info           # Show trust instructions"
+        long_about = "Local reverse proxy for Docker containers.\n\nAuto-discovers Docker containers and provides HTTPS access via\n*.localhost domains. Uses a local CA for certificate generation.\n\nExamples:\n  devflow proxy start                # Start the proxy\n  devflow proxy start --daemon       # Start in background\n  devflow proxy stop                 # Stop the proxy\n  devflow proxy status               # Show proxy status\n  devflow proxy list                 # List proxied containers\n  devflow proxy trust install        # Install CA certificate\n  devflow proxy trust verify         # Check if CA is trusted\n  devflow proxy trust remove         # Remove CA from trust store\n  devflow proxy trust info           # Show trust instructions",
+        hide = true
     )]
     Proxy {
         #[command(subcommand)]
@@ -323,7 +340,8 @@ Examples:
     // ── Garbage Collection ──
     #[command(
         about = "Detect and clean up orphaned projects (missing directory, leftover state)",
-        long_about = "Detect and clean up orphaned projects.\n\nScans all state stores (SQLite, local state YAML, Docker containers) for projects\nwhose directories no longer exist on disk. Orphaned resources include stopped/running\nDocker containers, database state, data directories, and registry entries.\n\nBy default, lists orphans and lets you pick which to clean up interactively.\n\nExamples:\n  devflow gc                     # Interactive: list orphans, pick to clean\n  devflow gc --list               # Just list orphans (no cleanup)\n  devflow gc --all                # Clean all orphans (with confirmation)\n  devflow gc --all --force        # Clean all orphans (skip confirmation)\n  devflow --json gc               # Machine-readable orphan list"
+        long_about = "Detect and clean up orphaned projects.\n\nScans all state stores (SQLite, local state YAML, Docker containers) for projects\nwhose directories no longer exist on disk. Orphaned resources include stopped/running\nDocker containers, database state, data directories, and registry entries.\n\nBy default, lists orphans and lets you pick which to clean up interactively.\n\nExamples:\n  devflow gc                     # Interactive: list orphans, pick to clean\n  devflow gc --list               # Just list orphans (no cleanup)\n  devflow gc --all                # Clean all orphans (with confirmation)\n  devflow gc --all --force        # Clean all orphans (skip confirmation)\n  devflow --json gc               # Machine-readable orphan list",
+        hide = true
     )]
     Gc {
         #[arg(long, help = "Only list orphans, do not clean up")]
@@ -349,8 +367,8 @@ pub enum ServiceCommands {
         from: Option<String>,
     },
     #[command(
-        about = "Delete a service workspace (keeps Git workspace and worktree)",
-        long_about = "Delete a service workspace (keeps Git workspace and worktree).\n\nRemoves service workspaces (containers, cloud workspaces) but preserves the Git workspace\nand any worktree directory. Use 'devflow remove' to delete everything.\n\nExamples:\n  devflow service delete feature-auth"
+        about = "Delete a service workspace (keeps workspace and worktree)",
+        long_about = "Delete a service workspace (keeps workspace and worktree).\n\nRemoves service workspaces (containers, cloud workspaces) but preserves the workspace\nand any worktree directory. Use 'devflow remove' to delete everything.\n\nExamples:\n  devflow service delete feature-auth"
     )]
     Delete {
         #[arg(help = "Name of the workspace to delete")]
@@ -479,7 +497,7 @@ pub enum HookCommands {
         name: Option<String>,
         #[arg(
             long,
-            help = "Workspace name context (defaults to current Git workspace)"
+            help = "Workspace name context (defaults to current workspace)"
         )]
         workspace: Option<String>,
     },
@@ -990,24 +1008,205 @@ pub async fn handle_command(
                     println!("  Files copied:  .env, .env.local");
                 }
 
-                println!("\nNext steps:");
-                if enable_worktrees {
+                // ── Guided wizard steps (interactive only) ──────────────────
+
+                let interactive = !non_interactive;
+                let mut added_services: Vec<String> = Vec::new();
+                let mut hooks_installed = false;
+                let mut shell_configured = false;
+
+                if interactive {
+                    // Step 1: Offer to add services
+                    println!();
+                    let add_service = inquire::Confirm::new(
+                        "Would you like to add a service?",
+                    )
+                    .with_default(true)
+                    .with_help_message("Configure a database or other service (e.g. PostgreSQL, ClickHouse, Redis)")
+                    .prompt()
+                    .unwrap_or(false);
+
+                    if add_service {
+                        loop {
+                            let result = service::run_add_service_wizard(
+                                &mut init_config,
+                                &init_config_path,
+                                non_interactive,
+                                json_output,
+                                None,
+                            )
+                            .await?;
+
+                            if let Some(cfg) = result {
+                                added_services.push(format!("{} ({}, {})", cfg.name, cfg.service_type, cfg.provider_type));
+                            }
+
+                            let add_another = inquire::Confirm::new(
+                                "Add another service?",
+                            )
+                            .with_default(false)
+                            .prompt()
+                            .unwrap_or(false);
+
+                            if !add_another {
+                                break;
+                            }
+                        }
+                    }
+
+                    // Step 2: Offer Git hooks installation
+                    println!();
+                    let install_hooks = inquire::Confirm::new(
+                        "Install Git hooks? (auto-sync services on checkout)",
+                    )
+                    .with_default(true)
+                    .with_help_message("Recommended. Automatically creates/switches service workspaces on git checkout.")
+                    .prompt()
+                    .unwrap_or(false);
+
+                    if install_hooks {
+                        if let Ok(vcs_prov) = vcs::detect_vcs_provider(".") {
+                            match vcs_prov.install_hooks() {
+                                Ok(()) => {
+                                    hooks_installed = true;
+                                    println!("Installed {} hooks", vcs_prov.provider_name());
+                                }
+                                Err(e) => {
+                                    eprintln!("Warning: could not install hooks: {}", e);
+                                }
+                            }
+                        }
+                    }
+
+                    // Step 3: Offer shell integration (only if worktrees are enabled)
+                    if enable_worktrees {
+                        println!();
+                        let setup_shell = inquire::Confirm::new(
+                            "Enable shell integration? (auto-cd into worktrees)",
+                        )
+                        .with_default(true)
+                        .with_help_message("Adds eval \"$(devflow shell-init)\" to your shell profile for automatic directory switching.")
+                        .prompt()
+                        .unwrap_or(false);
+
+                        if setup_shell {
+                            if let Ok(shell) = config::detect_shell_from_env() {
+                                let home = std::env::var("HOME").ok().map(PathBuf::from);
+                                let shell_config_path = match shell.as_str() {
+                                    "zsh" => home.as_ref().map(|h| h.join(".zshrc")),
+                                    "bash" => {
+                                        let bashrc = home.as_ref().map(|h| h.join(".bashrc"));
+                                        if bashrc.as_ref().is_some_and(|p| p.exists()) {
+                                            bashrc
+                                        } else {
+                                            home.as_ref().map(|h| h.join(".bash_profile"))
+                                        }
+                                    }
+                                    "fish" => home.as_ref().map(|h| {
+                                        h.join(".config").join("fish").join("config.fish")
+                                    }),
+                                    _ => None,
+                                };
+
+                                let eval_line = if shell == "fish" {
+                                    "devflow shell-init fish | source"
+                                } else {
+                                    "eval \"$(devflow shell-init)\""
+                                };
+
+                                if let Some(ref rc_path) = shell_config_path {
+                                    let already_configured = rc_path
+                                        .exists()
+                                        && std::fs::read_to_string(rc_path)
+                                            .unwrap_or_default()
+                                            .contains("devflow shell-init");
+
+                                    if already_configured {
+                                        println!("Shell integration already configured in {}", rc_path.display());
+                                        shell_configured = true;
+                                    } else {
+                                        let append = inquire::Confirm::new(&format!(
+                                            "Append to {}?",
+                                            rc_path.display()
+                                        ))
+                                        .with_default(true)
+                                        .prompt()
+                                        .unwrap_or(false);
+
+                                        if append {
+                                            use std::io::Write;
+                                            if let Ok(mut file) = std::fs::OpenOptions::new()
+                                                .append(true)
+                                                .create(true)
+                                                .open(rc_path)
+                                            {
+                                                writeln!(file, "\n# devflow shell integration")?;
+                                                writeln!(file, "{}", eval_line)?;
+                                                println!("Added to {}", rc_path.display());
+                                                shell_configured = true;
+                                            } else {
+                                                println!("Could not write to {}. Add manually:", rc_path.display());
+                                                println!("  {}", eval_line);
+                                            }
+                                        } else {
+                                            println!("Add this to your shell profile:");
+                                            println!("  {}", eval_line);
+                                        }
+                                    }
+                                } else {
+                                    println!("Add this to your shell profile:");
+                                    println!("  {}", eval_line);
+                                }
+                            }
+                        }
+                    }
+
+                    // Step 4: Print summary
+                    println!();
+                    println!("devflow initialized for '{}'", resolved_name);
+                    println!();
+                    println!("  Config:     {}", init_config_path.display());
+                    if !added_services.is_empty() {
+                        println!("  Services:   {}", added_services.join(", "));
+                    }
                     println!(
-                        "  eval \"$(devflow shell-init)\"  Add to your shell profile for auto-cd into worktrees"
+                        "  Hooks:      {}",
+                        if hooks_installed { "installed" } else { "not installed" }
                     );
+                    if enable_worktrees {
+                        println!(
+                            "  Shell:      {}",
+                            if shell_configured {
+                                "configured"
+                            } else {
+                                "not configured (run: eval \"$(devflow shell-init)\")"
+                            }
+                        );
+                        println!("  Worktrees:  enabled (../{{repo}}.{{workspace}})");
+                    }
+                    println!();
+                    println!("Next: devflow switch -c feature/my-feature");
+                } else {
+                    // Non-interactive: print legacy next steps
+                    println!("\nNext steps:");
+                    if enable_worktrees {
+                        println!(
+                            "  eval \"$(devflow shell-init)\"  Add to your shell profile for auto-cd into worktrees"
+                        );
+                    }
+                    println!(
+                        "  devflow service add          Add a service provider (interactive wizard)"
+                    );
+                    println!(
+                        "  devflow install-hooks        Install Git hooks for automatic branching"
+                    );
+                    println!("  devflow doctor               Check system health and configuration");
                 }
-                println!(
-                    "  devflow service add          Add a service provider (interactive wizard)"
-                );
-                println!(
-                    "  devflow install-hooks        Install Git hooks for automatic branching"
-                );
-                println!("  devflow doctor               Check system health and configuration");
 
                 if let Some(target_dir) = init_target_dir.as_ref() {
                     if config::shell_integration_enabled() {
                         println!("DEVFLOW_CD={}", target_dir.display());
-                    } else {
+                    } else if non_interactive {
                         config::print_manual_cd_hint(target_dir);
                     }
                 }

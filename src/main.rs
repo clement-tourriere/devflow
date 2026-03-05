@@ -7,25 +7,30 @@ mod tui;
 
 use cli::Commands;
 
-#[derive(Parser)]
-#[command(name = "devflow")]
-#[command(about = "A universal development environment branching tool")]
-#[command(version = "0.4.0")]
-#[command(disable_help_subcommand = true)]
-#[command(help_template = "\
+/// Full help template shown with `--help-all`.
+const FULL_HELP_TEMPLATE: &str = "\
 {name} {version}
-{about}
+Isolated dev environments for every workspace — automatically.
 
 {usage-heading} {usage}
 
+Getting Started:
+  init                Initialize devflow (guided setup wizard)
+  doctor              Check system health and configuration
+
+Daily Use:
+  switch              Create or switch workspaces (-c to create new)
+  list                List all workspaces with service status
+  status              Show current workspace and service info
+  connection          Show service connection info
+  remove              Remove a workspace and its services
+  commit              Commit staged changes (--ai for AI message)
+
 Workspace Management:
-  list                List all workspaces (with service + worktree status)
   graph               Render full environment graph (workspace tree + services)
-  link                Link an existing VCS workspace into devflow
-  switch              Switch to an existing workspace/worktree (use -c to create)
-  remove              Remove a workspace, its worktree, and associated service workspaces
+  link                Link an existing workspace into devflow
   merge               Merge current workspace into target (with optional cleanup)
-  cleanup             Clean up old service workspaces (alias for service cleanup)
+  cleanup             Clean up old service workspaces
 
 Services:
   service add         Add a new service provider
@@ -44,18 +49,9 @@ Services:
   service logs        Show container logs for a workspace
   service seed        Seed a workspace from an external source
 
-Top-level Aliases:
-  connection          Show connection info (alias for 'service connection')
-  status              Show current project and service status
-
-VCS:
-  commit              Commit staged changes (--ai for AI-generated message)
-
 Setup & Config:
-  init                Initialize devflow configuration
-  destroy             Tear down the entire devflow project (inverse of init)
   config              Show current configuration (-v for precedence details)
-  doctor              Run diagnostics and check system health
+  destroy             Tear down the entire devflow project (inverse of init)
   install-hooks       Install Git hooks (auto workspace/switch on checkout)
   uninstall-hooks     Uninstall Git hooks
   shell-init          Print shell integration script (enables worktree cd)
@@ -64,13 +60,13 @@ Setup & Config:
   gc                  Detect and clean up orphaned projects (leftover state)
 
 Extensibility:
-  hook show             Show configured hooks (filter by phase)
-  hook run              Run hooks for a phase manually
-  hook approvals        Manage hook approvals (list, add, clear)
-  hook explain          Explain hook phases and template variables
-  hook vars             Show available template variables with current values
-  hook render           Render a template string with current context
-  plugin                Manage plugin services (list, check, init)
+  hook show           Show configured hooks (filter by phase)
+  hook run            Run hooks for a phase manually
+  hook approvals      Manage hook approvals (list, add, clear)
+  hook explain        Explain hook phases and template variables
+  hook vars           Show available template variables with current values
+  hook render         Render a template string with current context
+  plugin              Manage plugin services (list, check, init)
 
 AI Agents:
   agent start         Start an AI agent in a new isolated workspace
@@ -90,6 +86,38 @@ Interactive:
   tui                 Launch the interactive terminal UI dashboard
 
 Options:
+{options}";
+
+#[derive(Parser)]
+#[command(name = "devflow")]
+#[command(about = "Isolated dev environments for every workspace — automatically.")]
+#[command(version = "0.4.0")]
+#[command(disable_help_subcommand = true)]
+#[command(help_template = "\
+{name} {version}
+Isolated dev environments for every workspace — automatically.
+
+{usage-heading} {usage}
+
+Getting Started:
+  init                Initialize devflow (guided setup wizard)
+  doctor              Check system health and configuration
+
+Daily Use:
+  switch              Create or switch workspaces (-c to create new)
+  list                List all workspaces with service status
+  status              Show current workspace and service info
+  connection          Show service connection info
+  remove              Remove a workspace and its services
+  commit              Commit staged changes (--ai for AI message)
+
+Interactive:
+  tui                 Launch the interactive terminal UI dashboard
+
+Run 'devflow <command> --help' for detailed usage.
+Run 'devflow --help-all' for all commands (services, hooks, proxy, agents).
+
+Options:
 {options}")]
 struct Cli {
     #[command(subcommand)]
@@ -106,6 +134,10 @@ struct Cli {
     /// Target a specific named service (from configured services)
     #[arg(short = 's', long, global = true)]
     service: Option<String>,
+
+    /// Show all commands including advanced (services, hooks, proxy, agents)
+    #[arg(long = "help-all", global = true)]
+    help_all: bool,
 }
 
 #[tokio::main]
@@ -119,9 +151,24 @@ async fn main() -> Result<()> {
             cli::handle_command(cmd, cli.json, cli.non_interactive, cli.service.as_deref()).await?
         }
         None => {
-            // Print help when no command is provided
-            let mut cmd = Cli::command();
-            cmd.print_help()?;
+            if cli.help_all {
+                // Show full help with all commands visible
+                let mut cmd = Cli::command();
+                // Unhide all subcommands for the full help view
+                let subcmds: Vec<clap::Command> = cmd
+                    .get_subcommands()
+                    .map(|s| s.clone().hide(false))
+                    .collect();
+                for sub in subcmds {
+                    cmd = cmd.mut_subcommand(sub.get_name().to_string(), |_| sub.clone());
+                }
+                cmd = cmd.help_template(FULL_HELP_TEMPLATE);
+                cmd.print_help()?;
+            } else {
+                // Print compact help when no command is provided
+                let mut cmd = Cli::command();
+                cmd.print_help()?;
+            }
         }
     }
 

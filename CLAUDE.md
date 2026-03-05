@@ -1,10 +1,10 @@
 # devflow — Universal Development Environment Tool
 
 ## Overview
-devflow is a Rust-based tool that provides per-workspace isolation for development services (PostgreSQL, ClickHouse, MySQL, Redis, and more) that automatically synchronize with Git workspaces. It manages Git worktrees, Docker containers with Copy-on-Write storage, cloud database workspaces, and lifecycle hooks — from a CLI, TUI, or desktop GUI. It also includes a native reverse proxy that auto-discovers Docker containers and provides HTTPS access via `*.localhost` domains.
+devflow is a Rust-based tool that provides per-workspace isolation for development services (PostgreSQL, ClickHouse, MySQL, Redis, and more) that automatically synchronize with workspaces. It manages Git worktrees, Docker containers with Copy-on-Write storage, cloud database workspaces, and lifecycle hooks — from a CLI, TUI, or desktop GUI. It also includes a native reverse proxy that auto-discovers Docker containers and provides HTTPS access via `*.localhost` domains.
 
 ## Core Concepts
-- **Workspace isolation**: Each Git workspace gets its own isolated set of services (databases, caches, etc.)
+- **Workspace isolation**: Each workspace gets its own isolated set of services (databases, caches, etc.)
 - **Git worktree integration**: Optionally creates worktree directories per workspace for true parallel development
 - **Multi-provider**: Local Docker containers, PostgreSQL TEMPLATE, Neon, DBLab, Xata, or custom plugins
 - **Multi-service**: A single project can manage multiple services (e.g., PostgreSQL + ClickHouse + Redis)

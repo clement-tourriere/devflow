@@ -4,6 +4,7 @@ import Layout from "./components/Layout";
 import Home from "./pages/Home";
 import ProjectList from "./pages/projects/ProjectList";
 import ProjectDetail from "./pages/projects/ProjectDetail";
+import ProjectSetup from "./pages/projects/ProjectSetup";
 import ProxyDashboard from "./pages/proxy/ProxyDashboard";
 import HookManager from "./pages/hooks/HookManager";
 import ConfigEditor from "./pages/config/ConfigEditor";
@@ -94,6 +95,7 @@ function App() {
       <Route path="/" element={<Layout />}>
         <Route index element={<Home />} />
         <Route path="projects" element={<ProjectList />} />
+        <Route path="projects/*/setup" element={<ProjectSetup />} />
         <Route path="projects/*" element={<ProjectDetail />} />
         <Route path="proxy" element={<ProxyDashboard />} />
         <Route path="hooks/*" element={<HookManager />} />

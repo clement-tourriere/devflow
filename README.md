@@ -1,12 +1,16 @@
-# devflow
+<p align="center">
+  <img src="docs/icon.png" alt="devflow" width="128" />
+</p>
 
-Isolated dev environments for every Git workspace — automatically.
+<h1 align="center">devflow</h1>
+
+<p align="center">Isolated dev environments for every workspace — automatically.</p>
 
 > [Full Documentation](docs/index.html) | [CLI Reference](docs/CLI.md) | [AI Agent Guide](AGENTS.md) | [Changelog](CHANGELOG.md)
 
 ## What is devflow?
 
-devflow gives each Git workspace its own isolated development environment: databases, caches, worktrees, and any stateful service. When you `git checkout feature-auth`, devflow automatically creates or switches to dedicated service instances that belong to that workspace. Data is cloned from the parent using Copy-on-Write, so creating a workspace is near-instant and costs almost no extra disk space. It works via CLI, interactive TUI, or desktop GUI.
+devflow gives each workspace its own isolated development environment: databases, caches, worktrees, and any stateful service. When you `git checkout feature-auth`, devflow automatically creates or switches to dedicated service instances that belong to that workspace. Data is cloned from the parent using Copy-on-Write, so creating a workspace is near-instant and costs almost no extra disk space. It works via CLI, interactive TUI, or desktop GUI.
 
 ## Features
 
@@ -35,22 +39,14 @@ Requires Rust 1.70+ and Docker (for local mode). See [Full Install](#full-instal
 ## Quick Start
 
 ```bash
-# 1. Initialize
-devflow init myapp
+# 1. Initialize (guided wizard handles services, hooks, and shell integration)
+cd ~/my-project
+devflow init
 
-# 2. Add a service
-devflow service add app-db --provider local --service-type postgres
-
-# 3. Install Git hooks (auto-create/switch on checkout)
-devflow install-hooks
-
-# 4. Enable shell integration (auto-cd into worktrees)
-eval "$(devflow shell-init)"
-
-# 5. Create a workspace
+# 2. Create your first workspace
 devflow switch -c feature/auth
 
-# 6. Check status and get connection info
+# 3. Get connection info
 devflow status
 devflow connection feature/auth --format env
 ```
@@ -61,9 +57,7 @@ Your feature workspace now has its own database. Schema changes, test data, and 
 
 ```bash
 cd ~/my-existing-project
-devflow init
-devflow service add app-db --provider local --service-type postgres
-devflow install-hooks
+devflow init    # Guided wizard offers service setup, hooks, and shell integration
 ```
 
 ### Seeding with data
@@ -85,7 +79,7 @@ Every workspace created from main inherits seeded data via Copy-on-Write.
 
 | Concept | Description |
 |---------|-------------|
-| **Workspace** | An isolated development environment tied to a Git ref. Each workspace can have its own services and optionally its own worktree directory. |
+| **Workspace** | An isolated development environment corresponding to a Git branch. Each workspace gets its own service instances and optionally its own worktree directory. (This is a devflow concept, not a built-in Git feature.) |
 | **Service** | A stateful backend (database, cache, queue) managed per workspace. Services are configured in `.devflow.yml`. |
 | **Worktree** | An optional Git worktree directory for a workspace, enabling true parallel development without stashing. |
 | **Provider** | The backend that manages service instances: Local (Docker), Neon, DBLab, Xata, or Plugin. |

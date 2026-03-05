@@ -51,6 +51,21 @@ impl ServicesTabComponent {
 impl Component for ServicesTabComponent {
     fn handle_key_event(&mut self, key: KeyEvent) -> Action {
         let count = self.service_count();
+
+        // 'a' to add a service works even when no services exist
+        if key.code == KeyCode::Char('a') {
+            return Action::ShowSelect {
+                title: "Add Service — select type".to_string(),
+                options: vec![
+                    "postgres    — PostgreSQL database".to_string(),
+                    "clickhouse  — ClickHouse analytics database".to_string(),
+                    "mysql       — MySQL database".to_string(),
+                    "generic     — Generic Docker container".to_string(),
+                ],
+                on_select: SelectTarget::AddServiceType,
+            };
+        }
+
         if count == 0 {
             return match key.code {
                 KeyCode::Char('r') => Action::Refresh,
@@ -125,6 +140,21 @@ impl Component for ServicesTabComponent {
                             workspace: ws.name.clone(),
                         };
                     }
+                }
+                Action::None
+            }
+            // Remove service config
+            KeyCode::Char('D') => {
+                if let Some(svc) = self.selected_entry() {
+                    let name = svc.name.clone();
+                    return Action::ShowConfirm {
+                        title: "Remove Service".to_string(),
+                        message: format!(
+                            "Remove service '{}' configuration? This does not destroy data.",
+                            name
+                        ),
+                        on_confirm: Box::new(Action::RemoveServiceConfig(name)),
+                    };
                 }
                 Action::None
             }
@@ -314,7 +344,7 @@ impl ServicesTabComponent {
 
         lines.push(Line::raw(""));
         lines.push(Line::styled(
-            "n/p:Workspace  S:Start  x:Stop  l:Logs  r:Refresh",
+            "a:Add  D:Remove  n/p:Workspace  S:Start  x:Stop  l:Logs  r:Refresh",
             Style::default().fg(theme::KEY_HINT),
         ));
 

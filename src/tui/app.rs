@@ -37,6 +37,12 @@ enum ModalState {
         input: String,
         target: InputTarget,
     },
+    Select {
+        title: String,
+        options: Vec<String>,
+        selected: usize,
+        on_select: SelectTarget,
+    },
 }
 
 /// Main TUI application
@@ -427,8 +433,8 @@ impl App {
 
     /// Handle key events, considering modal state.
     fn handle_key_event(&mut self, key: KeyEvent) -> Action {
-        // Modal takes priority
-        match &self.modal {
+        // Modal takes priority — use &mut self.modal for modals that need mutation
+        match &mut self.modal {
             ModalState::Help => {
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
@@ -445,29 +451,41 @@ impl App {
                     _ => Action::None,
                 };
             }
-            ModalState::Input { .. } => {
+            ModalState::Input { ref mut input, .. } => {
                 return match key.code {
                     KeyCode::Enter => {
-                        if let ModalState::Input { input, .. } = &self.modal {
-                            let text = input.clone();
-                            Action::SubmitInput(text)
-                        } else {
-                            Action::None
-                        }
+                        let text = input.clone();
+                        Action::SubmitInput(text)
                     }
                     KeyCode::Esc => Action::CancelInput,
                     KeyCode::Backspace => {
-                        if let ModalState::Input { ref mut input, .. } = self.modal {
-                            input.pop();
-                        }
+                        input.pop();
                         Action::None
                     }
                     KeyCode::Char(c) => {
-                        if let ModalState::Input { ref mut input, .. } = self.modal {
-                            input.push(c);
-                        }
+                        input.push(c);
                         Action::None
                     }
+                    _ => Action::None,
+                };
+            }
+            ModalState::Select {
+                ref options,
+                ref mut selected,
+                ..
+            } => {
+                let count = options.len();
+                return match key.code {
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        *selected = (*selected + 1) % count;
+                        Action::None
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        *selected = (*selected + count - 1) % count;
+                        Action::None
+                    }
+                    KeyCode::Enter => Action::SelectOption(*selected),
+                    KeyCode::Esc => Action::CancelSelect,
                     _ => Action::None,
                 };
             }
@@ -728,11 +746,199 @@ impl App {
                         InputTarget::FilterLogsPicker => {
                             self.logs.set_filter(text);
                         }
+                        InputTarget::AddServiceName { service_type } => {
+                            if !text.is_empty() {
+                                self.process_action(Action::AddServiceConfig {
+                                    service_type,
+                                    name: text,
+                                });
+                            }
+                        }
                     }
                 }
             }
             Action::CancelInput => {
                 self.modal = ModalState::None;
+            }
+            Action::ShowSelect {
+                title,
+                options,
+                on_select,
+            } => {
+                self.modal = ModalState::Select {
+                    title,
+                    options,
+                    selected: 0,
+                    on_select,
+                };
+            }
+            Action::SelectOption(idx) => {
+                if let ModalState::Select {
+                    options,
+                    on_select,
+                    ..
+                } = std::mem::replace(&mut self.modal, ModalState::None)
+                {
+                    if let Some(selected_value) = options.get(idx) {
+                        match on_select {
+                            SelectTarget::AddServiceType => {
+                                // Extract service type from label (e.g., "postgres" from "postgres — PostgreSQL database")
+                                let service_type = selected_value
+                                    .split_whitespace()
+                                    .next()
+                                    .unwrap_or("postgres")
+                                    .to_string();
+                                // Show name input next
+                                self.process_action(Action::ShowInput {
+                                    title: format!("Service name (type: {})", service_type),
+                                    on_submit: InputTarget::AddServiceName { service_type },
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            Action::CancelSelect => {
+                self.modal = ModalState::None;
+            }
+            Action::AddServiceConfig {
+                ref service_type,
+                ref name,
+            } => {
+                self.set_status(format!("Adding service '{}'...", name), false);
+                let config = self.context.config.clone();
+                let config_path = self
+                    .context
+                    .config_path
+                    .clone()
+                    .unwrap_or_else(|| std::env::current_dir().unwrap().join(".devflow.yml"));
+                let svc_type = service_type.clone();
+                let svc_name = name.clone();
+                let tx = self.bg_tx.clone();
+                tokio::spawn(async move {
+                    let result: anyhow::Result<()> = async {
+                        let is_local = true; // TUI always creates local services
+                        let named_cfg = devflow_core::config::NamedServiceConfig {
+                            name: svc_name.clone(),
+                            provider_type: "local".to_string(),
+                            service_type: svc_type.clone(),
+                            auto_workspace: devflow_core::config::default_auto_branch(),
+                            default: false,
+                            local: if is_local {
+                                Some(devflow_core::config::LocalServiceConfig {
+                                    image: None,
+                                    data_root: None,
+                                    storage: None,
+                                    port_range_start: None,
+                                    postgres_user: None,
+                                    postgres_password: None,
+                                    postgres_db: None,
+                                })
+                            } else {
+                                None
+                            },
+                            neon: None,
+                            dblab: None,
+                            xata: None,
+                            clickhouse: if svc_type == "clickhouse" {
+                                Some(devflow_core::config::ClickHouseConfig {
+                                    image: "clickhouse/clickhouse-server:latest".to_string(),
+                                    port_range_start: None,
+                                    data_root: None,
+                                    user: "default".to_string(),
+                                    password: None,
+                                })
+                            } else {
+                                None
+                            },
+                            mysql: if svc_type == "mysql" {
+                                Some(devflow_core::config::MySQLConfig {
+                                    image: "mysql:8".to_string(),
+                                    port_range_start: None,
+                                    data_root: None,
+                                    root_password: "dev".to_string(),
+                                    database: None,
+                                    user: None,
+                                    password: None,
+                                })
+                            } else {
+                                None
+                            },
+                            generic: None,
+                            plugin: None,
+                        };
+
+                        let mut state = devflow_core::state::LocalStateManager::new()?;
+                        state.add_service(&config_path, named_cfg.clone(), false)?;
+
+                        // Create main workspace for local providers
+                        if is_local {
+                            let mut config_with_service = config.clone();
+                            if let Some(state_services) = state.get_services(&config_path) {
+                                config_with_service.services = Some(state_services);
+                            }
+                            match devflow_core::services::factory::create_provider_from_named_config(
+                                &config_with_service,
+                                &named_cfg,
+                            )
+                            .await
+                            {
+                                Ok(be) => {
+                                    if let Err(e) = be.create_workspace("main", None).await {
+                                        log::warn!("Could not create main workspace: {}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    log::warn!("Could not initialize service: {}", e);
+                                }
+                            }
+                        }
+
+                        Ok(())
+                    }
+                    .await;
+
+                    match result {
+                        Ok(()) => {
+                            let _ = tx.send(Action::OperationComplete {
+                                success: true,
+                                message: format!("Service '{}' added", svc_name),
+                            });
+                            let _ = tx.send(Action::Refresh);
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Action::Error(format!(
+                                "Failed to add service: {}",
+                                e
+                            )));
+                        }
+                    }
+                });
+            }
+            Action::RemoveServiceConfig(ref name) => {
+                let config_path = self
+                    .context
+                    .config_path
+                    .clone()
+                    .unwrap_or_else(|| std::env::current_dir().unwrap().join(".devflow.yml"));
+                match devflow_core::state::LocalStateManager::new() {
+                    Ok(mut state) => match state.remove_service(&config_path, name) {
+                        Ok(()) => {
+                            self.set_status(format!("Removed service '{}'", name), false);
+                            self.context.refresh_vcs_snapshot();
+                            self.load_initial_data();
+                        }
+                        Err(e) => {
+                            self.set_status(
+                                format!("Failed to remove service: {}", e),
+                                true,
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        self.set_status(format!("Failed to load state: {}", e), true);
+                    }
+                }
             }
             Action::DataLoaded(ref _payload) => {
                 self.dispatch_action(&action);
@@ -905,6 +1111,14 @@ impl App {
             }
             ModalState::Input { title, input, .. } => {
                 help::render_input(frame, title, input);
+            }
+            ModalState::Select {
+                title,
+                options,
+                selected,
+                ..
+            } => {
+                help::render_select(frame, title, options, *selected);
             }
             ModalState::None => {}
         }

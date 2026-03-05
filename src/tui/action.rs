@@ -35,6 +35,15 @@ pub enum Action {
     /// Sent by background tasks back to the main thread.
     DeleteVcsBranch(String),
 
+    // ── Service config actions ──
+    /// Add a new service configuration (triggers wizard flow)
+    AddServiceConfig {
+        service_type: String,
+        name: String,
+    },
+    /// Remove a service configuration
+    RemoveServiceConfig(String),
+
     // ── Service actions ──
     StartService {
         service: String,
@@ -82,6 +91,15 @@ pub enum Action {
     SubmitInput(String),
     CancelInput,
 
+    // ── Select dialog ──
+    ShowSelect {
+        title: String,
+        options: Vec<String>,
+        on_select: SelectTarget,
+    },
+    SelectOption(usize),
+    CancelSelect,
+
     // ── Misc ──
     None,
 }
@@ -92,6 +110,15 @@ pub enum InputTarget {
     CreateBranch { from: Option<String> },
     FilterBranches,
     FilterLogsPicker,
+    /// Name input for a new service (service_type already selected)
+    AddServiceName { service_type: String },
+}
+
+/// Where to send select dialog results.
+#[derive(Debug, Clone)]
+pub enum SelectTarget {
+    /// User is picking a service type to add
+    AddServiceType,
 }
 
 /// Async data payloads that come back from background tasks.

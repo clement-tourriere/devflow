@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   listProjects,
@@ -29,6 +29,7 @@ function basenameFromPath(path: string): string {
 }
 
 function ProjectList() {
+  const navigate = useNavigate();
   const [projects, setProjects] = useState<ProjectRow[]>([]);
   const [removeTarget, setRemoveTarget] = useState<string | null>(null);
 
@@ -138,8 +139,9 @@ function ProjectList() {
       // Pass VCS preference only when no VCS already exists
       const vcsPref = vcsInfo?.existing_vcs ? undefined : selectedVcs;
       await addOrInitProject(selectedPath, normalized, vcsPref, branchingMode === "worktree");
+      const setupPath = `/projects/${encodeURIComponent(selectedPath)}/setup`;
       handleModalClose();
-      await loadProjects();
+      navigate(setupPath);
     } catch (e) {
       setModalError(`${e}`);
     } finally {

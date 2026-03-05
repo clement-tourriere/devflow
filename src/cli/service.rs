@@ -16,6 +16,278 @@ pub(super) enum ServiceAggregation {
     Capabilities,
 }
 
+/// Reusable interactive service-add wizard.
+///
+/// Walks the user through service type, provider, Docker discovery, and name selection.
+/// Returns the created `NamedServiceConfig` on success, or `None` if cancelled.
+/// In non-interactive/JSON mode, requires explicit parameters.
+pub(crate) async fn run_add_service_wizard(
+    config: &mut Config,
+    config_path: &std::path::PathBuf,
+    non_interactive: bool,
+    json_output: bool,
+    from: Option<&str>,
+) -> Result<Option<devflow_core::config::NamedServiceConfig>> {
+    // 1. Service type selection
+    let service_type = if non_interactive || json_output {
+        devflow_core::config::default_service_type()
+    } else {
+        use inquire::Select;
+        let service_types = vec![
+            "postgres    — PostgreSQL database",
+            "clickhouse  — ClickHouse analytics database",
+            "mysql       — MySQL database",
+            "generic     — Generic Docker container",
+            "plugin      — External plugin",
+        ];
+        let selection = Select::new("What type of service?", service_types)
+            .with_help_message("Use arrow keys to navigate, Enter to select")
+            .prompt();
+        match selection {
+            Ok(s) => s
+                .split_whitespace()
+                .next()
+                .unwrap_or("postgres")
+                .to_string(),
+            Err(
+                inquire::InquireError::OperationCanceled
+                | inquire::InquireError::OperationInterrupted,
+            ) => {
+                return Ok(None);
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
+
+    // 2. Provider selection
+    let provider_type = if non_interactive || json_output {
+        "local".to_string()
+    } else {
+        use inquire::Select;
+        let provider_options: Vec<&str> = match service_type.as_str() {
+            "postgres" => vec![
+                "local               — Docker container on this machine",
+                "neon                 — Neon serverless Postgres (cloud)",
+                "dblab               — Database Lab Engine (clone-based branching)",
+                "xata                — Xata serverless database (cloud)",
+            ],
+            "clickhouse" => vec![
+                "local               — Docker container on this machine",
+            ],
+            "mysql" => vec![
+                "local               — Docker container on this machine",
+            ],
+            "generic" => vec![
+                "local               — Docker container on this machine",
+            ],
+            "plugin" => vec![
+                "local               — Managed by plugin",
+            ],
+            _ => vec![
+                "local               — Docker container on this machine",
+            ],
+        };
+
+        if provider_options.len() == 1 {
+            let only = provider_options[0]
+                .split_whitespace()
+                .next()
+                .unwrap_or("local")
+                .to_string();
+            println!("Provider: {}", only);
+            only
+        } else {
+            let selection = Select::new("Which provider?", provider_options)
+                .with_help_message("Use arrow keys to navigate, Enter to select")
+                .prompt();
+            match selection {
+                Ok(s) => s.split_whitespace().next().unwrap_or("local").to_string(),
+                Err(
+                    inquire::InquireError::OperationCanceled
+                    | inquire::InquireError::OperationInterrupted,
+                ) => {
+                    return Ok(None);
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    };
+
+    // 2.5. Docker container discovery
+    let discovered = offer_discovered_containers(&service_type, non_interactive, json_output).await;
+
+    // 3. Service name
+    let name = if non_interactive || json_output {
+        match service_type.as_str() {
+            "clickhouse" => "analytics".to_string(),
+            "mysql" => "mysql".to_string(),
+            "generic" => "app".to_string(),
+            "plugin" => "plugin".to_string(),
+            _ => "db".to_string(),
+        }
+    } else {
+        use inquire::Text;
+        let default_name = if let Some((_, _, ref disc_name)) = discovered {
+            disc_name.as_str()
+        } else {
+            match service_type.as_str() {
+                "clickhouse" => "analytics",
+                "mysql" => "mysql",
+                "generic" => "app",
+                "plugin" => "plugin",
+                _ => "db",
+            }
+        };
+        let input = Text::new("Service name:")
+            .with_default(default_name)
+            .with_help_message("A short identifier for this service (e.g. db, analytics)")
+            .prompt();
+        match input {
+            Ok(n) if n.trim().is_empty() => default_name.to_string(),
+            Ok(n) => n.trim().to_string(),
+            Err(
+                inquire::InquireError::OperationCanceled
+                | inquire::InquireError::OperationInterrupted,
+            ) => {
+                return Ok(None);
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
+
+    let is_local = services::factory::ProviderType::is_local(&provider_type);
+
+    let discovered_image = discovered.as_ref().map(|(img, _, _)| img.clone());
+    let discovered_seed = discovered.as_ref().map(|(_, seed, _)| seed.clone());
+
+    // Build named service config
+    let named_cfg = devflow_core::config::NamedServiceConfig {
+        name: name.clone(),
+        provider_type: provider_type.clone(),
+        service_type: service_type.clone(),
+        auto_workspace: devflow_core::config::default_auto_branch(),
+        default: false,
+        local: if is_local {
+            Some(devflow_core::config::LocalServiceConfig {
+                image: discovered_image.clone(),
+                data_root: None,
+                storage: None,
+                port_range_start: None,
+                postgres_user: None,
+                postgres_password: None,
+                postgres_db: None,
+            })
+        } else {
+            None
+        },
+        neon: None,
+        dblab: None,
+        xata: None,
+        clickhouse: if service_type == "clickhouse" {
+            Some(devflow_core::config::ClickHouseConfig {
+                image: discovered_image.clone().unwrap_or_else(|| "clickhouse/clickhouse-server:latest".to_string()),
+                port_range_start: None,
+                data_root: None,
+                user: "default".to_string(),
+                password: None,
+            })
+        } else {
+            None
+        },
+        mysql: if service_type == "mysql" {
+            Some(devflow_core::config::MySQLConfig {
+                image: discovered_image.unwrap_or_else(|| "mysql:8".to_string()),
+                port_range_start: None,
+                data_root: None,
+                root_password: "dev".to_string(),
+                database: None,
+                user: None,
+                password: None,
+            })
+        } else {
+            None
+        },
+        generic: None,
+        plugin: None,
+    };
+
+    // Store service in local state
+    let mut state = LocalStateManager::new()?;
+    state.add_service(config_path, named_cfg.clone(), false)?;
+    if !json_output {
+        println!("Added service '{}' ({})", name, service_type);
+    }
+
+    // Use explicit seed source or discovered container's connection URL
+    let effective_seed = from.map(|s| s.to_string()).or(discovered_seed);
+
+    // Create main workspace for local providers
+    if is_local {
+        let mut config_with_service = config.clone();
+        if let Some(state_services) = state.get_services(config_path) {
+            config_with_service.services = Some(state_services);
+        }
+
+        #[cfg(feature = "service-local")]
+        if cfg!(target_os = "linux") {
+            if let Some(data_root) =
+                super::init::attempt_zfs_auto_setup(non_interactive, json_output).await
+            {
+                let mut updated_cfg = named_cfg.clone();
+                if let Some(ref mut local) = updated_cfg.local {
+                    local.data_root = Some(data_root);
+                }
+                if let Err(e) =
+                    state.add_service(config_path, updated_cfg.clone(), true)
+                {
+                    log::warn!(
+                        "Failed to persist updated service config in local state: {}",
+                        e
+                    );
+                }
+                if let Some(state_services) = state.get_services(config_path) {
+                    config_with_service.services = Some(state_services);
+                }
+                super::init::init_local_service_main(
+                    &config_with_service,
+                    &updated_cfg,
+                    effective_seed.as_deref(),
+                    json_output,
+                )
+                .await;
+            } else {
+                super::init::init_local_service_main(
+                    &config_with_service,
+                    &named_cfg,
+                    effective_seed.as_deref(),
+                    json_output,
+                )
+                .await;
+            }
+        } else {
+            super::init::init_local_service_main(
+                &config_with_service,
+                &named_cfg,
+                effective_seed.as_deref(),
+                json_output,
+            )
+            .await;
+        }
+        #[cfg(not(feature = "service-local"))]
+        {
+            super::init::init_local_service_main(
+                &config_with_service,
+                &named_cfg,
+                effective_seed.as_deref(),
+                json_output,
+            )
+            .await;
+        }
+    }
+
+    Ok(Some(named_cfg))
+}
+
 pub(super) async fn handle_service_dispatch(
     action: super::ServiceCommands,
     config: &mut Config,
@@ -37,282 +309,138 @@ pub(super) async fn handle_service_dispatch(
                 .clone()
                 .unwrap_or_else(|| std::env::current_dir().unwrap().join(".devflow.yml"));
 
-            // --- Interactive wizard when flags are missing ---
-
-            // 1. Service type selection
-            let service_type = if let Some(st) = service_type {
-                st
-            } else if non_interactive || json_output {
-                devflow_core::config::default_service_type()
-            } else {
-                use inquire::Select;
-                let service_types = vec![
-                    "postgres    — PostgreSQL database",
-                    "clickhouse  — ClickHouse analytics database",
-                    "mysql       — MySQL database",
-                    "generic     — Generic Docker container",
-                    "plugin      — External plugin",
-                ];
-                let selection = Select::new("What type of service?", service_types)
-                    .with_help_message("Use arrow keys to navigate, Enter to select")
-                    .prompt();
-                match selection {
-                    Ok(s) => s
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or("postgres")
-                        .to_string(),
-                    Err(
-                        inquire::InquireError::OperationCanceled
-                        | inquire::InquireError::OperationInterrupted,
-                    ) => {
-                        println!("Cancelled.");
-                        return Ok(());
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            };
-
-            // 2. Provider selection (choices depend on service type)
-            let provider_type = if let Some(p) = provider {
-                p
-            } else if non_interactive || json_output {
-                "local".to_string()
-            } else {
-                use inquire::Select;
-                let provider_options: Vec<&str> = match service_type.as_str() {
-                    "postgres" => vec![
-                        "local               — Docker container on this machine",
-                        "neon                 — Neon serverless Postgres (cloud)",
-                        "dblab               — Database Lab Engine (clone-based branching)",
-                        "xata                — Xata serverless database (cloud)",
-                    ],
-                    "clickhouse" => vec![
-                        "local               — Docker container on this machine",
-                    ],
-                    "mysql" => vec![
-                        "local               — Docker container on this machine",
-                    ],
-                    "generic" => vec![
-                        "local               — Docker container on this machine",
-                    ],
-                    "plugin" => vec![
-                        "local               — Managed by plugin",
-                    ],
-                    _ => vec![
-                        "local               — Docker container on this machine",
-                    ],
-                };
-
-                if provider_options.len() == 1 {
-                    // Only one option, auto-select but inform the user
-                    let only = provider_options[0]
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or("local")
-                        .to_string();
-                    println!("Provider: {}", only);
-                    only
+            // When explicit flags are provided, use them directly; otherwise delegate to wizard
+            if name.is_some() || provider.is_some() || service_type.is_some() {
+                // Direct mode with explicit flags — keep existing behavior for CLI power users
+                let service_type = service_type.unwrap_or_else(devflow_core::config::default_service_type);
+                let provider_type = provider.unwrap_or_else(|| "local".to_string());
+                let name = if let Some(n) = name {
+                    n
+                } else if non_interactive || json_output {
+                    anyhow::bail!("Service name is required in non-interactive mode. Usage: devflow service add <name>");
                 } else {
-                    let selection = Select::new("Which provider?", provider_options)
-                        .with_help_message("Use arrow keys to navigate, Enter to select")
-                        .prompt();
-                    match selection {
-                        Ok(s) => s.split_whitespace().next().unwrap_or("local").to_string(),
-                        Err(
-                            inquire::InquireError::OperationCanceled
-                            | inquire::InquireError::OperationInterrupted,
-                        ) => {
-                            println!("Cancelled.");
-                            return Ok(());
-                        }
-                        Err(e) => return Err(e.into()),
-                    }
-                }
-            };
-
-            // 2.5. Docker container discovery (pre-fill defaults when applicable)
-            let discovered = offer_discovered_containers(&service_type, non_interactive, json_output).await;
-
-            // 3. Service name
-            let name = if let Some(n) = name {
-                n
-            } else if non_interactive || json_output {
-                anyhow::bail!("Service name is required in non-interactive mode. Usage: devflow service add <name>");
-            } else {
-                use inquire::Text;
-                let default_name = if let Some((_, _, ref disc_name)) = discovered {
-                    disc_name.as_str()
-                } else {
-                    match service_type.as_str() {
+                    use inquire::Text;
+                    let default_name = match service_type.as_str() {
                         "clickhouse" => "analytics",
                         "mysql" => "mysql",
                         "generic" => "app",
                         "plugin" => "plugin",
                         _ => "db",
-                    }
+                    };
+                    Text::new("Service name:")
+                        .with_default(default_name)
+                        .prompt()
+                        .unwrap_or_else(|_| default_name.to_string())
                 };
-                let input = Text::new("Service name:")
-                    .with_default(default_name)
-                    .with_help_message("A short identifier for this service (e.g. db, analytics)")
-                    .prompt();
-                match input {
-                    Ok(n) if n.trim().is_empty() => default_name.to_string(),
-                    Ok(n) => n.trim().to_string(),
-                    Err(
-                        inquire::InquireError::OperationCanceled
-                        | inquire::InquireError::OperationInterrupted,
-                    ) => {
-                        println!("Cancelled.");
-                        return Ok(());
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            };
 
-            let is_local = services::factory::ProviderType::is_local(&provider_type);
-
-            // Apply discovered container image if available
-            let discovered_image = discovered.as_ref().map(|(img, _, _)| img.clone());
-            let discovered_seed = discovered.as_ref().map(|(_, seed, _)| seed.clone());
-
-            // Build named service config
-            let named_cfg = devflow_core::config::NamedServiceConfig {
-                name: name.clone(),
-                provider_type: provider_type.clone(),
-                service_type: service_type.clone(),
-                auto_workspace: devflow_core::config::default_auto_branch(),
-                default: false,
-                local: if is_local {
-                    Some(devflow_core::config::LocalServiceConfig {
-                        image: discovered_image.clone(),
-                        data_root: None,
-                        storage: None,
-                        port_range_start: None,
-                        postgres_user: None,
-                        postgres_password: None,
-                        postgres_db: None,
-                    })
-                } else {
-                    None
-                },
-                neon: None,
-                dblab: None,
-                xata: None,
-                clickhouse: if service_type == "clickhouse" {
-                    Some(devflow_core::config::ClickHouseConfig {
-                        image: discovered_image.clone().unwrap_or_else(|| "clickhouse/clickhouse-server:latest".to_string()),
-                        port_range_start: None,
-                        data_root: None,
-                        user: "default".to_string(),
-                        password: None,
-                    })
-                } else {
-                    None
-                },
-                mysql: if service_type == "mysql" {
-                    Some(devflow_core::config::MySQLConfig {
-                        image: discovered_image.unwrap_or_else(|| "mysql:8".to_string()),
-                        port_range_start: None,
-                        data_root: None,
-                        root_password: "dev".to_string(),
-                        database: None,
-                        user: None,
-                        password: None,
-                    })
-                } else {
-                    None
-                },
-                generic: None,
-                plugin: None,
-            };
-
-            // Store service in local state
-            let mut state = LocalStateManager::new()?;
-            state.add_service(&config_path_buf, named_cfg.clone(), force)?;
-            if !json_output {
-                println!("Added service '{}' to local state", name);
-            }
-
-            // Use explicit seed source or discovered container's connection URL
-            let effective_seed = from.or(discovered_seed);
-
-            // Create main workspace for local providers
-            if is_local {
-                // Build a config with the service injected so the factory can find it
-                let mut config_with_service = config.clone();
-                if let Some(state_services) = state.get_services(&config_path_buf) {
-                    config_with_service.services = Some(state_services);
-                }
-
-                // On Linux, offer ZFS auto-setup before creating the main workspace
-                #[cfg(feature = "service-local")]
-                if cfg!(target_os = "linux") {
-                    if let Some(data_root) =
-                        super::init::attempt_zfs_auto_setup(non_interactive, json_output).await
-                    {
-                        let mut updated_cfg = named_cfg.clone();
-                        if let Some(ref mut local) = updated_cfg.local {
-                            local.data_root = Some(data_root);
-                        }
-                        if let Err(e) =
-                            state.add_service(&config_path_buf, updated_cfg.clone(), true)
-                        {
-                            log::warn!(
-                                "Failed to persist updated service config in local state: {}",
-                                e
-                            );
-                        }
-                        if let Some(state_services) = state.get_services(&config_path_buf) {
-                            config_with_service.services = Some(state_services);
-                        }
-                        super::init::init_local_service_main(
-                            &config_with_service,
-                            &updated_cfg,
-                            effective_seed.as_deref(),
-                            json_output,
-                        )
-                        .await;
+                let is_local = services::factory::ProviderType::is_local(&provider_type);
+                let named_cfg = devflow_core::config::NamedServiceConfig {
+                    name: name.clone(),
+                    provider_type: provider_type.clone(),
+                    service_type: service_type.clone(),
+                    auto_workspace: devflow_core::config::default_auto_branch(),
+                    default: false,
+                    local: if is_local {
+                        Some(devflow_core::config::LocalServiceConfig {
+                            image: None,
+                            data_root: None,
+                            storage: None,
+                            port_range_start: None,
+                            postgres_user: None,
+                            postgres_password: None,
+                            postgres_db: None,
+                        })
                     } else {
-                        super::init::init_local_service_main(
-                            &config_with_service,
-                            &named_cfg,
-                            effective_seed.as_deref(),
-                            json_output,
-                        )
-                        .await;
+                        None
+                    },
+                    neon: None,
+                    dblab: None,
+                    xata: None,
+                    clickhouse: if service_type == "clickhouse" {
+                        Some(devflow_core::config::ClickHouseConfig {
+                            image: "clickhouse/clickhouse-server:latest".to_string(),
+                            port_range_start: None,
+                            data_root: None,
+                            user: "default".to_string(),
+                            password: None,
+                        })
+                    } else {
+                        None
+                    },
+                    mysql: if service_type == "mysql" {
+                        Some(devflow_core::config::MySQLConfig {
+                            image: "mysql:8".to_string(),
+                            port_range_start: None,
+                            data_root: None,
+                            root_password: "dev".to_string(),
+                            database: None,
+                            user: None,
+                            password: None,
+                        })
+                    } else {
+                        None
+                    },
+                    generic: None,
+                    plugin: None,
+                };
+
+                let mut state = LocalStateManager::new()?;
+                state.add_service(&config_path_buf, named_cfg.clone(), force)?;
+                if !json_output {
+                    println!("Added service '{}' to local state", name);
+                }
+
+                if is_local {
+                    let mut config_with_service = config.clone();
+                    if let Some(state_services) = state.get_services(&config_path_buf) {
+                        config_with_service.services = Some(state_services);
+                    }
+                    super::init::init_local_service_main(
+                        &config_with_service,
+                        &named_cfg,
+                        from.as_deref(),
+                        json_output,
+                    )
+                    .await;
+                }
+
+                if json_output {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "status": "ok",
+                            "action": "add_service",
+                            "name": name,
+                            "provider_type": provider_type,
+                        }))?
+                    );
+                }
+            } else {
+                // Interactive wizard mode
+                let result = run_add_service_wizard(
+                    config,
+                    &config_path_buf,
+                    non_interactive,
+                    json_output,
+                    from.as_deref(),
+                )
+                .await?;
+
+                if let Some(ref cfg) = result {
+                    if json_output {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "status": "ok",
+                                "action": "add_service",
+                                "name": cfg.name,
+                                "provider_type": cfg.provider_type,
+                            }))?
+                        );
                     }
                 } else {
-                    super::init::init_local_service_main(
-                        &config_with_service,
-                        &named_cfg,
-                        effective_seed.as_deref(),
-                        json_output,
-                    )
-                    .await;
+                    println!("Cancelled.");
                 }
-                #[cfg(not(feature = "service-local"))]
-                {
-                    super::init::init_local_service_main(
-                        &config_with_service,
-                        &named_cfg,
-                        effective_seed.as_deref(),
-                        json_output,
-                    )
-                    .await;
-                }
-            }
-
-            if json_output {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "status": "ok",
-                        "action": "add_service",
-                        "name": name,
-                        "provider_type": provider_type,
-                    }))?
-                );
             }
         }
         super::ServiceCommands::Remove { name } => {

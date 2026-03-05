@@ -203,6 +203,43 @@ pub fn render_input(frame: &mut Frame, title: &str, input: &str) {
     frame.render_widget(paragraph, area);
 }
 
+/// Render a selection dialog overlay.
+pub fn render_select(frame: &mut Frame, title: &str, options: &[String], selected: usize) {
+    let height = (options.len() as u16 + 5).min(20);
+    let area = centered_rect(50, height.max(8) as u16, frame.area());
+    frame.render_widget(Clear, area);
+
+    let mut lines = vec![Line::raw("")];
+    for (i, option) in options.iter().enumerate() {
+        let marker = if i == selected { "> " } else { "  " };
+        let style = if i == selected {
+            Style::default()
+                .fg(theme::TEXT_PRIMARY)
+                .bold()
+        } else {
+            Style::default().fg(theme::TEXT_SECONDARY)
+        };
+        lines.push(Line::styled(format!("  {}{}", marker, option), style));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "  j/k:Navigate  Enter:Select  Esc:Cancel",
+        Style::default().fg(theme::TEXT_MUTED),
+    ));
+
+    let paragraph = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::DIALOG_INPUT_BORDER))
+                .title(format!(" {} ", title))
+                .title_style(Style::default().fg(theme::DIALOG_INPUT_BORDER).bold()),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(paragraph, area);
+}
+
 /// Render a status bar / notification at the bottom.
 ///
 /// When a status message is active, shows the message prominently on the left

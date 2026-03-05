@@ -870,6 +870,35 @@ impl Component for WorkspacesComponent {
             return;
         }
 
+        // No-config detection: if no workspaces loaded, show helpful message
+        if self.data.is_some() && self.tree_rows.is_empty() && self.filter.is_empty() {
+            let msg = Paragraph::new(vec![
+                Line::raw(""),
+                Line::styled(
+                    " No devflow project found.",
+                    Style::default().fg(theme::TEXT_PRIMARY).bold(),
+                ),
+                Line::raw(""),
+                Line::styled(
+                    " Run 'devflow init' to get started.",
+                    Style::default().fg(theme::TEXT_SECONDARY),
+                ),
+                Line::raw(""),
+                Line::styled(
+                    " Press 'c' to create a workspace, or 'q' to quit.",
+                    Style::default().fg(theme::TEXT_MUTED),
+                ),
+            ])
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme::BORDER_ACTIVE))
+                    .title(" Environments "),
+            );
+            frame.render_widget(msg, area);
+            return;
+        }
+
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
