@@ -54,9 +54,11 @@ pub fn generate_claude_skill(config: &Config, _project_dir: &Path) -> Result<Str
     skill.push_str("```bash\n");
     skill.push_str("# Switch to a workspace (creates isolated services)\n");
     skill.push_str("devflow switch -c <workspace-name>\n\n");
-    skill.push_str("# Get connection info\n");
-    skill.push_str("devflow connection <workspace-name>\n");
-    skill.push_str("devflow --json connection <workspace-name>\n\n");
+    if !services.is_empty() {
+        skill.push_str("# Get connection info\n");
+        skill.push_str("devflow connection <workspace-name>\n");
+        skill.push_str("devflow --json connection <workspace-name>\n\n");
+    }
     skill.push_str("# Show current status\n");
     skill.push_str("devflow status\n\n");
     skill.push_str("# AI-powered commit\n");
@@ -118,10 +120,18 @@ pub fn generate_claude_skill(config: &Config, _project_dir: &Path) -> Result<Str
     );
     skill.push_str("   [ -n \"$WORKTREE\" ] && cd \"$WORKTREE\"\n");
     skill.push_str("   ```\n");
-    skill.push_str("3. Get connection info: `devflow --json connection agent/<task-id>`\n");
-    skill.push_str("4. Do your work in the isolated environment\n");
-    skill.push_str("5. Commit with AI message: `devflow commit --ai`\n");
-    skill.push_str("6. Clean up when done: `devflow remove agent/<task-id>`\n\n");
+    if !services.is_empty() {
+        skill.push_str(
+            "3. Get connection info: `devflow --json connection agent/<task-id>`\n",
+        );
+        skill.push_str("4. Do your work in the isolated environment\n");
+        skill.push_str("5. Commit with AI message: `devflow commit --ai`\n");
+        skill.push_str("6. Clean up when done: `devflow remove agent/<task-id>`\n\n");
+    } else {
+        skill.push_str("3. Do your work in the isolated environment\n");
+        skill.push_str("4. Commit with AI message: `devflow commit --ai`\n");
+        skill.push_str("5. Clean up when done: `devflow remove agent/<task-id>`\n\n");
+    }
 
     // Flags for automation
     skill.push_str("## Automation Flags\n\n");
@@ -213,6 +223,7 @@ description: Switch to an existing devflow workspace and its isolated services.
 3. Parse the JSON output and check for `worktree_path` — if present, change your working directory to it
 4. Verify the switch succeeded with `devflow status`
 5. If the workspace has services, retrieve connection info with `devflow --json connection $ARGUMENTS`
+   - If this returns `"services": "none_configured"`, the project uses workspaces without database services — skip this step
 6. Report the new workspace state and any connection strings to the user
 
 Always use `--json --non-interactive` when running as an agent. Do NOT use `--no-verify` — it skips all lifecycle hooks (e.g. migrations, env setup) which are usually needed.
@@ -260,7 +271,8 @@ description: Create a new devflow workspace with isolated services for a task or
 3. **Parse the JSON output** to check for `worktree_path`:
    - If `worktree_path` is present, **change your working directory** to it — this is where you should do all subsequent work
    - If `worktree_created` is `true`, a new worktree was just created for this workspace
-4. Retrieve connection info with `devflow --json connection $ARGUMENTS`
+4. If the project has database services, retrieve connection info with `devflow --json connection $ARGUMENTS`
+   - If this returns `"services": "none_configured"`, the project uses workspaces without database services — skip this step
 5. Report the new workspace details including service connection strings to the user
 
 Use a descriptive name like `feature/auth-refactor` or `agent/task-123` for the workspace.

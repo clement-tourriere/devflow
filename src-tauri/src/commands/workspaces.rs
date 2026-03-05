@@ -150,7 +150,11 @@ pub async fn get_connection_info(
 
         serde_json::to_value(&info).map_err(|e| e.to_string())
     } else {
-        Err("No services configured".to_string())
+        Ok(serde_json::json!({
+            "status": "ok",
+            "services": "none_configured",
+            "message": "No services configured for this project"
+        }))
     }
 }
 

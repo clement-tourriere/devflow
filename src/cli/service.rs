@@ -652,20 +652,27 @@ pub(super) async fn handle_service_provider_command(
     database_name: Option<&str>,
     config_path: &Option<std::path::PathBuf>,
 ) -> Result<()> {
-    if matches!(&cmd, super::ServiceCommands::Cleanup { .. })
-        && config.resolve_services().is_empty()
+    if matches!(
+        &cmd,
+        super::ServiceCommands::Cleanup { .. } | super::ServiceCommands::Connection { .. }
+    ) && config.resolve_services().is_empty()
     {
         if json_output {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "status": "ok",
-                    "services": "none_configured",
-                    "deleted": [],
-                }))?
-            );
-        } else {
+            let mut obj = serde_json::json!({
+                "status": "ok",
+                "services": "none_configured",
+            });
+            if matches!(&cmd, super::ServiceCommands::Cleanup { .. }) {
+                obj["deleted"] = serde_json::json!([]);
+            }
+            if matches!(&cmd, super::ServiceCommands::Connection { .. }) {
+                obj["message"] = serde_json::json!("No services configured for this project");
+            }
+            println!("{}", serde_json::to_string_pretty(&obj)?);
+        } else if matches!(&cmd, super::ServiceCommands::Cleanup { .. }) {
             println!("No services configured. Nothing to clean up.");
+        } else {
+            println!("No services configured. This project uses workspaces without database services.");
         }
         return Ok(());
     }
