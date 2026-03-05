@@ -4,7 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>devflow — Universal Development Environment Tool</title>
-<meta name="description" content="Isolated dev environments for every Git workspace — automatically. Worktrees, databases, caches, and stateful services that sync with your Git workflow.">
+<meta name="description" content="Branch your code, branch everything else too. devflow gives every Git branch its own databases, caches, and services — cloned instantly via Copy-on-Write.">
+<link rel="icon" type="image/png" href="icon.png">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" id="hljs-light">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" id="hljs-dark" disabled>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
@@ -239,9 +240,9 @@ body {
   line-height: 1.5;
 }
 .hero-features {
-  display: flex;
-  gap: 24px;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
   margin-bottom: 40px;
 }
 .hero-feature {
@@ -527,7 +528,7 @@ tr:hover td { background: var(--bg-alt); }
   .hero { padding: 60px 24px 40px; }
   .hero h1 { font-size: 32px; }
   .section { padding: 40px 24px; }
-  .hero-features { flex-direction: column; }
+  .hero-features { grid-template-columns: 1fr; }
 }
 @media (max-width: 600px) {
   .card-grid { grid-template-columns: 1fr; }
@@ -584,7 +585,7 @@ hr {
     <div class="nav-group">Getting Started</div>
     <a href="#getting-started">Quick Start</a>
     <a href="#installation" class="nav-sub">Installation</a>
-    <a href="#first-workspace" class="nav-sub">Your First Workspace</a>
+    <a href="#adding-services" class="nav-sub">Adding Services</a>
     <a href="#shell-integration" class="nav-sub">Shell Integration</a>
     <a href="#existing-project" class="nav-sub">Existing Project</a>
     <a href="#mise" class="nav-sub">Using mise</a>
@@ -618,6 +619,7 @@ hr {
     <a href="#desktop-gui">Desktop GUI</a>
     <a href="#tui-dashboard">TUI Dashboard</a>
     <a href="#ai-automation">AI &amp; Automation</a>
+    <a href="#agent-skills" class="nav-sub">Agent Skills</a>
     <a href="#agent-integration" class="nav-sub">Agent Integration</a>
     <a href="#vcs-support">VCS Support</a>
 
@@ -633,46 +635,45 @@ hr {
 
 <!-- ===== HERO ===== -->
 <section class="hero" id="hero">
-  <h1>Isolated dev environments for<br>every Git workspace &mdash; <span>automatically</span>.</h1>
+  <h1>Branch your code.<br><span>Branch everything else too.</span></h1>
   <p class="tagline">
-    devflow gives each Git workspace its own worktree, databases, caches, and stateful services.
-    Isolate your entire development environment with a single command.
+    devflow gives every branch its own databases, caches, and services &mdash; cloned instantly via Copy-on-Write.
+    Switch branches and your entire stack switches with you, automatically.
   </p>
 
   <div class="hero-features">
     <div class="hero-feature">
-      <div class="icon blue">&#9881;</div>
-      <div><strong>Automatic</strong><br>Git hooks create and switch environments on checkout</div>
+      <div class="icon blue"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div>
+      <div><strong>Automatic</strong><br>Git hooks sync your entire stack on checkout</div>
     </div>
     <div class="hero-feature">
-      <div class="icon green">&#9889;</div>
-      <div><strong>Instant</strong><br>Copy-on-Write cloning &mdash; workspace a 50GB database in seconds</div>
+      <div class="icon green"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
+      <div><strong>Instant</strong><br>Copy-on-Write &mdash; clone a 50 GB database in seconds</div>
     </div>
     <div class="hero-feature">
-      <div class="icon purple">&#9733;</div>
-      <div><strong>Multi-Service</strong><br>PostgreSQL, ClickHouse, MySQL, Redis, or any Docker image</div>
+      <div class="icon purple"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></div>
+      <div><strong>Multi-Service</strong><br>Postgres, ClickHouse, MySQL, Redis &mdash; local, cloud, or plugin</div>
     </div>
     <div class="hero-feature">
-      <div class="icon orange">&#9729;</div>
-      <div><strong>Flexible</strong><br>Local Docker, cloud (Neon, DBLab, Xata), or custom plugins</div>
+      <div class="icon purple"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></div>
+      <div><strong>CLI, TUI &amp; GUI</strong><br><a href="#tui-dashboard" style="color: var(--purple); text-decoration: underline;">Terminal dashboard</a>, <a href="#desktop-gui" style="color: var(--purple); text-decoration: underline;">desktop app</a>, or plain command line</div>
     </div>
     <div class="hero-feature">
-      <div class="icon green">&#9878;</div>
-      <div><strong>AI-Ready</strong><br>JSON output, <a href="#ai-automation" style="color: var(--green); text-decoration: underline;">llms.txt</a>, and agent scripts &mdash; built for autonomous coding agents</div>
+      <div class="icon green"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg></div>
+      <div><strong>AI-Ready</strong><br>Agent <a href="#agent-skills" style="color: var(--green); text-decoration: underline;">skills</a> for Claude Code, Cursor &amp; OpenCode</div>
     </div>
     <div class="hero-feature">
-      <div class="icon purple">&#9783;</div>
-      <div><strong>Three Interfaces</strong><br>CLI, <a href="#tui-dashboard" style="color: var(--purple); text-decoration: underline;">TUI dashboard</a>, and <a href="#desktop-gui" style="color: var(--purple); text-decoration: underline;">desktop GUI</a> &mdash; choose your workflow</div>
+      <div class="icon orange"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></div>
+      <div><strong>Hooks &amp; Plugins</strong><br>MiniJinja lifecycle hooks, custom providers, reverse proxy</div>
     </div>
   </div>
 
   <div class="hero-install">
-    <span class="comment"># Install and initialize in 30 seconds</span><br>
-    <span class="cmd">git clone</span> https://github.com/clement-tourriere/devflow.git<br>
-    <span class="cmd">cd</span> devflow && <span class="cmd">cargo install</span> --path .<br>
+    <span class="comment"># Install and get started in 30 seconds</span><br>
+    <span class="cmd">cargo install</span> --git https://github.com/clement-tourriere/devflow.git<br>
     <span class="cmd">cd</span> ~/my-project<br>
-    <span class="cmd">devflow init</span> myapp<br>
-    <span class="cmd">devflow install-hooks</span>
+    <span class="cmd">devflow init</span><br>
+    <span class="cmd">devflow switch</span> -c feature/my-feature
   </div>
 </section>
 
@@ -685,39 +686,46 @@ hr {
     Get from zero to isolated workspace environments in minutes. This section covers installation, your first workspace, and automatic Git integration.
   </p>
 
-  <h3 id="getting-started-scenarios">Three common starting points</h3>
+  <div class="callout callout-info">
+    <span class="callout-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></span>
+    <div><strong>Prefer a graphical interface?</strong> devflow ships with a <a href="#desktop-gui">Desktop GUI</a> (Tauri + React) that lets you manage projects, workspaces, services, and hooks without the command line. Install it with <code>mise run gui:build</code>, or run <code>mise run gui</code> for dev mode. You can also use the <a href="#tui-dashboard">TUI dashboard</a> (<code>devflow tui</code>) for a keyboard-driven terminal UI.</div>
+  </div>
+
+  <h3 id="quick-start">Quick Start (CLI)</h3>
   <div class="steps">
     <div class="step">
-      <h4>New project (recommended)</h4>
-<pre><code class="language-bash">cd ~/workspace
-devflow init myapp
-cd myapp
-
-devflow service add app-db --provider local --service-type postgres
-devflow install-hooks</code></pre>
-      <p>With shell integration enabled, <code>devflow init myapp</code> auto-<code>cd</code>s into the new directory via <code>DEVFLOW_CD</code>.</p>
+      <h4>Step 1: Initialize</h4>
+      <p>Navigate to your Git repository and run <code>devflow init</code>. The interactive wizard sets up your config and installs Git hooks automatically.</p>
+<pre><code class="language-bash">cd ~/my-project
+devflow init</code></pre>
+      <p>This creates a <code>.devflow.yml</code> config file and installs Git hooks for automatic workspace switching.</p>
     </div>
 
     <div class="step">
-      <h4>Existing project</h4>
-<pre><code class="language-bash">cd ~/workspace/my-existing-project
-devflow init
-
-devflow service add app-db --provider local --service-type postgres
-devflow install-hooks</code></pre>
+      <h4>Step 2: Create a workspace</h4>
+      <p>Create your first isolated workspace. devflow clones your services instantly using Copy-on-Write storage.</p>
+<pre><code class="language-bash">devflow switch -c feature/my-feature</code></pre>
+      <p>You can also use Git directly &mdash; <code>git checkout -b feature/my-feature</code> triggers the same flow via the hooks that <code>devflow init</code> installed. If you skipped hook installation during init (or used <code>--non-interactive</code>), run <code>devflow install-hooks</code> first.</p>
     </div>
 
     <div class="step">
-      <h4>Add a service with or without seed data</h4>
-<pre><code class="language-bash"># No seed (fresh main workspace data)
-devflow service add app-db --provider local --service-type postgres
+      <h4>Step 3: Develop, switch, repeat</h4>
+      <p>Make changes in isolation. When you switch branches, your services switch with you automatically.</p>
+<pre><code class="language-bash"># Work on your feature...
+npm run migrate
+npm test
 
-# Seed main workspace from a dump
-devflow service add app-db --provider local --service-type postgres --from ./backup.sql
+# Switch back to main — your services switch automatically
+git checkout main
 
-# Seed from a running PostgreSQL instance
-devflow service add app-db --provider local --service-type postgres --from postgresql://user:pass@localhost:5432/myapp</code></pre>
+# See all your workspaces
+devflow list</code></pre>
     </div>
+  </div>
+
+  <div class="callout">
+    <strong>What is a workspace?</strong>
+    <p>A workspace is a named environment (usually matching a Git branch) that bundles its own isolated copies of every service you've configured &mdash; databases, caches, queues, or any Docker container. When you <code>git checkout feature/auth</code>, devflow pauses the current services and starts the ones for <code>feature/auth</code>, so your data never leaks between branches. Workspaces are created instantly via Copy-on-Write &mdash; even a 50 GB database is cloned in under a second.</p>
   </div>
 
   <h3 id="installation">Installation</h3>
@@ -764,72 +772,43 @@ devflow setup-zfs --pool-name mypool # Custom name</code></pre>
 <pre><code class="language-bash">devflow --help
 devflow doctor</code></pre>
 
-  <!-- First Workspace -->
-  <h3 id="first-workspace">Your First Workspace</h3>
-  <p>Here's a complete walkthrough from project initialization to your first isolated development workspace environment.</p>
+  <!-- Adding Services -->
+  <h3 id="adding-services">Adding Services (optional)</h3>
+  <p>By default, <code>devflow init</code> asks you to add services. You can also add or change them at any time with <code>devflow service add</code>.</p>
 
   <div class="steps">
     <div class="step">
-      <h4>Initialize devflow in your project</h4>
-      <p>Navigate to your Git repository and run <code>devflow init</code>. This creates a <code>.devflow.yml</code> config file.</p>
-<pre><code class="language-bash">cd ~/my-project
-devflow init
+      <h4>Add a database</h4>
+      <p>Use the interactive wizard, or pass flags directly:</p>
+<pre><code class="language-bash"># Interactive — walks you through service type, provider, and name
+devflow service add app-db
+
+# Or specify everything on the command line
 devflow service add app-db --provider local --service-type postgres</code></pre>
-      <p>You can also run <code>devflow service add app-db</code> and use the interactive wizard to choose service type/provider.</p>
     </div>
 
     <div class="step">
-      <h4>Install Git hooks</h4>
-      <p>This sets up automatic environment branching whenever you <code>git checkout</code>.</p>
-<pre><code class="language-bash">devflow install-hooks</code></pre>
-      <p>Four hooks are installed: <code>post-checkout</code>, <code>post-merge</code>, <code>pre-commit</code>, and <code>post-rewrite</code>.</p>
+      <h4>Seed from existing data (optional)</h4>
+      <p>If you have existing schema or data you want every workspace to inherit:</p>
+<pre><code class="language-bash"># Seed from a running PostgreSQL instance
+devflow service add app-db --provider local --service-type postgres \
+  --from postgresql://user:pass@localhost:5432/myapp
+
+# Or seed from a SQL dump file
+devflow service add app-db --provider local --service-type postgres \
+  --from ./backup.sql</code></pre>
+      <p>Every workspace created from main automatically inherits this data via Copy-on-Write &mdash; no extra copies needed.</p>
     </div>
 
     <div class="step">
-      <h4>Create a feature workspace</h4>
-      <p>Create and switch explicitly with devflow, or use Git checkout if hooks are installed.</p>
-<pre><code class="language-bash"># Git-native flow
-git checkout -b feature/auth
+      <h4>Check connection info</h4>
+<pre><code class="language-bash"># Get connection string
+devflow connection main
+# → postgresql://postgres:postgres@localhost:55432/myapp
 
-# Explicit devflow flow (equivalent)
-devflow switch -c feature/auth</code></pre>
-      <p>Behind the scenes, devflow pauses the parent container, clones the data directory using Copy-on-Write, and starts a new container pointing at the clone.</p>
-    </div>
-
-    <div class="step">
-      <h4>Check the status</h4>
-<pre><code class="language-bash"># See all workspaces
-devflow list
-
-# Show project status
-devflow status
-
-# Get connection info
-devflow connection feature/auth
-devflow connection feature/auth --format env    # DATABASE_URL=...
-devflow connection feature/auth --format json   # {"host": "...", ...}</code></pre>
-    </div>
-
-    <div class="step">
-      <h4>Develop in isolation</h4>
-      <p>Make schema changes, run migrations, insert test data &mdash; everything is isolated. Switch back to main and your original database state is untouched.</p>
-<pre><code class="language-bash"># Run migrations on the feature workspace database
-npm run migrate
-
-# Switch back to main — database switches automatically
-git checkout main
-
-# The main database is exactly as you left it
-devflow status</code></pre>
-    </div>
-
-    <div class="step">
-      <h4>Clean up when done</h4>
-<pre><code class="language-bash"># Delete just the service workspace (keeps the Git workspace/worktree)
-devflow service delete feature/auth
-
-# Or remove everything: Git workspace + worktree + services
-devflow remove feature/auth</code></pre>
+# Or export as environment variable
+eval $(devflow connection main --format env)
+# → sets DATABASE_URL=postgresql://...</code></pre>
     </div>
   </div>
 
@@ -895,12 +874,8 @@ echo ".devflow.local.yml" >> .gitignore</code></pre>
     </div>
 
     <div class="step">
-      <h4>Install hooks and verify</h4>
-<pre><code class="language-bash"># Install Git hooks for automatic branching
-devflow install-hooks
-
-# Verify everything is set up correctly
-devflow doctor</code></pre>
+      <h4>Verify your setup</h4>
+<pre><code class="language-bash">devflow doctor</code></pre>
       <p><code>devflow doctor</code> checks your config, Docker, Git hooks, storage driver, and connectivity. Fix any issues it reports before continuing.</p>
     </div>
 
@@ -986,35 +961,39 @@ eval "$(mise activate bash)"   # or zsh/fish</code></pre>
 
   <h3>How Branching Works</h3>
 
-  <div class="diagram">                      ┌─────────────────────────────────────────────────┐
-                      │                  devflow CLI                     │
-                      │   (switch, create, delete, list, status, ...)    │
-                      ├─────────────────────────────────────────────────┤
-                      │                  Hook Engine                     │
-                      │   (MiniJinja templates, conditions, approvals)   │
-                      ├──────────────┬──────────────────────────────────┤
-                      │  VCS Layer   │         Service Layer             │
-                      │              │                                   │
-                      │  ┌────────┐  │  ┌────────────────────────────┐  │
-                      │  │  Git   │  │  │    ServiceProvider trait     │  │
-                      │  │ workspace │  │  │  (create/delete/switch/     │  │
-                      │  │   +    │  │  │   connect/start/stop)       │  │
-                      │  │worktree│  │  ├───────┬───────┬────────────┤  │
-                      │  ├────────┤  │  │Postgre│Click- │MySQL/      │  │
-                      │  │  jj    │  │  │SQL    │House  │Generic/    │  │
-                      │  │support │  │  │(local,│(local)│Plugin      │  │
-                      │  └────────┘  │  │ neon, │       │            │  │
-                      │              │  │ dblab,│       │            │  │
-                      │              │  │ xata, │       │            │  │
-                      │              │  │ tpl)  │       │            │  │
-                      │              │  └───────┴───────┴────────────┘  │
-                      ├──────────────┴──────────────────────────────────┤
-                      │              Configuration Layer                 │
-                      │  (.devflow.yml / .devflow.local.yml / env vars) │
-                      ├─────────────────────────────────────────────────┤
-                      │              State Management                    │
-                      │   (~/.config/devflow/local_state.yml + SQLite)   │
-                      └─────────────────────────────────────────────────┘</div>
+  <div class="diagram">        ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+        │  Desktop GUI │  │     TUI      │  │     CLI      │
+        │ (Tauri+React)│  │  (ratatui)   │  │  (clap)      │
+        └──────┬───────┘  └──────┬───────┘  └──────┬───────┘
+               └─────────────────┼─────────────────┘
+                                 ▼
+       ┌─────────────────────────────────────────────────────┐
+       │                    devflow-core                      │
+       ├─────────────────────────────────────────────────────┤
+       │                    Hook Engine                       │
+       │   (MiniJinja templates, conditions, approvals)       │
+       ├──────────────┬──────────────────────────────────────┤
+       │  VCS Layer   │           Service Layer               │
+       │              │                                       │
+       │  ┌────────┐  │  ┌──────────────────────────────┐    │
+       │  │  Git   │  │  │    ServiceProvider trait       │    │
+       │  │workspace│  │  │  (create/delete/switch/       │    │
+       │  │   +    │  │  │   connect/start/stop)         │    │
+       │  │worktree│  │  ├───────┬───────┬──────────────┤    │
+       │  ├────────┤  │  │Postgre│Click- │MySQL/         │    │
+       │  │   jj   │  │  │SQL    │House  │Generic/       │    │
+       │  │support │  │  │(local,│(local)│Plugin         │    │
+       │  └────────┘  │  │ neon, │       │               │    │
+       │              │  │ dblab,│       │               │    │
+       │              │  │ xata) │       │               │    │
+       │              │  └───────┴───────┴──────────────┘    │
+       ├──────────────┴──────────────┬───────────────────────┤
+       │    Configuration Layer      │    Reverse Proxy       │
+       │  (.devflow.yml / env vars)  │  (HTTPS *.localhost)   │
+       ├─────────────────────────────┴───────────────────────┤
+       │                  State Management                    │
+       │           (~/.config/devflow/local_state.yml)        │
+       └─────────────────────────────────────────────────────┘</div>
 
   <p>The core loop is simple:</p>
   <ol>
@@ -2322,8 +2301,30 @@ mise run gui:install</code></pre>
   </div>
 
   <h3 id="agent-integration">Agent Integration</h3>
-  <p>devflow follows the <a href="https://llmstxt.org">llms.txt convention</a> and ships with everything an AI coding agent needs to operate autonomously:</p>
+  <p>devflow follows the <a href="https://agentskills.io">Agent Skills</a> open standard and the <a href="https://llmstxt.org">llms.txt convention</a>, giving AI coding agents everything they need to manage isolated workspaces autonomously.</p>
 
+  <h4 id="agent-skills">Agent Skills</h4>
+  <p>Run <code>devflow agent skill</code> to generate workspace management skills that AI tools discover automatically:</p>
+
+<pre><code class="language-bash">devflow agent skill</code></pre>
+
+  <p>This creates the following files:</p>
+
+  <table>
+    <thead>
+      <tr><th>Skill</th><th>What It Teaches the Agent</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>devflow-workspace-list</code></td><td>List all workspaces with status (<code>devflow --json list</code>)</td></tr>
+      <tr><td><code>devflow-workspace-switch</code></td><td>Switch to an existing workspace (<code>devflow switch &lt;name&gt;</code>)</td></tr>
+      <tr><td><code>devflow-workspace-create</code></td><td>Create a new workspace with isolated services (<code>devflow switch -c &lt;name&gt;</code>)</td></tr>
+      <tr><td><code>devflow</code></td><td>Overview: configured services, hook phases, automation flags, suggested workflow</td></tr>
+    </tbody>
+  </table>
+
+  <p>Skills are written to <code>.agents/skills/</code> (Agent Skills standard) with symlinks in <code>.claude/skills/</code> for Claude Code compatibility. Claude Code, Cursor, and OpenCode all discover these skills automatically.</p>
+
+  <h4>Agent Context Files</h4>
   <div class="card-grid">
     <div class="card">
       <h4><code>AGENTS.md</code></h4>
@@ -2348,9 +2349,9 @@ mise run gui:install</code></pre>
 
   <div class="diagram">    ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
     │  Bootstrap   │ ──▶ │    Create    │ ──▶ │     Work     │ ──▶ │   Cleanup    │
-    │              │     │   Workspace     │     │              │     │              │
+    │              │     │  Workspace   │     │              │     │              │
     │ devflow init │     │  + Get Conn  │     │ Agent runs   │     │  devflow     │
-    │ install-hooks│     │  devflow     │     │ migrations,  │     │  delete      │
+    │ agent skill  │     │  devflow     │     │ migrations,  │     │  delete      │
     │ (idempotent) │     │  switch/     │     │ tests, code  │     │              │
     │              │     │  create      │     │ against an   │     │ (or reset    │
     │              │     │              │     │ isolated DB  │     │  to retry)   │
@@ -2369,26 +2370,29 @@ mise run gui:install</code></pre>
 
   <table>
     <thead>
-      <tr><th>Tool</th><th>Context File</th><th>How It Works</th></tr>
+      <tr><th>Tool</th><th>Context File</th><th>Skills</th><th>How It Works</th></tr>
     </thead>
     <tbody>
-      <tr><td><strong>Claude Code</strong></td><td><code>CLAUDE.md</code></td><td>Auto-loaded as project context; includes config schema, dev commands, project structure</td></tr>
-      <tr><td><strong>OpenCode</strong></td><td><code>AGENTS.md</code></td><td>Auto-loaded as project instructions; bootstrap flow and automation contract</td></tr>
-      <tr><td><strong>Cursor</strong></td><td><code>AGENTS.md</code></td><td>Reference from <code>.cursor/rules</code> or load as context in chat</td></tr>
-      <tr><td><strong>GitHub Copilot</strong></td><td><code>AGENTS.md</code></td><td>Available as workspace context; agent scripts run in Copilot Workspace</td></tr>
-      <tr><td><strong>Custom agents</strong></td><td><code>llms.txt</code> / <code>llms-full.txt</code></td><td>Machine-readable context; ingest <code>llms-full.txt</code> for complete reference</td></tr>
+      <tr><td><strong>Claude Code</strong></td><td><code>CLAUDE.md</code></td><td><code>.claude/skills/</code> (symlinks)</td><td>Skills auto-loaded as slash commands; workspace ops available out of the box</td></tr>
+      <tr><td><strong>Cursor</strong></td><td><code>AGENTS.md</code></td><td><code>.agents/skills/</code></td><td>Skills discoverable via Agent Skills standard</td></tr>
+      <tr><td><strong>OpenCode</strong></td><td><code>AGENTS.md</code></td><td><code>.agents/skills/</code></td><td>Skills discoverable via Agent Skills standard</td></tr>
+      <tr><td><strong>GitHub Copilot</strong></td><td><code>AGENTS.md</code></td><td>&mdash;</td><td>Available as workspace context; agent scripts run in Copilot Workspace</td></tr>
+      <tr><td><strong>Custom agents</strong></td><td><code>llms.txt</code> / <code>llms-full.txt</code></td><td>&mdash;</td><td>Machine-readable context; ingest <code>llms-full.txt</code> for complete reference</td></tr>
     </tbody>
   </table>
 
   <div class="callout callout-info">
     <span class="callout-icon">&#9432;</span>
-    <div>The <code>AGENTS.md</code> file is the recommended entry point for any AI agent. It contains the essential flags (<code>--json --non-interactive</code>), bootstrap scripts, and the automation contract that agents should follow.</div>
+    <div>Run <code>devflow agent skill</code> after <code>devflow init</code> to give your AI tools workspace management capabilities. The generated skills teach agents how to create, switch, and list workspaces &mdash; so they can isolate their own work automatically.</div>
   </div>
 
   <h3>Agent Commands</h3>
   <p>devflow includes built-in commands for managing AI agents in isolated workspaces:</p>
 
-<pre><code class="language-bash"># Start an AI agent in a new isolated workspace
+<pre><code class="language-bash"># Install workspace skills for AI coding tools
+devflow agent skill
+
+# Start an AI agent in a new isolated workspace
 devflow agent start fix-login -- 'Fix the login timeout bug'
 devflow agent start fix-login --command codex    # Use a specific agent
 devflow agent start fix-login --dry-run          # Preview without executing
@@ -2399,11 +2403,6 @@ devflow agent status
 # Get project context for the current workspace
 devflow agent context
 devflow agent context --format json
-
-# Generate skills/rules for AI coding tools
-devflow agent skill                              # All tools (Claude, Cursor, OpenCode)
-devflow agent skill --target claude              # .claude/skills/devflow/SKILL.md
-devflow agent skill --target cursor              # .cursor/rules/devflow.md
 
 # Generate AGENTS.md for this project
 devflow agent docs</code></pre>
