@@ -91,7 +91,7 @@ Options:
 #[derive(Parser)]
 #[command(name = "devflow")]
 #[command(about = "Isolated dev environments for every workspace — automatically.")]
-#[command(version = "0.4.0")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(disable_help_subcommand = true)]
 #[command(help_template = "\
 {name} {version}

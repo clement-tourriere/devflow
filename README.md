@@ -257,6 +257,37 @@ devflow agent start task-42 -- 'Fix the checkout flow'
 devflow agent status                     # Monitor progress
 ```
 
+## Releases (Commitizen)
+
+`cz` is the primary release workflow for version bumps, changelog updates, and tags.
+
+```bash
+# create Conventional Commit messages
+cz commit
+
+# dry-run next release bump
+cz bump --dry-run --yes --allow-no-commit --increment PATCH
+
+# create release commit + changelog + tag
+cz bump --yes
+git push origin main --follow-tags
+```
+
+Equivalent `mise` tasks are available:
+
+```bash
+mise run release:dry-run
+mise run release
+```
+
+`cz bump` updates all release version targets from `.cz.toml`, including Rust crates, Tauri config, UI package version, lockfile entries for `devflow*` packages, docs banner version, and `llms-full.txt`.
+
+## Documentation deployment
+
+Docs are deployed from `docs/` to GitHub Pages by `.github/workflows/docs-pages.yml` on every push to `main`.
+
+For private repositories, enable Pages in repository settings and choose **GitHub Actions** as the source.
+
 ## Copy-on-Write Storage
 
 | Filesystem | Platform | Method | Setup |

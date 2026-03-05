@@ -1,9 +1,8 @@
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "0.3.0"
+version = "0.4.0"
 tag_format = "v$version"
-version_files = [
-    "Cargo.toml:version",
-    "Cargo.lock:version",
-]
+pre_bump_hooks = ["python3 scripts/sync-version.py \"$CZ_PRE_NEW_VERSION\""]
 update_changelog_on_bump = true
+changelog_incremental = true
+changelog_start_rev = "v0.4.0"

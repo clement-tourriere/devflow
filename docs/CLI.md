@@ -232,6 +232,19 @@ devflow commit --ai --edit               # AI message + editor review
 devflow commit --ai --dry-run            # Preview AI message only
 ```
 
+### Commitizen release flow
+
+Use Commitizen for release bumps and tags:
+
+```bash
+cz commit
+cz bump --dry-run --yes --allow-no-commit --increment PATCH
+cz bump --yes
+git push origin main --follow-tags
+```
+
+Release version updates are configured in `.cz.toml`.
+
 ---
 
 ## Hooks

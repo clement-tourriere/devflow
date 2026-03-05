@@ -78,3 +78,11 @@ cargo fmt -- --check
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
 """
+
+[tasks."release:dry-run"]
+description = "Preview next Commitizen release bump"
+run = "sh -c 'cz bump --dry-run --yes --allow-no-commit --increment PATCH || test $? -eq 3'"
+
+[tasks.release]
+description = "Create release commit, changelog, and tag via Commitizen"
+run = "cz bump --yes"
