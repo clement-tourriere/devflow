@@ -141,9 +141,7 @@ impl HookEngine {
                         HookEntry::Extended(ext) => {
                             ext.continue_on_error.unwrap_or(!phase_blocking)
                         }
-                        HookEntry::Action(act) => {
-                            act.continue_on_error.unwrap_or(!phase_blocking)
-                        }
+                        HookEntry::Action(act) => act.continue_on_error.unwrap_or(!phase_blocking),
                     };
 
                     if continue_on_error {
@@ -238,9 +236,7 @@ impl HookEngine {
 
         // Check approval (shell commands always require approval)
         if self.require_approval {
-            if let Some(outcome) =
-                self.check_approval(name, &rendered_command)?
-            {
+            if let Some(outcome) = self.check_approval(name, &rendered_command)? {
                 return Ok(outcome);
             }
         }
@@ -354,7 +350,9 @@ impl HookEngine {
 
             tokio::spawn(async move {
                 match actions::execute_action(&action, &ctx_clone, &te, &wd, !quiet_output).await {
-                    Ok(r) => log::debug!("Background hook '{}' completed: {}", hook_name, r.summary),
+                    Ok(r) => {
+                        log::debug!("Background hook '{}' completed: {}", hook_name, r.summary)
+                    }
                     Err(e) => log::warn!("Background hook '{}' failed: {}", hook_name, e),
                 }
             });
@@ -425,10 +423,7 @@ impl HookEngine {
                     ) {
                         HookApprovalChoice::ApproveAlways => {
                             if let Err(e) = store.approve(project_key, &approval_command) {
-                                log::warn!(
-                                    "Failed to persist hook condition approval: {}",
-                                    e
-                                );
+                                log::warn!("Failed to persist hook condition approval: {}", e);
                             }
                         }
                         HookApprovalChoice::ApproveOnce => {}
@@ -454,11 +449,7 @@ impl HookEngine {
 
     /// Check approval for a command/action description.
     /// Returns `Some(HookOutcome::Skipped(..))` if denied, `None` if approved.
-    fn check_approval(
-        &self,
-        name: &str,
-        description: &str,
-    ) -> Result<Option<HookOutcome>> {
+    fn check_approval(&self, name: &str, description: &str) -> Result<Option<HookOutcome>> {
         if self.non_interactive && self.project_key.is_none() {
             anyhow::bail!(
                 "Cannot evaluate hook '{}' in non-interactive mode without a project key",
@@ -484,7 +475,9 @@ impl HookEngine {
                     }
                     HookApprovalChoice::ApproveOnce => {}
                     HookApprovalChoice::Deny => {
-                        return Ok(Some(HookOutcome::Skipped("not approved by user".to_string())));
+                        return Ok(Some(HookOutcome::Skipped(
+                            "not approved by user".to_string(),
+                        )));
                     }
                 }
             }
@@ -892,7 +885,9 @@ mod tests {
         assert!(HookEngine::is_builtin_condition("not_worktree"));
         assert!(HookEngine::is_builtin_condition("trigger_is:vcs"));
         assert!(HookEngine::is_builtin_condition("trigger_not:cli"));
-        assert!(HookEngine::is_builtin_condition("workspace_matches:^feat/.*"));
+        assert!(HookEngine::is_builtin_condition(
+            "workspace_matches:^feat/.*"
+        ));
         assert!(HookEngine::is_builtin_condition("workspace_is:main"));
         assert!(HookEngine::is_builtin_condition("workspace_not:main"));
         assert!(HookEngine::is_builtin_condition("env_set:FOO"));

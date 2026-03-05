@@ -392,10 +392,7 @@ pub enum ServiceCommands {
     Add {
         #[arg(help = "Service name (prompted if omitted)")]
         name: Option<String>,
-        #[arg(
-            long,
-            help = "Provider type (local, neon, dblab, xata)"
-        )]
+        #[arg(long, help = "Provider type (local, neon, dblab, xata)")]
         provider: Option<String>,
         #[arg(
             long,
@@ -477,7 +474,10 @@ pub enum ServiceCommands {
         long_about = "Discover running Docker containers matching known service types.\n\nScans Docker for running containers that appear to be databases or caches\n(PostgreSQL, ClickHouse, MySQL, Redis). Excludes devflow-managed containers.\n\nExamples:\n  devflow service discover                          # Discover all service containers\n  devflow service discover --service-type postgres   # Only PostgreSQL containers"
     )]
     Discover {
-        #[arg(long, help = "Filter by service type (postgres, clickhouse, mysql, generic)")]
+        #[arg(
+            long,
+            help = "Filter by service type (postgres, clickhouse, mysql, generic)"
+        )]
         service_type: Option<String>,
     },
 }
@@ -495,10 +495,7 @@ pub enum HookCommands {
         phase: String,
         #[arg(help = "Run only a specific named hook within the phase")]
         name: Option<String>,
-        #[arg(
-            long,
-            help = "Workspace name context (defaults to current workspace)"
-        )]
+        #[arg(long, help = "Workspace name context (defaults to current workspace)")]
         workspace: Option<String>,
     },
     #[command(about = "Manage hook approvals")]
@@ -1038,15 +1035,16 @@ pub async fn handle_command(
                             .await?;
 
                             if let Some(cfg) = result {
-                                added_services.push(format!("{} ({}, {})", cfg.name, cfg.service_type, cfg.provider_type));
+                                added_services.push(format!(
+                                    "{} ({}, {})",
+                                    cfg.name, cfg.service_type, cfg.provider_type
+                                ));
                             }
 
-                            let add_another = inquire::Confirm::new(
-                                "Add another service?",
-                            )
-                            .with_default(false)
-                            .prompt()
-                            .unwrap_or(false);
+                            let add_another = inquire::Confirm::new("Add another service?")
+                                .with_default(false)
+                                .prompt()
+                                .unwrap_or(false);
 
                             if !add_another {
                                 break;
@@ -1115,14 +1113,16 @@ pub async fn handle_command(
                                 };
 
                                 if let Some(ref rc_path) = shell_config_path {
-                                    let already_configured = rc_path
-                                        .exists()
+                                    let already_configured = rc_path.exists()
                                         && std::fs::read_to_string(rc_path)
                                             .unwrap_or_default()
                                             .contains("devflow shell-init");
 
                                     if already_configured {
-                                        println!("Shell integration already configured in {}", rc_path.display());
+                                        println!(
+                                            "Shell integration already configured in {}",
+                                            rc_path.display()
+                                        );
                                         shell_configured = true;
                                     } else {
                                         let append = inquire::Confirm::new(&format!(
@@ -1145,7 +1145,10 @@ pub async fn handle_command(
                                                 println!("Added to {}", rc_path.display());
                                                 shell_configured = true;
                                             } else {
-                                                println!("Could not write to {}. Add manually:", rc_path.display());
+                                                println!(
+                                                    "Could not write to {}. Add manually:",
+                                                    rc_path.display()
+                                                );
                                                 println!("  {}", eval_line);
                                             }
                                         } else {
@@ -1171,7 +1174,11 @@ pub async fn handle_command(
                     }
                     println!(
                         "  Hooks:      {}",
-                        if hooks_installed { "installed" } else { "not installed" }
+                        if hooks_installed {
+                            "installed"
+                        } else {
+                            "not installed"
+                        }
                     );
                     if enable_worktrees {
                         println!(
@@ -1200,7 +1207,9 @@ pub async fn handle_command(
                     println!(
                         "  devflow install-hooks        Install Git hooks for automatic branching"
                     );
-                    println!("  devflow doctor               Check system health and configuration");
+                    println!(
+                        "  devflow doctor               Check system health and configuration"
+                    );
                 }
 
                 if let Some(target_dir) = init_target_dir.as_ref() {

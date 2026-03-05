@@ -3,6 +3,7 @@ use devflow_core::workspace::hooks::HookApprovalMode;
 use devflow_core::workspace::{self, LifecycleOptions, WorkspaceCreationMode};
 use devflow_core::{config, vcs};
 use serde::Serialize;
+use tauri::Emitter;
 
 #[derive(Serialize)]
 pub struct WorkspaceEntry {
@@ -27,6 +28,12 @@ pub struct OrchestrationResultDto {
     pub service_name: String,
     pub success: bool,
     pub message: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct WorkspaceSwitchedEvent {
+    pub project_path: String,
+    pub workspace_name: String,
 }
 
 #[tauri::command]
@@ -120,8 +127,8 @@ pub async fn get_connection_info(
     service_name: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
+    let config = devflow_core::config::Config::from_file(&config_path)
+        .map_err(crate::commands::format_error)?;
 
     let named_services = config.resolve_services();
     let service_name = service_name.unwrap_or_else(|| "default".to_string());
@@ -196,7 +203,10 @@ pub async fn create_workspace(
                 message: r.message,
             })
             .collect(),
-        worktree_path: result.worktree.as_ref().map(|w| w.path.display().to_string()),
+        worktree_path: result
+            .worktree
+            .as_ref()
+            .map(|w| w.path.display().to_string()),
     };
 
     crate::update_tray_menu(&app);
@@ -225,10 +235,9 @@ pub async fn switch_workspace(
         copy_ignored: None,
     };
 
-    let result =
-        workspace::switch::switch_workspace(&cfg, project_dir, &workspace_name, &options)
-            .await
-            .map_err(crate::commands::format_error)?;
+    let result = workspace::switch::switch_workspace(&cfg, project_dir, &workspace_name, &options)
+        .await
+        .map_err(crate::commands::format_error)?;
 
     let response = result
         .services
@@ -239,6 +248,14 @@ pub async fn switch_workspace(
             message: r.message,
         })
         .collect();
+
+    let _ = app.emit(
+        "workspace-switched",
+        WorkspaceSwitchedEvent {
+            project_path: project_path.clone(),
+            workspace_name: workspace_name.clone(),
+        },
+    );
 
     crate::update_tray_menu(&app);
     Ok(response)
@@ -263,10 +280,9 @@ pub async fn delete_workspace(
         keep_services: false,
     };
 
-    let result =
-        workspace::delete::delete_workspace(&cfg, project_dir, &workspace_name, &options)
-            .await
-            .map_err(crate::commands::format_error)?;
+    let result = workspace::delete::delete_workspace(&cfg, project_dir, &workspace_name, &options)
+        .await
+        .map_err(crate::commands::format_error)?;
 
     let response = result
         .services
@@ -290,14 +306,17 @@ pub struct PruneResult {
 
 #[tauri::command]
 pub async fn prune_worktrees(project_path: String) -> Result<PruneResult, String> {
-    let vcs_provider = vcs::detect_vcs_provider(&project_path).map_err(crate::commands::format_error)?;
+    let vcs_provider =
+        vcs::detect_vcs_provider(&project_path).map_err(crate::commands::format_error)?;
 
     if !vcs_provider.supports_worktrees() {
         return Err("VCS provider does not support worktrees".to_string());
     }
 
     // Identify stale worktrees (path no longer exists on disk)
-    let worktrees = vcs_provider.list_worktrees().map_err(crate::commands::format_error)?;
+    let worktrees = vcs_provider
+        .list_worktrees()
+        .map_err(crate::commands::format_error)?;
     let stale: Vec<_> = worktrees
         .iter()
         .filter(|wt| !wt.is_main && !wt.path.exists())

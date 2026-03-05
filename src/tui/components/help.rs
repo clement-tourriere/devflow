@@ -213,9 +213,7 @@ pub fn render_select(frame: &mut Frame, title: &str, options: &[String], selecte
     for (i, option) in options.iter().enumerate() {
         let marker = if i == selected { "> " } else { "  " };
         let style = if i == selected {
-            Style::default()
-                .fg(theme::TEXT_PRIMARY)
-                .bold()
+            Style::default().fg(theme::TEXT_PRIMARY).bold()
         } else {
             Style::default().fg(theme::TEXT_SECONDARY)
         };

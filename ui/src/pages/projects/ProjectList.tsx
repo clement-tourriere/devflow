@@ -205,7 +205,7 @@ function ProjectList() {
                 <th>Workspace</th>
                 <th>Services</th>
                 <th>VCS</th>
-                <th>Mode</th>
+                <th>Default Mode</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -241,7 +241,7 @@ function ProjectList() {
                   <td>
                     {p.detail?.current_workspace && !p.detail?.worktree_enabled && (
                       <span className="badge" style={{ opacity: 0.7 }}>
-                        HEAD: {p.detail.current_workspace}
+                        active: {p.detail.current_workspace}
                       </span>
                     )}
                   </td>
@@ -257,9 +257,19 @@ function ProjectList() {
                   </td>
                   <td>
                     {p.detail?.worktree_enabled ? (
-                      <span className="badge badge-info">worktrees</span>
+                      <span
+                        className="badge badge-info"
+                        title="Default creation mode. You can still choose branch or worktree when creating a workspace."
+                      >
+                        worktree
+                      </span>
                     ) : p.detail?.has_config ? (
-                      <span className="badge">checkout</span>
+                      <span
+                        className="badge"
+                        title="Default creation mode. You can still choose branch or worktree when creating a workspace."
+                      >
+                        branch
+                      </span>
                     ) : (
                       <span style={{ color: "var(--text-muted)" }}>-</span>
                     )}

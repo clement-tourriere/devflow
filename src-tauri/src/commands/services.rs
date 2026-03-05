@@ -38,8 +38,8 @@ pub async fn add_service(
     request: AddServiceRequest,
 ) -> Result<ServiceEntry, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let mut config =
-        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
+    let mut config = devflow_core::config::Config::from_file(&config_path)
+        .map_err(crate::commands::format_error)?;
 
     // Ensure config.name is set so container names derive from the project, not cwd
     if config.name.is_none() {
@@ -179,8 +179,8 @@ fn build_named_config(request: &AddServiceRequest) -> Result<NamedServiceConfig,
 #[tauri::command]
 pub async fn list_services(project_path: String) -> Result<Vec<ServiceEntry>, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
+    let config = devflow_core::config::Config::from_file(&config_path)
+        .map_err(crate::commands::format_error)?;
 
     let named_services = config.resolve_services();
     Ok(named_services
@@ -201,8 +201,8 @@ pub async fn start_service(
     workspace_name: String,
 ) -> Result<(), String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
+    let config = devflow_core::config::Config::from_file(&config_path)
+        .map_err(crate::commands::format_error)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -227,8 +227,8 @@ pub async fn stop_service(
     workspace_name: String,
 ) -> Result<(), String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
+    let config = devflow_core::config::Config::from_file(&config_path)
+        .map_err(crate::commands::format_error)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -456,8 +456,8 @@ pub async fn get_service_logs(
     workspace_name: String,
 ) -> Result<String, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
+    let config = devflow_core::config::Config::from_file(&config_path)
+        .map_err(crate::commands::format_error)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -482,8 +482,8 @@ pub async fn reset_service(
     workspace_name: String,
 ) -> Result<(), String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
+    let config = devflow_core::config::Config::from_file(&config_path)
+        .map_err(crate::commands::format_error)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -508,8 +508,8 @@ pub async fn delete_service_workspace(
     workspace_name: String,
 ) -> Result<(), String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
+    let config = devflow_core::config::Config::from_file(&config_path)
+        .map_err(crate::commands::format_error)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -539,8 +539,8 @@ pub async fn destroy_service(
     service_name: String,
 ) -> Result<DestroyServiceResult, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let mut config =
-        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
+    let mut config = devflow_core::config::Config::from_file(&config_path)
+        .map_err(crate::commands::format_error)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -598,8 +598,8 @@ pub async fn list_service_workspaces(
     service_name: String,
 ) -> Result<Vec<ServiceWorkspaceInfo>, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
+    let config = devflow_core::config::Config::from_file(&config_path)
+        .map_err(crate::commands::format_error)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -635,8 +635,8 @@ pub async fn get_service_status(
     workspace_name: String,
 ) -> Result<ServiceWorkspaceStatus, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
+    let config = devflow_core::config::Config::from_file(&config_path)
+        .map_err(crate::commands::format_error)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -714,8 +714,8 @@ pub async fn discover_docker_containers(
 pub async fn install_agent_skills(project_path: String) -> Result<Vec<String>, String> {
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let project_dir = std::path::Path::new(&project_path);
-    let config =
-        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?;
+    let config = devflow_core::config::Config::from_file(&config_path)
+        .map_err(crate::commands::format_error)?;
 
     devflow_core::agent::install_agent_skills(&config, project_dir)
         .map_err(crate::commands::format_error)
@@ -724,8 +724,7 @@ pub async fn install_agent_skills(project_path: String) -> Result<Vec<String>, S
 #[tauri::command]
 pub async fn uninstall_agent_skills(project_path: String) -> Result<(), String> {
     let project_dir = std::path::Path::new(&project_path);
-    devflow_core::agent::uninstall_agent_skills(project_dir)
-        .map_err(crate::commands::format_error)
+    devflow_core::agent::uninstall_agent_skills(project_dir).map_err(crate::commands::format_error)
 }
 
 #[tauri::command]
@@ -733,5 +732,7 @@ pub async fn check_agent_skills(
     project_path: String,
 ) -> Result<devflow_core::agent::SkillInstallStatus, String> {
     let project_dir = std::path::Path::new(&project_path);
-    Ok(devflow_core::agent::check_agent_skills_installed(project_dir))
+    Ok(devflow_core::agent::check_agent_skills_installed(
+        project_dir,
+    ))
 }

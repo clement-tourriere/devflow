@@ -176,12 +176,10 @@ function ProjectCard({ project }: { project: ProjectInfo }) {
         <span style={{ fontSize: 16, fontWeight: 600, color: "var(--text-primary)" }}>
           {project.name}
         </span>
-        {d && (
-          d.has_config ? (
-            <span className="badge badge-success" style={{ fontSize: 11 }}>configured</span>
-          ) : (
-            <span className="badge badge-warning" style={{ fontSize: 11 }}>no config</span>
-          )
+        {d && !d.has_config && (
+          <span className="badge badge-warning" style={{ fontSize: 11 }}>
+            setup needed
+          </span>
         )}
       </div>
 
@@ -203,10 +201,23 @@ function ProjectCard({ project }: { project: ProjectInfo }) {
       {/* Info row */}
       <div className="flex items-center gap-2" style={{ flexWrap: "wrap" }}>
         {d?.current_workspace && !d?.worktree_enabled && (
-          <span className="badge" style={{ opacity: 0.7 }}>HEAD: {d.current_workspace}</span>
+          <span className="badge" style={{ opacity: 0.7 }}>
+            active: {d.current_workspace}
+          </span>
         )}
-        {d?.worktree_enabled && (
-          <span className="badge badge-success" style={{ fontSize: 11 }}>worktrees</span>
+        {d?.vcs_type && (
+          <span className="badge" style={{ fontSize: 11 }}>
+            vcs: {d.vcs_type}
+          </span>
+        )}
+        {d?.has_config && (
+          <span
+            className="badge badge-info"
+            style={{ fontSize: 11 }}
+            title="Default creation mode. You can still choose branch or worktree when creating a workspace."
+          >
+            default: {d.worktree_enabled ? "worktree" : "branch"}
+          </span>
         )}
         {d && (
           <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>

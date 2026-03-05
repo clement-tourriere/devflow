@@ -938,7 +938,10 @@ impl VcsProvider for GitRepository {
 
         if analysis.is_fast_forward() {
             // Fast-forward: just move HEAD to the target commit
-            let refname = format!("refs/heads/{}", self.current_workspace()?.unwrap_or_default());
+            let refname = format!(
+                "refs/heads/{}",
+                self.current_workspace()?.unwrap_or_default()
+            );
             self.repo
                 .find_reference(&refname)
                 .and_then(|mut r| r.set_target(annotated.id(), "devflow: fast-forward merge"))
@@ -958,9 +961,7 @@ impl VcsProvider for GitRepository {
             // Check for conflicts
             let mut index = self.repo.index().context("Failed to get index")?;
             if index.has_conflicts() {
-                anyhow::bail!(
-                    "Merge conflicts detected. Resolve conflicts and commit manually."
-                );
+                anyhow::bail!("Merge conflicts detected. Resolve conflicts and commit manually.");
             }
 
             // Create merge commit
@@ -990,14 +991,14 @@ impl VcsProvider for GitRepository {
             return Ok(());
         }
 
-        anyhow::bail!("Cannot merge '{}': merge analysis returned unexpected result", source);
+        anyhow::bail!(
+            "Cannot merge '{}': merge analysis returned unexpected result",
+            source
+        );
     }
 
     fn detach_head(&self) -> Result<()> {
-        let head = self
-            .repo
-            .head()
-            .context("Failed to get HEAD")?;
+        let head = self.repo.head().context("Failed to get HEAD")?;
         let commit = head
             .peel_to_commit()
             .context("HEAD does not point to a commit")?;

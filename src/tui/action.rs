@@ -107,11 +107,15 @@ pub enum Action {
 /// Where to send input dialog results.
 #[derive(Debug, Clone)]
 pub enum InputTarget {
-    CreateBranch { from: Option<String> },
+    CreateBranch {
+        from: Option<String>,
+    },
     FilterBranches,
     FilterLogsPicker,
     /// Name input for a new service (service_type already selected)
-    AddServiceName { service_type: String },
+    AddServiceName {
+        service_type: String,
+    },
 }
 
 /// Where to send select dialog results.

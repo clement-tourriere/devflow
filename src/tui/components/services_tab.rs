@@ -191,7 +191,6 @@ impl Component for ServicesTabComponent {
         self.render_service_list(frame, chunks[0], spinner);
         self.render_service_detail(frame, chunks[1]);
     }
-
 }
 
 impl ServicesTabComponent {
@@ -205,7 +204,10 @@ impl ServicesTabComponent {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme::BORDER_ACTIVE))
-            .title(Span::styled(title, Style::default().fg(theme::TAB_TITLE).bold()));
+            .title(Span::styled(
+                title,
+                Style::default().fg(theme::TAB_TITLE).bold(),
+            ));
 
         let items: Vec<ListItem> = match &self.data {
             Some(data) => data
@@ -233,7 +235,11 @@ impl ServicesTabComponent {
                 })
                 .collect(),
             None => vec![ListItem::new(Line::styled(
-                if self.loading { "Loading..." } else { "No services configured" },
+                if self.loading {
+                    "Loading..."
+                } else {
+                    "No services configured"
+                },
                 Style::default().fg(theme::TEXT_MUTED),
             ))],
         };
@@ -330,7 +336,10 @@ impl ServicesTabComponent {
                 if !ws.database_name.is_empty() {
                     lines.push(Line::from(vec![
                         Span::raw("      db: "),
-                        Span::styled(&ws.database_name, Style::default().fg(theme::VALUE_DATABASE)),
+                        Span::styled(
+                            &ws.database_name,
+                            Style::default().fg(theme::VALUE_DATABASE),
+                        ),
                     ]));
                 }
                 if let Some(ref parent) = ws.parent_workspace {

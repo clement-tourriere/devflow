@@ -497,7 +497,8 @@ pub async fn destroy_project(project_path: String) -> Result<DestroyResult, Stri
     let local_config_path = path.join(".devflow.local.yml");
 
     let mut config = if config_path.exists() {
-        devflow_core::config::Config::from_file(&config_path).map_err(crate::commands::format_error)?
+        devflow_core::config::Config::from_file(&config_path)
+            .map_err(crate::commands::format_error)?
     } else {
         devflow_core::config::Config::default()
     };

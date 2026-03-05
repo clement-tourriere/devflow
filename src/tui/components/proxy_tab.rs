@@ -76,8 +76,7 @@ impl Component for ProxyTabComponent {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
                 if !self.targets.is_empty() {
-                    self.selected_target =
-                        (self.selected_target + 1) % self.targets.len();
+                    self.selected_target = (self.selected_target + 1) % self.targets.len();
                     self.list_state.select(Some(self.selected_target));
                 }
                 Action::None
@@ -121,7 +120,6 @@ impl Component for ProxyTabComponent {
         self.render_status_panel(frame, chunks[0], spinner);
         self.render_targets_panel(frame, chunks[1]);
     }
-
 }
 
 impl ProxyTabComponent {
@@ -135,7 +133,10 @@ impl ProxyTabComponent {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme::BORDER_ACTIVE))
-            .title(Span::styled(title, Style::default().fg(theme::TAB_TITLE).bold()));
+            .title(Span::styled(
+                title,
+                Style::default().fg(theme::TAB_TITLE).bold(),
+            ));
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -224,13 +225,11 @@ impl ProxyTabComponent {
         frame.render_widget(block, area);
 
         if self.targets.is_empty() {
-            let hint = Paragraph::new(
-                if self.status.as_ref().is_some_and(|s| s.running) {
-                    "No proxied containers"
-                } else {
-                    "Start the proxy to see routing targets"
-                },
-            )
+            let hint = Paragraph::new(if self.status.as_ref().is_some_and(|s| s.running) {
+                "No proxied containers"
+            } else {
+                "Start the proxy to see routing targets"
+            })
             .style(Style::default().fg(theme::TEXT_MUTED));
             frame.render_widget(hint, inner);
             return;

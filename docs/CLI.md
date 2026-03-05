@@ -2,6 +2,8 @@
 
 Complete reference for all devflow commands. All core commands support the `--json` and `--non-interactive` global flags for automation.
 
+Tip: run `devflow --help-all` to print the full command surface directly in the CLI.
+
 ## Global Flags
 
 ```bash

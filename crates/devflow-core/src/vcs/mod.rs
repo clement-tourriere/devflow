@@ -149,20 +149,14 @@ pub trait VcsProvider: Send {
     /// Returns `Ok(())` on success.  For git this performs a fast-forward
     /// or normal merge using `git2`.
     fn merge_branch(&self, _source: &str) -> Result<()> {
-        anyhow::bail!(
-            "{} does not support merge_branch",
-            self.provider_name()
-        )
+        anyhow::bail!("{} does not support merge_branch", self.provider_name())
     }
 
     /// Detach HEAD from the current workspace.
     ///
     /// Needed before deleting the currently checked-out workspace.
     fn detach_head(&self) -> Result<()> {
-        anyhow::bail!(
-            "{} does not support detach_head",
-            self.provider_name()
-        )
+        anyhow::bail!("{} does not support detach_head", self.provider_name())
     }
 
     /// Clean up stale worktree entries.

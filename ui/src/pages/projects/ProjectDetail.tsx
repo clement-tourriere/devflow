@@ -1,11 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
+import { listen } from "@tauri-apps/api/event";
 import {
   getProjectDetail,
   listWorkspaces,
   listServices,
   addService,
   createWorkspace,
+  switchWorkspace,
   deleteWorkspace,
   startService,
   stopService,
@@ -36,6 +38,11 @@ import Modal from "../../components/Modal";
 import ConfirmDialog from "../../components/ConfirmDialog";
 import AddServiceModal from "../../components/AddServiceModal";
 import { useTerminal } from "../../context/TerminalContext";
+
+interface WorkspaceSwitchedEvent {
+  project_path: string;
+  workspace_name: string;
+}
 
 function ProjectDetail() {
   const { "*": splat } = useParams();
@@ -166,6 +173,22 @@ function ProjectDetail() {
     reload();
   }, [reload]);
 
+  useEffect(() => {
+    const unlisten = listen<WorkspaceSwitchedEvent>(
+      "workspace-switched",
+      (event) => {
+        if (event.payload.project_path === projectPath) {
+          setCurrentWorkspace(event.payload.workspace_name);
+          void reload();
+        }
+      }
+    );
+
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, [projectPath, reload]);
+
   // Background doctor check for badge
   useEffect(() => {
     if (!detail?.has_config || !projectPath) return;
@@ -195,6 +218,18 @@ function ProjectDetail() {
       setCreationMode(projectDefaultCreationMode);
       setCopyFiles(detail?.worktree_copy_files ?? []);
       setCopyIgnored(detail?.worktree_copy_ignored ?? false);
+      await reload();
+    } catch (e) {
+      alert(`${e}`);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleSwitchWorkspace = async (workspaceName: string) => {
+    setActionLoading(`switch:${workspaceName}`);
+    try {
+      await switchWorkspace(projectPath, workspaceName);
       await reload();
     } catch (e) {
       alert(`${e}`);
@@ -445,6 +480,11 @@ function ProjectDetail() {
 
   if (!detail) return <div>Loading...</div>;
 
+  const currentWorkspaceEntry = workspaces.find((w) => w.is_current);
+  const showActiveWorkspaceBadge = Boolean(
+    currentWorkspace && currentWorkspaceEntry && !currentWorkspaceEntry.worktree_path
+  );
+
   return (
     <div>
       {/* Header */}
@@ -460,21 +500,24 @@ function ProjectDetail() {
             >
               {detail.path}
             </span>
-            {currentWorkspace && !detail.worktree_enabled && (
-              <span className="badge" style={{ opacity: 0.7 }}>HEAD: {currentWorkspace}</span>
+            {showActiveWorkspaceBadge && (
+              <span className="badge" style={{ opacity: 0.7 }}>
+                active: {currentWorkspace}
+              </span>
             )}
-            {detail.has_config ? (
-              <span className="badge badge-success">configured</span>
-            ) : (
-              <span className="badge badge-warning">no config</span>
+            {!detail.has_config && (
+              <span className="badge badge-warning">setup needed</span>
             )}
             {detail.vcs_type && (
-              <span className="badge">{detail.vcs_type}</span>
+              <span className="badge">vcs: {detail.vcs_type}</span>
             )}
-            {detail.worktree_enabled ? (
-              <span className="badge badge-info">worktrees</span>
-            ) : (
-              <span className="badge">checkout mode</span>
+            {detail.has_config && (
+              <span
+                className="badge badge-info"
+                title="Default creation mode. You can still choose branch or worktree when creating a workspace."
+              >
+                default: {detail.worktree_enabled ? "worktree" : "branch"}
+              </span>
             )}
           </div>
         </div>
@@ -588,7 +631,7 @@ function ProjectDetail() {
                       ) : (
                         <span className="badge" style={{ fontSize: 10 }}>git branch</span>
                       )}
-                      {b.is_current && (
+                      {b.is_current && !b.worktree_path && (
                         <span className="badge badge-success" style={{ fontSize: 10 }}>active</span>
                       )}
                       {b.is_default && (
@@ -613,6 +656,17 @@ function ProjectDetail() {
                   </td>
                   <td style={{ textAlign: "right" }}>
                     <div className="flex gap-2" style={{ justifyContent: "flex-end", flexWrap: "wrap", rowGap: 6 }}>
+                      {!b.is_current && !b.worktree_path && (
+                        <button
+                          className="btn"
+                          style={{ padding: "2px 10px", fontSize: 12 }}
+                          onClick={() => handleSwitchWorkspace(b.name)}
+                          disabled={actionLoading === `switch:${b.name}`}
+                          title={`Switch to workspace ${b.name}`}
+                        >
+                          {actionLoading === `switch:${b.name}` ? "..." : "Switch"}
+                        </button>
+                      )}
                       <button
                         className="btn"
                         style={{ padding: "2px 10px", fontSize: 12 }}
@@ -829,8 +883,9 @@ function ProjectDetail() {
                           fontSize: 12,
                         }}
                       >
-                        {branchList.length} workspace
-                        {branchList.length !== 1 ? "es" : ""}
+                        {branchList.length === 1
+                          ? "1 workspace"
+                          : `${branchList.length} workspaces`}
                       </span>
                       {runningCount > 0 && (
                         <span className="badge badge-success" style={{ fontSize: 11 }}>

@@ -91,8 +91,8 @@ pub async fn run_lifecycle_hooks_best_effort(
     phase: HookPhase,
     opts: &LifecycleOptions,
 ) {
-    if let Err(e) = run_lifecycle_hooks(config, project_dir, workspace_name, phase.clone(), opts)
-        .await
+    if let Err(e) =
+        run_lifecycle_hooks(config, project_dir, workspace_name, phase.clone(), opts).await
     {
         log::warn!("Hook phase {:?} failed: {}", phase, e);
     }

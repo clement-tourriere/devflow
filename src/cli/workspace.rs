@@ -1148,7 +1148,11 @@ pub(super) async fn handle_branch_command(
                         non_interactive,
                         None,
                         None,
-                        if no_respect_gitignore { Some(true) } else { None },
+                        if no_respect_gitignore {
+                            Some(true)
+                        } else {
+                            None
+                        },
                     )
                     .await?;
                 }
@@ -1396,7 +1400,8 @@ async fn handle_interactive_switch(
                 )
                 .await?;
             } else if selected_branch == config.git.main_workspace {
-                handle_switch_to_main(config, config_path, false, false, false, false, None, None).await?;
+                handle_switch_to_main(config, config_path, false, false, false, false, None, None)
+                    .await?;
             } else {
                 handle_switch_command(
                     config,
@@ -2199,10 +2204,7 @@ async fn handle_remove_command(
     }
 
     if !result.branch_deleted {
-        anyhow::bail!(
-            "Failed to delete VCS workspace '{}'",
-            workspace_name
-        );
+        anyhow::bail!("Failed to delete VCS workspace '{}'", workspace_name);
     }
 
     Ok(())
@@ -2332,8 +2334,8 @@ async fn handle_merge_command(
         }
     }
     // Use the VcsProvider merge rather than spawning git CLI
-    let merge_vcs = vcs::detect_vcs_provider(&merge_dir)
-        .context("Failed to open VCS repository for merge")?;
+    let merge_vcs =
+        vcs::detect_vcs_provider(&merge_dir).context("Failed to open VCS repository for merge")?;
     merge_vcs
         .merge_branch(&source)
         .context("Merge failed. Resolve conflicts and try again.")?;

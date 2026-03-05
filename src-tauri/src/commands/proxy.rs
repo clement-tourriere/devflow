@@ -114,7 +114,8 @@ pub async fn get_proxy_status(state: State<'_, AppState>) -> Result<ProxyStatus,
 
 #[tauri::command]
 pub async fn list_containers() -> Result<Vec<ContainerEntry>, String> {
-    let monitor = devflow_proxy::monitor::DockerMonitor::new().map_err(crate::commands::format_error)?;
+    let monitor =
+        devflow_proxy::monitor::DockerMonitor::new().map_err(crate::commands::format_error)?;
 
     let containers = monitor
         .get_running_containers()
@@ -157,8 +158,8 @@ pub async fn get_certificate_status() -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 pub async fn install_certificate() -> Result<(), String> {
-    let ca =
-        devflow_proxy::ca::CertificateAuthority::load_or_generate().map_err(crate::commands::format_error)?;
+    let ca = devflow_proxy::ca::CertificateAuthority::load_or_generate()
+        .map_err(crate::commands::format_error)?;
     devflow_proxy::platform::install_system_trust(&ca).map_err(crate::commands::format_error)
 }
 

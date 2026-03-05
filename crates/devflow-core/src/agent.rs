@@ -310,10 +310,7 @@ fn ensure_claude_skill_symlinks(project_dir: &Path) -> Result<()> {
 
     for dir_name in MANAGED_SKILL_DIRS {
         let claude_link = claude_skills_dir.join(dir_name);
-        let relative_target = Path::new("..")
-            .join("..")
-            .join(SKILLS_DIR)
-            .join(dir_name);
+        let relative_target = Path::new("..").join("..").join(SKILLS_DIR).join(dir_name);
 
         if claude_link.is_symlink() {
             if let Ok(target) = std::fs::read_link(&claude_link) {

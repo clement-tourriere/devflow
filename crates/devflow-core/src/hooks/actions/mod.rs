@@ -53,11 +53,9 @@ pub async fn execute_action(
             content,
             mode,
         } => write_file::execute(path, content, mode, context, template_engine, working_dir),
-        super::HookAction::WriteEnv {
-            path,
-            vars,
-            mode,
-        } => write_env::execute(path, vars, mode, context, template_engine, working_dir),
+        super::HookAction::WriteEnv { path, vars, mode } => {
+            write_env::execute(path, vars, mode, context, template_engine, working_dir)
+        }
         super::HookAction::Copy {
             from,
             to,
@@ -67,17 +65,15 @@ pub async fn execute_action(
             container,
             command,
             user,
-        } => {
-            docker_exec::execute(
-                container,
-                command,
-                user.as_deref(),
-                context,
-                template_engine,
-                working_dir,
-                print_output,
-            )
-        }
+        } => docker_exec::execute(
+            container,
+            command,
+            user.as_deref(),
+            context,
+            template_engine,
+            working_dir,
+            print_output,
+        ),
         super::HookAction::Http {
             url,
             method,

@@ -100,8 +100,7 @@ pub async fn switch_workspace(
                     );
                 }
 
-                vcs_provider
-                    .create_workspace(workspace_name, options.from_workspace.as_deref())?;
+                vcs_provider.create_workspace(workspace_name, options.from_workspace.as_deref())?;
                 branch_created = true;
                 parent_for_new = options.from_workspace.clone();
             }
@@ -127,8 +126,7 @@ pub async fn switch_workspace(
                     workspace_name
                 );
             }
-            vcs_provider
-                .create_workspace(workspace_name, options.from_workspace.as_deref())?;
+            vcs_provider.create_workspace(workspace_name, options.from_workspace.as_deref())?;
             branch_created = true;
             parent_for_new = options.from_workspace.clone();
         }
@@ -153,47 +151,46 @@ pub async fn switch_workspace(
     );
 
     // 4. Service orchestration
-    let service_results: Vec<ServiceResult> = if !opts.skip_services
-        && !config.resolve_services().is_empty()
-    {
-        // Determine parent for service creation
-        let service_parent = if branch_created {
-            normalized_parent.clone()
-        } else {
-            // Look up stored parent from registry
-            LocalStateManager::new()
-                .ok()
-                .and_then(|state| state.get_workspace_by_dir(project_dir, &normalized_name))
-                .and_then(|b| b.parent)
-        };
+    let service_results: Vec<ServiceResult> =
+        if !opts.skip_services && !config.resolve_services().is_empty() {
+            // Determine parent for service creation
+            let service_parent = if branch_created {
+                normalized_parent.clone()
+            } else {
+                // Look up stored parent from registry
+                LocalStateManager::new()
+                    .ok()
+                    .and_then(|state| state.get_workspace_by_dir(project_dir, &normalized_name))
+                    .and_then(|b| b.parent)
+            };
 
-        let results = services::factory::orchestrate_switch(
-            config,
-            &normalized_name,
-            service_parent.as_deref(),
-        )
-        .await?;
-
-        let service_results: Vec<ServiceResult> =
-            results.into_iter().map(ServiceResult::from).collect();
-
-        // Post-service-switch hooks (only if any service succeeded)
-        let any_success = service_results.iter().any(|r| r.success);
-        if any_success && !opts.skip_hooks {
-            run_lifecycle_hooks_best_effort(
+            let results = services::factory::orchestrate_switch(
                 config,
-                project_dir,
                 &normalized_name,
-                HookPhase::PostServiceSwitch,
-                opts,
+                service_parent.as_deref(),
             )
-            .await;
-        }
+            .await?;
 
-        service_results
-    } else {
-        vec![]
-    };
+            let service_results: Vec<ServiceResult> =
+                results.into_iter().map(ServiceResult::from).collect();
+
+            // Post-service-switch hooks (only if any service succeeded)
+            let any_success = service_results.iter().any(|r| r.success);
+            if any_success && !opts.skip_hooks {
+                run_lifecycle_hooks_best_effort(
+                    config,
+                    project_dir,
+                    &normalized_name,
+                    HookPhase::PostServiceSwitch,
+                    opts,
+                )
+                .await;
+            }
+
+            service_results
+        } else {
+            vec![]
+        };
 
     // 5. Post-create hooks (only if branch was freshly created)
     if branch_created && !opts.skip_hooks {

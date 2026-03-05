@@ -17,6 +17,20 @@ fn resolve_project_dir_for_hooks() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+fn parse_hook_phase_input(phase: &str) -> Result<HookPhase> {
+    let trimmed = phase.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("Hook phase cannot be empty");
+    }
+
+    let parsed = match trimmed.parse::<HookPhase>() {
+        Ok(phase) => phase,
+        Err(never) => match never {},
+    };
+
+    Ok(parsed)
+}
+
 /// Build a `HookContext` from project config and workspace name.
 async fn build_hook_context(config: &Config, workspace_name: &str) -> HookContext {
     let project_dir = resolve_project_dir_for_hooks();
@@ -92,7 +106,7 @@ fn handle_hook_show(config: &Config, phase_filter: Option<&str>, json_output: bo
     // Optionally filter to a single phase
     let phase_filter_parsed: Option<HookPhase> = match phase_filter {
         Some(s) => {
-            let parsed: HookPhase = s.parse().unwrap();
+            let parsed = parse_hook_phase_input(s)?;
             if let HookPhase::Custom(ref name) = parsed {
                 eprintln!(
                     "Warning: '{}' is not a built-in phase. Built-in phases: pre-switch, post-create, \
@@ -451,7 +465,10 @@ async fn handle_hook_vars(
     if let Some(ref sc) = context.short_commit {
         println!("  {{{{ short_commit }}}}        = {}", sc);
     }
-    println!("  {{{{ trigger_source }}}}      = {}", context.trigger_source);
+    println!(
+        "  {{{{ trigger_source }}}}      = {}",
+        context.trigger_source
+    );
     if let Some(ref prev) = context.previous_workspace {
         println!("  {{{{ previous_workspace }}}}  = {}", prev);
     }
@@ -552,7 +569,7 @@ async fn handle_hook_run(
         }
     };
 
-    let phase: HookPhase = phase_str.parse().unwrap();
+    let phase = parse_hook_phase_input(phase_str)?;
 
     if let HookPhase::Custom(ref name) = phase {
         eprintln!(
@@ -721,10 +738,7 @@ fn handle_hook_approvals(action: super::ApprovalCommands, json_output: bool) -> 
 
 /// `devflow hook triggers` — show VCS event → devflow phase mapping.
 fn handle_hook_triggers(config: &Config, json_output: bool) -> Result<()> {
-    let triggers = config
-        .triggers
-        .clone()
-        .unwrap_or_default();
+    let triggers = config.triggers.clone().unwrap_or_default();
     let mappings = triggers.git_mappings();
 
     if json_output {

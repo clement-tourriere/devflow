@@ -39,19 +39,13 @@ impl Default for TriggersConfig {
 /// Default VCS-to-devflow phase mapping.
 fn default_git_triggers() -> HashMap<String, Vec<String>> {
     let mut m = HashMap::new();
-    m.insert(
-        "post-checkout".to_string(),
-        vec!["post-switch".to_string()],
-    );
+    m.insert("post-checkout".to_string(), vec!["post-switch".to_string()]);
     m.insert("pre-commit".to_string(), vec!["pre-commit".to_string()]);
     m.insert(
         "post-merge".to_string(),
         vec!["post-merge".to_string(), "post-switch".to_string()],
     );
-    m.insert(
-        "post-rewrite".to_string(),
-        vec!["post-rewrite".to_string()],
-    );
+    m.insert("post-rewrite".to_string(), vec!["post-rewrite".to_string()]);
     m
 }
 

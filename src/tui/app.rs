@@ -409,8 +409,8 @@ impl App {
                 }
                 self.handle_key_event(key)
             }
-            AppEvent::Mouse(_) => Action::None,
-            AppEvent::Resize(_, _) => Action::None,
+            AppEvent::Mouse(_event) => Action::None,
+            AppEvent::Resize(_cols, _rows) => Action::None,
             AppEvent::Tick => {
                 // Advance spinner
                 self.spinner_tick = (self.spinner_tick + 1) % theme::SPINNER_FRAMES.len();
@@ -693,7 +693,7 @@ impl App {
                 ref workspace,
             } => {
                 self.logs.set_loading(service, workspace);
-                self.switch_tab(2); // Switch to logs tab
+                self.switch_tab(4); // Switch to logs tab
                 self.spawn_fetch_logs(service.clone(), workspace.clone());
             }
             Action::RunDoctor => {
@@ -774,9 +774,7 @@ impl App {
             }
             Action::SelectOption(idx) => {
                 if let ModalState::Select {
-                    options,
-                    on_select,
-                    ..
+                    options, on_select, ..
                 } = std::mem::replace(&mut self.modal, ModalState::None)
                 {
                     if let Some(selected_value) = options.get(idx) {
@@ -907,10 +905,7 @@ impl App {
                             let _ = tx.send(Action::Refresh);
                         }
                         Err(e) => {
-                            let _ = tx.send(Action::Error(format!(
-                                "Failed to add service: {}",
-                                e
-                            )));
+                            let _ = tx.send(Action::Error(format!("Failed to add service: {}", e)));
                         }
                     }
                 });
@@ -929,10 +924,7 @@ impl App {
                             self.load_initial_data();
                         }
                         Err(e) => {
-                            self.set_status(
-                                format!("Failed to remove service: {}", e),
-                                true,
-                            );
+                            self.set_status(format!("Failed to remove service: {}", e), true);
                         }
                     },
                     Err(e) => {

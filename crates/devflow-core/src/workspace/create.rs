@@ -58,15 +58,13 @@ pub async fn create_workspace(
         vcs::detect_vcs_provider(project_dir).context("Failed to open VCS repository")?;
 
     let normalized_name = config.get_normalized_workspace_name(workspace_name);
-    let normalized_parent = options.from_workspace.as_deref().map(|fb| {
-        config.get_normalized_workspace_name(fb)
-    });
+    let normalized_parent = options
+        .from_workspace
+        .as_deref()
+        .map(|fb| config.get_normalized_workspace_name(fb));
 
     // Decide whether to create a worktree
-    let config_prefers_worktree = config
-        .worktree
-        .as_ref()
-        .is_some_and(|wt| wt.enabled);
+    let config_prefers_worktree = config.worktree.as_ref().is_some_and(|wt| wt.enabled);
 
     let create_as_worktree = match options.creation_mode {
         WorkspaceCreationMode::Default => config_prefers_worktree,

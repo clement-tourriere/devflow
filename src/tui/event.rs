@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyEvent};
+use crossterm::event::{self, Event, KeyEvent, MouseEvent};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -9,9 +9,9 @@ pub enum AppEvent {
     /// A key was pressed
     Key(KeyEvent),
     /// Mouse activity
-    Mouse(()),
+    Mouse(MouseEvent),
     /// Terminal was resized
-    Resize((), ()),
+    Resize(u16, u16),
     /// Periodic tick for background refresh
     Tick,
 }
@@ -49,8 +49,8 @@ impl EventHandler {
                     if let Some(evt) = evt {
                         let app_event = match evt {
                             Event::Key(key) => Some(AppEvent::Key(key)),
-                            Event::Mouse(_) => Some(AppEvent::Mouse(())),
-                            Event::Resize(_, _) => Some(AppEvent::Resize((), ())),
+                            Event::Mouse(mouse) => Some(AppEvent::Mouse(mouse)),
+                            Event::Resize(cols, rows) => Some(AppEvent::Resize(cols, rows)),
                             _ => None,
                         };
                         if let Some(e) = app_event {

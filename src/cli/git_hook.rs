@@ -58,8 +58,7 @@ pub(super) fn copy_worktree_files(config: &Config, main_worktree_dir: &str) -> R
                                     if let Some(parent) = target.parent() {
                                         std::fs::create_dir_all(parent).ok();
                                     }
-                                    if let Err(e) =
-                                        reflink_copy::reflink_or_copy(&source, &target)
+                                    if let Err(e) = reflink_copy::reflink_or_copy(&source, &target)
                                     {
                                         log::warn!(
                                             "Failed to copy ignored entry '{}': {}",
@@ -140,7 +139,17 @@ pub(super) async fn handle_git_hook(
         if config.should_switch_on_workspace(&current_git_branch) {
             // If switching to main git workspace, use main database
             if current_git_branch == config.git.main_workspace {
-                super::workspace::handle_switch_to_main(config, config_path, false, false, false, true, Some("vcs"), Some("post-checkout")).await?;
+                super::workspace::handle_switch_to_main(
+                    config,
+                    config_path,
+                    false,
+                    false,
+                    false,
+                    true,
+                    Some("vcs"),
+                    Some("post-checkout"),
+                )
+                .await?;
             } else {
                 // For other workspaces, check if we should create them and switch
                 if config.should_create_workspace(&current_git_branch) {

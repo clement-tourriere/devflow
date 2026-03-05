@@ -78,6 +78,11 @@ export const createWorkspace = (
     copyFiles,
     copyIgnored,
   });
+export const switchWorkspace = (projectPath: string, workspaceName: string) =>
+  invoke<OrchestrationResult[]>("switch_workspace", {
+    projectPath,
+    workspaceName,
+  });
 export const deleteWorkspace = (projectPath: string, workspaceName: string) =>
   invoke<OrchestrationResult[]>("delete_workspace", {
     projectPath,

@@ -37,24 +37,35 @@ impl ProviderType {
             #[cfg(feature = "service-local")]
             "local" | "docker" => Ok(ProviderType::Local),
             #[cfg(not(feature = "service-local"))]
-            "local" | "docker" => anyhow::bail!("Local provider not compiled. Rebuild with --features service-local"),
+            "local" | "docker" => {
+                anyhow::bail!("Local provider not compiled. Rebuild with --features service-local")
+            }
 
             #[cfg(feature = "service-neon")]
             "neon" => Ok(ProviderType::Neon),
             #[cfg(not(feature = "service-neon"))]
-            "neon" => anyhow::bail!("Neon provider not compiled. Rebuild with --features service-neon"),
+            "neon" => {
+                anyhow::bail!("Neon provider not compiled. Rebuild with --features service-neon")
+            }
 
             #[cfg(feature = "service-dblab")]
             "dblab" | "database_lab" => Ok(ProviderType::DBLab),
             #[cfg(not(feature = "service-dblab"))]
-            "dblab" | "database_lab" => anyhow::bail!("DBLab provider not compiled. Rebuild with --features service-dblab"),
+            "dblab" | "database_lab" => {
+                anyhow::bail!("DBLab provider not compiled. Rebuild with --features service-dblab")
+            }
 
             #[cfg(feature = "service-xata")]
             "xata" | "xata_lite" => Ok(ProviderType::Xata),
             #[cfg(not(feature = "service-xata"))]
-            "xata" | "xata_lite" => anyhow::bail!("Xata provider not compiled. Rebuild with --features service-xata"),
+            "xata" | "xata_lite" => {
+                anyhow::bail!("Xata provider not compiled. Rebuild with --features service-xata")
+            }
 
-            _ => anyhow::bail!("Unknown provider type: {}. Valid types: local, neon, dblab, xata", s),
+            _ => anyhow::bail!(
+                "Unknown provider type: {}. Valid types: local, neon, dblab, xata",
+                s
+            ),
         }
     }
 

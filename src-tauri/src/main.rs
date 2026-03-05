@@ -14,12 +14,12 @@ fn workspace_menu_item_id(project_path: &str, workspace_name: &str) -> String {
     )
 }
 
-fn parse_workspace_menu_project_path(id: &str) -> Option<String> {
+fn parse_workspace_menu_payload(id: &str) -> Option<(String, String)> {
     let payload = id.strip_prefix("workspace-open:")?;
-    let (encoded_project, _) = payload.split_once('|')?;
-    urlencoding::decode(encoded_project)
-        .ok()
-        .map(|s| s.into_owned())
+    let (encoded_project, encoded_workspace) = payload.split_once('|')?;
+    let project_path = urlencoding::decode(encoded_project).ok()?.into_owned();
+    let workspace_name = urlencoding::decode(encoded_workspace).ok()?.into_owned();
+    Some((project_path, workspace_name))
 }
 
 fn workspace_tray_label(workspace: &commands::workspaces::WorkspaceEntry) -> (String, bool) {
@@ -36,7 +36,7 @@ fn workspace_tray_label(workspace: &commands::workspaces::WorkspaceEntry) -> (St
             details.push("checked out".to_string());
         }
         let label = format!("worktree: {} ({})", workspace.name, details.join(", "));
-        (label, false)
+        (label, workspace.is_current)
     } else if workspace.is_current {
         (format!("branch: {} (checked out)", workspace.name), true)
     } else {
@@ -392,8 +392,52 @@ fn build_tray(app: &tauri::App) -> Result<tauri::tray::TrayIcon, Box<dyn std::er
                     navigate_to_project(app, project_path);
                 }
                 _ if id.starts_with("workspace-open:") => {
-                    if let Some(project_path) = parse_workspace_menu_project_path(id) {
-                        navigate_to_project(app, &project_path);
+                    if let Some((project_path, workspace_name)) = parse_workspace_menu_payload(id) {
+                        let handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let should_switch = match commands::workspaces::list_workspaces(
+                                project_path.clone(),
+                            )
+                            .await
+                            {
+                                Ok(result) => result
+                                    .workspaces
+                                    .iter()
+                                    .find(|w| w.name == workspace_name)
+                                    .map(|w| w.worktree_path.is_none())
+                                    .unwrap_or(false),
+                                Err(err) => {
+                                    log::warn!(
+                                        "Could not determine workspace type for tray action in '{}': {}",
+                                        project_path,
+                                        err
+                                    );
+                                    false
+                                }
+                            };
+
+                            if should_switch {
+                                if let Err(err) = commands::workspaces::switch_workspace(
+                                    handle.clone(),
+                                    project_path.clone(),
+                                    workspace_name.clone(),
+                                )
+                                .await
+                                {
+                                    log::warn!(
+                                        "Failed to switch workspace from tray for '{}': {}",
+                                        project_path,
+                                        err
+                                    );
+                                }
+                            } else {
+                                log::debug!(
+                                    "Skipping tray switch for worktree/unknown workspace '{}'",
+                                    workspace_name
+                                );
+                            }
+                            navigate_to_project(&handle, &project_path);
+                        });
                     }
                 }
                 _ => {}

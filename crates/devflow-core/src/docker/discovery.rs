@@ -1,5 +1,5 @@
-use bollard::Docker;
 use bollard::query_parameters::{InspectContainerOptions, ListContainersOptions};
+use bollard::Docker;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -90,10 +90,7 @@ pub async fn discover_containers(
 
         // Inspect for full details
         let inspect = match docker
-            .inspect_container(
-                container_id,
-                Some(InspectContainerOptions { size: false }),
-            )
+            .inspect_container(container_id, Some(InspectContainerOptions { size: false }))
             .await
         {
             Ok(info) => info,

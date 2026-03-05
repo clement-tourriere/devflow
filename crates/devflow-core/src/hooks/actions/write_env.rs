@@ -59,11 +59,7 @@ pub fn execute(
     }
 
     Ok(ActionResult {
-        summary: format!(
-            "write-env: {} ({} vars)",
-            file_path,
-            rendered_vars.len()
-        ),
+        summary: format!("write-env: {} ({} vars)", file_path, rendered_vars.len()),
     })
 }
 

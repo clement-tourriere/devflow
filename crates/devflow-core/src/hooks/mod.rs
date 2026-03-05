@@ -199,9 +199,7 @@ pub struct ActionHookEntry {
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum HookAction {
     /// Run a shell command (same as Extended, but explicit as an action)
-    Shell {
-        command: String,
-    },
+    Shell { command: String },
     /// Find-and-replace in a file
     Replace {
         file: String,
@@ -270,7 +268,10 @@ fn default_http_method() -> String {
 impl HookAction {
     /// Whether this action requires user approval before execution.
     pub fn requires_approval(&self) -> bool {
-        matches!(self, HookAction::Shell { .. } | HookAction::DockerExec { .. })
+        matches!(
+            self,
+            HookAction::Shell { .. } | HookAction::DockerExec { .. }
+        )
     }
 
     /// Human-readable action type name.
@@ -458,14 +459,11 @@ pub async fn build_hook_context(
     let (commit, short_commit) = git2::Repository::discover(&canonical_project_dir)
         .ok()
         .and_then(|repo| {
-            repo.head()
-                .ok()
-                .and_then(|head| head.target())
-                .map(|oid| {
-                    let sha = oid.to_string();
-                    let short = sha[..7.min(sha.len())].to_string();
-                    (Some(sha), Some(short))
-                })
+            repo.head().ok().and_then(|head| head.target()).map(|oid| {
+                let sha = oid.to_string();
+                let short = sha[..7.min(sha.len())].to_string();
+                (Some(sha), Some(short))
+            })
         })
         .unwrap_or((None, None));
 
@@ -529,16 +527,14 @@ action:
 "#;
         let entry: HookEntry = serde_yaml_ng::from_str(yaml).unwrap();
         match entry {
-            HookEntry::Action(act) => {
-                match &act.action {
-                    HookAction::WriteEnv { path, vars, .. } => {
-                        assert_eq!(path, ".env.local");
-                        assert_eq!(vars.len(), 2);
-                        assert!(vars.contains_key("DATABASE_URL"));
-                    }
-                    other => panic!("Expected WriteEnv action, got {:?}", other),
+            HookEntry::Action(act) => match &act.action {
+                HookAction::WriteEnv { path, vars, .. } => {
+                    assert_eq!(path, ".env.local");
+                    assert_eq!(vars.len(), 2);
+                    assert!(vars.contains_key("DATABASE_URL"));
                 }
-            }
+                other => panic!("Expected WriteEnv action, got {:?}", other),
+            },
             other => panic!("Expected Action, got {:?}", other),
         }
     }
@@ -555,15 +551,13 @@ action:
 "#;
         let entry: HookEntry = serde_yaml_ng::from_str(yaml).unwrap();
         match entry {
-            HookEntry::Action(act) => {
-                match &act.action {
-                    HookAction::Replace { file, regex, .. } => {
-                        assert_eq!(file, "config/database.yml");
-                        assert!(*regex);
-                    }
-                    other => panic!("Expected Replace action, got {:?}", other),
+            HookEntry::Action(act) => match &act.action {
+                HookAction::Replace { file, regex, .. } => {
+                    assert_eq!(file, "config/database.yml");
+                    assert!(*regex);
                 }
-            }
+                other => panic!("Expected Replace action, got {:?}", other),
+            },
             other => panic!("Expected Action, got {:?}", other),
         }
     }
@@ -606,7 +600,12 @@ action:
             HookEntry::Action(act) => {
                 assert!(!act.action.requires_approval());
                 match &act.action {
-                    HookAction::Http { url, method, headers, body } => {
+                    HookAction::Http {
+                        url,
+                        method,
+                        headers,
+                        body,
+                    } => {
                         assert_eq!(url, "https://hooks.slack.com/services/XXX");
                         assert_eq!(method, "POST");
                         assert!(headers.is_some());
@@ -630,16 +629,18 @@ action:
 "#;
         let entry: HookEntry = serde_yaml_ng::from_str(yaml).unwrap();
         match entry {
-            HookEntry::Action(act) => {
-                match &act.action {
-                    HookAction::Notify { title, message, level } => {
-                        assert_eq!(title, "devflow");
-                        assert_eq!(message, "Ready");
-                        assert!(matches!(level, NotifyLevel::Success));
-                    }
-                    other => panic!("Expected Notify action, got {:?}", other),
+            HookEntry::Action(act) => match &act.action {
+                HookAction::Notify {
+                    title,
+                    message,
+                    level,
+                } => {
+                    assert_eq!(title, "devflow");
+                    assert_eq!(message, "Ready");
+                    assert!(matches!(level, NotifyLevel::Success));
                 }
-            }
+                other => panic!("Expected Notify action, got {:?}", other),
+            },
             other => panic!("Expected Action, got {:?}", other),
         }
     }
@@ -656,7 +657,11 @@ action:
         match entry {
             HookEntry::Action(act) => {
                 match &act.action {
-                    HookAction::Copy { from, to, overwrite } => {
+                    HookAction::Copy {
+                        from,
+                        to,
+                        overwrite,
+                    } => {
                         assert_eq!(from, ".env.example");
                         assert_eq!(to, ".env.local");
                         assert!(*overwrite); // default true
@@ -682,7 +687,11 @@ action:
             HookEntry::Action(act) => {
                 assert!(act.action.requires_approval());
                 match &act.action {
-                    HookAction::DockerExec { container, command, user } => {
+                    HookAction::DockerExec {
+                        container,
+                        command,
+                        user,
+                    } => {
                         assert_eq!(container, "myapp-postgres");
                         assert_eq!(command, "psql -U postgres -c 'SELECT 1'");
                         assert_eq!(user.as_deref(), Some("postgres"));
@@ -716,9 +725,18 @@ post-switch:
 
         let post_create = config.get(&HookPhase::PostCreate).unwrap();
         assert_eq!(post_create.len(), 3);
-        assert!(matches!(post_create.get("install"), Some(HookEntry::Simple(_))));
-        assert!(matches!(post_create.get("env"), Some(HookEntry::Extended(_))));
-        assert!(matches!(post_create.get("write-env"), Some(HookEntry::Action(_))));
+        assert!(matches!(
+            post_create.get("install"),
+            Some(HookEntry::Simple(_))
+        ));
+        assert!(matches!(
+            post_create.get("env"),
+            Some(HookEntry::Extended(_))
+        ));
+        assert!(matches!(
+            post_create.get("write-env"),
+            Some(HookEntry::Action(_))
+        ));
 
         let post_switch = config.get(&HookPhase::PostSwitch).unwrap();
         assert_eq!(post_switch.len(), 1);
@@ -744,7 +762,9 @@ post-switch:
         assert!(extended.requires_approval());
 
         let action_shell = HookEntry::Action(ActionHookEntry {
-            action: HookAction::Shell { command: "echo hi".to_string() },
+            action: HookAction::Shell {
+                command: "echo hi".to_string(),
+            },
             working_dir: None,
             continue_on_error: None,
             condition: None,
@@ -784,13 +804,78 @@ post-switch:
 
     #[test]
     fn test_hook_action_type_name() {
-        assert_eq!(HookAction::Shell { command: "".to_string() }.type_name(), "shell");
-        assert_eq!(HookAction::Replace { file: "".to_string(), pattern: "".to_string(), replacement: "".to_string(), regex: false, create_if_missing: false }.type_name(), "replace");
-        assert_eq!(HookAction::WriteFile { path: "".to_string(), content: "".to_string(), mode: WriteMode::Overwrite }.type_name(), "write-file");
-        assert_eq!(HookAction::WriteEnv { path: "".to_string(), vars: IndexMap::new(), mode: EnvWriteMode::Overwrite }.type_name(), "write-env");
-        assert_eq!(HookAction::Copy { from: "".to_string(), to: "".to_string(), overwrite: true }.type_name(), "copy");
-        assert_eq!(HookAction::DockerExec { container: "".to_string(), command: "".to_string(), user: None }.type_name(), "docker-exec");
-        assert_eq!(HookAction::Http { url: "".to_string(), method: "GET".to_string(), body: None, headers: None }.type_name(), "http");
-        assert_eq!(HookAction::Notify { title: "".to_string(), message: "".to_string(), level: NotifyLevel::Info }.type_name(), "notify");
+        assert_eq!(
+            HookAction::Shell {
+                command: "".to_string()
+            }
+            .type_name(),
+            "shell"
+        );
+        assert_eq!(
+            HookAction::Replace {
+                file: "".to_string(),
+                pattern: "".to_string(),
+                replacement: "".to_string(),
+                regex: false,
+                create_if_missing: false
+            }
+            .type_name(),
+            "replace"
+        );
+        assert_eq!(
+            HookAction::WriteFile {
+                path: "".to_string(),
+                content: "".to_string(),
+                mode: WriteMode::Overwrite
+            }
+            .type_name(),
+            "write-file"
+        );
+        assert_eq!(
+            HookAction::WriteEnv {
+                path: "".to_string(),
+                vars: IndexMap::new(),
+                mode: EnvWriteMode::Overwrite
+            }
+            .type_name(),
+            "write-env"
+        );
+        assert_eq!(
+            HookAction::Copy {
+                from: "".to_string(),
+                to: "".to_string(),
+                overwrite: true
+            }
+            .type_name(),
+            "copy"
+        );
+        assert_eq!(
+            HookAction::DockerExec {
+                container: "".to_string(),
+                command: "".to_string(),
+                user: None
+            }
+            .type_name(),
+            "docker-exec"
+        );
+        assert_eq!(
+            HookAction::Http {
+                url: "".to_string(),
+                method: "GET".to_string(),
+                body: None,
+                headers: None
+            }
+            .type_name(),
+            "http"
+        );
+        assert_eq!(
+            HookAction::Notify {
+                title: "".to_string(),
+                message: "".to_string(),
+                level: NotifyLevel::Info
+            }
+            .type_name(),
+            "notify"
+        );
     }
 }

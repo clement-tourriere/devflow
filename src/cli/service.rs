@@ -71,21 +71,11 @@ pub(crate) async fn run_add_service_wizard(
                 "dblab               — Database Lab Engine (clone-based branching)",
                 "xata                — Xata serverless database (cloud)",
             ],
-            "clickhouse" => vec![
-                "local               — Docker container on this machine",
-            ],
-            "mysql" => vec![
-                "local               — Docker container on this machine",
-            ],
-            "generic" => vec![
-                "local               — Docker container on this machine",
-            ],
-            "plugin" => vec![
-                "local               — Managed by plugin",
-            ],
-            _ => vec![
-                "local               — Docker container on this machine",
-            ],
+            "clickhouse" => vec!["local               — Docker container on this machine"],
+            "mysql" => vec!["local               — Docker container on this machine"],
+            "generic" => vec!["local               — Docker container on this machine"],
+            "plugin" => vec!["local               — Managed by plugin"],
+            _ => vec!["local               — Docker container on this machine"],
         };
 
         if provider_options.len() == 1 {
@@ -185,7 +175,9 @@ pub(crate) async fn run_add_service_wizard(
         xata: None,
         clickhouse: if service_type == "clickhouse" {
             Some(devflow_core::config::ClickHouseConfig {
-                image: discovered_image.clone().unwrap_or_else(|| "clickhouse/clickhouse-server:latest".to_string()),
+                image: discovered_image
+                    .clone()
+                    .unwrap_or_else(|| "clickhouse/clickhouse-server:latest".to_string()),
                 port_range_start: None,
                 data_root: None,
                 user: "default".to_string(),
@@ -237,9 +229,7 @@ pub(crate) async fn run_add_service_wizard(
                 if let Some(ref mut local) = updated_cfg.local {
                     local.data_root = Some(data_root);
                 }
-                if let Err(e) =
-                    state.add_service(config_path, updated_cfg.clone(), true)
-                {
+                if let Err(e) = state.add_service(config_path, updated_cfg.clone(), true) {
                     log::warn!(
                         "Failed to persist updated service config in local state: {}",
                         e
@@ -312,7 +302,8 @@ pub(super) async fn handle_service_dispatch(
             // When explicit flags are provided, use them directly; otherwise delegate to wizard
             if name.is_some() || provider.is_some() || service_type.is_some() {
                 // Direct mode with explicit flags — keep existing behavior for CLI power users
-                let service_type = service_type.unwrap_or_else(devflow_core::config::default_service_type);
+                let service_type =
+                    service_type.unwrap_or_else(devflow_core::config::default_service_type);
                 let provider_type = provider.unwrap_or_else(|| "local".to_string());
                 let name = if let Some(n) = name {
                     n
@@ -646,7 +637,9 @@ pub(super) async fn handle_service_provider_command(
     database_name: Option<&str>,
     config_path: &Option<std::path::PathBuf>,
 ) -> Result<()> {
-    if matches!(&cmd, super::ServiceCommands::Cleanup { .. }) && config.resolve_services().is_empty() {
+    if matches!(&cmd, super::ServiceCommands::Cleanup { .. })
+        && config.resolve_services().is_empty()
+    {
         if json_output {
             println!(
                 "{}",
@@ -2033,7 +2026,8 @@ pub(super) fn enrich_branch_list_json(
             .or_else(|| service_map.get(&normalized))
             .copied();
         let wt = wt_lookup.get(name).or_else(|| wt_lookup.get(&normalized));
-        let is_context = super::context_matches_branch(config, context.context_branch.as_deref(), name);
+        let is_context =
+            super::context_matches_branch(config, context.context_branch.as_deref(), name);
         let is_current = current_git.as_deref() == Some(name.as_str())
             || current_normalized.as_deref() == Some(name.as_str());
         let is_default = *name == default_workspace
@@ -2098,10 +2092,7 @@ async fn handle_discover(service_type: Option<&str>, json_output: bool) -> Resul
     println!("{}", "-".repeat(100));
     for c in &containers {
         let compose_label = if c.is_compose {
-            format!(
-                " ({})",
-                c.compose_project.as_deref().unwrap_or("compose")
-            )
+            format!(" ({})", c.compose_project.as_deref().unwrap_or("compose"))
         } else {
             String::new()
         };
@@ -2138,10 +2129,7 @@ pub(super) async fn offer_discovered_containers(
         .iter()
         .map(|c| {
             let compose_tag = if c.is_compose {
-                format!(
-                    " [{}]",
-                    c.compose_project.as_deref().unwrap_or("compose")
-                )
+                format!(" [{}]", c.compose_project.as_deref().unwrap_or("compose"))
             } else {
                 String::new()
             };
@@ -2171,10 +2159,10 @@ pub(super) async fn offer_discovered_containers(
                 .position(|c| s.starts_with(&c.container_name))
                 .unwrap_or(0);
             let c = &containers[idx];
-            let name = c
-                .compose_service
-                .clone()
-                .unwrap_or_else(|| c.container_name.replace(|ch: char| !ch.is_alphanumeric() && ch != '-', "-"));
+            let name = c.compose_service.clone().unwrap_or_else(|| {
+                c.container_name
+                    .replace(|ch: char| !ch.is_alphanumeric() && ch != '-', "-")
+            });
             Some((c.image.clone(), c.connection_url.clone(), name))
         }
         Err(_) => None,

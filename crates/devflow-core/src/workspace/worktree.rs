@@ -43,11 +43,7 @@ pub fn apply_worktree_path_template(
 ///
 /// Applies the config path template (or the default `../{repo}.{workspace}`)
 /// and joins it relative to the project directory.
-pub fn resolve_worktree_path(
-    config: &Config,
-    project_dir: &Path,
-    workspace_name: &str,
-) -> PathBuf {
+pub fn resolve_worktree_path(config: &Config, project_dir: &Path, workspace_name: &str) -> PathBuf {
     let repo_name = resolve_repo_name(config, project_dir);
     let normalized = config.get_normalized_workspace_name(workspace_name);
     let path_template = config
@@ -195,11 +191,7 @@ pub fn reflink_copy_dir(src: &Path, dst: &Path) {
             reflink_copy_dir(&src_path, &dst_path);
         } else if src_path.is_file() {
             if let Err(e) = reflink_copy::reflink_or_copy(&src_path, &dst_path) {
-                log::warn!(
-                    "Failed to reflink copy '{}': {}",
-                    src_path.display(),
-                    e
-                );
+                log::warn!("Failed to reflink copy '{}': {}", src_path.display(), e);
             }
         }
     });
@@ -229,7 +221,10 @@ mod tests {
     fn test_resolve_repo_name_from_config() {
         let mut config = Config::default();
         config.name = Some("my-project".to_string());
-        assert_eq!(resolve_repo_name(&config, Path::new("/tmp/foo")), "my-project");
+        assert_eq!(
+            resolve_repo_name(&config, Path::new("/tmp/foo")),
+            "my-project"
+        );
     }
 
     #[test]

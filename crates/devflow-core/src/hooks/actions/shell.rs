@@ -16,7 +16,14 @@ pub fn execute(
     print_output: bool,
 ) -> Result<ActionResult> {
     let rendered = template_engine.render(command_template, context)?;
-    run_shell_command(&rendered, working_dir, None, context, template_engine, print_output)?;
+    run_shell_command(
+        &rendered,
+        working_dir,
+        None,
+        context,
+        template_engine,
+        print_output,
+    )?;
     Ok(ActionResult {
         summary: format!("shell: {}", rendered),
     })
