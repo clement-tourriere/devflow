@@ -22,6 +22,8 @@ import {
   listContainers,
   getProxyStatus,
   runDoctor,
+  checkAgentSkills,
+  installAgentSkills,
 } from "../../utils/invoke";
 import type {
   ProjectDetail as ProjectDetailType,
@@ -33,6 +35,7 @@ import type {
   ContainerEntry,
   ProxyStatus,
   WorkspaceCreationMode,
+  AgentSkillsStatus,
 } from "../../types";
 import Modal from "../../components/Modal";
 import ConfirmDialog from "../../components/ConfirmDialog";
@@ -56,6 +59,11 @@ function ProjectDetail() {
   const [currentWorkspace, setCurrentWorkspace] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [setupIssueCount, setSetupIssueCount] = useState(0);
+
+  // Agent skills staleness
+  const [skillStatus, setSkillStatus] = useState<AgentSkillsStatus | null>(null);
+  const [skillsUpdating, setSkillsUpdating] = useState(false);
+  const [skillsDismissed, setSkillsDismissed] = useState(false);
 
   // Service workspace tracking: { "service-name": ServiceWorkspaceInfo[] }
   const [serviceWorkspaces, setServiceWorkspaces] = useState<
@@ -198,7 +206,25 @@ function ProjectDetail() {
         setSetupIssueCount(failCount);
       })
       .catch(() => setSetupIssueCount(0));
+    // Also check agent skills staleness
+    checkAgentSkills(projectPath)
+      .then((status) => setSkillStatus(status))
+      .catch(() => setSkillStatus(null));
   }, [detail?.has_config, projectPath]);
+
+  const handleUpdateSkills = async () => {
+    if (!projectPath || skillsUpdating) return;
+    setSkillsUpdating(true);
+    try {
+      await installAgentSkills(projectPath);
+      const status = await checkAgentSkills(projectPath);
+      setSkillStatus(status);
+    } catch {
+      // Silently fail — user can use Setup page for detailed errors
+    } finally {
+      setSkillsUpdating(false);
+    }
+  };
 
   const handleCreateWorkspace = async () => {
     if (!newWorkspaceName.trim() || isCreatingWorkspace) return;
@@ -562,6 +588,54 @@ function ProjectDetail() {
           )}
         </div>
       </div>
+
+      {/* Agent skills update notification */}
+      {skillStatus?.update_available && skillStatus.installed_skills.length > 0 && !skillsDismissed && (
+        <div
+          className="card"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            padding: "10px 16px",
+            borderLeft: "3px solid var(--warning)",
+            gap: 12,
+          }}
+        >
+          <div style={{ flex: 1, fontSize: 13 }}>
+            <strong>Agent skills update available</strong>
+            <span style={{ color: "var(--text-secondary)", marginLeft: 8 }}>
+              {skillStatus.stale_skills.length > 0 && `${skillStatus.stale_skills.length} outdated`}
+              {skillStatus.stale_skills.length > 0 && skillStatus.missing_skills.length > 0 && ", "}
+              {skillStatus.missing_skills.length > 0 && `${skillStatus.missing_skills.length} new`}
+            </span>
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button
+              className="btn btn-primary"
+              onClick={handleUpdateSkills}
+              disabled={skillsUpdating}
+              style={{ padding: "4px 14px", fontSize: 12 }}
+            >
+              {skillsUpdating ? "Updating..." : "Update"}
+            </button>
+            <button
+              className="btn-link"
+              onClick={() => setSkillsDismissed(true)}
+              style={{
+                fontSize: 12,
+                color: "var(--text-muted)",
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                padding: "4px 6px",
+              }}
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Workspaces card */}
       <div className="card">

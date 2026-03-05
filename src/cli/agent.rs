@@ -68,7 +68,7 @@ pub(super) async fn handle_agent_command(
                 true,  // create
                 None,  // from (defaults to current)
                 false, // no_services
-                true,  // no_verify (agent workspaces skip hooks)
+                false, // no_verify (let hooks run; --non-interactive handles approval)
                 json_output,
                 true, // non_interactive
                 None,

@@ -266,6 +266,8 @@ export interface AgentSkillsStatus {
   installed: boolean;
   installed_skills: string[];
   missing_skills: string[];
+  update_available: boolean;
+  stale_skills: string[];
 }
 
 export interface VcsInfo {

@@ -25,7 +25,8 @@ Five service types: postgres, clickhouse, mysql, generic (any Docker image), plu
 ## Automation contract
 
 - Pass `--json --non-interactive` for all machine executions.
-- Use `--no-verify` with `switch` in headless runs unless hooks are pre-approved.
+- Use `--non-interactive` on `switch` to run hooks without prompts (hooks must be pre-approved).
+- Use `--no-verify` only when hooks are genuinely unwanted — it skips ALL hooks entirely.
 - Non-zero exit code on any failure; partial multi-provider failures also return non-zero.
 - `destroy` and `remove` require `--force` in `--json` or `--non-interactive` mode.
 - Hook approvals are required; unapproved hooks fail in non-interactive mode.
@@ -37,7 +38,12 @@ Five service types: postgres, clickhouse, mysql, generic (any Docker image), plu
 TASK_ID="issue-123"
 BRANCH="agent/$TASK_ID"
 
-devflow --json --non-interactive switch -c "$BRANCH" --no-verify
+OUTPUT=$(devflow --json --non-interactive switch -c "$BRANCH")
+
+# If worktrees are enabled, switch to the worktree directory
+WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
+[ -n "$WORKTREE" ] && cd "$WORKTREE"
+
 CONN=$(devflow --json service connection "$BRANCH" | jq -r '.connection_string')
 
 # run task against $CONN ...
@@ -359,57 +365,43 @@ commit:
 
 ```
 src/
-  main.rs                  CLI entry point (clap derive)
-  cli/
-    mod.rs                 Command enum and dispatch
-    workspace.rs           Workspace operations (switch, list, graph, link, remove, merge, cleanup)
-    service.rs             Service operations (add, create, delete, start, stop, reset, seed, discover)
-    agent.rs               AI agent commands (start, status, context, skill, docs)
-    proxy.rs               Proxy commands (start, stop, status, list, trust)
-    hook.rs                Hook commands (show, run, explain, vars, render, approvals, triggers, actions)
-    commit.rs              VCS commit with AI message generation
-  tui/                     Terminal UI (ratatui-based dashboard)
-
-crates/devflow-core/src/
-  agent.rs                 AI agent integration (skill generation, context, rules)
-  config/mod.rs            Config types, 3-tier merging, validation
+  main.rs               CLI entry point (clap derive)
+  cli.rs                All command implementations (~7800 lines)
+  agent.rs              AI agent integration (skill generation, context, rules)
+  config/mod.rs         Config types, 3-tier merging, validation
   services/
-    mod.rs                 ServiceProvider trait
-    factory.rs             Provider creation + multi-provider orchestration
+    mod.rs              ServiceProvider trait
+    factory.rs          Provider creation + multi-provider orchestration
     postgres/
-      local/               Docker provider (mod.rs, docker.rs, state.rs, storage/, seed.rs)
-      template.rs          PostgreSQL TEMPLATE provider
-      neon.rs              Neon cloud provider
-      dblab.rs             DBLab cloud provider
-      xata.rs              Xata cloud provider
-    clickhouse/local.rs    ClickHouse Docker provider
-    mysql/local.rs         MySQL Docker provider
-    generic/mod.rs         Generic Docker provider
-    plugin.rs              Plugin provider (JSON-over-stdio)
+      local/            Docker provider (mod.rs, docker.rs, state.rs, storage/, seed.rs)
+      template.rs       PostgreSQL TEMPLATE provider
+      neon.rs           Neon cloud provider
+      dblab.rs          DBLab cloud provider
+      xata.rs           Xata cloud provider
+    clickhouse/local.rs ClickHouse Docker provider
+    mysql/local.rs      MySQL Docker provider
+    generic/mod.rs      Generic Docker provider
+    plugin.rs           Plugin provider (JSON-over-stdio)
   hooks/
-    mod.rs                 HookPhase, HookEntry, HooksConfig types
-    executor.rs            HookEngine execution with approval/conditions
-    template.rs            MiniJinja TemplateEngine with custom filters
-    approval.rs            ApprovalStore (YAML persistence with file locking)
+    mod.rs              HookPhase, HookEntry, HooksConfig types
+    executor.rs         HookEngine execution with approval/conditions
+    template.rs         MiniJinja TemplateEngine with custom filters
+    approval.rs         ApprovalStore (YAML persistence with file locking)
   vcs/
-    mod.rs                 VcsProvider trait (Git + Jujutsu auto-detection)
-    git.rs                 Git implementation (git2 crate)
-    jj.rs                  Jujutsu implementation (jj CLI)
-    cow_worktree.rs        CoW worktree creation
-  state/local_state.rs     User-level state (SQLite)
-  docker/compose.rs        Docker Compose file parsing
-  llm.rs                   LLM integration for AI commit messages (CLI-first + API fallback)
-
-crates/devflow-proxy/src/  Native reverse proxy
-src-tauri/                 Tauri 2 desktop GUI (Rust backend)
-ui/                        React frontend (for the desktop GUI)
+    mod.rs              VcsProvider trait (Git + Jujutsu auto-detection)
+    git.rs              Git implementation (git2 crate)
+    jj.rs               Jujutsu implementation (jj CLI)
+    cow_worktree.rs     CoW worktree creation
+  state/local_state.rs  User-level state (SQLite)
+  docker/compose.rs     Docker Compose file parsing
+  database.rs           PostgreSQL template provider DB operations
+  llm.rs                LLM integration for AI commit messages (CLI-first + API fallback)
 ```
 
 ## Primary references
 
 - `AGENTS.md` — Agent onboarding and automation contract
-- `README.md` — Product overview and quickstart
-- `docs/CLI.md` — Complete CLI reference
+- `README.md` — Product overview, quickstart, full reference
 - `CLAUDE.md` — Developer context and project structure
 - `CHANGELOG.md` — Version history
 - `docs/index.html` — Full documentation site

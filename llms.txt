@@ -5,19 +5,19 @@
 devflow gives each Git workspace its own isolated development environment. When you
 `git checkout feature-auth`, devflow automatically creates (or switches to)
 a dedicated worktree and service instances that belong to that workspace. Data is
-cloned using Copy-on-Write for near-instant, space-efficient workspace creation.
+cloned using Copy-on-Write for near-instant, space-efficient branching.
 
 ## Automation defaults
 
 - Always pass `--json --non-interactive` for machine-safe execution.
-- Use `--no-verify` on `switch` in headless environments to skip hook approval prompts.
+- Use `--non-interactive` on `switch` to run hooks without prompts (requires pre-approved hooks).
 - Use `devflow --json capabilities` to detect automation guarantees at runtime.
 - Non-zero exit code means failure; partial multi-provider failures also return non-zero.
+- Note: `--no-verify` skips ALL hooks entirely — only use when hooks are genuinely unwanted.
 
 ## Docs
 
-- [README.md](README.md): Product overview, quickstart, configuration, and install guide.
-- [docs/CLI.md](docs/CLI.md): Complete CLI reference — all commands, flags, and examples.
+- [README.md](README.md): Product overview, quickstart, configuration reference, CLI reference, and install guide.
 - [AGENTS.md](AGENTS.md): Agent-first onboarding, bootstrap flow, suggested agent loop, and automation contract.
 - [CLAUDE.md](CLAUDE.md): Project structure, config schema, development commands, and AI agent context.
 - [CHANGELOG.md](CHANGELOG.md): Version history and release notes.
@@ -33,19 +33,15 @@ cloned using Copy-on-Write for near-instant, space-efficient workspace creation.
 
 ## Source (for code agents)
 
-- [src/cli/mod.rs](src/cli/mod.rs): Command routing, JSON/non-interactive behavior, multi-provider orchestration.
-- [src/cli/workspace.rs](src/cli/workspace.rs): Workspace operations (switch, list, graph, link, remove, merge).
-- [src/cli/service.rs](src/cli/service.rs): Service operations (add, create, delete, start, stop, reset, seed, discover).
-- [src/cli/agent.rs](src/cli/agent.rs): AI agent commands (start, status, context, skill, docs).
-- [src/cli/proxy.rs](src/cli/proxy.rs): Proxy commands (start, stop, status, list, trust).
-- [crates/devflow-core/src/agent.rs](crates/devflow-core/src/agent.rs): AI agent integration (skill generation, context, rules).
-- [crates/devflow-core/src/config/mod.rs](crates/devflow-core/src/config/mod.rs): Config loading, 3-tier merging, env var overrides, validation.
-- [crates/devflow-core/src/services/mod.rs](crates/devflow-core/src/services/mod.rs): `ServiceProvider` trait — the interface all providers implement.
-- [crates/devflow-core/src/services/factory.rs](crates/devflow-core/src/services/factory.rs): Provider creation, dispatch, multi-provider orchestration.
-- [crates/devflow-core/src/hooks/executor.rs](crates/devflow-core/src/hooks/executor.rs): Hook execution engine, approval checks, conditions.
-- [crates/devflow-core/src/hooks/template.rs](crates/devflow-core/src/hooks/template.rs): MiniJinja template engine with custom filters.
-- [crates/devflow-core/src/vcs/mod.rs](crates/devflow-core/src/vcs/mod.rs): VCS abstraction (Git + Jujutsu), auto-detection.
-- [crates/devflow-core/src/services/plugin.rs](crates/devflow-core/src/services/plugin.rs): Plugin provider protocol (JSON-over-stdio).
+- [src/cli.rs](src/cli.rs): Command routing, JSON/non-interactive behavior, multi-provider orchestration.
+- [src/agent.rs](src/agent.rs): AI agent integration (skill generation, context, rules).
+- [src/config/mod.rs](src/config/mod.rs): Config loading, 3-tier merging, env var overrides, validation.
+- [src/services/mod.rs](src/services/mod.rs): `ServiceProvider` trait — the interface all providers implement.
+- [src/services/factory.rs](src/services/factory.rs): Provider creation, dispatch, multi-provider orchestration.
+- [src/hooks/executor.rs](src/hooks/executor.rs): Hook execution engine, approval checks, conditions.
+- [src/hooks/template.rs](src/hooks/template.rs): MiniJinja template engine with custom filters.
+- [src/vcs/mod.rs](src/vcs/mod.rs): VCS abstraction (Git + Jujutsu), auto-detection.
+- [src/services/plugin.rs](src/services/plugin.rs): Plugin provider protocol (JSON-over-stdio).
 
 ## Optional
 

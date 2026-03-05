@@ -224,7 +224,9 @@ devflow agent skill --target claude      # Claude Code only
 For CI/CD and automation, use `--json --non-interactive` for structured output:
 
 ```bash
-devflow --json --non-interactive switch -c agent/task-42 --no-verify
+OUTPUT=$(devflow --json --non-interactive switch -c agent/task-42)
+WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
+[ -n "$WORKTREE" ] && cd "$WORKTREE"
 CONN=$(devflow --json service connection agent/task-42 | jq -r '.connection_string')
 ```
 

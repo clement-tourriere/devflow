@@ -14,6 +14,12 @@ fi
 
 BRANCH="agent/${TASK_ID}"
 
-# --no-verify avoids interactive hook approvals in headless runs.
-devflow --json --non-interactive switch "$BRANCH" --no-verify >/dev/null
+# --non-interactive runs hooks but skips interactive prompts.
+# Hooks requiring approval must be pre-approved: devflow hook approvals add "<cmd>"
+OUTPUT=$(devflow --json --non-interactive switch -c "$BRANCH")
+
+# If worktrees are enabled, switch to the worktree directory
+WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
+[ -n "$WORKTREE" ] && cd "$WORKTREE"
+
 devflow --json service connection "$BRANCH"

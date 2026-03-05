@@ -9,8 +9,25 @@ Use devflow to create an isolated development workspace environment per task, wi
 ## Recommended Flags
 
 - `--json`: structured output on stdout
-- `--non-interactive`: disable prompts in automation
-- `--no-verify` on `switch`: skip lifecycle hooks when approval prompts are possible
+- `--non-interactive`: disable prompts in automation (hooks still run but require pre-approval)
+
+> **Note**: `--no-verify` on `switch` skips **all** lifecycle hooks entirely. This is usually not what agents want — hooks run migrations, set up `.env` files, and configure tools. Use `--non-interactive` instead, which runs hooks but skips interactive prompts.
+
+## Hook Pre-Approval
+
+In `--non-interactive` mode, hooks with shell commands require pre-approval to run. Approve them once per project:
+
+```bash
+# List configured hooks to see what needs approval
+devflow hook show
+
+# Approve specific hook commands
+devflow hook approvals add "mise trust"
+devflow hook approvals add "npm run migrate"
+
+# List current approvals
+devflow hook approvals list
+```
 
 ## Bootstrap a Repository
 
@@ -37,7 +54,12 @@ Equivalent manual flow:
 
 ```bash
 WORKSPACE="agent/$TASK_ID"
-devflow --json --non-interactive switch -c "$WORKSPACE" --no-verify
+OUTPUT=$(devflow --json --non-interactive switch -c "$WORKSPACE")
+
+# If worktrees are enabled, switch to the worktree directory
+WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
+[ -n "$WORKTREE" ] && cd "$WORKTREE"
+
 devflow --json service connection "$WORKSPACE"
 ```
 
@@ -92,15 +114,19 @@ devflow hook explain post-create
 WORKSPACE="agent/$TASK_ID"
 
 # 1) Create/switch isolated environment for this task
-devflow --json --non-interactive switch -c "$WORKSPACE" --no-verify
+OUTPUT=$(devflow --json --non-interactive switch -c "$WORKSPACE")
 
-# 2) Read connection info and run the task
+# 2) Switch to worktree directory if worktrees are enabled
+WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
+[ -n "$WORKTREE" ] && cd "$WORKTREE"
+
+# 3) Read connection info and run the task
 CONN=$(devflow --json service connection "$WORKSPACE" | jq -r '.connection_string')
 
-# 3) Optional reset for retries
+# 4) Optional reset for retries
 devflow --json --non-interactive service reset "$WORKSPACE"
 
-# 4) Cleanup when done
+# 5) Cleanup when done
 devflow --json --non-interactive service delete "$WORKSPACE"
 ```
 

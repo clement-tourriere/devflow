@@ -417,6 +417,28 @@ pub async fn run_doctor(project_path: String) -> Result<serde_json::Value, Strin
         skill_status.installed,
         if skill_status.installed {
             format!("{} skills installed", skill_status.installed_skills.len())
+        } else if !skill_status.installed_skills.is_empty() {
+            // Some skills installed but update needed
+            if !skill_status.stale_skills.is_empty() && !skill_status.missing_skills.is_empty() {
+                format!(
+                    "{} installed, {} outdated, {} new available",
+                    skill_status.installed_skills.len(),
+                    skill_status.stale_skills.len(),
+                    skill_status.missing_skills.len()
+                )
+            } else if !skill_status.stale_skills.is_empty() {
+                format!(
+                    "{} installed, {} need update",
+                    skill_status.installed_skills.len(),
+                    skill_status.stale_skills.len()
+                )
+            } else {
+                format!(
+                    "{} installed, {} new available",
+                    skill_status.installed_skills.len(),
+                    skill_status.missing_skills.len()
+                )
+            }
         } else {
             "Not installed".to_string()
         },

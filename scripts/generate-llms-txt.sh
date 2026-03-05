@@ -88,9 +88,10 @@ cloned using Copy-on-Write for near-instant, space-efficient branching.
 ## Automation defaults
 
 - Always pass `--json --non-interactive` for machine-safe execution.
-- Use `--no-verify` on `switch` in headless environments to skip hook approval prompts.
+- Use `--non-interactive` on `switch` to run hooks without prompts (requires pre-approved hooks).
 - Use `devflow --json capabilities` to detect automation guarantees at runtime.
 - Non-zero exit code means failure; partial multi-provider failures also return non-zero.
+- Note: `--no-verify` skips ALL hooks entirely — only use when hooks are genuinely unwanted.
 
 ## Docs
 
@@ -163,7 +164,8 @@ Five service types: postgres, clickhouse, mysql, generic (any Docker image), plu
 ## Automation contract
 
 - Pass \`--json --non-interactive\` for all machine executions.
-- Use \`--no-verify\` with \`switch\` in headless runs unless hooks are pre-approved.
+- Use \`--non-interactive\` on \`switch\` to run hooks without prompts (hooks must be pre-approved).
+- Use \`--no-verify\` only when hooks are genuinely unwanted — it skips ALL hooks entirely.
 - Non-zero exit code on any failure; partial multi-provider failures also return non-zero.
 - \`destroy\` and \`remove\` require \`--force\` in \`--json\` or \`--non-interactive\` mode.
 - Hook approvals are required; unapproved hooks fail in non-interactive mode.
@@ -175,7 +177,12 @@ Five service types: postgres, clickhouse, mysql, generic (any Docker image), plu
 TASK_ID="issue-123"
 BRANCH="agent/\$TASK_ID"
 
-devflow --json --non-interactive switch -c "\$BRANCH" --no-verify
+OUTPUT=\$(devflow --json --non-interactive switch -c "\$BRANCH")
+
+# If worktrees are enabled, switch to the worktree directory
+WORKTREE=\$(echo "\$OUTPUT" | jq -r '.worktree_path // empty')
+[ -n "\$WORKTREE" ] && cd "\$WORKTREE"
+
 CONN=\$(devflow --json service connection "\$BRANCH" | jq -r '.connection_string')
 
 # run task against \$CONN ...

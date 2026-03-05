@@ -2487,7 +2487,8 @@ devflow --json status
   <p>Skip all prompts and use sensible defaults. Essential for CI/CD, scripts, and AI agents:</p>
 <pre><code class="language-bash"># All commands in non-interactive mode
 devflow --non-interactive create feature/auth
-devflow --non-interactive switch feature/auth --no-verify
+devflow --non-interactive switch feature/auth        # Hooks run (require pre-approval)
+devflow --non-interactive switch feature/auth --no-verify  # Skip ALL hooks entirely
 devflow --non-interactive destroy --force</code></pre>
 
   <h4>Automation Contract</h4>
@@ -2509,26 +2510,31 @@ devflow --non-interactive destroy --force</code></pre>
 
 # 1. Create isolated environment for the agent task
 BRANCH="agent-task-$TASK_ID"
-devflow --json --non-interactive switch -c "$BRANCH" --no-verify >/dev/null
+OUTPUT=$(devflow --json --non-interactive switch -c "$BRANCH")
+
+# 2. Switch to worktree directory if worktrees are enabled
+WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
+[ -n "$WORKTREE" ] && cd "$WORKTREE"
+
 CONN=$(devflow --json connection "$BRANCH" | jq -r '.connection_string')
 
-# 2. Seed with test data if needed
+# 3. Seed with test data if needed
 devflow --non-interactive service seed "$BRANCH" --from test-data.sql
 
-# 3. Agent works against an isolated development environment
+# 4. Agent works against an isolated development environment
 export DATABASE_URL="$CONN"
 python agent.py --task "$TASK_ID"
 
-# 4. Reset to clean state if agent needs to retry
+# 5. Reset to clean state if agent needs to retry
 devflow --non-interactive service reset "$BRANCH"
 
-# 5. Re-run agent
+# 6. Re-run agent
 python agent.py --task "$TASK_ID"
 
-# 6. Check container logs on failure
+# 7. Check container logs on failure
 devflow service logs "$BRANCH"
 
-# 7. Clean up
+# 8. Clean up
 devflow --non-interactive remove "$BRANCH" --force</code></pre>
 
   <h3>CI/CD Pipeline Integration</h3>
@@ -2550,6 +2556,7 @@ jobs:
       - name: Create preview environment
         run: |
           devflow --json --non-interactive init myapp
+          # --no-verify skips hooks (appropriate for CI where hooks aren't pre-approved)
           devflow --json --non-interactive switch -c pr-${{ github.event.number }} --no-verify
 
       - name: Run migrations
@@ -3273,7 +3280,11 @@ TASKS=("fix-login-bug" "add-user-search" "optimize-queries")
 for TASK in "${TASKS[@]}"; do
   (
     # Create isolated workspace
-    devflow --json --non-interactive switch -c "agent/$TASK" --no-verify
+    OUTPUT=$(devflow --json --non-interactive switch -c "agent/$TASK")
+
+    # Switch to worktree if enabled
+    WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
+    [ -n "$WORKTREE" ] && cd "$WORKTREE"
 
     # Get connection string
     CONN=$(devflow --json connection "agent/$TASK" | jq -r '.connection_string')

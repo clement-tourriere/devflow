@@ -25,6 +25,10 @@ pub struct SkillInstallStatus {
     pub installed: bool,
     pub installed_skills: Vec<String>,
     pub missing_skills: Vec<String>,
+    /// Whether any installed skills have outdated content or new skills are available.
+    pub update_available: bool,
+    /// Skills whose installed content differs from the current generated content.
+    pub stale_skills: Vec<String>,
 }
 
 /// Generate a Claude Code skill file for this project.
@@ -103,17 +107,33 @@ pub fn generate_claude_skill(config: &Config, _project_dir: &Path) -> Result<Str
     // Agent workflow
     skill.push_str("## Agent Workflow\n\n");
     skill.push_str("When working on a task:\n\n");
-    skill.push_str("1. Create an isolated workspace: `devflow switch -c agent/<task-id>`\n");
-    skill.push_str("2. Get connection info: `devflow --json connection agent/<task-id>`\n");
-    skill.push_str("3. Do your work in the isolated environment\n");
-    skill.push_str("4. Commit with AI message: `devflow commit --ai`\n");
-    skill.push_str("5. Clean up when done: `devflow remove agent/<task-id>`\n\n");
+    skill.push_str("1. Create an isolated workspace:\n");
+    skill.push_str("   ```bash\n");
+    skill.push_str("   OUTPUT=$(devflow --json --non-interactive switch -c agent/<task-id>)\n");
+    skill.push_str("   ```\n");
+    skill.push_str("2. If worktrees are enabled, switch to the worktree directory:\n");
+    skill.push_str("   ```bash\n");
+    skill.push_str(
+        "   WORKTREE=$(echo \"$OUTPUT\" | jq -r '.worktree_path // empty')\n",
+    );
+    skill.push_str("   [ -n \"$WORKTREE\" ] && cd \"$WORKTREE\"\n");
+    skill.push_str("   ```\n");
+    skill.push_str("3. Get connection info: `devflow --json connection agent/<task-id>`\n");
+    skill.push_str("4. Do your work in the isolated environment\n");
+    skill.push_str("5. Commit with AI message: `devflow commit --ai`\n");
+    skill.push_str("6. Clean up when done: `devflow remove agent/<task-id>`\n\n");
 
     // Flags for automation
     skill.push_str("## Automation Flags\n\n");
     skill.push_str("- `--json`: Structured JSON output on stdout\n");
-    skill.push_str("- `--non-interactive`: Skip prompts, use defaults\n");
-    skill.push_str("- `--no-verify` on `switch`: Skip hook approval prompts\n");
+    skill.push_str("- `--non-interactive`: Skip prompts, use defaults (hooks still run but require pre-approval)\n");
+    skill.push_str("- `--no-verify` on `switch`: Skip **all** hooks entirely (not recommended — use `--non-interactive` instead)\n\n");
+    skill.push_str("### Hook Pre-Approval\n\n");
+    skill.push_str("In `--non-interactive` mode, hooks with shell commands require pre-approval:\n");
+    skill.push_str("```bash\n");
+    skill.push_str("devflow hook approvals add \"<command>\"  # Approve a specific hook command\n");
+    skill.push_str("devflow hook approvals list              # List approved hooks\n");
+    skill.push_str("```\n");
 
     Ok(skill)
 }
@@ -189,19 +209,22 @@ description: Switch to an existing devflow workspace and its isolated services.
 ## Instructions
 
 1. The workspace name is provided in `$ARGUMENTS`
-2. Run `devflow switch $ARGUMENTS --non-interactive --no-verify` to switch
-3. Verify the switch succeeded with `devflow status`
-4. If the workspace has services, retrieve connection info with `devflow --json connection $ARGUMENTS`
-5. Report the new workspace state and any connection strings to the user
+2. Run `devflow --json --non-interactive switch $ARGUMENTS` to switch
+3. Parse the JSON output and check for `worktree_path` — if present, change your working directory to it
+4. Verify the switch succeeded with `devflow status`
+5. If the workspace has services, retrieve connection info with `devflow --json connection $ARGUMENTS`
+6. Report the new workspace state and any connection strings to the user
 
-Always use `--non-interactive` to avoid prompts and `--no-verify` to skip hook approval when running as an agent.
+Always use `--json --non-interactive` when running as an agent. Do NOT use `--no-verify` — it skips all lifecycle hooks (e.g. migrations, env setup) which are usually needed.
 
 ## Examples
 
 Switch to an existing workspace:
 
 ```bash
-devflow switch my-feature --non-interactive --no-verify
+OUTPUT=$(devflow --json --non-interactive switch my-feature)
+WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
+[ -n "$WORKTREE" ] && cd "$WORKTREE"
 ```
 
 Verify the switch and get connection info:
@@ -229,21 +252,31 @@ description: Create a new devflow workspace with isolated services for a task or
 ## Instructions
 
 1. The workspace name is provided in `$ARGUMENTS`
-2. Run `devflow switch -c $ARGUMENTS --non-interactive --no-verify` to create and switch
+2. Run `devflow --json --non-interactive switch -c $ARGUMENTS` to create and switch
    - The `-c` flag creates the workspace if it doesn't exist
    - This provisions isolated service instances (databases, caches) automatically
    - If worktrees are enabled, a new Git worktree directory is created
-3. Retrieve connection info with `devflow --json connection $ARGUMENTS`
-4. Report the new workspace details including service connection strings to the user
+   - Lifecycle hooks (e.g. `post-create`, `post-switch`) run automatically
+3. **Parse the JSON output** to check for `worktree_path`:
+   - If `worktree_path` is present, **change your working directory** to it — this is where you should do all subsequent work
+   - If `worktree_created` is `true`, a new worktree was just created for this workspace
+4. Retrieve connection info with `devflow --json connection $ARGUMENTS`
+5. Report the new workspace details including service connection strings to the user
 
 Use a descriptive name like `feature/auth-refactor` or `agent/task-123` for the workspace.
+
+**Important**: Do NOT use `--no-verify` — it skips all lifecycle hooks (migrations, env setup, etc.) which are usually needed for a working environment.
 
 ## Examples
 
 Create a new workspace for a feature:
 
 ```bash
-devflow switch -c feature/my-task --non-interactive --no-verify
+OUTPUT=$(devflow --json --non-interactive switch -c feature/my-task)
+
+# If worktrees are enabled, switch to the worktree directory
+WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
+[ -n "$WORKTREE" ] && cd "$WORKTREE"
 ```
 
 Get connection strings for the new workspace:
@@ -255,7 +288,9 @@ devflow --json connection feature/my-task
 Create a workspace and immediately get full context:
 
 ```bash
-devflow switch -c agent/task-42 --non-interactive --no-verify
+OUTPUT=$(devflow --json --non-interactive switch -c agent/task-42)
+WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
+[ -n "$WORKTREE" ] && cd "$WORKTREE"
 devflow --json connection agent/task-42
 devflow agent context
 ```
@@ -357,26 +392,58 @@ pub fn uninstall_agent_skills(project_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Check whether agent skills are installed for a project.
+/// Check whether agent skills are installed for a project, and whether they need updating.
+///
+/// Compares installed skill file content against the current generated content
+/// to detect outdated skills. Also detects new skills that aren't installed yet.
 pub fn check_agent_skills_installed(project_dir: &Path) -> SkillInstallStatus {
     let skills_dir = project_dir.join(SKILLS_DIR);
 
     let mut installed_skills = Vec::new();
     let mut missing_skills = Vec::new();
+    let mut stale_skills = Vec::new();
+
+    // Build a map of expected skill content for comparison
+    let generated_skills = generate_workspace_skills();
+    let expected_content: std::collections::HashMap<&str, &str> = generated_skills
+        .iter()
+        .map(|s| {
+            // Extract the top-level dir name from the relative path (e.g. "devflow-workspace-list/SKILL.md" -> "devflow-workspace-list")
+            let dir_name = s
+                .relative_path
+                .split('/')
+                .next()
+                .unwrap_or(&s.relative_path);
+            (dir_name, s.content.as_str())
+        })
+        .collect();
 
     for dir_name in MANAGED_SKILL_DIRS {
         let skill_file = skills_dir.join(dir_name).join("SKILL.md");
         if skill_file.exists() {
             installed_skills.push(dir_name.to_string());
+
+            // Check if content matches
+            if let Some(expected) = expected_content.get(dir_name) {
+                if let Ok(actual) = std::fs::read_to_string(&skill_file) {
+                    if actual.trim() != expected.trim() {
+                        stale_skills.push(dir_name.to_string());
+                    }
+                }
+            }
         } else {
             missing_skills.push(dir_name.to_string());
         }
     }
 
+    let update_available = !stale_skills.is_empty() || !missing_skills.is_empty();
+
     SkillInstallStatus {
-        installed: missing_skills.is_empty(),
+        installed: missing_skills.is_empty() && stale_skills.is_empty(),
         installed_skills,
         missing_skills,
+        update_available,
+        stale_skills,
     }
 }
 
