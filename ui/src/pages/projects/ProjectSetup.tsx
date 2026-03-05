@@ -295,6 +295,7 @@ function ProjectSetup() {
         open={showAddService}
         onClose={() => setShowAddService(false)}
         onAdd={handleAddService}
+        projectPath={projectPath}
       />
     </div>
   );

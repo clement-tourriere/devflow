@@ -211,9 +211,13 @@ devflow service seed main --from s3://bucket/path/dump.sql
 
 Auto-discover running Docker containers and suggest adding them as services.
 
+By default, discovery is scoped to compose services in the current project.
+Use `--global` to include containers from all projects.
+
 ```bash
 devflow service discover
 devflow service discover --service-type postgres
+devflow service discover --global
 ```
 
 ---

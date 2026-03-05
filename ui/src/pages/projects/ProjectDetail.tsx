@@ -1642,6 +1642,7 @@ function ProjectDetail() {
         open={showAddService}
         onClose={() => setShowAddService(false)}
         onAdd={handleAddService}
+        projectPath={projectPath}
       />
     </div>
   );

@@ -157,9 +157,14 @@ export const destroyService = (projectPath: string, serviceName: string) =>
     projectPath,
     serviceName,
   });
-export const discoverDockerContainers = (serviceType?: string) =>
+export const discoverDockerContainers = (
+  serviceType?: string,
+  options?: { projectPath?: string; global?: boolean }
+) =>
   invoke<DiscoveredContainer[]>("discover_docker_containers", {
     serviceType,
+    projectPath: options?.projectPath,
+    global: options?.global,
   });
 export const installAgentSkills = (projectPath: string) =>
   invoke<string[]>("install_agent_skills", { projectPath });

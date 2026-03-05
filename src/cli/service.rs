@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use devflow_core::config::{Config, EffectiveConfig};
@@ -104,7 +104,13 @@ pub(crate) async fn run_add_service_wizard(
     };
 
     // 2.5. Docker container discovery
-    let discovered = offer_discovered_containers(&service_type, non_interactive, json_output).await;
+    let discovered = offer_discovered_containers(
+        &service_type,
+        config_path.parent(),
+        non_interactive,
+        json_output,
+    )
+    .await;
 
     // 3. Service name
     let name = if non_interactive || json_output {
@@ -608,8 +614,17 @@ pub(super) async fn handle_service_dispatch(
                 }
             }
         }
-        super::ServiceCommands::Discover { service_type } => {
-            handle_discover(service_type.as_deref(), json_output).await?;
+        super::ServiceCommands::Discover {
+            service_type,
+            global,
+        } => {
+            handle_discover(
+                service_type.as_deref(),
+                global,
+                config_path.as_ref().and_then(|p| p.parent()),
+                json_output,
+            )
+            .await?;
         }
         // Provider operations: delegate to handle_service_provider_command
         other => {
@@ -2072,8 +2087,23 @@ pub(super) fn enrich_branch_list_json(
 }
 
 /// Handle `devflow service discover` subcommand.
-async fn handle_discover(service_type: Option<&str>, json_output: bool) -> Result<()> {
-    let containers = docker::discovery::discover_containers(service_type).await?;
+async fn handle_discover(
+    service_type: Option<&str>,
+    global: bool,
+    project_root: Option<&Path>,
+    json_output: bool,
+) -> Result<()> {
+    let scoped_project_root = if global {
+        None
+    } else if let Some(root) = project_root {
+        Some(root.to_path_buf())
+    } else {
+        Some(std::env::current_dir()?)
+    };
+
+    let containers =
+        docker::discovery::discover_containers(service_type, scoped_project_root.as_deref())
+            .await?;
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&containers)?);
@@ -2113,6 +2143,7 @@ async fn handle_discover(service_type: Option<&str>, json_output: bool) -> Resul
 /// Returns `(image, seed_url, name_suggestion)` if user picks a container, or `None` to skip.
 pub(super) async fn offer_discovered_containers(
     service_type: &str,
+    project_root: Option<&Path>,
     non_interactive: bool,
     json_output: bool,
 ) -> Option<(String, String, String)> {
@@ -2120,10 +2151,11 @@ pub(super) async fn offer_discovered_containers(
         return None;
     }
 
-    let containers = match docker::discovery::discover_containers(Some(service_type)).await {
-        Ok(c) if !c.is_empty() => c,
-        _ => return None,
-    };
+    let containers =
+        match docker::discovery::discover_containers(Some(service_type), project_root).await {
+            Ok(c) if !c.is_empty() => c,
+            _ => return None,
+        };
 
     let options: Vec<String> = containers
         .iter()

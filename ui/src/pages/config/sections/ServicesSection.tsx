@@ -6,6 +6,7 @@ import AddServiceModal from "../../../components/AddServiceModal";
 interface Props {
   config: FilledConfig;
   onChange: (config: FilledConfig) => void;
+  projectPath?: string;
 }
 
 const SERVICE_TYPE_COLORS: Record<string, string> = {
@@ -15,7 +16,7 @@ const SERVICE_TYPE_COLORS: Record<string, string> = {
   generic: "var(--text-muted)",
 };
 
-function ServicesSection({ config, onChange }: Props) {
+function ServicesSection({ config, onChange, projectPath }: Props) {
   const services = config.services || [];
   const [adding, setAdding] = useState(false);
 
@@ -122,6 +123,7 @@ function ServicesSection({ config, onChange }: Props) {
         open={adding}
         onClose={() => setAdding(false)}
         onAdd={handleAdd}
+        projectPath={projectPath}
       />
     </div>
   );

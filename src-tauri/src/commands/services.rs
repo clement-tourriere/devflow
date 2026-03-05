@@ -685,10 +685,21 @@ pub struct DiscoveredContainerEntry {
 #[tauri::command]
 pub async fn discover_docker_containers(
     service_type: Option<String>,
+    project_path: Option<String>,
+    global: Option<bool>,
 ) -> Result<Vec<DiscoveredContainerEntry>, String> {
-    let containers = discovery::discover_containers(service_type.as_deref())
-        .await
-        .map_err(crate::commands::format_error)?;
+    let scoped_project_root = if global.unwrap_or(false) {
+        None
+    } else if let Some(path) = project_path.as_deref() {
+        Some(std::path::PathBuf::from(path))
+    } else {
+        std::env::current_dir().ok()
+    };
+
+    let containers =
+        discovery::discover_containers(service_type.as_deref(), scoped_project_root.as_deref())
+            .await
+            .map_err(crate::commands::format_error)?;
 
     Ok(containers
         .into_iter()

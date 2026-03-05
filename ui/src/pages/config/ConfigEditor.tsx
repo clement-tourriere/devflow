@@ -215,7 +215,11 @@ function ConfigEditor() {
                 <WorktreeSection config={config} onChange={handleChange} />
               )}
               {activeSection === "services" && (
-                <ServicesSection config={config} onChange={handleChange} />
+                <ServicesSection
+                  config={config}
+                  onChange={handleChange}
+                  projectPath={projectPath}
+                />
               )}
               {activeSection === "agent" && (
                 <AgentSection config={config} onChange={handleChange} />

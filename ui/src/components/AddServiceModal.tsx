@@ -7,6 +7,7 @@ interface AddServiceModalProps {
   open: boolean;
   onClose: () => void;
   onAdd: (request: AddServiceRequest) => Promise<void>;
+  projectPath?: string;
   /** Label for the submit button (default: "Add Service") */
   submitLabel?: string;
   /** Label while submitting (default: "Adding...") */
@@ -43,6 +44,7 @@ function AddServiceModal({
   open,
   onClose,
   onAdd,
+  projectPath,
   submitLabel = "Add Service",
   submittingLabel = "Adding...",
 }: AddServiceModalProps) {
@@ -62,18 +64,27 @@ function AddServiceModal({
   const [selectedDiscovery, setSelectedDiscovery] = useState<string | null>(null);
 
   const runDiscovery = useCallback(async (serviceType: string) => {
+    if (!projectPath) {
+      setDiscoveredContainers([]);
+      setSelectedDiscovery(null);
+      setDiscoveryLoading(false);
+      return;
+    }
+
     setDiscoveryLoading(true);
     setDiscoveredContainers([]);
     setSelectedDiscovery(null);
     try {
-      const containers = await discoverDockerContainers(serviceType);
+      const containers = await discoverDockerContainers(serviceType, {
+        projectPath,
+      });
       setDiscoveredContainers(containers);
     } catch {
       setDiscoveredContainers([]);
     } finally {
       setDiscoveryLoading(false);
     }
-  }, []);
+  }, [projectPath]);
 
   // Reset form when modal opens
   useEffect(() => {

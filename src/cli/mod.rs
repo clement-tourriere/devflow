@@ -471,7 +471,7 @@ pub enum ServiceCommands {
 
     #[command(
         about = "Discover running Docker containers matching known service types",
-        long_about = "Discover running Docker containers matching known service types.\n\nScans Docker for running containers that appear to be databases or caches\n(PostgreSQL, ClickHouse, MySQL, Redis). Excludes devflow-managed containers.\n\nExamples:\n  devflow service discover                          # Discover all service containers\n  devflow service discover --service-type postgres   # Only PostgreSQL containers"
+        long_about = "Discover running Docker containers matching known service types.\n\nBy default, results are scoped to Docker Compose containers belonging to the\ncurrent devflow project (matched by compose working directory/config files).\nUse --global to discover across all projects. Always excludes devflow-managed\ncontainers.\n\nExamples:\n  devflow service discover                           # Current project containers only\n  devflow service discover --service-type postgres   # Current project PostgreSQL only\n  devflow service discover --global                  # All projects"
     )]
     Discover {
         #[arg(
@@ -479,6 +479,11 @@ pub enum ServiceCommands {
             help = "Filter by service type (postgres, clickhouse, mysql, generic)"
         )]
         service_type: Option<String>,
+        #[arg(
+            long,
+            help = "Discover across all projects (disable current-project scoping)"
+        )]
+        global: bool,
     },
 }
 
