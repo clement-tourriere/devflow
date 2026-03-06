@@ -330,6 +330,39 @@ select {
   cursor: not-allowed;
 }
 
+/* Project list card rows */
+.project-list-card {
+  display: block;
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.project-list-card:hover {
+  border-color: var(--accent);
+}
+
+/* Search input */
+.search-input {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  width: 220px;
+}
+
+.search-input::placeholder {
+  color: var(--text-muted);
+}
+
 /* Terminal Panel */
 .terminal-panel {
   display: flex;

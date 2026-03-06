@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { Link } from "react-router-dom";
+import { useState, useEffect, useRef } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import {
   listProjects,
   getProjectDetail,
@@ -12,47 +12,57 @@ import type {
   ProxyStatus,
   ContainerEntry,
 } from "../types";
+import AddProjectModal, { type AddProjectModalHandle } from "../components/AddProjectModal";
+import { sortByRecent } from "../utils/recentProjects";
 
 interface ProjectInfo extends ProjectEntry {
   detail: ProjectDetail | null;
   containerCount: number;
 }
 
+const MAX_DASHBOARD_PROJECTS = 6;
+
 function Home() {
+  const navigate = useNavigate();
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [proxyStatus, setProxyStatus] = useState<ProxyStatus | null>(null);
   const [containers, setContainers] = useState<ContainerEntry[]>([]);
+  const addModalRef = useRef<AddProjectModalHandle>(null);
+
+  const load = async () => {
+    const [projectList, proxy, containerList] = await Promise.all([
+      listProjects().catch(() => [] as ProjectEntry[]),
+      getProxyStatus().catch(() => null),
+      listContainers().catch(() => [] as ContainerEntry[]),
+    ]);
+
+    setProxyStatus(proxy);
+    setContainers(containerList);
+
+    const enriched = await Promise.all(
+      projectList.map(async (p) => {
+        const detail = await getProjectDetail(p.path).catch(() => null);
+        const containerCount = containerList.filter(
+          (c) => c.project === p.name
+        ).length;
+        return { ...p, detail, containerCount };
+      })
+    );
+    setProjects(enriched);
+  };
 
   useEffect(() => {
-    const load = async () => {
-      const [projectList, proxy, containerList] = await Promise.all([
-        listProjects().catch(() => [] as ProjectEntry[]),
-        getProxyStatus().catch(() => null),
-        listContainers().catch(() => [] as ContainerEntry[]),
-      ]);
-
-      setProxyStatus(proxy);
-      setContainers(containerList);
-
-      // Enrich each project with detail info
-      const enriched = await Promise.all(
-        projectList.map(async (p) => {
-          const detail = await getProjectDetail(p.path).catch(() => null);
-          const containerCount = containerList.filter(
-            (c) => c.project === p.name
-          ).length;
-          return {
-            ...p,
-            detail,
-            containerCount,
-          };
-        })
-      );
-      setProjects(enriched);
-    };
-
     load();
   }, []);
+
+  const handleProjectAdded = (projectPath: string) => {
+    load();
+    navigate(`/projects/${encodeURIComponent(projectPath)}`);
+  };
+
+  const sorted = sortByRecent(projects, (p) => p.path);
+  const capped = sorted.slice(0, MAX_DASHBOARD_PROJECTS);
+  const hasMore = projects.length > MAX_DASHBOARD_PROJECTS;
 
   return (
     <div>
@@ -60,9 +70,13 @@ function Home() {
         <h1 className="page-title" style={{ marginBottom: 0 }}>
           Dashboard
         </h1>
-        <Link to="/projects" className="btn btn-primary" style={{ fontSize: 13 }}>
+        <button
+          className="btn btn-primary"
+          style={{ fontSize: 13 }}
+          onClick={() => addModalRef.current?.open()}
+        >
           Add Project
-        </Link>
+        </button>
       </div>
 
       {/* Proxy status strip */}
@@ -135,17 +149,38 @@ function Home() {
             Add an existing devflow project or initialize a new one to get
             started.
           </p>
-          <Link to="/projects" className="btn btn-primary">
+          <button
+            className="btn btn-primary"
+            onClick={() => addModalRef.current?.open()}
+          >
             Add Project
-          </Link>
+          </button>
         </div>
       ) : (
-        <div className="grid grid-2">
-          {projects.map((p) => (
-            <ProjectCard key={p.path} project={p} />
-          ))}
-        </div>
+        <>
+          <div className="grid grid-2">
+            {capped.map((p) => (
+              <ProjectCard key={p.path} project={p} />
+            ))}
+          </div>
+          {hasMore && (
+            <div style={{ textAlign: "center", marginTop: 8 }}>
+              <Link
+                to="/projects"
+                style={{
+                  color: "var(--text-muted)",
+                  fontSize: 13,
+                  textDecoration: "none",
+                }}
+              >
+                View all projects ({projects.length}) &rarr;
+              </Link>
+            </div>
+          )}
+        </>
       )}
+
+      <AddProjectModal ref={addModalRef} onProjectAdded={handleProjectAdded} />
     </div>
   );
 }
@@ -171,7 +206,6 @@ function ProjectCard({ project }: { project: ProjectInfo }) {
         (e.currentTarget.style.borderColor = "var(--border)")
       }
     >
-      {/* Project name + config status */}
       <div className="flex items-center justify-between" style={{ marginBottom: 6 }}>
         <span style={{ fontSize: 16, fontWeight: 600, color: "var(--text-primary)" }}>
           {project.name}
@@ -183,7 +217,6 @@ function ProjectCard({ project }: { project: ProjectInfo }) {
         )}
       </div>
 
-      {/* Path */}
       <div
         className="mono"
         style={{
@@ -198,7 +231,6 @@ function ProjectCard({ project }: { project: ProjectInfo }) {
         {project.path}
       </div>
 
-      {/* Info row */}
       <div className="flex items-center gap-2" style={{ flexWrap: "wrap" }}>
         {d?.current_workspace && !d?.worktree_enabled && (
           <span className="badge" style={{ opacity: 0.7 }}>

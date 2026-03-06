@@ -41,6 +41,7 @@ import Modal from "../../components/Modal";
 import ConfirmDialog from "../../components/ConfirmDialog";
 import AddServiceModal from "../../components/AddServiceModal";
 import { useTerminal } from "../../context/TerminalContext";
+import { recordProjectAccess } from "../../utils/recentProjects";
 
 interface WorkspaceSwitchedEvent {
   project_path: string;
@@ -180,7 +181,10 @@ function ProjectDetail() {
 
   useEffect(() => {
     reload();
-  }, [reload]);
+    if (projectPath) {
+      recordProjectAccess(projectPath);
+    }
+  }, [reload, projectPath]);
 
   useEffect(() => {
     const unlisten = listen<WorkspaceSwitchedEvent>(

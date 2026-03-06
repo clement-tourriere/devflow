@@ -1,17 +1,44 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Outlet, NavLink, useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
 import { getProxyStatus, listProjects, getSettings } from "../utils/invoke";
 import type { ProjectEntry, ProxyStatus, AppSettings } from "../types";
 import TerminalPanel from "./TerminalPanel";
 import { useTerminal } from "../context/TerminalContext";
+import { sortByRecent } from "../utils/recentProjects";
+
+const MAX_SIDEBAR_PROJECTS = 5;
 
 function Layout() {
   const [proxyStatus, setProxyStatus] = useState<ProxyStatus | null>(null);
   const [projects, setProjects] = useState<ProjectEntry[]>([]);
+  const [sidebarOrder, setSidebarOrder] = useState<ProjectEntry[]>([]);
   const [smartMerge, setSmartMerge] = useState(false);
   const navigate = useNavigate();
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
   const { isVisible, toggle, pendingTerminal, clearPending } = useTerminal();
+
+  // Merge new project list into sidebar: keep existing order, append new ones, remove deleted
+  const updateProjectList = useCallback((list: ProjectEntry[]) => {
+    setProjects(list);
+    setSidebarOrder((prev) => {
+      if (prev.length === 0) {
+        // First load — sort by recency
+        return sortByRecent(list, (p) => p.path);
+      }
+      const newPaths = new Set(list.map((p) => p.path));
+      const listByPath = new Map(list.map((p) => [p.path, p]));
+      // Keep existing items in their current order, update data
+      const kept = prev
+        .filter((p) => newPaths.has(p.path))
+        .map((p) => listByPath.get(p.path)!);
+      const existingPaths = new Set(prev.map((p) => p.path));
+      // Append genuinely new projects at the top
+      const added = list.filter((p) => !existingPaths.has(p.path));
+      return [...added, ...kept];
+    });
+  }, []);
 
   useEffect(() => {
     getProxyStatus()
@@ -19,7 +46,7 @@ function Layout() {
       .catch(() => setProxyStatus(null));
 
     listProjects()
-      .then(setProjects)
+      .then(updateProjectList)
       .catch(() => {});
 
     getSettings()
@@ -33,7 +60,7 @@ function Layout() {
 
     // Listen for tray navigation events
     const unlistenNav = listen<string>("navigate", (event) => {
-      navigate(event.payload);
+      navigateRef.current(event.payload);
     });
 
     // Listen for settings changes (e.g. smart_merge toggle)
@@ -45,7 +72,7 @@ function Layout() {
 
     // Listen for project list changes (add/remove)
     const handleProjectsChanged = () => {
-      listProjects().then(setProjects).catch(() => {});
+      listProjects().then(updateProjectList).catch(() => {});
     };
     window.addEventListener("devflow:projects-changed", handleProjectsChanged);
 
@@ -55,7 +82,8 @@ function Layout() {
       window.removeEventListener("devflow:settings-updated", handleSettingsUpdate);
       window.removeEventListener("devflow:projects-changed", handleProjectsChanged);
     };
-  }, [navigate]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Keyboard shortcut: Ctrl+` to toggle terminal
   useEffect(() => {
@@ -87,26 +115,31 @@ function Layout() {
           </NavLink>
 
           <div className="nav-section">Projects</div>
-          <NavLink
-            to="/projects"
-            end
-            className={({ isActive }) =>
-              `nav-item${isActive ? " active" : ""}`
-            }
-          >
-            All Projects
-          </NavLink>
-          {projects.map((p) => (
+          {sidebarOrder
+            .slice(0, MAX_SIDEBAR_PROJECTS)
+            .map((p) => (
+              <NavLink
+                key={p.path}
+                to={`/projects/${encodeURIComponent(p.path)}`}
+                className={({ isActive }) =>
+                  `nav-item${isActive ? " active" : ""}`
+                }
+              >
+                {p.name}
+              </NavLink>
+            ))}
+          {projects.length > 0 && (
             <NavLink
-              key={p.path}
-              to={`/projects/${encodeURIComponent(p.path)}`}
+              to="/projects"
+              end
               className={({ isActive }) =>
                 `nav-item${isActive ? " active" : ""}`
               }
+              style={{ color: "var(--text-muted)", fontSize: 12 }}
             >
-              {p.name}
+              All projects ({projects.length})
             </NavLink>
-          ))}
+          )}
 
           {smartMerge && (
             <>
