@@ -10,122 +10,118 @@
 
 ## What is devflow?
 
-devflow gives each workspace its own isolated development environment: databases, caches, worktrees, and any stateful service. When you `git checkout feature-auth`, devflow automatically creates or switches to dedicated service instances that belong to that workspace. Data is cloned from the parent using Copy-on-Write, so creating a workspace is near-instant and costs almost no extra disk space. It works via CLI, interactive TUI, or desktop GUI.
+devflow gives each Git or Jujutsu workspace its own development environment: databases, caches, worktrees, hooks, and other stateful services. When you switch workspaces, devflow can automatically create or switch the matching service instances, keep worktrees aligned, and surface the right connection info for your app and tools.
 
-## Features
+The result: no more shared local databases between branches, less stashing, faster reviews, safer migrations, and cleaner parallel work.
 
-- Per-workspace isolated services (PostgreSQL, ClickHouse, MySQL, Redis, any Docker image)
-- Automatic Git sync — services create and switch with your checkout
-- Copy-on-Write cloning (APFS, ZFS, Btrfs, XFS) — instant, space-efficient
-- Git worktree management with CoW directory cloning
-- Native HTTPS reverse proxy with auto-discovered `*.localhost` domains
-- Desktop GUI (Tauri 2 + React) for graphical management
-- Interactive TUI dashboard with workspace and service control
-- Lifecycle hooks with MiniJinja templates
-- AI agent integration and AI-powered commit messages
-- Cloud providers (Neon, DBLab, Xata) and custom plugin system
-- JSON output and non-interactive mode for CI/CD and agent automation
+## Why teams use it
 
-## Install
+- Isolated per-workspace services for PostgreSQL, MySQL, ClickHouse, Redis, and custom Docker images
+- Fast Copy-on-Write cloning for databases and worktrees on APFS, ZFS, Btrfs, and XFS
+- Automatic workspace sync through CLI commands or installed VCS hooks
+- Multiple interfaces: CLI, TUI dashboard, and desktop GUI
+- Hook system with MiniJinja templates, approvals, built-in actions, and reusable recipes
+- Native HTTPS reverse proxy for `*.localhost` Docker services
+- AI-friendly automation with `--json`, `--non-interactive`, `AGENTS.md`, `llms.txt`, and agent skills
+- Advanced workflow support including merge checks, rebase flows, merge train, and sandboxed workspaces
 
-```bash
-git clone https://github.com/clement-tourriere/devflow.git
-cd devflow
-cargo install --path .
-```
+## Choose your interface
 
-Requires Rust 1.70+ and Docker (for local mode). See [Full Install](#full-install) for platform-specific instructions.
+- `CLI` for scripts, daily workspace switching, CI, and power users
+- `devflow tui` for keyboard-driven workspace, service, proxy, and log management in the terminal
+- Desktop app for project setup, services, hooks, config editing, embedded terminal, proxy controls, settings, and merge train
 
-## Quick Start
+## Quick start
 
 ```bash
-# 1. Initialize (guided wizard handles services, hooks, and shell integration)
+# 1. Initialize a repository
 cd ~/my-project
 devflow init
 
-# 2. Create your first workspace
+# 2. Create a workspace with isolated services
 devflow switch -c feature/auth
 
-# 3. Get connection info
+# 3. Inspect the environment
 devflow status
 devflow connection feature/auth --format env
 ```
 
-Your feature workspace now has its own database. Schema changes, test data, and migrations are completely isolated from main.
-
-### Adding to an existing project
+If worktrees are enabled, devflow can also move you into the matching worktree directory with shell integration:
 
 ```bash
-cd ~/my-existing-project
-devflow init    # Guided wizard offers service setup, hooks, and shell integration
+eval "$(devflow shell-init)"
 ```
 
-### Seeding with data
-
-```bash
-# From a dump file
-devflow service add app-db --provider local --service-type postgres --from ./backup.sql
-
-# From a running database
-devflow service add app-db --provider local --service-type postgres --from postgresql://user:pass@host/db
-
-# From S3
-devflow service add app-db --provider local --service-type postgres --from s3://bucket/backups/latest.dump
-```
-
-Every workspace created from main inherits seeded data via Copy-on-Write.
-
-## Concepts
+## Core concepts
 
 | Concept | Description |
-|---------|-------------|
-| **Workspace** | An isolated development environment corresponding to a Git branch. Each workspace gets its own service instances and optionally its own worktree directory. (This is a devflow concept, not a built-in Git feature.) |
-| **Service** | A stateful backend (database, cache, queue) managed per workspace. Services are configured in `.devflow.yml`. |
-| **Worktree** | An optional Git worktree directory for a workspace, enabling true parallel development without stashing. |
-| **Provider** | The backend that manages service instances: Local (Docker), Neon, DBLab, Xata, or Plugin. |
-| **Hook** | A MiniJinja-templated command that runs at lifecycle events (post-create, post-switch, pre-merge, etc.). |
+|---|---|
+| **Workspace** | A devflow-managed isolated environment associated with a Git branch or JJ bookmark/change. It is the unit that gets services, hooks, and optional worktree directories. |
+| **Service** | A stateful backend managed per workspace: database, cache, queue, or generic Docker container. |
+| **Worktree** | An optional per-workspace checkout directory so you can work on multiple tasks without stashing. |
+| **Provider** | The system that creates service instances: local Docker, Neon, DBLab, Xata, or a plugin provider. |
+| **Hook** | A command or built-in action that runs during lifecycle events like create, switch, merge, rebase, or cleanup. |
 
-## Desktop GUI
+## Main capabilities
 
-The desktop GUI (Tauri 2 + React) provides graphical management of projects, workspaces, services, hooks, proxy, and configuration.
+### Workspace isolation
+
+- `devflow switch -c feature/x` creates a new workspace and its services
+- `devflow switch feature/x` returns to an existing workspace and updates the environment
+- `devflow remove feature/x` cleans up the workspace, worktree, and service instances together
+
+### Services
+
+Supported service types include PostgreSQL, MySQL, ClickHouse, generic Docker containers, and plugin-backed services. Local mode supports fast cloning and common lifecycle operations such as start, stop, reset, logs, seed, and cleanup.
 
 ```bash
-mise run gui          # Development mode with hot-reload
-mise run gui:build    # Production bundle
+devflow service add app-db --provider local --service-type postgres
+devflow service add analytics --provider local --service-type clickhouse
+devflow service discover
 ```
 
-Key features:
+### Hooks
 
-- Dashboard with project overview and proxy status
-- Workspace management with create, switch, delete, and connection info
-- Service lifecycle control (start, stop, reset, logs)
-- Hook editor with MiniJinja template preview and variable browser
-- Proxy dashboard with container discovery and one-click CA trust
-- Section-based configuration editor (no raw YAML needed)
-- System tray with quick access to projects and workspaces
-
-Requires [bun](https://bun.sh) and the [Tauri CLI](https://v2.tauri.app/start/prerequisites/).
-
-## TUI Dashboard
+Hooks are MiniJinja-templated lifecycle actions that can update `.env` files, run migrations, call APIs, copy files, notify the desktop, or execute shell commands.
 
 ```bash
-devflow tui
+devflow hook show
+devflow hook explain post-switch
+devflow hook actions
+devflow hook recipes
 ```
 
-Three-tab interactive terminal dashboard:
+Built-in phases cover switching, create/remove, commit, merge, rebase, merge cascade, and service lifecycle events. Custom phases are also supported.
 
-- **Environments** — workspace tree with service states, start/stop controls, press `o` to open a workspace
-- **System** — configuration, hooks (with template reference and scaffold snippets), and diagnostics
-- **Logs** — service log viewer with workspace/service picker and keyboard navigation
+### Smart merge
 
-## Reverse Proxy
+devflow includes advanced merge tooling for teams that want stronger branch hygiene:
 
-devflow includes a native HTTPS reverse proxy that auto-discovers Docker containers and serves them via `*.localhost` domains.
+- merge readiness checks before landing work
+- `devflow merge` and `devflow rebase` helpers
+- merge train queue with pause, resume, and run support
+- optional cleanup after successful merge
+
+Smart merge is feature-gated in settings/config before `devflow train` commands are available.
+
+### Sandboxed workspaces
+
+For risky automation or agent tasks, you can create a restricted workspace:
 
 ```bash
-devflow proxy start                      # Start the proxy
-devflow proxy trust install              # Trust the CA (one-time)
-devflow proxy list                       # See proxied containers
+devflow switch -c agent/fix-login --sandboxed
+```
+
+This uses the sandbox support in `devflow-core` to reduce filesystem and command access where supported by the platform.
+
+### Reverse proxy
+
+devflow ships with a native reverse proxy that auto-discovers Docker containers and maps them to HTTPS `*.localhost` domains.
+
+```bash
+devflow proxy start
+devflow proxy trust install
+devflow proxy list
 ```
 
 | Container Type | Domain Pattern |
@@ -133,13 +129,62 @@ devflow proxy list                       # See proxied containers
 | Standalone | `container_name.localhost` |
 | Compose service | `service.project.localhost` |
 | devflow service | `service.workspace.project.localhost` |
-| Custom label | value of `devproxy.domain` label |
+| Custom label | value of `devproxy.domain` |
 
-Certificates are auto-generated using a local CA. After `devflow proxy trust install`, all `*.localhost` domains work with HTTPS — no browser warnings or `-k` flags needed.
+### AI agents and automation
+
+devflow is designed to work well with coding agents and CI:
+
+- `--json` for structured output
+- `--non-interactive` for automation-safe execution
+- `devflow agent context` for machine-readable project and service context
+- `devflow agent skill` to install Agent Skills-compatible workspace skills
+- `AGENTS.md`, `llms.txt`, and example agent bootstrap scripts in `examples/`
+
+```bash
+devflow --json --non-interactive switch -c agent/task-42
+devflow agent context --format json
+devflow agent skill
+```
+
+See `AGENTS.md` for the recommended agent workflow.
+
+## Desktop app
+
+The desktop GUI is a substantial part of the product, not just a wrapper around the CLI. It includes:
+
+- Project list and setup flow
+- Workspace and service management
+- Hook manager and config editor
+- Proxy dashboard
+- Embedded terminal panel
+- Settings page with feature toggles such as Smart Merge
+- Merge Train page when Smart Merge is enabled
+
+```bash
+mise run gui
+mise run gui:build
+```
+
+Requires [bun](https://bun.sh) and the [Tauri CLI](https://v2.tauri.app/start/prerequisites/).
+
+## TUI dashboard
+
+```bash
+devflow tui
+```
+
+The TUI has five tabs:
+
+- `Workspaces` — workspace tree, status, and open/create/switch actions
+- `Services` — service inventory and capabilities
+- `Proxy` — proxy status and proxied containers
+- `System` — config, hooks, and diagnostics
+- `Logs` — service log viewer
 
 ## Configuration
 
-Created by `devflow init`. All sections are optional — an empty file is valid.
+`devflow init` creates `.devflow.yml`. All sections are optional.
 
 ```yaml
 services:
@@ -163,7 +208,11 @@ worktree:
 hooks:
   post-create:
     env:
-      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
+      action:
+        type: write-env
+        path: .env.local
+        vars:
+          DATABASE_URL: "{{ service['app-db'].url }}"
     migrate: "npm run migrate"
   post-switch:
     env:
@@ -178,119 +227,84 @@ commit:
     command: "claude -p --model haiku"
 ```
 
-### Config hierarchy (highest to lowest)
+Config precedence:
 
-1. **Environment variables** — quick toggles and overrides
-2. **`.devflow.local.yml`** — project-specific local overrides (gitignored)
-3. **`.devflow.yml`** — team shared configuration
+1. Environment variables
+2. `.devflow.local.yml`
+3. `.devflow.yml`
 
-See the [full documentation](docs/index.html#configuration) for all options, environment variables, and provider-specific settings.
-
-## Hooks
-
-Lifecycle hooks are MiniJinja-templated commands that run at specific phases:
-
-| Phase | When it fires |
-|---|---|
-| `post-create` | After creating a new workspace |
-| `post-switch` | After switching to a workspace |
-| `pre-commit` | Before committing |
-| `pre-merge` | Before merging workspaces |
-| `post-merge` | After merging |
-| `pre-remove` | Before removing a workspace |
-
-There are 15 phases in total — see [all hook phases](docs/CLI.md#hooks) for the complete list.
-
-Template variables: `{{ workspace }}`, `{{ service['name'].url }}`, `{{ service['name'].host }}`, `{{ service['name'].port }}`, `{{ repo }}`, `{{ worktree_path }}`.
-
-Filters: `sanitize`, `sanitize_db`, `hash_port`, `lower`, `upper`, `replace`, `truncate`.
-
-## AI Agents
-
-devflow provides first-class support for AI coding agents:
-
-```bash
-# Start an agent in an isolated workspace
-devflow agent start fix-login -- 'Fix the login timeout bug'
-
-# Check agent status
-devflow agent status
-
-# Generate skills/rules for AI tools
-devflow agent skill                      # All tools (Claude, Cursor, OpenCode)
-devflow agent skill --target claude      # Claude Code only
-```
-
-For CI/CD and automation, use `--json --non-interactive` for structured output:
-
-```bash
-OUTPUT=$(devflow --json --non-interactive switch -c agent/task-42)
-WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
-[ -n "$WORKTREE" ] && cd "$WORKTREE"
-CONN=$(devflow --json service connection agent/task-42 | jq -r '.connection_string')
-```
-
-See [AGENTS.md](AGENTS.md) for the full agent guide and automation contract.
-
-## Workflows
+## Example workflows
 
 ### Feature development
 
 ```bash
-git checkout -b feature/auth             # Git hooks auto-create services
-# ... develop with isolated database ...
-git checkout main                        # Services switch back automatically
-devflow remove feature/auth              # Clean up when done
+devflow switch -c feature/auth
+# make schema changes, seed data, run app
+devflow status
 ```
 
-### PR review
+### Review an existing branch with isolated state
 
 ```bash
-git checkout feature/payment-refactor    # Services created automatically
-devflow service logs feature/payment-refactor  # Check logs if needed
-git checkout main                        # Switch back
-devflow remove feature/payment-refactor --force
+devflow switch feature/payment-refactor
+devflow service logs feature/payment-refactor
 ```
 
-### AI agent
+### Merge train
 
 ```bash
-devflow agent start task-42 -- 'Fix the checkout flow'
-devflow agent status                     # Monitor progress
+devflow train add
+devflow train status
+devflow train run --cleanup
 ```
 
-## Releases (Commitizen)
-
-`cz` is the primary release workflow for version bumps, changelog updates, and tags.
+### Agent or automation task
 
 ```bash
-# create Conventional Commit messages
-cz commit
-
-# dry-run next release bump
-cz bump --dry-run --yes --allow-no-commit --increment PATCH
-
-# create release commit + changelog + tag
-cz bump --yes
-git push origin main --follow-tags
+devflow --json --non-interactive switch -c agent/task-42
+devflow agent context --format json
 ```
 
-Equivalent `mise` tasks are available:
+## Install
 
 ```bash
-mise run release:dry-run
-mise run release
+git clone https://github.com/clement-tourriere/devflow.git
+cd devflow
+cargo install --path .
 ```
 
-`cz bump` updates all release version targets from `.cz.toml`, including Rust crates, Tauri config, UI package version, lockfile entries for `devflow*` packages, docs banner version, and `llms-full.txt`.
+Requirements:
 
-## Documentation deployment
+- Rust 1.70+
+- Docker for local services
+- `bun` + Tauri prerequisites if you want the desktop GUI
 
-Docs are deployed from `docs/` to GitHub Pages by `.github/workflows/docs-pages.yml` on every push to `main`.
+### macOS
 
-For private repositories, enable Pages in repository settings and choose **GitHub Actions** as the source.
+APFS cloning works automatically. Install Docker Desktop or OrbStack, install Rust, then run `cargo install --path .`.
 
-## Copy-on-Write Storage
+### Ubuntu
+
+```bash
+sudo apt-get update && sudo apt-get install -y docker.io
+sudo usermod -aG docker $USER && newgrp docker
+
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+
+git clone https://github.com/clement-tourriere/devflow.git
+cd devflow
+cargo install --path .
+```
+
+### Optional: ZFS on Linux
+
+```bash
+sudo apt-get install -y zfsutils-linux
+devflow setup-zfs
+```
+
+## Storage backends for fast cloning
 
 | Filesystem | Platform | Method | Setup |
 |---|---|---|---|
@@ -298,46 +312,20 @@ For private repositories, enable Pages in repository settings and choose **GitHu
 | ZFS | Linux | Snapshots + clones | `devflow setup-zfs` |
 | Btrfs | Linux | Reflink copy | Automatic |
 | XFS | Linux | Reflink copy | Automatic |
-| ext4 / other | Any | Full copy (fallback) | None |
+| ext4 / other | Any | Full copy fallback | None |
 
-## Full Install
+## Examples and further reading
 
-### macOS
+- `examples/simple.devflow.yml` — minimal single-service setup
+- `examples/multi-service.devflow.yml` — multi-service project with hooks and worktrees
+- `examples/django.devflow.yml` — framework-oriented example
+- `docs/CLI.md` — command reference
+- `docs/index.html` — full documentation site
+- `AGENTS.md` — agent workflow guide
 
-No special setup — APFS cloning is automatic. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or [OrbStack](https://orbstack.dev)) and Rust, then `cargo install --path .`.
+## Documentation deployment
 
-### Ubuntu
-
-```bash
-# Docker
-sudo apt-get update && sudo apt-get install -y docker.io
-sudo usermod -aG docker $USER && newgrp docker
-
-# Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-
-# devflow
-git clone https://github.com/clement-tourriere/devflow.git
-cd devflow && cargo install --path .
-```
-
-### Optional: ZFS (Linux)
-
-For near-instant cloning on ext4 (Ubuntu default):
-
-```bash
-sudo apt-get install -y zfsutils-linux
-devflow setup-zfs                        # 10G pool named "devflow"
-```
-
-## Further Reading
-
-- [Full Documentation](docs/index.html) — complete reference with search and dark mode
-- [CLI Reference](docs/CLI.md) — all commands and flags
-- [AI Agent Guide](AGENTS.md) — automation contract and agent workflows
-- [Changelog](CHANGELOG.md) — version history
-- [Examples](examples/) — ready-to-use configuration files
+Docs are deployed from `docs/` to GitHub Pages via `.github/workflows/docs-pages.yml` on pushes to `main`.
 
 ## License
 

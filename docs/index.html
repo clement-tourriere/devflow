@@ -2252,9 +2252,19 @@ mise run gui:install</code></pre>
     </thead>
     <tbody>
       <tr>
-        <td><strong>Environments</strong></td>
+        <td><strong>Workspaces</strong></td>
         <td>Workspace tree with parent/child relationships, service states, worktree paths</td>
         <td>Switch workspace, start/stop services, press <code>o</code> to open workspace and exit</td>
+      </tr>
+      <tr>
+        <td><strong>Services</strong></td>
+        <td>Configured services, provider state, and capability information</td>
+        <td>Inspect service inventory and provider support without leaving the terminal</td>
+      </tr>
+      <tr>
+        <td><strong>Proxy</strong></td>
+        <td>Proxy status, trusted CA state, and discovered localhost endpoints</td>
+        <td>Check reverse proxy health and discover running container routes</td>
       </tr>
       <tr>
         <td><strong>System</strong></td>
@@ -2290,7 +2300,7 @@ mise run gui:install</code></pre>
 <section class="section" id="ai-automation">
   <h2><span class="number">12</span> AI &amp; Automation</h2>
   <p class="section-desc">
-    devflow is designed for both human developers and autonomous agents. It provides AI-powered commit messages, structured JSON output for CI/CD pipelines, and first-class support for AI coding agents that need isolated database sandboxes.
+    devflow is designed for both human developers and autonomous agents. It provides AI-powered commit messages, structured JSON output for CI/CD pipelines, agent context and skills, optional sandboxed workspaces, and isolated service environments for parallel tasks.
   </p>
 
   <div class="callout callout-success">
@@ -2299,6 +2309,22 @@ mise run gui:install</code></pre>
       <strong>Why devflow for AI agents?</strong> Each agent task gets its own database &mdash; fully isolated, instantly cloned via Copy-on-Write. No shared state between parallel agents, no conflicts, no cleanup headaches. The <code>--json --non-interactive</code> flags make every command machine-safe, and <code>llms.txt</code> gives agents all the context they need.
     </div>
   </div>
+
+  <h3>Sandboxed Workspaces</h3>
+  <p>For higher-risk automation or experimental tasks, create a workspace in sandboxed mode:</p>
+
+<pre><code class="language-bash">devflow switch -c agent/fix-login --sandboxed</code></pre>
+
+  <p>Sandbox support is platform-aware and reduces filesystem or command access where the current system supports it.</p>
+
+  <h3>Smart Merge</h3>
+  <p>devflow also includes an advanced merge workflow with readiness checks, rebase helpers, and merge train support. This feature set is controlled by the Smart Merge setting in the desktop app or global config.</p>
+
+<pre><code class="language-bash">devflow merge --check-only
+devflow rebase develop
+devflow train add
+devflow train status
+devflow train run --cleanup</code></pre>
 
   <h3 id="agent-integration">Agent Integration</h3>
   <p>devflow follows the <a href="https://agentskills.io">Agent Skills</a> open standard and the <a href="https://llmstxt.org">llms.txt convention</a>, giving AI coding agents everything they need to manage isolated workspaces autonomously.</p>
@@ -2387,25 +2413,20 @@ mise run gui:install</code></pre>
   </div>
 
   <h3>Agent Commands</h3>
-  <p>devflow includes built-in commands for managing AI agents in isolated workspaces:</p>
+  <p>devflow includes built-in commands for AI-friendly context, skill installation, and automation-safe workspace management:</p>
 
 <pre><code class="language-bash"># Install workspace skills for AI coding tools
 devflow agent skill
 
-# Start an AI agent in a new isolated workspace
-devflow agent start fix-login -- 'Fix the login timeout bug'
-devflow agent start fix-login --command codex    # Use a specific agent
-devflow agent start fix-login --dry-run          # Preview without executing
-
-# Check agent workspaces
+# Check tracked agent-oriented workspaces
 devflow agent status
 
 # Get project context for the current workspace
 devflow agent context
 devflow agent context --format json
 
-# Generate AGENTS.md for this project
-devflow agent docs</code></pre>
+# Create an isolated workspace for an agent task
+devflow --json --non-interactive switch -c agent/fix-login</code></pre>
 
   <h3>AI Commit Messages</h3>
   <p>Generate conventional commit messages from your staged changes using any OpenAI-compatible LLM:</p>
@@ -2463,7 +2484,7 @@ export DEVFLOW_LLM_MODEL="llama3.1"</code></pre>
   <p>All core commands support <code>--json</code> for structured output, making devflow trivially scriptable from any language or agent framework.</p>
 
 <pre><code class="language-bash"># Create a workspace and get structured output
-devflow --json create feature/auth
+devflow --json switch -c feature/auth
 # → {"name": "feature/auth", "state": "running", ...}
 
 # Get connection info as JSON
@@ -2486,14 +2507,14 @@ devflow --json status
   <h3>Non-Interactive Mode</h3>
   <p>Skip all prompts and use sensible defaults. Essential for CI/CD, scripts, and AI agents:</p>
 <pre><code class="language-bash"># All commands in non-interactive mode
-devflow --non-interactive create feature/auth
+devflow --non-interactive switch -c feature/auth
 devflow --non-interactive switch feature/auth        # Hooks run (require pre-approval)
 devflow --non-interactive switch feature/auth --no-verify  # Skip ALL hooks entirely
 devflow --non-interactive destroy --force</code></pre>
 
   <h4>Automation Contract</h4>
   <ul>
-    <li>Multi-provider <code>create</code>, <code>delete</code>, and <code>switch</code> exit non-zero if any provider fails</li>
+    <li>Multi-provider <code>service create</code>, <code>service delete</code>, and <code>switch</code> exit non-zero if any provider fails</li>
     <li><code>destroy</code> and <code>remove</code> require <code>--force</code> in <code>--json</code> or <code>--non-interactive</code> mode</li>
     <li>Unapproved hooks fail in non-interactive mode (no approval prompts)</li>
     <li>Use <code>devflow --json capabilities</code> to detect guarantees at runtime</li>
@@ -2837,12 +2858,6 @@ devflow commit --ai --dry-run            # Preview AI message</code></pre>
 
   <h3>AI Agents</h3>
 
-  <h4><code>devflow agent start &lt;task&gt;</code></h4>
-  <p>Start an AI agent in a new isolated workspace.</p>
-<pre><code class="language-bash">devflow agent start fix-login -- 'Fix the login timeout bug'
-devflow agent start fix-login --command codex
-devflow agent start fix-login --dry-run  # Preview without executing</code></pre>
-
   <h4><code>devflow agent status</code></h4>
   <p>Show agent status across all workspaces.</p>
 
@@ -2854,13 +2869,8 @@ devflow agent context --workspace feat/x    # Specific workspace</code></pre>
 
   <h4><code>devflow agent skill</code></h4>
   <p>Generate project-specific skills/rules for AI tools.</p>
-<pre><code class="language-bash">devflow agent skill                      # All tools (Claude, Cursor, OpenCode)
-devflow agent skill --target claude      # .claude/skills/devflow/SKILL.md
-devflow agent skill --target cursor      # .cursor/rules/devflow.md
-devflow agent skill --target opencode    # AGENTS.md</code></pre>
-
-  <h4><code>devflow agent docs</code></h4>
-  <p>Generate an AGENTS.md tailored to this project.</p>
+<pre><code class="language-bash">devflow agent skill
+devflow --json agent skill</code></pre>
 
   <hr>
 
@@ -2895,17 +2905,19 @@ devflow hook approvals clear              # Clear all approvals</code></pre>
   <p>Show the VCS event to hook phase mapping.</p>
 
   <h4><code>devflow hook actions</code></h4>
-  <p>List built-in action types (shell, replace, write-file, write-env, copy, docker-exec, http).</p>
+  <p>List built-in action types such as shell, replace, write-file, write-env, copy, docker-exec, http, and notify.</p>
+
+  <h4><code>devflow hook recipes</code></h4>
+  <p>List built-in hook recipe bundles you can install into <code>.devflow.yml</code>.</p>
+
+  <h4><code>devflow hook install &lt;recipe&gt;</code></h4>
+  <p>Install a built-in hook recipe without overwriting existing entries.</p>
+<pre><code class="language-bash">devflow hook recipes
+devflow hook install sync-ai-configs</code></pre>
 
   <hr>
 
   <h3>AI Agents</h3>
-
-  <h4><code>devflow agent start &lt;task&gt;</code></h4>
-  <p>Start an AI agent in a new isolated workspace.</p>
-<pre><code class="language-bash">devflow agent start fix-login -- 'Fix the login timeout bug'
-devflow agent start fix-login --command codex
-devflow agent start fix-login --dry-run</code></pre>
 
   <h4><code>devflow agent status</code></h4>
   <p>Show agent status across all workspaces.</p>
@@ -2918,13 +2930,11 @@ devflow agent context --workspace feat/x</code></pre>
 
   <h4><code>devflow agent skill</code></h4>
   <p>Generate project-specific skills/rules for AI tools.</p>
-<pre><code class="language-bash">devflow agent skill                      # All tools
-devflow agent skill --target claude      # .claude/skills/devflow/SKILL.md
-devflow agent skill --target cursor      # .cursor/rules/devflow.md
-devflow agent skill --target opencode    # AGENTS.md</code></pre>
+<pre><code class="language-bash">devflow agent skill
+devflow --json agent skill</code></pre>
 
-  <h4><code>devflow agent docs</code></h4>
-  <p>Generate an <code>AGENTS.md</code> tailored to this project.</p>
+  <h4><code>devflow sync-ai-configs</code></h4>
+  <p>Copy AI tool configuration additions from the current worktree back to the main worktree.</p>
 
   <hr>
 
