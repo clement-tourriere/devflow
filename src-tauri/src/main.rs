@@ -116,6 +116,7 @@ fn main() {
             commands::hooks::get_trigger_mappings,
             commands::hooks::get_recipes,
             commands::hooks::install_recipe,
+            commands::hooks::install_recipes,
             // Proxy
             commands::proxy::start_proxy,
             commands::proxy::stop_proxy,

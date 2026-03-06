@@ -10,6 +10,7 @@ import {
   getTriggerMappings,
   getRecipes,
   installRecipe,
+  installRecipes,
 } from "../../utils/invoke";
 import type { HookPhaseEntry, HookInfo, ActionTypeInfo, TriggerMapping, RecipeInfo } from "../../types";
 import HookEditModal from "./HookEditModal";
@@ -504,47 +505,27 @@ function HookManager() {
               )}
 
               {rightTab === "variables" && (
-                <>
-                  {Object.keys(variables).length === 0 ? (
-                    <p style={{ color: "var(--text-secondary)", fontSize: 13 }}>
-                      No variables available.
-                    </p>
-                  ) : (
-                    <div style={{ fontSize: 12 }}>
-                      {Object.entries(variables).map(([key, val]) => (
-                        <div
-                          key={key}
-                          style={{
-                            padding: "4px 0",
-                            borderBottom: "1px solid var(--border)",
-                            display: "flex",
-                            gap: 8,
-                          }}
-                        >
-                          <span
-                            className="mono"
-                            style={{ color: "var(--accent)", minWidth: 100, flexShrink: 0 }}
-                          >
-                            {key}
-                          </span>
-                          <span
-                            className="mono"
-                            style={{
-                              color: "var(--text-secondary)",
-                              wordBreak: "break-all",
-                            }}
-                          >
-                            {typeof val === "object" ? JSON.stringify(val) : String(val)}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </>
+                <VariableBrowser variables={variables} />
               )}
 
               {rightTab === "recipes" && (
                 <>
+                  {/* Setup Profiles */}
+                  <RecipeProfiles
+                    projectPath={projectPath}
+                    recipes={recipes}
+                    phases={phases}
+                    onInstalled={(result) => {
+                      if (result.hooks_added > 0) {
+                        setRunResult(`Profile installed: ${result.hooks_added} hook(s) added, ${result.hooks_skipped} skipped`);
+                      } else {
+                        setRunResult(`Profile already installed (${result.hooks_skipped} hook(s) skipped)`);
+                      }
+                      loadData();
+                    }}
+                    onError={(e) => setRunResult(`Install failed: ${String(e)}`)}
+                  />
+
                   <div style={{ fontSize: 12, marginBottom: 8, color: "var(--text-secondary)" }}>
                     Pre-built hook configurations you can install with one click.
                   </div>
@@ -756,6 +737,383 @@ function HookManager() {
           }}
         />
       )}
+    </div>
+  );
+}
+
+// ── Variable Browser ────────────────────────────────────────────────
+
+const VARIABLE_CATEGORIES: {
+  label: string;
+  vars: { key: string; expr: string; description?: string }[];
+}[] = [
+  {
+    label: "Workspace",
+    vars: [
+      { key: "workspace", expr: "{{ workspace }}", description: "Current workspace name" },
+      { key: "default_workspace", expr: "{{ default_workspace }}", description: "Default workspace (e.g. main)" },
+      { key: "name", expr: "{{ name }}", description: "Project name" },
+      { key: "repo", expr: "{{ repo }}", description: "Repository name" },
+      { key: "worktree_path", expr: "{{ worktree_path }}", description: "Path to worktree directory" },
+    ],
+  },
+  {
+    label: "VCS",
+    vars: [
+      { key: "commit", expr: "{{ commit }}", description: "Full commit hash" },
+      { key: "short_commit", expr: "{{ short_commit }}", description: "Short commit hash" },
+      { key: "target", expr: "{{ target }}", description: "Target workspace for merge" },
+      { key: "base", expr: "{{ base }}", description: "Base workspace" },
+      { key: "previous_workspace", expr: "{{ previous_workspace }}", description: "Previously checked-out workspace" },
+    ],
+  },
+  {
+    label: "Trigger",
+    vars: [
+      { key: "trigger_source", expr: "{{ trigger_source }}", description: "What triggered the hook (vcs, cli, gui, auto)" },
+      { key: "vcs_event", expr: "{{ vcs_event }}", description: "VCS event name" },
+    ],
+  },
+  {
+    label: "Services",
+    vars: [
+      { key: "service[name].host", expr: "{{ service['SERVICE_NAME'].host }}", description: "Service host" },
+      { key: "service[name].port", expr: "{{ service['SERVICE_NAME'].port }}", description: "Service port" },
+      { key: "service[name].database", expr: "{{ service['SERVICE_NAME'].database }}", description: "Database name" },
+      { key: "service[name].user", expr: "{{ service['SERVICE_NAME'].user }}", description: "Service user" },
+      { key: "service[name].url", expr: "{{ service['SERVICE_NAME'].url }}", description: "Full connection URL" },
+    ],
+  },
+];
+
+function VariableBrowser({ variables }: { variables: Record<string, unknown> }) {
+  const [search, setSearch] = useState("");
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [copied, setCopied] = useState<string | null>(null);
+  const [syntaxOpen, setSyntaxOpen] = useState(false);
+
+  const searchLower = search.toLowerCase();
+
+  const copyToClipboard = (expr: string) => {
+    navigator.clipboard.writeText(expr).then(() => {
+      setCopied(expr);
+      setTimeout(() => setCopied(null), 1500);
+    });
+  };
+
+  // Build live service entries from actual variables
+  const serviceVars: { key: string; expr: string; value?: string }[] = [];
+  if (variables.service && typeof variables.service === "object") {
+    const services = variables.service as Record<string, Record<string, unknown>>;
+    for (const [svcName, svcData] of Object.entries(services)) {
+      for (const field of ["host", "port", "database", "user", "url"]) {
+        if (svcData[field] !== undefined) {
+          serviceVars.push({
+            key: `service['${svcName}'].${field}`,
+            expr: `{{ service['${svcName}'].${field} }}`,
+            value: String(svcData[field]),
+          });
+        }
+      }
+    }
+  }
+
+  return (
+    <div style={{ fontSize: 12 }}>
+      <input
+        type="text"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        placeholder="Search variables..."
+        style={{ width: "100%", fontSize: 12, marginBottom: 8 }}
+      />
+
+      {Object.keys(variables).length === 0 ? (
+        <p style={{ color: "var(--text-secondary)", fontSize: 13 }}>
+          No variables available.
+        </p>
+      ) : (
+        <>
+          {VARIABLE_CATEGORIES.map((cat) => {
+            const isServices = cat.label === "Services";
+            const items: { key: string; expr: string; value?: string }[] = isServices
+              ? serviceVars.length > 0
+                ? serviceVars
+                : cat.vars
+              : cat.vars.map((v) => ({
+                  key: v.key,
+                  expr: v.expr,
+                  value:
+                    variables[v.key] !== undefined
+                      ? typeof variables[v.key] === "object"
+                        ? JSON.stringify(variables[v.key])
+                        : String(variables[v.key])
+                      : undefined,
+                }));
+
+            const filtered = items.filter(
+              (v) =>
+                !searchLower ||
+                v.key.toLowerCase().includes(searchLower) ||
+                v.expr.toLowerCase().includes(searchLower)
+            );
+            if (filtered.length === 0) return null;
+
+            const isCollapsed = collapsed[cat.label];
+
+            return (
+              <div key={cat.label} style={{ marginBottom: 6 }}>
+                <div
+                  onClick={() =>
+                    setCollapsed((p) => ({ ...p, [cat.label]: !p[cat.label] }))
+                  }
+                  style={{
+                    fontSize: 10,
+                    textTransform: "uppercase",
+                    color: "var(--text-muted)",
+                    fontWeight: 600,
+                    padding: "4px 0",
+                    cursor: "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 4,
+                    userSelect: "none",
+                  }}
+                >
+                  <span style={{ fontSize: 8 }}>{isCollapsed ? "\u25B6" : "\u25BC"}</span>
+                  {cat.label}
+                  <span style={{ fontWeight: 400, fontSize: 10 }}>({filtered.length})</span>
+                </div>
+                {!isCollapsed &&
+                  filtered.map((v) => (
+                    <div
+                      key={v.key}
+                      style={{
+                        padding: "3px 0",
+                        borderBottom: "1px solid var(--border)",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                      }}
+                    >
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div
+                          className="mono"
+                          style={{ color: "var(--accent)", fontSize: 12 }}
+                        >
+                          {v.key}
+                        </div>
+                        <div
+                          className="mono"
+                          style={{
+                            color: "var(--text-muted)",
+                            fontSize: 10,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {v.expr}
+                        </div>
+                        {v.value !== undefined && (
+                          <div
+                            className="mono"
+                            style={{
+                              color: "var(--text-secondary)",
+                              fontSize: 10,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            = {v.value}
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => copyToClipboard(v.expr)}
+                        title="Copy expression"
+                        style={{
+                          background: "none",
+                          border: "1px solid var(--border)",
+                          borderRadius: 4,
+                          padding: "2px 6px",
+                          cursor: "pointer",
+                          fontSize: 10,
+                          color:
+                            copied === v.expr
+                              ? "var(--success, #3fb950)"
+                              : "var(--text-secondary)",
+                          flexShrink: 0,
+                        }}
+                      >
+                        {copied === v.expr ? "Copied!" : "Copy"}
+                      </button>
+                    </div>
+                  ))}
+              </div>
+            );
+          })}
+
+          {/* Syntax Quick Reference */}
+          <div style={{ marginTop: 8, borderTop: "1px solid var(--border)", paddingTop: 6 }}>
+            <div
+              onClick={() => setSyntaxOpen((p) => !p)}
+              style={{
+                fontSize: 11,
+                color: "var(--text-muted)",
+                cursor: "pointer",
+                userSelect: "none",
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+              }}
+            >
+              <span style={{ fontSize: 8 }}>{syntaxOpen ? "\u25BC" : "\u25B6"}</span>
+              Syntax Help
+            </div>
+            {syntaxOpen && (
+              <div
+                className="mono"
+                style={{
+                  marginTop: 4,
+                  padding: 8,
+                  background: "var(--bg-primary)",
+                  borderRadius: 6,
+                  fontSize: 10,
+                  color: "var(--text-secondary)",
+                  lineHeight: 1.6,
+                }}
+              >
+                <div><strong>Filters:</strong> sanitize, sanitize_db, hash_port, lower, upper, replace(a,b), truncate(n)</div>
+                <div><strong>Syntax:</strong> {"{{ var }}"}, {"{{ var | filter }}"}, {"{{ service['name'].url }}"}</div>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Recipe Profiles ─────────────────────────────────────────────────
+
+const RECIPE_PROFILES = [
+  {
+    name: "Local Dev",
+    description: "Install deps + copy .env + trust mise + run migrations",
+    recipes: ["install-deps", "local-dev-setup", "db-migrate"],
+  },
+  {
+    name: "Docker Dev",
+    description: "Manage Docker Compose lifecycle automatically",
+    recipes: ["docker-compose"],
+  },
+];
+
+function RecipeProfiles({
+  projectPath,
+  recipes,
+  phases,
+  onInstalled,
+  onError,
+}: {
+  projectPath: string;
+  recipes: RecipeInfo[];
+  phases: HookPhaseEntry[];
+  onInstalled: (result: { hooks_added: number; hooks_skipped: number }) => void;
+  onError: (e: unknown) => void;
+}) {
+  const [installingProfile, setInstallingProfile] = useState<string | null>(null);
+
+  const isProfileInstalled = (recipeNames: string[]) => {
+    return recipeNames.every((name) => {
+      const recipe = recipes.find((r) => r.name === name);
+      if (!recipe) return false;
+      return recipe.hooks_preview.every((h) =>
+        phases.some(
+          (p) =>
+            p.phase === h.phase &&
+            p.hooks.some((hook) => hook.name === h.hook_name)
+        )
+      );
+    });
+  };
+
+  const handleInstallProfile = async (profileName: string, recipeNames: string[]) => {
+    setInstallingProfile(profileName);
+    try {
+      const result = await installRecipes(projectPath, recipeNames);
+      onInstalled(result);
+    } catch (e) {
+      onError(e);
+    } finally {
+      setInstallingProfile(null);
+    }
+  };
+
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div
+        style={{
+          fontSize: 10,
+          textTransform: "uppercase",
+          color: "var(--text-muted)",
+          fontWeight: 600,
+          marginBottom: 6,
+        }}
+      >
+        Quick Setup Profiles
+      </div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        {RECIPE_PROFILES.map((profile) => {
+          const installed = isProfileInstalled(profile.recipes);
+          const isInstalling = installingProfile === profile.name;
+          return (
+            <div
+              key={profile.name}
+              style={{
+                flex: 1,
+                padding: "10px 12px",
+                border: "1px solid var(--border)",
+                borderRadius: 8,
+                background: installed
+                  ? "rgba(63, 185, 80, 0.06)"
+                  : "var(--bg-primary)",
+              }}
+            >
+              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 2 }}>
+                {profile.name}
+              </div>
+              <div
+                style={{
+                  fontSize: 11,
+                  color: "var(--text-secondary)",
+                  marginBottom: 6,
+                }}
+              >
+                {profile.description}
+              </div>
+              {installed ? (
+                <span className="badge badge-success" style={{ fontSize: 10 }}>
+                  installed
+                </span>
+              ) : (
+                <button
+                  className="btn btn-primary"
+                  style={{ fontSize: 11, padding: "2px 10px" }}
+                  disabled={isInstalling}
+                  onClick={() =>
+                    handleInstallProfile(profile.name, profile.recipes)
+                  }
+                >
+                  {isInstalling ? "Installing..." : "Install Profile"}
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

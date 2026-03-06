@@ -242,6 +242,8 @@ export const getRecipes = () =>
   invoke<RecipeInfo[]>("get_recipes");
 export const installRecipe = (projectPath: string, recipeName: string) =>
   invoke<InstallRecipeResult>("install_recipe", { projectPath, recipeName });
+export const installRecipes = (projectPath: string, recipeNames: string[]) =>
+  invoke<InstallRecipeResult>("install_recipes", { projectPath, recipeNames });
 
 // Proxy
 export const startProxy = () => invoke<ProxyStatus>("start_proxy");

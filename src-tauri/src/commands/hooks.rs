@@ -807,6 +807,50 @@ pub async fn install_recipe(
     })
 }
 
+#[tauri::command]
+pub async fn install_recipes(
+    project_path: String,
+    recipe_names: Vec<String>,
+) -> Result<InstallRecipeResult, String> {
+    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
+    let config = devflow_core::config::Config::from_file(&config_path)
+        .map_err(crate::commands::format_error)?;
+
+    let mut hooks_config = config.hooks.unwrap_or_default();
+    let mut total_added = 0;
+    let mut total_skipped = 0;
+
+    for name in &recipe_names {
+        let recipe = devflow_core::hooks::recipes::find_recipe(name)
+            .ok_or_else(|| format!("Recipe '{}' not found", name))?;
+        let result =
+            devflow_core::hooks::recipes::merge_recipe_into_config(&mut hooks_config, &recipe);
+        total_added += result.hooks_added;
+        total_skipped += result.hooks_skipped;
+    }
+
+    if total_added > 0 {
+        let content = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+        let mut doc: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&content).map_err(|e| e.to_string())?;
+        let hooks_yaml =
+            serde_yaml_ng::to_value(&hooks_config).map_err(|e| e.to_string())?;
+        if let serde_yaml_ng::Value::Mapping(ref mut map) = doc {
+            map.insert(
+                serde_yaml_ng::Value::String("hooks".to_string()),
+                hooks_yaml,
+            );
+        }
+        let output = serde_yaml_ng::to_string(&doc).map_err(|e| e.to_string())?;
+        std::fs::write(&config_path, output).map_err(|e| e.to_string())?;
+    }
+
+    Ok(InstallRecipeResult {
+        hooks_added: total_added,
+        hooks_skipped: total_skipped,
+    })
+}
+
 /// Get VCS trigger mappings.
 #[tauri::command]
 pub async fn get_trigger_mappings(project_path: String) -> Result<serde_json::Value, String> {

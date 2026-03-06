@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import type { ActionTypeInfo, ActionFieldInfo, HookInfo, RecipeInfo } from "../../types";
-import { saveHooks, listHooks, getRecipes, installRecipe } from "../../utils/invoke";
+import { saveHooks, listHooks, installRecipe } from "../../utils/invoke";
 
 interface ConditionPreset {
   label: string;
@@ -164,6 +164,7 @@ export default function HookEditModal({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [installingRecipeName, setInstallingRecipeName] = useState<string | null>(null);
+  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
 
   // Common hook options
   const [condition, setCondition] = useState(editState?.condition ?? "");
@@ -173,6 +174,30 @@ export default function HookEditModal({
   const [background, setBackground] = useState(
     editState?.background ?? false
   );
+
+  // Track whether the form has been touched
+  const hasUnsavedChanges = () => {
+    if (step === "pick-type") return false;
+    if (isEditing) {
+      // Editing: compare against initial state
+      if (hookName !== (editState?.hookName ?? "")) return true;
+      if (condition !== (editState?.condition ?? "")) return true;
+      if (continueOnError !== (editState?.continueOnError ?? false)) return true;
+      if (background !== (editState?.background ?? false)) return true;
+      if (JSON.stringify(fieldValues) !== JSON.stringify(editState?.fieldValues ?? {})) return true;
+      return false;
+    }
+    // New hook: any content means unsaved
+    return hookName.trim() !== "" || Object.values(fieldValues).some((v) => v !== "" && v !== false);
+  };
+
+  const handleCloseAttempt = () => {
+    if (hasUnsavedChanges()) {
+      setShowDiscardConfirm(true);
+      return;
+    }
+    onClose();
+  };
 
   const handleTypeSelect = (actionType: ActionTypeInfo) => {
     setSelectedType(actionType);
@@ -267,25 +292,39 @@ export default function HookEditModal({
     switch (field.field_type) {
       case "string":
         return (
-          <input
-            type="text"
-            value={(value as string) || ""}
-            onChange={(e) => updateField(field.name, e.target.value)}
-            placeholder={field.template ? "Supports {{ templates }}" : ""}
-            className="mono"
-            style={{ fontSize: 12, width: "100%" }}
-          />
+          <TemplateFieldWrapper
+            template={field.template}
+            onInsert={(snippet) => {
+              updateField(field.name, ((value as string) || "") + snippet);
+            }}
+          >
+            <input
+              type="text"
+              value={(value as string) || ""}
+              onChange={(e) => updateField(field.name, e.target.value)}
+              placeholder={field.template ? "Supports {{ templates }}" : ""}
+              className="mono"
+              style={{ fontSize: 12, width: "100%" }}
+            />
+          </TemplateFieldWrapper>
         );
 
       case "text":
         return (
-          <textarea
-            value={(value as string) || ""}
-            onChange={(e) => updateField(field.name, e.target.value)}
-            placeholder={field.template ? "Supports {{ templates }}" : ""}
-            className="mono"
-            style={{ fontSize: 12, minHeight: 60, width: "100%" }}
-          />
+          <TemplateFieldWrapper
+            template={field.template}
+            onInsert={(snippet) => {
+              updateField(field.name, ((value as string) || "") + snippet);
+            }}
+          >
+            <textarea
+              value={(value as string) || ""}
+              onChange={(e) => updateField(field.name, e.target.value)}
+              placeholder={field.template ? "Supports {{ templates }}" : ""}
+              className="mono"
+              style={{ fontSize: 12, minHeight: 60, width: "100%" }}
+            />
+          </TemplateFieldWrapper>
         );
 
       case "bool":
@@ -337,12 +376,17 @@ export default function HookEditModal({
         justifyContent: "center",
         zIndex: 1000,
       }}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) {
+          e.preventDefault();
+          e.stopPropagation();
+          handleCloseAttempt();
+        }
       }}
     >
       <div
         style={{
+          position: "relative",
           background: "var(--bg-secondary)",
           borderRadius: 12,
           border: "1px solid var(--border)",
@@ -481,7 +525,7 @@ export default function HookEditModal({
               ))}
             </div>
             <div style={{ marginTop: 16, textAlign: "right" }}>
-              <button className="btn" onClick={onClose}>
+              <button className="btn" onClick={handleCloseAttempt}>
                 Cancel
               </button>
             </div>
@@ -548,13 +592,16 @@ export default function HookEditModal({
                       {field.required && " *"}
                       {field.template && (
                         <span
+                          className="mono"
                           style={{
                             fontWeight: 400,
-                            color: "var(--text-muted)",
+                            color: "var(--accent)",
                             marginLeft: 6,
+                            fontSize: 11,
                           }}
+                          title="Supports MiniJinja templates"
                         >
-                          (template)
+                          {"{ }"}
                         </span>
                       )}
                     </label>
@@ -629,7 +676,7 @@ export default function HookEditModal({
                 </button>
               )}
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="btn" onClick={onClose}>
+                <button className="btn" onClick={handleCloseAttempt}>
                   Cancel
                 </button>
                 <button
@@ -642,6 +689,55 @@ export default function HookEditModal({
               </div>
             </div>
           </>
+        )}
+
+        {/* Discard confirmation overlay */}
+        {showDiscardConfirm && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              background: "rgba(0,0,0,0.6)",
+              borderRadius: 12,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 10,
+            }}
+          >
+            <div
+              style={{
+                background: "var(--bg-secondary)",
+                border: "1px solid var(--border)",
+                borderRadius: 10,
+                padding: "20px 24px",
+                textAlign: "center",
+                maxWidth: 300,
+              }}
+            >
+              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>
+                Discard changes?
+              </div>
+              <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 16 }}>
+                You have unsaved changes that will be lost.
+              </div>
+              <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+                <button
+                  className="btn"
+                  onClick={() => setShowDiscardConfirm(false)}
+                >
+                  Keep Editing
+                </button>
+                <button
+                  className="btn"
+                  style={{ background: "var(--danger)", color: "#fff", borderColor: "var(--danger)" }}
+                  onClick={onClose}
+                >
+                  Discard
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </div>
@@ -892,6 +988,124 @@ function ConditionPicker({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Template Snippet Chips ───────────────────────────────────────────
+
+const TEMPLATE_SNIPPETS: { label: string; value: string; tooltip: string; category: string }[] = [
+  // Variables
+  { label: "workspace", value: "{{ workspace }}", tooltip: "Current workspace/branch name", category: "Variables" },
+  { label: "repo", value: "{{ repo }}", tooltip: "Repository name", category: "Variables" },
+  { label: "worktree_path", value: "{{ worktree_path }}", tooltip: "Absolute path to the worktree directory", category: "Variables" },
+  { label: "short_commit", value: "{{ short_commit }}", tooltip: "Short (7-char) commit hash", category: "Variables" },
+  { label: "service URL", value: "{{ service['SERVICE_NAME'].url }}", tooltip: "Full connection URL for a service (replace SERVICE_NAME)", category: "Variables" },
+  { label: "commit", value: "{{ commit }}", tooltip: "Full commit hash", category: "Variables" },
+  { label: "name", value: "{{ name }}", tooltip: "Project name", category: "Variables" },
+  { label: "default_workspace", value: "{{ default_workspace }}", tooltip: "Default workspace name (e.g. main)", category: "Variables" },
+  // Filters
+  { label: "| sanitize", value: "{{ workspace | sanitize }}", tooltip: "Sanitize for use as identifier (replace special chars with -)", category: "Filters" },
+  { label: "| sanitize_db", value: "{{ workspace | sanitize_db }}", tooltip: "Sanitize for database name (replace special chars with _)", category: "Filters" },
+  { label: "| hash_port", value: "{{ workspace | hash_port }}", tooltip: "Deterministic port number from workspace name", category: "Filters" },
+];
+
+function SnippetChip({
+  snippet,
+  onInsert,
+}: {
+  snippet: (typeof TEMPLATE_SNIPPETS)[number];
+  onInsert: (value: string) => void;
+}) {
+  const [showTooltip, setShowTooltip] = useState(false);
+  const chipRef = useRef<HTMLButtonElement>(null);
+
+  return (
+    <span style={{ position: "relative", display: "inline-block" }}>
+      <button
+        ref={chipRef}
+        onClick={() => onInsert(snippet.value)}
+        onMouseEnter={() => setShowTooltip(true)}
+        onMouseLeave={() => setShowTooltip(false)}
+        className="mono"
+        style={{
+          fontSize: 10,
+          padding: "2px 7px",
+          background: "var(--bg-secondary)",
+          border: "1px solid var(--border)",
+          borderRadius: 10,
+          cursor: "pointer",
+          color: "var(--accent)",
+          transition: "background 0.1s, border-color 0.1s",
+          lineHeight: "16px",
+        }}
+        onMouseDown={(e) => e.preventDefault()} // keep focus in field
+      >
+        {snippet.label}
+      </button>
+      {showTooltip && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: "calc(100% + 6px)",
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: "var(--bg-primary)",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            padding: "6px 10px",
+            fontSize: 11,
+            color: "var(--text-primary)",
+            whiteSpace: "nowrap",
+            zIndex: 200,
+            boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
+            pointerEvents: "none",
+          }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: 2 }}>{snippet.tooltip}</div>
+          <div className="mono" style={{ color: "var(--text-muted)", fontSize: 10 }}>
+            {snippet.value}
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+function TemplateFieldWrapper({
+  template,
+  onInsert,
+  children,
+}: {
+  template?: boolean;
+  onInsert: (snippet: string) => void;
+  children: React.ReactNode;
+}) {
+  if (!template) return <>{children}</>;
+
+  const varSnippets = TEMPLATE_SNIPPETS.filter((s) => s.category === "Variables");
+  const filterSnippets = TEMPLATE_SNIPPETS.filter((s) => s.category === "Filters");
+
+  return (
+    <div>
+      {children}
+      <div
+        style={{
+          marginTop: 4,
+          display: "flex",
+          flexWrap: "wrap",
+          gap: 3,
+          alignItems: "center",
+        }}
+      >
+        {varSnippets.map((s) => (
+          <SnippetChip key={s.value} snippet={s} onInsert={onInsert} />
+        ))}
+        <span style={{ width: 1, height: 14, background: "var(--border)", margin: "0 2px" }} />
+        {filterSnippets.map((s) => (
+          <SnippetChip key={s.value} snippet={s} onInsert={onInsert} />
+        ))}
+      </div>
     </div>
   );
 }

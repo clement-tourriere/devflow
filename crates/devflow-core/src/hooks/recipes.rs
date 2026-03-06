@@ -63,7 +63,13 @@ pub struct InstallRecipeResult {
 
 /// Return all built-in hook recipes.
 pub fn builtin_recipes() -> Vec<HookRecipe> {
-    vec![sync_ai_configs_recipe()]
+    vec![
+        sync_ai_configs_recipe(),
+        install_deps_recipe(),
+        docker_compose_recipe(),
+        local_dev_setup_recipe(),
+        db_migrate_recipe(),
+    ]
 }
 
 /// Find a built-in recipe by name.
@@ -145,6 +151,170 @@ fn sync_ai_configs_recipe() -> HookRecipe {
     }
 }
 
+fn install_deps_recipe() -> HookRecipe {
+    let make_phase = || {
+        let mut phase = IndexMap::new();
+        for (name, condition, command) in [
+            ("install-deps-npm", "file_exists:package-lock.json", "npm ci"),
+            ("install-deps-bun", "file_exists:bun.lockb", "bun install --frozen-lockfile"),
+            ("install-deps-pnpm", "file_exists:pnpm-lock.yaml", "pnpm install --frozen-lockfile"),
+            ("install-deps-yarn", "file_exists:yarn.lock", "yarn install --frozen-lockfile"),
+            ("install-deps-uv", "file_exists:uv.lock", "uv sync"),
+            ("install-deps-cargo", "file_exists:Cargo.lock", "cargo build"),
+        ] {
+            phase.insert(
+                name.to_string(),
+                HookEntry::Extended(ExtendedHookEntry {
+                    command: command.to_string(),
+                    working_dir: None,
+                    continue_on_error: Some(true),
+                    condition: Some(condition.to_string()),
+                    environment: None,
+                    background: false,
+                }),
+            );
+        }
+        phase
+    };
+
+    let mut hooks = IndexMap::new();
+    hooks.insert(HookPhase::PostCreate, make_phase());
+    hooks.insert(HookPhase::PostSwitch, make_phase());
+
+    HookRecipe {
+        name: "install-deps",
+        description: "Auto-detect and install dependencies (npm, bun, pnpm, yarn, uv, cargo)",
+        category: "Setup",
+        hooks,
+    }
+}
+
+fn docker_compose_recipe() -> HookRecipe {
+    let compose_files = [
+        ("", "docker-compose.yml"),
+        ("-v2", "compose.yml"),
+        ("-yaml", "compose.yaml"),
+    ];
+
+    let make_hooks = |suffix: &str, command: &str| {
+        let mut phase = IndexMap::new();
+        for (variant, file) in &compose_files {
+            phase.insert(
+                format!("compose-{}{}", suffix, variant),
+                HookEntry::Extended(ExtendedHookEntry {
+                    command: command.to_string(),
+                    working_dir: None,
+                    continue_on_error: None,
+                    condition: Some(format!("file_exists:{}", file)),
+                    environment: None,
+                    background: false,
+                }),
+            );
+        }
+        phase
+    };
+
+    let mut hooks = IndexMap::new();
+    hooks.insert(HookPhase::PostCreate, make_hooks("up", "docker compose up -d"));
+    hooks.insert(HookPhase::PostSwitch, make_hooks("restart", "docker compose up -d --build"));
+    hooks.insert(HookPhase::PreRemove, make_hooks("down", "docker compose down"));
+
+    HookRecipe {
+        name: "docker-compose",
+        description: "Manage Docker Compose lifecycle (up on create, restart on switch, down on remove)",
+        category: "Docker",
+        hooks,
+    }
+}
+
+fn local_dev_setup_recipe() -> HookRecipe {
+    use super::{ActionHookEntry, HookAction};
+
+    let mut post_create = IndexMap::new();
+    post_create.insert(
+        "copy-env".to_string(),
+        HookEntry::Action(ActionHookEntry {
+            action: HookAction::Copy {
+                from: ".env.example".to_string(),
+                to: ".env.local".to_string(),
+                overwrite: false,
+            },
+            working_dir: None,
+            continue_on_error: None,
+            condition: Some("file_exists:.env.example".to_string()),
+            environment: None,
+            background: false,
+        }),
+    );
+    post_create.insert(
+        "mise-trust".to_string(),
+        HookEntry::Extended(ExtendedHookEntry {
+            command: "mise trust".to_string(),
+            working_dir: None,
+            continue_on_error: None,
+            condition: Some("file_exists:.mise.toml".to_string()),
+            environment: None,
+            background: false,
+        }),
+    );
+    post_create.insert(
+        "direnv-allow".to_string(),
+        HookEntry::Extended(ExtendedHookEntry {
+            command: "direnv allow".to_string(),
+            working_dir: None,
+            continue_on_error: None,
+            condition: Some("file_exists:.envrc".to_string()),
+            environment: None,
+            background: false,
+        }),
+    );
+
+    let mut hooks = IndexMap::new();
+    hooks.insert(HookPhase::PostCreate, post_create);
+
+    HookRecipe {
+        name: "local-dev-setup",
+        description: "Copy .env.example, trust mise, and allow direnv on workspace creation",
+        category: "Setup",
+        hooks,
+    }
+}
+
+fn db_migrate_recipe() -> HookRecipe {
+    let make_phase = || {
+        let mut phase = IndexMap::new();
+        for (name, condition, command) in [
+            ("migrate-prisma", "file_exists:prisma/schema.prisma", "npx prisma migrate deploy"),
+            ("migrate-rails", "dir_exists:db/migrate", "bin/rails db:migrate"),
+            ("migrate-django", "file_exists:manage.py", "python manage.py migrate"),
+        ] {
+            phase.insert(
+                name.to_string(),
+                HookEntry::Extended(ExtendedHookEntry {
+                    command: command.to_string(),
+                    working_dir: None,
+                    continue_on_error: Some(true),
+                    condition: Some(condition.to_string()),
+                    environment: None,
+                    background: false,
+                }),
+            );
+        }
+        phase
+    };
+
+    let mut hooks = IndexMap::new();
+    hooks.insert(HookPhase::PostCreate, make_phase());
+    hooks.insert(HookPhase::PostSwitch, make_phase());
+
+    HookRecipe {
+        name: "db-migrate",
+        description: "Run database migrations (Prisma, Rails, Django) after workspace creation and switch",
+        category: "Database",
+        hooks,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,5 +361,101 @@ mod tests {
         assert_eq!(info.name, "sync-ai-configs");
         assert_eq!(info.category, "AI Tools");
         assert_eq!(info.hooks_preview.len(), 2);
+    }
+
+    #[test]
+    fn test_install_deps_recipe() {
+        let recipe = install_deps_recipe();
+        assert_eq!(recipe.name, "install-deps");
+        assert_eq!(recipe.category, "Setup");
+        assert_eq!(recipe.hooks.len(), 2); // post-create + post-switch
+        assert!(recipe.hooks.contains_key(&HookPhase::PostCreate));
+        assert!(recipe.hooks.contains_key(&HookPhase::PostSwitch));
+        // 6 package managers per phase
+        assert_eq!(recipe.hooks[&HookPhase::PostCreate].len(), 6);
+        assert_eq!(recipe.hooks[&HookPhase::PostSwitch].len(), 6);
+        // All should have conditions
+        for (_phase, hooks) in &recipe.hooks {
+            for (_name, entry) in hooks {
+                match entry {
+                    HookEntry::Extended(ext) => {
+                        assert!(ext.condition.is_some());
+                        assert_eq!(ext.continue_on_error, Some(true));
+                    }
+                    _ => panic!("Expected Extended entry"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_docker_compose_recipe() {
+        let recipe = docker_compose_recipe();
+        assert_eq!(recipe.name, "docker-compose");
+        assert_eq!(recipe.category, "Docker");
+        assert_eq!(recipe.hooks.len(), 3); // post-create, post-switch, pre-remove
+        assert!(recipe.hooks.contains_key(&HookPhase::PostCreate));
+        assert!(recipe.hooks.contains_key(&HookPhase::PostSwitch));
+        assert!(recipe.hooks.contains_key(&HookPhase::PreRemove));
+        // 3 compose file variants per phase
+        for (_phase, hooks) in &recipe.hooks {
+            assert_eq!(hooks.len(), 3);
+        }
+        let info = recipe.to_info();
+        assert_eq!(info.hooks_preview.len(), 9); // 3 phases * 3 variants
+    }
+
+    #[test]
+    fn test_local_dev_setup_recipe() {
+        let recipe = local_dev_setup_recipe();
+        assert_eq!(recipe.name, "local-dev-setup");
+        assert_eq!(recipe.category, "Setup");
+        assert_eq!(recipe.hooks.len(), 1); // post-create only
+        let post_create = &recipe.hooks[&HookPhase::PostCreate];
+        assert_eq!(post_create.len(), 3); // copy-env, mise-trust, direnv-allow
+        assert!(post_create.contains_key("copy-env"));
+        assert!(post_create.contains_key("mise-trust"));
+        assert!(post_create.contains_key("direnv-allow"));
+        // copy-env should be an Action
+        match &post_create["copy-env"] {
+            HookEntry::Action(act) => {
+                assert_eq!(act.action.type_name(), "copy");
+                assert_eq!(act.condition.as_deref(), Some("file_exists:.env.example"));
+            }
+            _ => panic!("Expected Action entry for copy-env"),
+        }
+    }
+
+    #[test]
+    fn test_db_migrate_recipe() {
+        let recipe = db_migrate_recipe();
+        assert_eq!(recipe.name, "db-migrate");
+        assert_eq!(recipe.category, "Database");
+        assert_eq!(recipe.hooks.len(), 2); // post-create + post-switch
+        for (_phase, hooks) in &recipe.hooks {
+            assert_eq!(hooks.len(), 3); // prisma, rails, django
+        }
+        let info = recipe.to_info();
+        assert_eq!(info.hooks_preview.len(), 6); // 2 phases * 3 frameworks
+    }
+
+    #[test]
+    fn test_builtin_recipes_count() {
+        let recipes = builtin_recipes();
+        assert_eq!(recipes.len(), 5);
+        let names: Vec<&str> = recipes.iter().map(|r| r.name).collect();
+        assert!(names.contains(&"sync-ai-configs"));
+        assert!(names.contains(&"install-deps"));
+        assert!(names.contains(&"docker-compose"));
+        assert!(names.contains(&"local-dev-setup"));
+        assert!(names.contains(&"db-migrate"));
+    }
+
+    #[test]
+    fn test_find_new_recipes() {
+        assert!(find_recipe("install-deps").is_some());
+        assert!(find_recipe("docker-compose").is_some());
+        assert!(find_recipe("local-dev-setup").is_some());
+        assert!(find_recipe("db-migrate").is_some());
     }
 }
