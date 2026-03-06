@@ -2,9 +2,298 @@ use crate::state::AppState;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use devflow_terminal::{SessionMetadata, TerminalSessionConfig, TerminalSessionInfo};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tauri::{Emitter, State};
+
+#[cfg(target_os = "macos")]
+fn sandbox_shell_env(working_dir: &str) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    let workspace_dir = PathBuf::from(working_dir);
+    let real_home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/Users/unknown"));
+    let shell_home = workspace_dir.join(".devflow-shell-home");
+    let cache_dir = shell_home.join(".cache");
+    let state_dir = shell_home.join(".local/state");
+    let data_dir = shell_home.join(".local/share");
+    let config_dir = shell_home.join(".config");
+    let zdotdir = shell_home.join(".zsh");
+    let tmp_dir = std::env::temp_dir().join("devflow-shell");
+
+    env.insert("HOME".to_string(), shell_home.display().to_string());
+    env.insert("DEVFLOW_REAL_HOME".to_string(), real_home.display().to_string());
+    env.insert("XDG_CACHE_HOME".to_string(), cache_dir.display().to_string());
+    env.insert("XDG_STATE_HOME".to_string(), state_dir.display().to_string());
+    env.insert("XDG_DATA_HOME".to_string(), real_home.join(".local/share").display().to_string());
+    env.insert("XDG_CONFIG_HOME".to_string(), real_home.join(".config").display().to_string());
+    env.insert("ZDOTDIR".to_string(), zdotdir.display().to_string());
+    env.insert("ZSH_COMPDUMP".to_string(), zdotdir.join(".zcompdump").display().to_string());
+    env.insert("STARSHIP_CACHE".to_string(), cache_dir.join("starship").display().to_string());
+    env.insert("STARSHIP_LOG".to_string(), "error".to_string());
+    env.insert(
+        "STARSHIP_CONFIG".to_string(),
+        real_home.join(".config/starship.toml").display().to_string(),
+    );
+    env.insert("MISE_CACHE_DIR".to_string(), cache_dir.join("mise").display().to_string());
+    env.insert("MISE_STATE_DIR".to_string(), state_dir.join("mise").display().to_string());
+    env.insert("MISE_DATA_DIR".to_string(), data_dir.join("mise").display().to_string());
+    env.insert(
+        "MISE_GLOBAL_CONFIG_FILE".to_string(),
+        real_home.join(".config/mise/config.toml").display().to_string(),
+    );
+    env.insert("DOCKER_CONFIG".to_string(), config_dir.join("docker").display().to_string());
+    env.insert("TMPDIR".to_string(), tmp_dir.display().to_string());
+    env.insert("LC_ALL".to_string(), "en_US.UTF-8".to_string());
+    env.insert("LANG".to_string(), "en_US.UTF-8".to_string());
+
+    env
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_sandbox_shell_home(working_dir: &str) -> Result<HashMap<String, String>, String> {
+    let shell_env = sandbox_shell_env(working_dir);
+    let home_dir = shell_env
+        .get("HOME")
+        .cloned()
+        .ok_or_else(|| "Missing sandbox HOME".to_string())?;
+    let xdg_cache_home = shell_env
+        .get("XDG_CACHE_HOME")
+        .cloned()
+        .ok_or_else(|| "Missing sandbox XDG_CACHE_HOME".to_string())?;
+    let xdg_state_home = shell_env
+        .get("XDG_STATE_HOME")
+        .cloned()
+        .ok_or_else(|| "Missing sandbox XDG_STATE_HOME".to_string())?;
+    let xdg_data_home = shell_env
+        .get("XDG_DATA_HOME")
+        .cloned()
+        .ok_or_else(|| "Missing sandbox XDG_DATA_HOME".to_string())?;
+    let xdg_config_home = shell_env
+        .get("XDG_CONFIG_HOME")
+        .cloned()
+        .ok_or_else(|| "Missing sandbox XDG_CONFIG_HOME".to_string())?;
+    let zdotdir = shell_env
+        .get("ZDOTDIR")
+        .cloned()
+        .ok_or_else(|| "Missing sandbox ZDOTDIR".to_string())?;
+    let docker_config = shell_env
+        .get("DOCKER_CONFIG")
+        .cloned()
+        .ok_or_else(|| "Missing sandbox DOCKER_CONFIG".to_string())?;
+    let tmpdir = shell_env
+        .get("TMPDIR")
+        .cloned()
+        .ok_or_else(|| "Missing sandbox TMPDIR".to_string())?;
+
+    let required_dirs = [
+        home_dir.clone(),
+        xdg_cache_home.clone(),
+        xdg_state_home.clone(),
+        xdg_data_home.clone(),
+        xdg_config_home.clone(),
+        zdotdir.clone(),
+        docker_config.clone(),
+        tmpdir.clone(),
+        Path::new(&xdg_cache_home)
+            .join("oh-my-zsh/completions")
+            .display()
+            .to_string(),
+        Path::new(&xdg_cache_home)
+            .join("starship")
+            .display()
+            .to_string(),
+        Path::new(&xdg_cache_home)
+            .join("mise")
+            .display()
+            .to_string(),
+        Path::new(&xdg_state_home)
+            .join("mise")
+            .display()
+            .to_string(),
+        Path::new(&xdg_data_home)
+            .join("mise")
+            .display()
+            .to_string(),
+    ];
+
+    for dir in required_dirs {
+        if dir.is_empty() {
+            continue;
+        }
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            format!("Failed to prepare sandbox shell directory '{}': {}", dir, e)
+        })?;
+    }
+
+    let home = dirs::home_dir().ok_or_else(|| "Failed to resolve user home directory".to_string())?;
+    let zdotdir = PathBuf::from(zdotdir);
+
+    for (source_name, target_name) in [
+        (".zshenv", ".zshenv"),
+        (".zprofile", ".zprofile"),
+        (".zshrc", ".zshrc"),
+        (".profile", ".profile"),
+    ] {
+        let source = home.join(source_name);
+        let target = zdotdir.join(target_name);
+        if source.is_file() {
+            let mut content = std::fs::read_to_string(&source).map_err(|e| {
+                format!(
+                    "Failed to read shell config '{}' for sandbox home: {}",
+                    source.display(),
+                    e
+                )
+            })?;
+
+            if source_name == ".zshrc" {
+                content = content.replace(
+                    "export ZSH=$HOME/.oh-my-zsh",
+                    &format!("export ZSH={}/.oh-my-zsh", home.display()),
+                );
+                content = content.replace(
+                    "$HOME/.cargo/env",
+                    &format!("{}/.cargo/env", home.display()),
+                );
+                content = content.replace(
+                    "$HOME/.local/bin",
+                    &format!("{}/.local/bin", home.display()),
+                );
+                content = content.replace(
+                    "source $ZSH/oh-my-zsh.sh",
+                    "plugins=(git)\nsource $ZSH/oh-my-zsh.sh",
+                );
+                content = content.replace(
+                    "$HOME/.bun",
+                    &format!("{}/.bun", home.display()),
+                );
+                content = content.replace(
+                    "autoload -U compinit && compinit",
+                    "# devflow sandbox: oh-my-zsh handles compinit",
+                );
+                // Keep starship init so the sandboxed shell has the user's prompt + colors.
+                // STARSHIP_CACHE and STARSHIP_CONFIG env vars are already redirected.
+                content = content.replace(
+                    "eval \"$(fnm env --use-on-cd --shell zsh)\"",
+                    "# devflow sandbox: disabled fnm use-on-cd",
+                );
+                content = content.replace(
+                    "eval \"`fnm env`\"",
+                    "# devflow sandbox: disabled fnm env",
+                );
+                content = content.replace(
+                    "eval \"$(/Users/ctourriere/.local/bin/mise activate zsh)\"",
+                    "# devflow sandbox: disabled mise activate",
+                );
+                content.push_str(&format!(
+                    "\nexport ZSH_CACHE_DIR=\"{}/oh-my-zsh\"\n",
+                    xdg_cache_home
+                ));
+                content.push_str("\nexport ZSH_DISABLE_COMPFIX=true\n");
+                content.push_str("export DISABLE_AUTO_UPDATE=true\n");
+                content.push_str("export DISABLE_MAGIC_FUNCTIONS=true\n");
+                content.push_str("unsetopt correct_all\n");
+                content.push_str("alias l='ls -lah'\n");
+                content.push_str("alias ll='ls -lh'\n");
+                content.push_str("alias la='ls -lAh'\n");
+            }
+
+            if source_name == ".zshenv" || source_name == ".profile" {
+                content = content.replace(
+                    "$HOME/.cargo/env",
+                    &format!("{}/.cargo/env", home.display()),
+                );
+                content = content.replace(
+                    "$HOME/.local/bin",
+                    &format!("{}/.local/bin", home.display()),
+                );
+            }
+
+            if source_name == ".zprofile" {
+                content = content.replace(
+                    "source ~/.orbstack/shell/init.zsh 2>/dev/null || :",
+                    "# devflow sandbox: disabled OrbStack init",
+                );
+            }
+
+            std::fs::write(&target, content).map_err(|e| {
+                format!(
+                    "Failed to write shell config '{}' into sandbox home: {}",
+                    target.display(),
+                    e
+                )
+            })?;
+        }
+    }
+
+    Ok(shell_env)
+}
+
+#[cfg(target_os = "macos")]
+fn sandbox_shell_candidates() -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Ok(shell) = std::env::var("SHELL") {
+        let shell_path = Path::new(&shell);
+        if shell_path.is_file() && seen.insert(shell.clone()) {
+            candidates.push(shell);
+        }
+    }
+
+    for fallback in ["/bin/zsh", "/bin/bash", "/bin/sh"] {
+        let fallback_owned = fallback.to_string();
+        if Path::new(fallback).is_file() && seen.insert(fallback_owned.clone()) {
+            candidates.push(fallback_owned);
+        }
+    }
+
+    candidates
+}
+
+#[cfg(target_os = "macos")]
+fn preflight_sandbox_shell(
+    sandbox_exec_path: &Path,
+    profile_path: &Path,
+    shell_path: &str,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt;
+
+    let output = std::process::Command::new(sandbox_exec_path)
+        .arg("-f")
+        .arg(profile_path)
+        .arg(shell_path)
+        .arg("-i")
+        .arg("-c")
+        .arg("exit 0")
+        .output()
+        .map_err(|e| {
+            format!(
+                "Failed to run sandbox shell preflight for '{}': {}",
+                shell_path, e
+            )
+        })?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let details = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else if let Some(signal) = output.status.signal() {
+        format!("terminated by signal {}", signal)
+    } else {
+        format!("exit code {}", output.status.code().unwrap_or(-1))
+    };
+
+    Err(format!(
+        "Sandbox shell '{}' failed preflight: {}",
+        shell_path, details
+    ))
+}
 
 /// Build shell + args for a sandboxed terminal session.
 /// On macOS, wraps the user's shell with `sandbox-exec -f <profile>`.
@@ -12,7 +301,7 @@ use tauri::{Emitter, State};
 fn build_sandboxed_shell(
     working_dir: &str,
     project_path: &Option<String>,
-) -> (Option<String>, Option<Vec<String>>) {
+) -> Result<(Option<String>, Option<Vec<String>>), String> {
     let workspace_dir = Path::new(working_dir);
 
     // Load sandbox config from project if available
@@ -46,7 +335,13 @@ fn build_sandboxed_shell(
             .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join("devflow")
             .join("sandbox-profiles");
-        let _ = std::fs::create_dir_all(&profile_dir);
+        std::fs::create_dir_all(&profile_dir).map_err(|e| {
+            format!(
+                "Failed to create sandbox profile directory '{}': {}",
+                profile_dir.display(),
+                e
+            )
+        })?;
         let profile_path = profile_dir.join(format!(
             "terminal-{}-{}.sb",
             std::process::id(),
@@ -55,29 +350,62 @@ fn build_sandboxed_shell(
                 .unwrap_or_default()
                 .as_nanos()
         ));
-        if std::fs::write(&profile_path, &profile).is_err() {
-            return (None, None);
+        std::fs::write(&profile_path, &profile).map_err(|e| {
+            format!(
+                "Failed to write sandbox profile '{}': {}",
+                profile_path.display(),
+                e
+            )
+        })?;
+
+        let sandbox_exec_path = PathBuf::from("/usr/bin/sandbox-exec");
+        if !sandbox_exec_path.is_file() {
+            return Err(
+                "Sandboxed terminals require '/usr/bin/sandbox-exec', but it was not found"
+                    .to_string(),
+            );
         }
 
-        let user_shell =
-            std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let shell_candidates = sandbox_shell_candidates();
+        if shell_candidates.is_empty() {
+            return Err("No usable shell executable found for sandboxed terminal".to_string());
+        }
 
-        (
-            Some("sandbox-exec".to_string()),
+        let mut selected_shell = None;
+        let mut preflight_errors = Vec::new();
+        for candidate in shell_candidates {
+            match preflight_sandbox_shell(&sandbox_exec_path, &profile_path, &candidate) {
+                Ok(()) => {
+                    selected_shell = Some(candidate);
+                    break;
+                }
+                Err(e) => preflight_errors.push(e),
+            }
+        }
+
+        let shell_path = selected_shell.ok_or_else(|| {
+            format!(
+                "Sandbox shell preflight failed. {}",
+                preflight_errors.join(" | ")
+            )
+        })?;
+
+        Ok((
+            Some(sandbox_exec_path.display().to_string()),
             Some(vec![
                 "-f".to_string(),
                 profile_path.display().to_string(),
-                user_shell.clone(),
-                "-l".to_string(),
+                shell_path,
+                "-i".to_string(),
             ]),
-        )
+        ))
     }
 
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (workspace_dir, extra_read, extra_write);
         // On non-macOS, no OS-level shell wrapping (command guard applies to devflow commands)
-        (None, None)
+        Ok((None, None))
     }
 }
 
@@ -169,7 +497,7 @@ pub async fn create_terminal(
     workspace_name: Option<String>,
 ) -> Result<TerminalSessionInfo, String> {
     // Determine working directory
-    let working_dir = if let (Some(ref pp), Some(ref workspace)) = (&project_path, &workspace_name)
+    let mut working_dir = if let (Some(ref pp), Some(ref workspace)) = (&project_path, &workspace_name)
     {
         // Try to find worktree path for this workspace
         let vcs = devflow_core::vcs::detect_vcs_provider(pp).ok();
@@ -187,6 +515,26 @@ pub async fn create_terminal(
             .display()
             .to_string()
     };
+
+    if !Path::new(&working_dir).is_dir() {
+        if let Some(ref pp) = project_path {
+            if Path::new(pp).is_dir() {
+                log::warn!(
+                    "Terminal target directory '{}' does not exist, falling back to project root '{}'",
+                    working_dir,
+                    pp
+                );
+                working_dir = pp.clone();
+            }
+        }
+    }
+
+    if !Path::new(&working_dir).is_dir() {
+        return Err(format!(
+            "Terminal working directory '{}' does not exist",
+            working_dir
+        ));
+    }
 
     // Build environment
     let mut env = HashMap::new();
@@ -227,8 +575,15 @@ pub async fn create_terminal(
         false
     };
 
+    #[cfg(target_os = "macos")]
+    if sandbox_state {
+        env.extend(prepare_sandbox_shell_home(&working_dir)?);
+        env.insert("DISABLE_AUTO_UPDATE".to_string(), "true".to_string());
+        env.insert("ZSH_DISABLE_COMPFIX".to_string(), "true".to_string());
+    }
+
     let (shell, shell_args) = if sandbox_state {
-        build_sandboxed_shell(&working_dir, &project_path)
+        build_sandboxed_shell(&working_dir, &project_path)?
     } else {
         (None, None)
     };
@@ -249,11 +604,21 @@ pub async fn create_terminal(
         workspace_name: workspace_name.clone(),
     };
 
+    let terminal_manager = state.terminals.clone();
     let (info, mut output_rx) = state
         .terminals
         .create_session(config, metadata)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            if sandbox_state {
+                format!(
+                    "Failed to spawn sandboxed terminal in '{}': {}. Check sandbox profile access and shell path.",
+                    working_dir, e
+                )
+            } else {
+                format!("Failed to spawn terminal in '{}': {}", working_dir, e)
+            }
+        })?;
 
     // Spawn task to forward PTY output as events to the frontend
     let session_id = info.id.clone();
@@ -266,7 +631,8 @@ pub async fn create_terminal(
             };
             let _ = app_handle.emit("terminal-output", &event);
         }
-        // PTY output ended — emit exit event
+        // PTY closed — notify frontend so it can close the tab
+        let _ = terminal_manager.close_session(&session_id).await;
         let exit_event = TerminalExitEvent {
             session_id: session_id.clone(),
         };

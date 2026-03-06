@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 /// - Process execution and forking
 pub fn generate_seatbelt_profile(
     workspace_dir: &Path,
-    extra_read_paths: &[PathBuf],
+    _extra_read_paths: &[PathBuf],
     extra_write_paths: &[PathBuf],
 ) -> String {
     let home = dirs::home_dir()
@@ -34,57 +34,45 @@ pub fn generate_seatbelt_profile(
     profile.push_str("(allow ipc-posix-shm-read-data)\n");
     profile.push_str("(allow ipc-posix-shm-write-data)\n");
 
-    // System binaries + libraries (read-only)
-    profile.push_str("(allow file-read*\n");
-    profile.push_str("  (subpath \"/usr\")\n");
-    profile.push_str("  (subpath \"/bin\")\n");
-    profile.push_str("  (subpath \"/sbin\")\n");
-    profile.push_str("  (subpath \"/Library\")\n");
-    profile.push_str("  (subpath \"/System\")\n");
-    profile.push_str("  (subpath \"/opt/homebrew\")\n");
-    profile.push_str("  (subpath \"/nix\")\n");
-    profile.push_str("  (subpath \"/private/var\")\n");
-    profile.push_str("  (subpath \"/private/tmp\")\n");
-    profile.push_str("  (subpath \"/dev\")\n");
-    profile.push_str("  (subpath \"/etc\")\n");
-    profile.push_str("  (subpath \"/var\")\n");
-    profile.push_str("  (subpath \"/Applications\")\n");
+    // TTY job control (tcsetpgrp used by zsh/oh-my-zsh)
+    profile.push_str("(allow file-ioctl (subpath \"/dev\"))\n");
 
-    // User tool directories (read-only)
-    profile.push_str(&format!("  (subpath \"{}/.cargo\")\n", home));
-    profile.push_str(&format!("  (subpath \"{}/.rustup\")\n", home));
-    profile.push_str(&format!("  (subpath \"{}/.nvm\")\n", home));
-    profile.push_str(&format!("  (subpath \"{}/.local\")\n", home));
-    profile.push_str(&format!("  (subpath \"{}/.bun\")\n", home));
-    profile.push_str(&format!("  (subpath \"{}/.npm\")\n", home));
-    profile.push_str(&format!("  (subpath \"{}/.config\")\n", home));
+    // Global read access — the sandbox restricts *writes*, not reads.
+    // Users expect a normal shell: `ls /`, `cat /etc/hosts`, tool lookups, etc.
+    profile.push_str("(allow file-read*)\n");
 
-    // Extra read paths from config
-    for path in extra_read_paths {
-        profile.push_str(&format!("  (subpath \"{}\")\n", path.display()));
-    }
-
-    profile.push_str(")\n");
-
-    // Workspace (read+write)
+    // Workspace (write access)
     profile.push_str(&format!(
-        "(allow file-read* file-write* (subpath \"{}\"))\n",
+        "(allow file-write* (subpath \"{}\"))\n",
         workspace
     ));
 
-    // Temp directory (read+write)
+    // Temp directory (write access)
     profile.push_str(&format!(
-        "(allow file-read* file-write* (subpath \"{}\"))\n",
+        "(allow file-write* (subpath \"{}\"))\n",
         tmpdir
     ));
+
+    // Standard sink used heavily by shell startup scripts.
+    profile.push_str("(allow file-write* (literal \"/dev/null\"))\n");
 
     // Extra write paths from config
     for path in extra_write_paths {
         profile.push_str(&format!(
-            "(allow file-read* file-write* (subpath \"{}\"))\n",
+            "(allow file-write* (subpath \"{}\"))\n",
             path.display()
         ));
     }
+
+    // Real home cache/state dirs (oh-my-zsh, compinit resolve real home despite HOME override)
+    profile.push_str(&format!(
+        "(allow file-write* (subpath \"{}/.cache\"))\n",
+        home
+    ));
+    profile.push_str(&format!(
+        "(allow file-write* (subpath \"{}/.local/state\"))\n",
+        home
+    ));
 
     // Network — allow all (v1 doesn't restrict network)
     profile.push_str("(allow network*)\n");
@@ -105,10 +93,7 @@ pub fn write_profile_to_temp(profile: &str) -> std::io::Result<tempfile::NamedTe
 
 /// Wrap a command string to run under sandbox-exec.
 /// Returns (program, args) tuple suitable for `Command::new(program).args(args)`.
-pub fn wrap_command(
-    command: &str,
-    profile_path: &Path,
-) -> (String, Vec<String>) {
+pub fn wrap_command(command: &str, profile_path: &Path) -> (String, Vec<String>) {
     (
         "sandbox-exec".to_string(),
         vec![
@@ -137,28 +122,23 @@ mod tests {
         assert!(profile.contains("(version 1)"));
         assert!(profile.contains("(deny default)"));
         assert!(profile.contains("(allow process-exec)"));
-        assert!(profile.contains("(subpath \"/tmp/workspace\")"));
-        assert!(profile.contains("(subpath \"/opt/shared-data\")"));
+        assert!(profile.contains("(allow file-read*)"));
+        assert!(profile.contains("(allow file-write* (subpath \"/tmp/workspace\"))"));
         assert!(profile.contains("(allow network*)"));
     }
 
     #[test]
-    fn test_profile_includes_system_paths() {
+    fn test_profile_allows_global_read_and_dev_null() {
         let profile = generate_seatbelt_profile(Path::new("/tmp/ws"), &[], &[]);
 
-        assert!(profile.contains("(subpath \"/usr\")"));
-        assert!(profile.contains("(subpath \"/bin\")"));
-        assert!(profile.contains("(subpath \"/Library\")"));
-        assert!(profile.contains("(subpath \"/opt/homebrew\")"));
+        assert!(profile.contains("(allow file-read*)"));
+        assert!(profile.contains("(allow file-write* (literal \"/dev/null\"))"));
     }
 
     #[test]
     fn test_extra_write_paths() {
-        let profile = generate_seatbelt_profile(
-            Path::new("/tmp/ws"),
-            &[],
-            &[PathBuf::from("/data/shared")],
-        );
+        let profile =
+            generate_seatbelt_profile(Path::new("/tmp/ws"), &[], &[PathBuf::from("/data/shared")]);
 
         assert!(profile.contains("(subpath \"/data/shared\")"));
     }
@@ -171,5 +151,27 @@ mod tests {
             args,
             vec!["-f", "/tmp/profile.sb", "sh", "-c", "echo hello"]
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_generated_profile_runs_basic_binary() {
+        let sandbox_exec = Path::new("/usr/bin/sandbox-exec");
+        if !sandbox_exec.is_file() {
+            return;
+        }
+
+        let profile = generate_seatbelt_profile(Path::new("/tmp/devflow-sandbox-test"), &[], &[]);
+        let profile_file =
+            write_profile_to_temp(&profile).expect("failed to write seatbelt profile");
+
+        let status = std::process::Command::new(sandbox_exec)
+            .arg("-f")
+            .arg(profile_file.path())
+            .arg("/usr/bin/true")
+            .status()
+            .expect("failed to execute sandbox-exec");
+
+        assert!(status.success(), "sandbox-exec returned status: {status}");
     }
 }

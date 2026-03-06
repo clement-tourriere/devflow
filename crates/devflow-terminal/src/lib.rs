@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, Mutex, RwLock};
 
 /// Configuration for creating a new terminal session.
@@ -49,17 +50,21 @@ pub struct SessionMetadata {
 struct TerminalSession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
-    _child: Box<dyn portable_pty::Child + Send + Sync>,
+    _killer: Box<dyn ChildKiller + Send + Sync>,
     status: TerminalStatus,
+    exit_code: Option<u32>,
     metadata: SessionMetadata,
     working_directory: String,
     /// Signal to stop the reader task.
     cancel_tx: Option<mpsc::Sender<()>>,
 }
 
+const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 type SessionMap = Arc<RwLock<HashMap<String, Arc<Mutex<TerminalSession>>>>>;
 
 /// Manages all terminal sessions.
+#[derive(Clone)]
 pub struct TerminalManager {
     sessions: SessionMap,
 }
@@ -149,6 +154,35 @@ impl TerminalManager {
         // Spawn a blocking reader task
         let session_id = id.clone();
         let sessions_ref = Arc::clone(&self.sessions);
+        let killer = child.clone_killer();
+        let child = Arc::new(Mutex::new(child));
+        let child_for_exit = Arc::clone(&child);
+
+        tokio::spawn(async move {
+            loop {
+                let exit_result = {
+                    let mut child = child_for_exit.lock().await;
+                    match child.try_wait() {
+                        Ok(Some(status)) => Some(Some(status.exit_code())),
+                        Ok(None) => None,
+                        Err(_) => Some(None),
+                    }
+                };
+
+                if let Some(code) = exit_result {
+                    let map = sessions_ref.read().await;
+                    if let Some(session) = map.get(&session_id) {
+                        let mut s = session.lock().await;
+                        s.status = TerminalStatus::Exited;
+                        s.exit_code = code;
+                    }
+                    break;
+                }
+
+                tokio::time::sleep(EXIT_POLL_INTERVAL).await;
+            }
+        });
+
         tokio::task::spawn_blocking(move || {
             let mut buf = [0u8; 4096];
             loop {
@@ -165,21 +199,14 @@ impl TerminalManager {
                     Err(_) => break,
                 }
             }
-            // Mark session as exited
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                let map = sessions_ref.read().await;
-                if let Some(session) = map.get(&session_id) {
-                    session.lock().await.status = TerminalStatus::Exited;
-                }
-            });
         });
 
         let session = Arc::new(Mutex::new(TerminalSession {
             master: pair.master,
             writer,
-            _child: child,
+            _killer: killer,
             status: TerminalStatus::Running,
+            exit_code: None,
             metadata,
             working_directory: working_dir,
             cancel_tx: Some(cancel_tx),
@@ -279,6 +306,7 @@ impl TerminalManager {
             let _ = self.close_session(&id).await;
         }
     }
+
 }
 
 impl Default for TerminalManager {

@@ -23,6 +23,28 @@ const MIN_PANEL_HEIGHT = 120;
 const DEFAULT_PANEL_HEIGHT = 300;
 const STORAGE_KEY = "devflow-terminal-panel-height";
 
+function formatTerminalError(error: unknown): string {
+  if (error instanceof Error && error.message.trim().length > 0) {
+    return error.message.trim().replace(/^Error:\s*/i, "");
+  }
+  if (typeof error === "string" && error.trim().length > 0) {
+    return error.trim().replace(/^Error:\s*/i, "");
+  }
+  if (typeof error === "object" && error !== null && "message" in error) {
+    const maybeMessage = (error as { message?: unknown }).message;
+    if (typeof maybeMessage === "string" && maybeMessage.trim().length > 0) {
+      return maybeMessage.trim().replace(/^Error:\s*/i, "");
+    }
+  }
+  try {
+    const serialized = JSON.stringify(error);
+    if (serialized && serialized !== "{}") return serialized;
+  } catch {
+    // Ignore JSON stringify issues.
+  }
+  return "Failed to open terminal (unknown error).";
+}
+
 interface TerminalPanelProps {
   isVisible: boolean;
   onToggle: () => void;
@@ -58,6 +80,7 @@ function TerminalPanel({
   const [isResizing, setIsResizing] = useState(false);
   const [terminalRenderer, setTerminalRenderer] = useState<TerminalRenderer>("auto");
   const [terminalFontSize, setTerminalFontSize] = useState(14);
+  const [panelError, setPanelError] = useState<string | null>(null);
 
   // Launcher state
   const [showLauncher, setShowLauncher] = useState(false);
@@ -72,6 +95,7 @@ function TerminalPanel({
   const [launcherError, setLauncherError] = useState<string | null>(null);
 
   const panelRef = useRef<HTMLDivElement>(null);
+  const exitedSessionIdsRef = useRef<Set<string>>(new Set());
 
   const filteredProjects = useMemo(() => {
     const query = launcherProjectFilter.trim().toLowerCase();
@@ -106,6 +130,11 @@ function TerminalPanel({
   useEffect(() => {
     listTerminals()
       .then((sessions) => {
+        exitedSessionIdsRef.current = new Set(
+          sessions
+            .filter((session) => session.status === "Exited")
+            .map((session) => session.id)
+        );
         setTabs(sessions);
         if (sessions.length > 0) {
           setActiveTabId((prev) => prev ?? sessions[0].id);
@@ -145,6 +174,7 @@ function TerminalPanel({
           return prev;
         }
 
+        exitedSessionIdsRef.current.delete(sessionId);
         const next = prev.filter((tab) => tab.id !== sessionId);
 
         setActiveTabId((prevActive) => {
@@ -167,39 +197,65 @@ function TerminalPanel({
     [isVisible, onToggle]
   );
 
-  // Auto-close tabs when shell exits (Ctrl+D / exit)
+  const handleTerminalExit = useCallback(
+    (sessionId: string) => {
+      setTimeout(() => {
+        removeTabLocally(sessionId);
+        closeTerminalInvoke(sessionId).catch(() => {});
+      }, 150);
+    },
+    [removeTabLocally]
+  );
+
   useEffect(() => {
     const unlisten = listen<TerminalExitEvent>("terminal-exit", (event) => {
-      const sessionId = event.payload.session_id;
-      removeTabLocally(sessionId);
-      closeTerminalInvoke(sessionId).catch(() => {
-        // Session may already be cleaned up.
-      });
+      handleTerminalExit(event.payload.session_id);
     });
 
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [removeTabLocally]);
+  }, [handleTerminalExit]);
 
   const handleCreateTab = useCallback(async () => {
+    setPanelError(null);
     try {
       const session = await createTerminalInvoke();
-      setTabs((prev) => [...prev, session]);
+      const initialStatus = exitedSessionIdsRef.current.has(session.id)
+        ? "Exited"
+        : session.status;
+      const nextSession: TerminalSessionInfo = {
+        ...session,
+        status: initialStatus,
+      };
+      setTabs((prev) => [...prev, nextSession]);
       setActiveTabId(session.id);
     } catch (e) {
+      setPanelError(formatTerminalError(e));
       console.error("Failed to create terminal:", e);
     }
   }, []);
 
   const handleCreateTargetedTab = useCallback(
     async (projectPath?: string, workspaceName?: string) => {
+      setPanelError(null);
       try {
         const session = await createTerminalInvoke(projectPath, workspaceName);
-        setTabs((prev) => [...prev, session]);
+        const initialStatus = exitedSessionIdsRef.current.has(session.id)
+          ? "Exited"
+          : session.status;
+        const nextSession: TerminalSessionInfo = {
+          ...session,
+          status: initialStatus,
+        };
+        setTabs((prev) => [...prev, nextSession]);
         setActiveTabId(session.id);
+        return null;
       } catch (e) {
+        const message = formatTerminalError(e);
+        setPanelError(message);
         console.error("Failed to create terminal:", e);
+        return message;
       }
     },
     []
@@ -312,11 +368,18 @@ function TerminalPanel({
       return;
     }
 
-    await handleCreateTargetedTab(
+    setLauncherError(null);
+    const error = await handleCreateTargetedTab(
       launcherProjectPath,
       launcherBranchName
     );
-    setShowLauncher(false);
+
+    if (!error) {
+      setShowLauncher(false);
+      return;
+    }
+
+    setLauncherError(error);
   }, [launcherProjectPath, launcherBranchName, handleCreateTargetedTab]);
 
   const handleCloseTab = useCallback(
@@ -340,6 +403,7 @@ function TerminalPanel({
         // ignore
       }
     }
+    exitedSessionIdsRef.current.clear();
     setTabs([]);
     setActiveTabId(null);
     onToggle();
@@ -480,6 +544,11 @@ function TerminalPanel({
         </div>
 
         <div className="terminal-panel-content">
+          {panelError && (
+            <div className="terminal-panel-error" role="alert">
+              {panelError}
+            </div>
+          )}
           {tabs.length === 0 ? (
             <div className="terminal-panel-empty">
               <p>No terminals open</p>
