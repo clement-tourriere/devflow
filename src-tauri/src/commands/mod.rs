@@ -5,6 +5,7 @@ pub mod proxy;
 pub mod services;
 pub mod settings;
 pub mod terminal;
+pub mod train;
 pub mod workspaces;
 
 /// Format an anyhow error with full cause chain, deduplicating adjacent identical messages.

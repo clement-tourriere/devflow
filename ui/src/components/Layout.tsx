@@ -1,14 +1,15 @@
 import { useState, useEffect } from "react";
 import { Outlet, NavLink, useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
-import { getProxyStatus, listProjects } from "../utils/invoke";
-import type { ProjectEntry, ProxyStatus } from "../types";
+import { getProxyStatus, listProjects, getSettings } from "../utils/invoke";
+import type { ProjectEntry, ProxyStatus, AppSettings } from "../types";
 import TerminalPanel from "./TerminalPanel";
 import { useTerminal } from "../context/TerminalContext";
 
 function Layout() {
   const [proxyStatus, setProxyStatus] = useState<ProxyStatus | null>(null);
   const [projects, setProjects] = useState<ProjectEntry[]>([]);
+  const [smartMerge, setSmartMerge] = useState(false);
   const navigate = useNavigate();
   const { isVisible, toggle, pendingTerminal, clearPending } = useTerminal();
 
@@ -21,6 +22,10 @@ function Layout() {
       .then(setProjects)
       .catch(() => {});
 
+    getSettings()
+      .then((s) => setSmartMerge(s.smart_merge))
+      .catch(() => {});
+
     // Listen for proxy status changes from backend
     const unlistenProxy = listen<ProxyStatus>("proxy-status-changed", (event) => {
       setProxyStatus(event.payload);
@@ -31,9 +36,17 @@ function Layout() {
       navigate(event.payload);
     });
 
+    // Listen for settings changes (e.g. smart_merge toggle)
+    const handleSettingsUpdate = (e: Event) => {
+      const detail = (e as CustomEvent<AppSettings>).detail;
+      if (detail) setSmartMerge(detail.smart_merge);
+    };
+    window.addEventListener("devflow:settings-updated", handleSettingsUpdate);
+
     return () => {
       unlistenProxy.then((fn) => fn());
       unlistenNav.then((fn) => fn());
+      window.removeEventListener("devflow:settings-updated", handleSettingsUpdate);
     };
   }, [navigate]);
 
@@ -87,6 +100,20 @@ function Layout() {
               {p.name}
             </NavLink>
           ))}
+
+          {smartMerge && (
+            <>
+              <div className="nav-section">Merge</div>
+              <NavLink
+                to="/merge-train"
+                className={({ isActive }) =>
+                  `nav-item${isActive ? " active" : ""}`
+                }
+              >
+                Merge Train
+              </NavLink>
+            </>
+          )}
 
           <div className="nav-section">Infrastructure</div>
           <NavLink

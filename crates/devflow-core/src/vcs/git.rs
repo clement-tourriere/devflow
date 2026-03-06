@@ -1008,6 +1008,168 @@ impl VcsProvider for GitRepository {
         Ok(())
     }
 
+    fn merge_base(&self, a: &str, b: &str) -> Result<String> {
+        let a_oid = self
+            .repo
+            .find_branch(a, git2::BranchType::Local)
+            .with_context(|| format!("Workspace '{}' not found", a))?
+            .into_reference()
+            .peel_to_commit()
+            .context("Failed to resolve commit for workspace")?
+            .id();
+
+        let b_oid = self
+            .repo
+            .find_branch(b, git2::BranchType::Local)
+            .with_context(|| format!("Workspace '{}' not found", b))?
+            .into_reference()
+            .peel_to_commit()
+            .context("Failed to resolve commit for workspace")?
+            .id();
+
+        let base = self
+            .repo
+            .merge_base(a_oid, b_oid)
+            .context("Failed to find merge base")?;
+
+        Ok(base.to_string())
+    }
+
+    fn changed_files_since(
+        &self,
+        base_commit: &str,
+        workspace: &str,
+    ) -> Result<Vec<std::path::PathBuf>> {
+        let base_oid = git2::Oid::from_str(base_commit)
+            .with_context(|| format!("Invalid commit SHA: {}", base_commit))?;
+        let base_tree = self
+            .repo
+            .find_commit(base_oid)
+            .context("Failed to find base commit")?
+            .tree()
+            .context("Failed to get tree for base commit")?;
+
+        let head_tree = self
+            .repo
+            .find_branch(workspace, git2::BranchType::Local)
+            .with_context(|| format!("Workspace '{}' not found", workspace))?
+            .into_reference()
+            .peel_to_commit()
+            .context("Failed to resolve commit")?
+            .tree()
+            .context("Failed to get tree")?;
+
+        let diff = self
+            .repo
+            .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None)
+            .context("Failed to diff trees")?;
+
+        let mut files = Vec::new();
+        for delta in diff.deltas() {
+            if let Some(path) = delta.new_file().path() {
+                files.push(path.to_path_buf());
+            }
+        }
+
+        Ok(files)
+    }
+
+    fn rebase(&self, onto: &str) -> Result<crate::merge::RebaseResult> {
+        let onto_branch = self
+            .repo
+            .find_branch(onto, git2::BranchType::Local)
+            .with_context(|| format!("Target workspace '{}' not found", onto))?;
+        let onto_annotated = self
+            .repo
+            .find_annotated_commit(
+                onto_branch
+                    .into_reference()
+                    .peel_to_commit()
+                    .context("Failed to resolve onto commit")?
+                    .id(),
+            )
+            .context("Failed to create annotated commit for rebase target")?;
+
+        let head = self
+            .repo
+            .head()
+            .context("Failed to get HEAD")?
+            .peel_to_commit()
+            .context("HEAD does not point to a commit")?;
+        let head_annotated = self
+            .repo
+            .find_annotated_commit(head.id())
+            .context("Failed to create annotated commit for HEAD")?;
+
+        let mut rebase = self
+            .repo
+            .rebase(
+                Some(&head_annotated),
+                None,
+                Some(&onto_annotated),
+                None,
+            )
+            .context("Failed to start rebase")?;
+
+        let sig = self
+            .repo
+            .signature()
+            .or_else(|_| git2::Signature::now("devflow", "devflow@localhost"))
+            .context("Failed to create signature")?;
+
+        let mut commits_replayed = 0;
+
+        loop {
+            match rebase.next() {
+                Some(Ok(_op)) => {
+                    // Check for conflicts in the index
+                    let index = self.repo.index().context("Failed to get index")?;
+                    if index.has_conflicts() {
+                        let conflict_files: Vec<String> = index
+                            .conflicts()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|c| {
+                                c.ok().and_then(|entry| {
+                                    entry.our.map(|e| {
+                                        String::from_utf8_lossy(&e.path).to_string()
+                                    })
+                                })
+                            })
+                            .collect();
+
+                        rebase.abort().ok();
+                        return Ok(crate::merge::RebaseResult {
+                            success: false,
+                            commits_replayed,
+                            conflicts: true,
+                            conflict_files,
+                        });
+                    }
+
+                    rebase
+                        .commit(None, &sig, None)
+                        .context("Failed to commit rebased changes")?;
+                    commits_replayed += 1;
+                }
+                Some(Err(e)) => {
+                    rebase.abort().ok();
+                    anyhow::bail!("Rebase operation failed: {}", e);
+                }
+                None => break,
+            }
+        }
+
+        rebase.finish(None).context("Failed to finish rebase")?;
+
+        Ok(crate::merge::RebaseResult {
+            success: true,
+            commits_replayed,
+            conflicts: false,
+            conflict_files: vec![],
+        })
+    }
+
     fn prune_worktrees(&self) -> Result<()> {
         // git2 doesn't expose worktree pruning directly, use git CLI
         let root = self.get_repo_root();

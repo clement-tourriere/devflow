@@ -34,6 +34,33 @@ pub enum Action {
     /// Internal: delete the VCS workspace after service workspaces are cleaned up.
     /// Sent by background tasks back to the main thread.
     DeleteVcsBranch(String),
+    /// Merge a workspace into a target.
+    MergeWorkspace {
+        source: String,
+        target: String,
+    },
+    /// Rebase a workspace onto a target.
+    RebaseWorkspace {
+        source: String,
+        target: String,
+    },
+    /// Merge checks completed — show results in overlay.
+    MergeChecksComplete(devflow_core::merge::MergeReadinessReport),
+    /// Rebase completed — show results.
+    RebaseComplete(devflow_core::merge::RebaseResult),
+
+    // ── Merge train actions ──
+    TrainAdd {
+        workspace: String,
+        target: String,
+    },
+    TrainRun {
+        target: String,
+    },
+    TrainStatus {
+        target: String,
+    },
+    MergeTrainProgress(devflow_core::merge::train::MergeTrainEntry),
 
     // ── Service config actions ──
     /// Add a new service configuration (triggers wizard flow)

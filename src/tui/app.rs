@@ -664,6 +664,156 @@ impl App {
                     self.load_initial_data();
                 }
             }
+            Action::MergeWorkspace {
+                ref source,
+                ref target,
+            } => {
+                self.set_status(
+                    format!("Merging '{}' into '{}'...", source, target),
+                    false,
+                );
+                let source = source.clone();
+                let target = target.clone();
+                let config = self.context.config.clone();
+                let project_dir = self
+                    .context
+                    .config_path
+                    .as_ref()
+                    .and_then(|p| p.parent())
+                    .map(|d| d.to_path_buf())
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                let bg_tx = self.bg_tx.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let vcs = devflow_core::vcs::detect_vcs_provider(&project_dir)?;
+
+                        // Run readiness checks first
+                        if let Some(ref merge_config) = config.merge {
+                            let checks =
+                                devflow_core::merge::build_checks_from_config(merge_config);
+                            if !checks.is_empty() {
+                                let report = devflow_core::merge::run_checks(
+                                    &checks,
+                                    vcs.as_ref(),
+                                    &source,
+                                    &target,
+                                );
+                                if !report.ready {
+                                    return Ok(Action::MergeChecksComplete(report));
+                                }
+                            }
+                        }
+
+                        // Checkout target, merge source
+                        let merge_dir = vcs
+                            .worktree_path(&target)?
+                            .unwrap_or_else(|| project_dir.clone());
+                        let merge_vcs = devflow_core::vcs::detect_vcs_provider(&merge_dir)?;
+                        if merge_dir == project_dir {
+                            merge_vcs.checkout_workspace(&target)?;
+                        }
+                        merge_vcs.merge_branch(&source)?;
+                        Ok::<Action, anyhow::Error>(Action::OperationComplete {
+                            success: true,
+                            message: format!("Merged '{}' into '{}'", source, target),
+                        })
+                    })
+                    .await;
+
+                    let action = match result {
+                        Ok(Ok(action)) => action,
+                        Ok(Err(e)) => Action::OperationComplete {
+                            success: false,
+                            message: format!("Merge failed: {}", e),
+                        },
+                        Err(e) => Action::Error(format!("Merge task panicked: {}", e)),
+                    };
+                    let _ = bg_tx.send(action);
+                });
+            }
+            Action::RebaseWorkspace {
+                ref source,
+                ref target,
+            } => {
+                self.set_status(
+                    format!("Rebasing '{}' onto '{}'...", source, target),
+                    false,
+                );
+                let source = source.clone();
+                let target = target.clone();
+                let project_dir = self
+                    .context
+                    .config_path
+                    .as_ref()
+                    .and_then(|p| p.parent())
+                    .map(|d| d.to_path_buf())
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                let bg_tx = self.bg_tx.clone();
+                let source_display = source.clone();
+                let target_display = target.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let vcs = devflow_core::vcs::detect_vcs_provider(&project_dir)?;
+                        vcs.checkout_workspace(&source)?;
+                        let rebase_result = vcs.rebase(&target)?;
+                        Ok::<devflow_core::merge::RebaseResult, anyhow::Error>(rebase_result)
+                    })
+                    .await;
+
+                    let action = match result {
+                        Ok(Ok(r)) => {
+                            if r.success {
+                                Action::OperationComplete {
+                                    success: true,
+                                    message: format!(
+                                        "Rebased '{}' onto '{}' ({} commits)",
+                                        source_display, target_display, r.commits_replayed
+                                    ),
+                                }
+                            } else {
+                                Action::OperationComplete {
+                                    success: false,
+                                    message: format!(
+                                        "Rebase conflicts in: {}",
+                                        r.conflict_files.join(", ")
+                                    ),
+                                }
+                            }
+                        }
+                        Ok(Err(e)) => Action::OperationComplete {
+                            success: false,
+                            message: format!("Rebase failed: {}", e),
+                        },
+                        Err(e) => Action::Error(format!("Rebase task panicked: {}", e)),
+                    };
+                    let _ = bg_tx.send(action);
+                });
+            }
+            Action::MergeChecksComplete(ref report) => {
+                let msg = if report.ready {
+                    "Merge readiness: READY".to_string()
+                } else {
+                    let failures: Vec<&str> = report
+                        .checks
+                        .iter()
+                        .filter(|c| !c.passed)
+                        .map(|c| c.message.as_str())
+                        .collect();
+                    format!("Merge blocked: {}", failures.join("; "))
+                };
+                self.set_status(msg, !report.ready);
+            }
+            Action::RebaseComplete(ref _result) => {
+                // Handled by OperationComplete already
+            }
+            Action::TrainAdd { .. }
+            | Action::TrainRun { .. }
+            | Action::TrainStatus { .. }
+            | Action::MergeTrainProgress(_) => {
+                // Merge train TUI tab actions — placeholder for future tab
+            }
             Action::StartService {
                 ref service,
                 ref workspace,

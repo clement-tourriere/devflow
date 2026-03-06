@@ -20,6 +20,10 @@ pub struct AppSettings {
     pub terminal_renderer: String,
     #[serde(default = "default_terminal_font_size")]
     pub terminal_font_size: u16,
+    /// Feature flag: enable smart merge features (readiness checks, rebase,
+    /// merge trains, cascade notifications). Default: `false`.
+    #[serde(default)]
+    pub smart_merge: bool,
 }
 
 fn default_terminal_renderer() -> String {
@@ -38,6 +42,7 @@ impl Default for AppSettings {
             proxy_config: None,
             terminal_renderer: default_terminal_renderer(),
             terminal_font_size: default_terminal_font_size(),
+            smart_merge: false,
         }
     }
 }

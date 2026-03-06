@@ -845,6 +845,60 @@ impl Component for WorkspacesComponent {
                 }
                 Action::None
             }
+            KeyCode::Char('m') => {
+                if let Some(row) = self.selected_row() {
+                    if !row.workspace.is_default {
+                        let default = self
+                            .tree_rows
+                            .iter()
+                            .find(|r| r.workspace.is_default)
+                            .map(|r| r.workspace.name.clone())
+                            .unwrap_or_else(|| "main".to_string());
+                        Action::ShowConfirm {
+                            title: "Merge Workspace".to_string(),
+                            message: format!(
+                                "Merge '{}' into '{}'?",
+                                row.workspace.name, default
+                            ),
+                            on_confirm: Box::new(Action::MergeWorkspace {
+                                source: row.workspace.name.clone(),
+                                target: default,
+                            }),
+                        }
+                    } else {
+                        Action::Error("Cannot merge the default workspace".to_string())
+                    }
+                } else {
+                    Action::None
+                }
+            }
+            KeyCode::Char('b') => {
+                if let Some(row) = self.selected_row() {
+                    if !row.workspace.is_default {
+                        let default = self
+                            .tree_rows
+                            .iter()
+                            .find(|r| r.workspace.is_default)
+                            .map(|r| r.workspace.name.clone())
+                            .unwrap_or_else(|| "main".to_string());
+                        Action::ShowConfirm {
+                            title: "Rebase Workspace".to_string(),
+                            message: format!(
+                                "Rebase '{}' onto '{}'?",
+                                row.workspace.name, default
+                            ),
+                            on_confirm: Box::new(Action::RebaseWorkspace {
+                                source: row.workspace.name.clone(),
+                                target: default,
+                            }),
+                        }
+                    } else {
+                        Action::Error("Cannot rebase the default workspace".to_string())
+                    }
+                } else {
+                    Action::None
+                }
+            }
             KeyCode::Char('r') => Action::Refresh,
             _ => Action::None,
         }

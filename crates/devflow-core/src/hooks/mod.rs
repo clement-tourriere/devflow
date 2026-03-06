@@ -36,6 +36,13 @@ pub enum HookPhase {
     PostMerge,
     PostRewrite,
 
+    // Rebase lifecycle
+    PreRebase,
+    PostRebase,
+
+    // Cascade lifecycle
+    PostMergeCascade,
+
     // Service lifecycle
     PreServiceCreate,
     PostServiceCreate,
@@ -61,6 +68,9 @@ impl fmt::Display for HookPhase {
             HookPhase::PreMerge => write!(f, "pre-merge"),
             HookPhase::PostMerge => write!(f, "post-merge"),
             HookPhase::PostRewrite => write!(f, "post-rewrite"),
+            HookPhase::PreRebase => write!(f, "pre-rebase"),
+            HookPhase::PostRebase => write!(f, "post-rebase"),
+            HookPhase::PostMergeCascade => write!(f, "post-merge-cascade"),
             HookPhase::PreServiceCreate => write!(f, "pre-service-create"),
             HookPhase::PostServiceCreate => write!(f, "post-service-create"),
             HookPhase::PreServiceDelete => write!(f, "pre-service-delete"),
@@ -81,6 +91,7 @@ impl HookPhase {
                 | HookPhase::PreRemove
                 | HookPhase::PreCommit
                 | HookPhase::PreMerge
+                | HookPhase::PreRebase
                 | HookPhase::PreServiceCreate
                 | HookPhase::PreServiceDelete
         )
@@ -102,6 +113,9 @@ impl FromStr for HookPhase {
             "pre-merge" => HookPhase::PreMerge,
             "post-merge" => HookPhase::PostMerge,
             "post-rewrite" => HookPhase::PostRewrite,
+            "pre-rebase" => HookPhase::PreRebase,
+            "post-rebase" => HookPhase::PostRebase,
+            "post-merge-cascade" => HookPhase::PostMergeCascade,
             "pre-service-create" => HookPhase::PreServiceCreate,
             "post-service-create" => HookPhase::PostServiceCreate,
             "pre-service-delete" => HookPhase::PreServiceDelete,

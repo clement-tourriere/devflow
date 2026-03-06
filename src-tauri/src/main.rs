@@ -138,6 +138,16 @@ fn main() {
             commands::terminal::write_terminal,
             commands::terminal::resize_terminal,
             commands::terminal::close_terminal,
+            // Merge & Train
+            commands::train::merge_check,
+            commands::train::merge_workspace,
+            commands::train::rebase_workspace,
+            commands::train::train_add,
+            commands::train::train_remove,
+            commands::train::train_status,
+            commands::train::train_run,
+            commands::train::train_pause,
+            commands::train::train_resume,
         ])
         .setup(move |app| {
             log::info!("Application setup complete");

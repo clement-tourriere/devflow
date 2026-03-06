@@ -238,6 +238,7 @@ export interface AppSettings {
   } | null;
   terminal_renderer: TerminalRenderer;
   terminal_font_size: number;
+  smart_merge: boolean;
 }
 
 export type TerminalRenderer = "auto" | "webgpu" | "webgl2";
@@ -310,4 +311,59 @@ export interface TerminalOutputEvent {
 
 export interface TerminalExitEvent {
   session_id: string;
+}
+
+// ── Merge & Train types ──
+
+export interface MergeCheckResult {
+  check_name: string;
+  passed: boolean;
+  severity: "error" | "warning";
+  message: string;
+  files: string[];
+  suggestion: string | null;
+}
+
+export interface MergeReadinessReport {
+  source: string;
+  target: string;
+  ready: boolean;
+  checks: MergeCheckResult[];
+}
+
+export interface RebaseResult {
+  success: boolean;
+  commits_replayed: number;
+  conflicts: boolean;
+  conflict_files: string[];
+}
+
+export interface CascadeRebaseNeeded {
+  workspace: string;
+  reason: string;
+}
+
+export interface CascadeReport {
+  affected_children: string[];
+  needs_rebase: CascadeRebaseNeeded[];
+}
+
+export interface MergeResult {
+  success: boolean;
+  message: string;
+  cascade: CascadeReport | null;
+}
+
+export interface MergeTrainEntry {
+  workspace: string;
+  position: number;
+  status: string;
+  error: string | null;
+}
+
+export interface MergeTrain {
+  id: string;
+  target: string;
+  status: string;
+  entries: MergeTrainEntry[];
 }

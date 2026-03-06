@@ -13,6 +13,7 @@ export interface DevflowConfig {
   triggers?: Record<string, unknown> | null;
   agent?: AgentConfig | null;
   commit?: CommitConfig | null;
+  merge?: MergeConfig | null;
 }
 
 export interface GitConfig {
@@ -129,6 +130,24 @@ export interface CommitGenerationConfig {
   api_key?: string | null;
   api_url?: string | null;
   model?: string | null;
+}
+
+export type MergeStrategy = "merge" | "rebase";
+
+export interface MergeConfig {
+  strategy?: MergeStrategy | null;
+  cleanup_after_merge?: boolean | null;
+  cascade_rebase?: boolean | null;
+  checks?: MergeCheckConfig[];
+}
+
+export interface MergeCheckConfig {
+  type: string;
+  label?: string | null;
+  severity?: string | null;
+  directory_pattern?: string | null;
+  file_pattern?: string | null;
+  command?: string | null;
 }
 
 // Defaults matching Rust Default impls — used to fill fields omitted by skip_serializing_if

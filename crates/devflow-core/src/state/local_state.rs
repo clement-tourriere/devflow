@@ -47,6 +47,9 @@ pub struct ProjectState {
     /// Registry of devflow workspaces tracked for this project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspaces: Option<Vec<DevflowWorkspace>>,
+    /// Active merge trains for this project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_trains: Option<Vec<crate::merge::train::MergeTrain>>,
 }
 
 pub struct LocalStateManager {
@@ -146,11 +149,13 @@ impl LocalStateManager {
 
         let existing = self.state.projects.get(&project_key);
         let existing_branches = existing.and_then(|p| p.workspaces.clone());
+        let existing_trains = existing.and_then(|p| p.merge_trains.clone());
 
         let project_state = ProjectState {
             last_updated: chrono::Utc::now(),
             services: Some(services),
             workspaces: existing_branches,
+            merge_trains: existing_trains,
         };
 
         self.state.projects.insert(project_key, project_state);
@@ -196,10 +201,13 @@ impl LocalStateManager {
             services.push(service);
         }
 
+        let existing_trains = existing.and_then(|p| p.merge_trains.clone());
+
         let project_state = ProjectState {
             last_updated: chrono::Utc::now(),
             services: Some(services),
             workspaces: existing_branches,
+            merge_trains: existing_trains,
         };
 
         self.state.projects.insert(project_key, project_state);
@@ -304,6 +312,7 @@ impl LocalStateManager {
                 last_updated: chrono::Utc::now(),
                 services: None,
                 workspaces: None,
+                merge_trains: None,
             });
 
         let workspaces = project.workspaces.get_or_insert_with(Vec::new);
@@ -418,6 +427,91 @@ impl LocalStateManager {
         }
 
         Ok(())
+    }
+
+    // ── Merge train CRUD ─────────────────────────────────────────────
+
+    /// Get all merge trains for a project.
+    pub fn get_merge_trains(
+        &self,
+        project_dir: &Path,
+    ) -> Vec<crate::merge::train::MergeTrain> {
+        let config_path = project_dir.join(".devflow.yml");
+        self.get_project_key(&config_path)
+            .and_then(|key| self.state.projects.get(&key))
+            .and_then(|p| p.merge_trains.clone())
+            .unwrap_or_default()
+    }
+
+    /// Save (upsert) a merge train for a project.
+    pub fn save_merge_train(
+        &mut self,
+        project_dir: &Path,
+        train: &crate::merge::train::MergeTrain,
+    ) -> Result<()> {
+        self.refresh_state()?;
+
+        let config_path = project_dir.join(".devflow.yml");
+        let project_key = self.get_project_key(&config_path).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Failed to get project key for path: {}",
+                project_dir.display()
+            )
+        })?;
+
+        let project = self
+            .state
+            .projects
+            .entry(project_key)
+            .or_insert_with(|| ProjectState {
+                last_updated: chrono::Utc::now(),
+                services: None,
+                workspaces: None,
+                merge_trains: None,
+            });
+
+        let trains = project.merge_trains.get_or_insert_with(Vec::new);
+
+        if let Some(pos) = trains.iter().position(|t| t.id == train.id) {
+            trains[pos] = train.clone();
+        } else {
+            trains.push(train.clone());
+        }
+
+        project.last_updated = chrono::Utc::now();
+        self.save_state()
+    }
+
+    // ── Workspace relationship queries ──────────────────────────────
+
+    /// Get child workspaces (workspaces whose parent is `workspace`).
+    pub fn get_children(
+        &self,
+        project_dir: &Path,
+        workspace: &str,
+    ) -> Vec<DevflowWorkspace> {
+        self.get_workspaces_by_dir(project_dir)
+            .into_iter()
+            .filter(|w| w.parent.as_deref() == Some(workspace))
+            .collect()
+    }
+
+    /// Get sibling workspaces (workspaces with the same parent).
+    pub fn get_siblings(
+        &self,
+        project_dir: &Path,
+        workspace: &str,
+    ) -> Vec<DevflowWorkspace> {
+        let workspaces = self.get_workspaces_by_dir(project_dir);
+        let parent = workspaces
+            .iter()
+            .find(|w| w.name == workspace)
+            .and_then(|w| w.parent.clone());
+
+        workspaces
+            .into_iter()
+            .filter(|w| w.parent == parent && w.name != workspace)
+            .collect()
     }
 
     #[allow(dead_code)]

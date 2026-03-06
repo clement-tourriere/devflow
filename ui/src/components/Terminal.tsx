@@ -102,10 +102,8 @@ palette = 15=#ffffff
       }
     );
 
-    const unlistenExitPromise = listen<TerminalExitEvent>("terminal-exit", (event) => {
-      if (event.payload.session_id === sessionId && restty) {
-        restty.sendInput("\r\n\x1b[90m[Process exited]\x1b[0m\r\n", "pty");
-      }
+    const unlistenExitPromise = listen<TerminalExitEvent>("terminal-exit", () => {
+      // Terminal panel handles exit state and cleanup.
     });
 
     const setup = () => {

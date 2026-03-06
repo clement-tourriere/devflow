@@ -10,6 +10,7 @@ import WorktreeSection from "./sections/WorktreeSection";
 import ServicesSection from "./sections/ServicesSection";
 import AgentSection from "./sections/AgentSection";
 import CommitSection from "./sections/CommitSection";
+import MergeSection from "./sections/MergeSection";
 import YamlEditor from "./YamlEditor";
 
 type Section =
@@ -20,6 +21,7 @@ type Section =
   | "services"
   | "agent"
   | "commit"
+  | "merge"
   | "yaml";
 
 const SECTIONS: { key: Section; label: string }[] = [
@@ -30,6 +32,7 @@ const SECTIONS: { key: Section; label: string }[] = [
   { key: "services", label: "Services" },
   { key: "agent", label: "Agent" },
   { key: "commit", label: "Commit" },
+  { key: "merge", label: "Merge" },
   { key: "yaml", label: "YAML" },
 ];
 
@@ -226,6 +229,9 @@ function ConfigEditor() {
               )}
               {activeSection === "commit" && (
                 <CommitSection config={config} onChange={handleChange} />
+              )}
+              {activeSection === "merge" && (
+                <MergeSection config={config} onChange={handleChange} />
               )}
 
               {/* Save/Reset bar for GUI sections */}

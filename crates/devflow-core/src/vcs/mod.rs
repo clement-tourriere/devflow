@@ -159,6 +159,30 @@ pub trait VcsProvider: Send {
         anyhow::bail!("{} does not support detach_head", self.provider_name())
     }
 
+    /// Find the merge base (common ancestor) of two workspaces.
+    ///
+    /// Returns the commit SHA of the merge base.
+    fn merge_base(&self, _a: &str, _b: &str) -> Result<String> {
+        anyhow::bail!("{} does not support merge_base", self.provider_name())
+    }
+
+    /// List files changed between a base commit and a workspace head.
+    ///
+    /// Returns paths relative to the repo root.
+    fn changed_files_since(&self, _base_commit: &str, _workspace: &str) -> Result<Vec<PathBuf>> {
+        anyhow::bail!(
+            "{} does not support changed_files_since",
+            self.provider_name()
+        )
+    }
+
+    /// Rebase the current workspace onto a target workspace.
+    ///
+    /// Returns a `RebaseResult` describing the outcome.
+    fn rebase(&self, _onto: &str) -> Result<crate::merge::RebaseResult> {
+        anyhow::bail!("{} does not support rebase", self.provider_name())
+    }
+
     /// Clean up stale worktree entries.
     fn prune_worktrees(&self) -> Result<()> {
         Ok(())

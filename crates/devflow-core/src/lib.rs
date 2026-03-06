@@ -3,6 +3,7 @@ pub mod docker;
 pub mod hooks;
 #[cfg(feature = "llm")]
 pub mod llm;
+pub mod merge;
 pub mod sandbox;
 pub mod services;
 pub mod state;

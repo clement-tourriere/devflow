@@ -9,6 +9,7 @@ mod plugin;
 mod proxy;
 mod service;
 mod sync_ai_configs;
+mod train;
 pub mod workspace;
 
 use std::path::PathBuf;
@@ -132,6 +133,32 @@ Examples:
         cleanup: bool,
         #[arg(long, help = "Simulate merge without actual operations")]
         dry_run: bool,
+        #[arg(long, help = "Skip merge readiness checks")]
+        force: bool,
+        #[arg(long, help = "Run checks only without merging")]
+        check_only: bool,
+        #[arg(long, help = "Auto-rebase affected child workspaces after merge")]
+        cascade_rebase: bool,
+    },
+    #[command(
+        about = "Rebase current workspace onto target",
+        long_about = "Rebase current workspace onto target.\n\nReplays commits from the current workspace onto the target workspace.\n\nExamples:\n  devflow rebase                # Rebase onto main\n  devflow rebase develop        # Rebase onto develop\n  devflow rebase --dry-run      # Preview without rebasing",
+        hide = true
+    )]
+    Rebase {
+        #[arg(help = "Target workspace to rebase onto (default: main)")]
+        target: Option<String>,
+        #[arg(long, help = "Simulate rebase without actual operations")]
+        dry_run: bool,
+    },
+    #[command(
+        about = "Merge train — queue-based sequential merge pipeline",
+        long_about = "Merge train — queue-based sequential merge pipeline.\n\nQueue workspaces for sequential merge into a target with readiness checks.\n\nExamples:\n  devflow train add                    # Add current workspace to train\n  devflow train status                 # Show train status\n  devflow train run                    # Run the merge train\n  devflow train remove feature-auth    # Remove workspace from train",
+        hide = true
+    )]
+    Train {
+        #[command(subcommand)]
+        action: TrainAction,
     },
     #[command(
         about = "Clean up old service workspaces (alias for 'service cleanup')",
@@ -368,6 +395,47 @@ Examples:
         all: bool,
         #[arg(long, help = "Skip confirmation prompts")]
         force: bool,
+    },
+}
+
+/// Subcommands for `devflow train`.
+#[derive(Subcommand)]
+pub enum TrainAction {
+    #[command(about = "Add a workspace to the merge train")]
+    Add {
+        #[arg(help = "Target workspace to merge into (default: main)")]
+        target: Option<String>,
+        #[arg(help = "Workspace to add (default: current)")]
+        workspace: Option<String>,
+    },
+    #[command(about = "Remove a workspace from the merge train")]
+    Remove {
+        #[arg(help = "Workspace to remove")]
+        workspace: String,
+    },
+    #[command(about = "Show merge train status")]
+    Status {
+        #[arg(help = "Target workspace (default: main)")]
+        target: Option<String>,
+    },
+    #[command(about = "Run the merge train")]
+    Run {
+        #[arg(help = "Target workspace (default: main)")]
+        target: Option<String>,
+        #[arg(long, help = "Stop on first failure")]
+        stop_on_failure: bool,
+        #[arg(long, help = "Delete source workspaces after successful merge")]
+        cleanup: bool,
+    },
+    #[command(about = "Pause the merge train")]
+    Pause {
+        #[arg(help = "Target workspace (default: main)")]
+        target: Option<String>,
+    },
+    #[command(about = "Resume the merge train")]
+    Resume {
+        #[arg(help = "Target workspace (default: main)")]
+        target: Option<String>,
     },
 }
 
@@ -715,6 +783,8 @@ pub async fn handle_command(
             | Commands::WorktreeSetup
             | Commands::Remove { .. }
             | Commands::Merge { .. }
+            | Commands::Rebase { .. }
+            | Commands::Train { .. }
             | Commands::Doctor
     );
 

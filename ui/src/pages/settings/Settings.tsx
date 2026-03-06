@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   getSettings,
   saveSettings,
@@ -17,7 +17,8 @@ import type {
 function Settings() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [projects, setProjects] = useState<ProjectEntry[]>([]);
-  const [saved, setSaved] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const loaded = useRef(false);
 
   // Orphan state
   const [orphans, setOrphans] = useState<OrphanProjectEntry[]>([]);
@@ -27,23 +28,40 @@ function Settings() {
   const [orphanResults, setOrphanResults] = useState<OrphanCleanupResult[]>([]);
 
   useEffect(() => {
-    getSettings().then(setSettings).catch(console.error);
+    getSettings()
+      .then((s) => {
+        setSettings(s);
+        // Mark loaded after initial state is set so auto-save doesn't fire on load
+        requestAnimationFrame(() => {
+          loaded.current = true;
+        });
+      })
+      .catch(console.error);
     listProjects().then(setProjects).catch(() => {});
   }, []);
 
-  const handleSave = async () => {
-    if (!settings) return;
-    try {
-      await saveSettings(settings);
-      window.dispatchEvent(
-        new CustomEvent("devflow:settings-updated", { detail: settings })
-      );
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-    } catch (e) {
-      alert(`Save failed: ${e}`);
-    }
-  };
+  // Auto-save with debounce
+  useEffect(() => {
+    if (!settings || !loaded.current) return;
+
+    const timer = setTimeout(() => {
+      setSaveStatus("saving");
+      saveSettings(settings)
+        .then(() => {
+          window.dispatchEvent(
+            new CustomEvent("devflow:settings-updated", { detail: settings })
+          );
+          setSaveStatus("saved");
+          setTimeout(() => setSaveStatus("idle"), 1500);
+        })
+        .catch(() => {
+          setSaveStatus("error");
+          setTimeout(() => setSaveStatus("idle"), 3000);
+        });
+    }, 800);
+
+    return () => clearTimeout(timer);
+  }, [settings]);
 
   const handleScanOrphans = async () => {
     setOrphanScanning(true);
@@ -282,6 +300,53 @@ function Settings() {
       </div>
 
       <div className="card">
+        <div className="card-title">Features</div>
+        <p style={{ color: "var(--text-secondary)", marginBottom: 12 }}>
+          Toggle experimental features on or off.
+        </p>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            padding: "10px 12px",
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            background: "var(--bg-primary)",
+          }}
+        >
+          <div>
+            <div style={{ fontWeight: 500, marginBottom: 2 }}>Smart Merge</div>
+            <div style={{ color: "var(--text-muted)", fontSize: 12 }}>
+              Enable merge readiness checks, rebase, merge trains, and cascade
+              notifications.
+            </div>
+          </div>
+          <label
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              color: "var(--text-secondary)",
+              fontSize: 13,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={settings.smart_merge}
+              onChange={(e) =>
+                setSettings((prev) =>
+                  prev ? { ...prev, smart_merge: e.target.checked } : prev
+                )
+              }
+            />
+            {settings.smart_merge ? "On" : "Off"}
+          </label>
+        </div>
+      </div>
+
+      <div className="card">
         <div className="card-title">Terminal</div>
         <p style={{ color: "var(--text-secondary)", marginBottom: 12 }}>
           Embedded terminal rendering is powered by libghostty-vt with restty.
@@ -368,32 +433,32 @@ function Settings() {
         </div>
       </div>
 
-      <div className="card">
-        <div className="card-title">Application</div>
-        <p style={{ color: "var(--text-secondary)", marginBottom: 12 }}>
-          Application settings are stored locally and not synced.
-        </p>
-        <div className="flex gap-2">
-          <button className="btn btn-primary" onClick={handleSave}>
-            Save Settings
-          </button>
+      {saveStatus !== "idle" && (
+        <div
+          style={{
+            position: "fixed",
+            bottom: 20,
+            right: 20,
+            padding: "8px 16px",
+            borderRadius: 8,
+            fontSize: 13,
+            background:
+              saveStatus === "error"
+                ? "rgba(248, 81, 73, 0.15)"
+                : "rgba(63, 185, 80, 0.15)",
+            color: saveStatus === "error" ? "var(--danger)" : "var(--success)",
+            border: `1px solid ${saveStatus === "error" ? "var(--danger)" : "var(--success)"}`,
+            pointerEvents: "none",
+            transition: "opacity 0.2s",
+          }}
+        >
+          {saveStatus === "saving"
+            ? "Saving..."
+            : saveStatus === "saved"
+              ? "Settings saved"
+              : "Failed to save"}
         </div>
-        {saved && (
-          <div
-            style={{
-              marginTop: 8,
-              padding: 12,
-              background: "rgba(63, 185, 80, 0.1)",
-              border: "1px solid var(--success)",
-              borderRadius: 6,
-              color: "var(--success)",
-              fontSize: 13,
-            }}
-          >
-            Settings saved.
-          </div>
-        )}
-      </div>
+      )}
     </div>
   );
 }

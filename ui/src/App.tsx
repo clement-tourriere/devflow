@@ -10,6 +10,7 @@ import HookManager from "./pages/hooks/HookManager";
 import ConfigEditor from "./pages/config/ConfigEditor";
 import DoctorPage from "./pages/doctor/DoctorPage";
 import Settings from "./pages/settings/Settings";
+import MergeTrainPage from "./pages/MergeTrainPage";
 
 const TEXT_INPUT_TYPES = new Set([
   "",
@@ -101,6 +102,7 @@ function App() {
         <Route path="hooks/*" element={<HookManager />} />
         <Route path="config/*" element={<ConfigEditor />} />
         <Route path="setup/*" element={<DoctorPage />} />
+        <Route path="merge-train" element={<MergeTrainPage />} />
         <Route path="settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

@@ -8,7 +8,7 @@ license = "MIT"
 
 [features]
 default = ["service-local", "service-neon", "service-dblab", "service-xata", "llm", "sandbox"]
-service-local = ["dep:bollard", "dep:rusqlite", "dep:rust-s3", "dep:tar", "dep:bytes", "dep:futures-util", "dep:tempfile", "dep:uuid", "dep:url"]
+service-local = ["dep:bollard", "dep:rusqlite", "dep:rust-s3", "dep:tar", "dep:bytes", "dep:futures-util", "dep:tempfile", "dep:url"]
 service-neon = ["dep:reqwest"]
 service-dblab = ["dep:reqwest"]
 service-xata = ["dep:reqwest"]
@@ -53,7 +53,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 rusqlite = { version = "0.38", default-features = false, features = ["bundled"], optional = true }
 
 # UUID generation
-uuid = { version = "1.15", features = ["v4", "serde"], optional = true }
+uuid = { version = "1.15", features = ["v4", "serde"] }
+
+# Glob pattern matching for merge checks
+glob = { version = "0.3", default-features = false }
 
 # HTTP client for cloud backends
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }

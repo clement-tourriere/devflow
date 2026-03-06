@@ -304,3 +304,73 @@ export const resizeTerminal = (
 ) => invoke<void>("resize_terminal", { sessionId, rows, cols });
 export const closeTerminal = (sessionId: string) =>
   invoke<void>("close_terminal", { sessionId });
+
+// Merge & Train
+export const mergeCheck = (
+  projectPath: string,
+  source: string,
+  target?: string
+) =>
+  invoke<import("../types").MergeReadinessReport>("merge_check", {
+    projectPath,
+    source,
+    target,
+  });
+
+export const mergeWorkspace = (
+  projectPath: string,
+  source: string,
+  target?: string,
+  cleanup?: boolean
+) =>
+  invoke<import("../types").MergeResult>("merge_workspace", {
+    projectPath,
+    source,
+    target,
+    cleanup,
+  });
+
+export const rebaseWorkspace = (
+  projectPath: string,
+  workspace: string,
+  target?: string
+) =>
+  invoke<import("../types").RebaseResult>("rebase_workspace", {
+    projectPath,
+    workspace,
+    target,
+  });
+
+export const trainAdd = (
+  projectPath: string,
+  workspace?: string,
+  target?: string
+) => invoke<void>("train_add", { projectPath, workspace, target });
+
+export const trainRemove = (projectPath: string, workspace: string) =>
+  invoke<void>("train_remove", { projectPath, workspace });
+
+export const trainStatus = (projectPath: string, target?: string) =>
+  invoke<import("../types").MergeTrain | null>("train_status", {
+    projectPath,
+    target,
+  });
+
+export const trainRun = (
+  projectPath: string,
+  target?: string,
+  stopOnFailure?: boolean,
+  cleanup?: boolean
+) =>
+  invoke<import("../types").MergeTrainEntry[]>("train_run", {
+    projectPath,
+    target,
+    stopOnFailure,
+    cleanup,
+  });
+
+export const trainPause = (projectPath: string, target?: string) =>
+  invoke<void>("train_pause", { projectPath, target });
+
+export const trainResume = (projectPath: string, target?: string) =>
+  invoke<void>("train_resume", { projectPath, target });
