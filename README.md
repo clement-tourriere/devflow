@@ -68,6 +68,7 @@ eval "$(devflow shell-init)"
 
 - `devflow switch -c feature/x` creates a new workspace and its services
 - `devflow switch feature/x` returns to an existing workspace and updates the environment
+- `devflow switch feature/x --open` opens a tmux/zellij session in the workspace worktree
 - `devflow remove feature/x` cleans up the workspace, worktree, and service instances together
 
 ### Services

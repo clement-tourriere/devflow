@@ -69,6 +69,7 @@ pub fn builtin_recipes() -> Vec<HookRecipe> {
         docker_compose_recipe(),
         local_dev_setup_recipe(),
         db_migrate_recipe(),
+        multiplexer_session_recipe(),
     ]
 }
 
@@ -315,6 +316,31 @@ fn db_migrate_recipe() -> HookRecipe {
     }
 }
 
+fn multiplexer_session_recipe() -> HookRecipe {
+    let mut post_create = IndexMap::new();
+    post_create.insert(
+        "open-session".to_string(),
+        HookEntry::Extended(ExtendedHookEntry {
+            command: "devflow switch --open {{ workspace }}".to_string(),
+            working_dir: None,
+            continue_on_error: Some(true),
+            condition: None,
+            environment: None,
+            background: true,
+        }),
+    );
+
+    let mut hooks = IndexMap::new();
+    hooks.insert(HookPhase::PostCreate, post_create);
+
+    HookRecipe {
+        name: "multiplexer-session",
+        description: "Auto-open a tmux/zellij session in the worktree after workspace creation",
+        category: "Workflow",
+        hooks,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,7 +468,7 @@ mod tests {
     #[test]
     fn test_builtin_recipes_count() {
         let recipes = builtin_recipes();
-        assert_eq!(recipes.len(), 5);
+        assert_eq!(recipes.len(), 6);
         let names: Vec<&str> = recipes.iter().map(|r| r.name).collect();
         assert!(names.contains(&"sync-ai-configs"));
         assert!(names.contains(&"install-deps"));

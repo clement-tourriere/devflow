@@ -28,6 +28,7 @@ devflow switch feature/auth
 devflow switch -c feature/new
 devflow switch -c feature/new --from develop
 devflow switch feature/auth -x "npm run dev"
+devflow switch feature/auth --open
 devflow switch feature/auth --no-services
 devflow switch feature/auth --dry-run
 devflow switch -c agent/task-42 --sandboxed
@@ -39,12 +40,42 @@ Important flags:
 - `--from <workspace>` choose the parent workspace
 - `-x, --execute <command>` run a command after switching
 - `-d, --detach` run the post-switch command in a detached multiplexer session
+- `-o, --open` open an interactive multiplexer session in the workspace worktree
 - `--no-services` skip service branching/switching
 - `--no-verify` skip hooks
 - `--template` switch to the main/template workspace
 - `--no-respect-gitignore` include gitignored files in worktree copy
 - `--sandboxed` create the workspace with sandbox restrictions
 - `--no-sandbox` disable sandboxing even if enabled by default
+
+### Multiplexer Integration
+
+`--open` and `--detach` use tmux or zellij to launch sessions in the workspace worktree. The multiplexer is auto-detected (tmux first, then zellij), or you can set a preference in `.devflow.yml`:
+
+```yaml
+execute:
+  multiplexer: zellij  # or "tmux"
+```
+
+For a fully custom template, use `detach_command` with `{session}`, `{dir}`, and `{cmd}` placeholders:
+
+```yaml
+execute:
+  detach_command: "screen -dmS {session} bash -c {cmd}"
+```
+
+Examples:
+
+```bash
+# Open interactive session in workspace worktree
+devflow switch feature-auth --open
+
+# Run a command in a detached session
+devflow switch feature-auth -x "npm run dev" --detach
+
+# Auto-open sessions on new workspace creation (install hook recipe)
+devflow hook install multiplexer-session
+```
 
 ### `devflow status`
 

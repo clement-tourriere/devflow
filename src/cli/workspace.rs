@@ -1003,6 +1003,7 @@ pub(super) async fn handle_branch_command(
             from,
             execute,
             detach,
+            open,
             execute_args,
             no_services,
             no_verify,
@@ -1196,16 +1197,17 @@ pub(super) async fn handle_branch_command(
                 handle_interactive_switch(config, config_path).await?;
             }
 
-            // Execute command in workspace if requested
-            if let Some(ref cmd) = execute {
+            // Execute command or open interactive session in workspace
+            if open || execute.is_some() {
                 let workspace = workspace_name.as_deref().unwrap_or(&config.git.main_workspace);
+                let cmd = execute.as_deref().unwrap_or("");
                 execute_in_workspace(
                     config,
                     config_path,
                     workspace,
                     cmd,
                     &execute_args,
-                    detach,
+                    detach || open,
                     sandbox_resolved,
                     json_output,
                 )
@@ -2170,49 +2172,88 @@ async fn execute_in_workspace(
     }
 
     if detach {
-        // Detached execution via configured multiplexer
+        // Detached/interactive execution via configured multiplexer
+        let is_interactive = full_cmd.is_empty();
+
         let template = config
             .execute
             .as_ref()
             .and_then(|e| e.detach_command.clone())
             .or_else(|| {
-                if which::which("tmux").is_ok() {
-                    Some("tmux new-session -d -s {session} -c {dir} sh -c {cmd}".to_string())
-                } else {
-                    None
+                // Respect configured multiplexer preference, then auto-detect
+                let preferred = config
+                    .execute
+                    .as_ref()
+                    .and_then(|e| e.multiplexer.as_deref());
+
+                match preferred {
+                    Some("zellij") if which::which("zellij").is_ok() => {
+                        Some("zellij --session {session} --cwd {dir} {cmd}".to_string())
+                    }
+                    Some("tmux") if which::which("tmux").is_ok() => {
+                        Some("tmux new-session -d -s {session} -c {dir} {cmd}".to_string())
+                    }
+                    Some(name) => {
+                        log::warn!("Configured multiplexer '{}' not found, falling back to auto-detection", name);
+                        None
+                    }
+                    None => None,
                 }
+                .or_else(|| {
+                    if which::which("tmux").is_ok() {
+                        Some("tmux new-session -d -s {session} -c {dir} {cmd}".to_string())
+                    } else if which::which("zellij").is_ok() {
+                        Some("zellij --session {session} --cwd {dir} {cmd}".to_string())
+                    } else {
+                        None
+                    }
+                })
             });
 
         let Some(template) = template else {
             anyhow::bail!(
-                "No multiplexer available for --detach. Install tmux or configure execute.detach_command in .devflow.yml"
+                "No multiplexer available for --detach/--open. Install tmux or zellij, or configure execute.detach_command in .devflow.yml"
             );
         };
 
         let session = normalized.replace('/', "-");
 
-        // Shell-escape the command for embedding in the template
-        let escaped_cmd = full_cmd.replace('\'', "'\\''");
-        let quoted_cmd = format!("'{}'", escaped_cmd);
+        // Build the {cmd} replacement
+        let cmd_replacement = if is_interactive {
+            String::new()
+        } else if template.contains("sh -c") {
+            // Custom template already includes sh -c — pass raw command
+            let escaped = full_cmd.replace('\'', "'\\''");
+            format!("'{}'", escaped)
+        } else {
+            let escaped = full_cmd.replace('\'', "'\\''");
+            format!("sh -c '{}'", escaped)
+        };
 
         let expanded = template
             .replace("{session}", &session)
             .replace("{dir}", &work_dir.display().to_string())
-            .replace("{cmd}", &quoted_cmd);
+            .replace("{cmd}", &cmd_replacement);
+        // Trim trailing whitespace from empty {cmd} expansion
+        let expanded = expanded.trim_end().to_string();
 
         if !json_output {
-            println!("Detaching: {}", expanded);
+            if is_interactive {
+                println!("Opening session: {}", expanded);
+            } else {
+                println!("Detaching: {}", expanded);
+            }
         }
 
         let status = tokio::process::Command::new("sh")
             .args(["-c", &expanded])
             .status()
             .await
-            .context("Failed to launch detached session")?;
+            .context("Failed to launch multiplexer session")?;
 
         if !status.success() {
             anyhow::bail!(
-                "Detach command failed with exit code: {}",
+                "Multiplexer command failed with exit code: {}",
                 status.code().unwrap_or(-1)
             );
         }

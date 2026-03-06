@@ -11,6 +11,7 @@ export interface DevflowConfig {
   worktree?: WorktreeConfig | null;
   hooks?: Record<string, Record<string, unknown>> | null;
   triggers?: Record<string, unknown> | null;
+  execute?: ExecuteConfig | null;
   agent?: AgentConfig | null;
   commit?: CommitConfig | null;
   merge?: MergeConfig | null;
@@ -115,6 +116,11 @@ export interface PluginConfig {
   name?: string | null;
   timeout: number;
   config?: unknown | null;
+}
+
+export interface ExecuteConfig {
+  detach_command?: string | null;
+  multiplexer?: string | null;
 }
 
 export interface AgentConfig {

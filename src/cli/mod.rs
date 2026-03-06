@@ -92,6 +92,8 @@ Examples:
         execute: Option<String>,
         #[arg(long, short = 'd', help = "Run -x command in a detached multiplexer session")]
         detach: bool,
+        #[arg(long, short = 'o', help = "Open an interactive multiplexer session in the workspace")]
+        open: bool,
         #[arg(last = true, help = "Arguments passed to the -x command")]
         execute_args: Vec<String>,
         #[arg(long, help = "Skip service branching (only VCS switch)")]
