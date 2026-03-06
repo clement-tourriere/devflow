@@ -90,9 +90,7 @@ pub fn merge_recipe_into_config(
     let mut skipped = 0;
 
     for (phase, recipe_hooks) in &recipe.hooks {
-        let phase_map = existing
-            .entry(phase.clone())
-            .or_default();
+        let phase_map = existing.entry(phase.clone()).or_default();
         for (name, entry) in recipe_hooks {
             if phase_map.contains_key(name) {
                 skipped += 1;
@@ -156,12 +154,32 @@ fn install_deps_recipe() -> HookRecipe {
     let make_phase = || {
         let mut phase = IndexMap::new();
         for (name, condition, command) in [
-            ("install-deps-npm", "file_exists:package-lock.json", "npm ci"),
-            ("install-deps-bun", "file_exists:bun.lockb", "bun install --frozen-lockfile"),
-            ("install-deps-pnpm", "file_exists:pnpm-lock.yaml", "pnpm install --frozen-lockfile"),
-            ("install-deps-yarn", "file_exists:yarn.lock", "yarn install --frozen-lockfile"),
+            (
+                "install-deps-npm",
+                "file_exists:package-lock.json",
+                "npm ci",
+            ),
+            (
+                "install-deps-bun",
+                "file_exists:bun.lockb",
+                "bun install --frozen-lockfile",
+            ),
+            (
+                "install-deps-pnpm",
+                "file_exists:pnpm-lock.yaml",
+                "pnpm install --frozen-lockfile",
+            ),
+            (
+                "install-deps-yarn",
+                "file_exists:yarn.lock",
+                "yarn install --frozen-lockfile",
+            ),
             ("install-deps-uv", "file_exists:uv.lock", "uv sync"),
-            ("install-deps-cargo", "file_exists:Cargo.lock", "cargo build"),
+            (
+                "install-deps-cargo",
+                "file_exists:Cargo.lock",
+                "cargo build",
+            ),
         ] {
             phase.insert(
                 name.to_string(),
@@ -216,13 +234,23 @@ fn docker_compose_recipe() -> HookRecipe {
     };
 
     let mut hooks = IndexMap::new();
-    hooks.insert(HookPhase::PostCreate, make_hooks("up", "docker compose up -d"));
-    hooks.insert(HookPhase::PostSwitch, make_hooks("restart", "docker compose up -d --build"));
-    hooks.insert(HookPhase::PreRemove, make_hooks("down", "docker compose down"));
+    hooks.insert(
+        HookPhase::PostCreate,
+        make_hooks("up", "docker compose up -d"),
+    );
+    hooks.insert(
+        HookPhase::PostSwitch,
+        make_hooks("restart", "docker compose up -d --build"),
+    );
+    hooks.insert(
+        HookPhase::PreRemove,
+        make_hooks("down", "docker compose down"),
+    );
 
     HookRecipe {
         name: "docker-compose",
-        description: "Manage Docker Compose lifecycle (up on create, restart on switch, down on remove)",
+        description:
+            "Manage Docker Compose lifecycle (up on create, restart on switch, down on remove)",
         category: "Docker",
         hooks,
     }
@@ -285,9 +313,21 @@ fn db_migrate_recipe() -> HookRecipe {
     let make_phase = || {
         let mut phase = IndexMap::new();
         for (name, condition, command) in [
-            ("migrate-prisma", "file_exists:prisma/schema.prisma", "npx prisma migrate deploy"),
-            ("migrate-rails", "dir_exists:db/migrate", "bin/rails db:migrate"),
-            ("migrate-django", "file_exists:manage.py", "python manage.py migrate"),
+            (
+                "migrate-prisma",
+                "file_exists:prisma/schema.prisma",
+                "npx prisma migrate deploy",
+            ),
+            (
+                "migrate-rails",
+                "dir_exists:db/migrate",
+                "bin/rails db:migrate",
+            ),
+            (
+                "migrate-django",
+                "file_exists:manage.py",
+                "python manage.py migrate",
+            ),
         ] {
             phase.insert(
                 name.to_string(),
@@ -310,7 +350,8 @@ fn db_migrate_recipe() -> HookRecipe {
 
     HookRecipe {
         name: "db-migrate",
-        description: "Run database migrations (Prisma, Rails, Django) after workspace creation and switch",
+        description:
+            "Run database migrations (Prisma, Rails, Django) after workspace creation and switch",
         category: "Database",
         hooks,
     }

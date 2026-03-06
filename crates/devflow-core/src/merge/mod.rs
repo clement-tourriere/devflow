@@ -42,12 +42,8 @@ pub struct MergeReadinessReport {
 /// A single merge readiness check.
 pub trait MergeCheck: Send + Sync {
     fn name(&self) -> &str;
-    fn check(
-        &self,
-        repo: &dyn VcsProvider,
-        source: &str,
-        target: &str,
-    ) -> Result<MergeCheckResult>;
+    fn check(&self, repo: &dyn VcsProvider, source: &str, target: &str)
+        -> Result<MergeCheckResult>;
 }
 
 /// Run all configured merge checks and return a readiness report.
@@ -86,9 +82,7 @@ pub fn run_checks(
 }
 
 /// Build the list of merge checks from configuration.
-pub fn build_checks_from_config(
-    config: &crate::config::MergeConfig,
-) -> Vec<Box<dyn MergeCheck>> {
+pub fn build_checks_from_config(config: &crate::config::MergeConfig) -> Vec<Box<dyn MergeCheck>> {
     let mut result: Vec<Box<dyn MergeCheck>> = Vec::new();
 
     for check_config in &config.checks {
@@ -154,10 +148,7 @@ pub fn build_checks_from_config(
                 }
             }
             _ => {
-                log::warn!(
-                    "Unknown merge check type: '{}'",
-                    check_config.check_type
-                );
+                log::warn!("Unknown merge check type: '{}'", check_config.check_type);
             }
         }
     }

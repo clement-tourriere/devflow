@@ -781,16 +781,14 @@ pub async fn install_recipe(
         .map_err(crate::commands::format_error)?;
 
     let mut hooks_config = config.hooks.unwrap_or_default();
-    let result =
-        devflow_core::hooks::recipes::merge_recipe_into_config(&mut hooks_config, &recipe);
+    let result = devflow_core::hooks::recipes::merge_recipe_into_config(&mut hooks_config, &recipe);
 
     if result.hooks_added > 0 {
         // Write back to config
         let content = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
         let mut doc: serde_yaml_ng::Value =
             serde_yaml_ng::from_str(&content).map_err(|e| e.to_string())?;
-        let hooks_yaml =
-            serde_yaml_ng::to_value(&hooks_config).map_err(|e| e.to_string())?;
+        let hooks_yaml = serde_yaml_ng::to_value(&hooks_config).map_err(|e| e.to_string())?;
         if let serde_yaml_ng::Value::Mapping(ref mut map) = doc {
             map.insert(
                 serde_yaml_ng::Value::String("hooks".to_string()),
@@ -833,8 +831,7 @@ pub async fn install_recipes(
         let content = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
         let mut doc: serde_yaml_ng::Value =
             serde_yaml_ng::from_str(&content).map_err(|e| e.to_string())?;
-        let hooks_yaml =
-            serde_yaml_ng::to_value(&hooks_config).map_err(|e| e.to_string())?;
+        let hooks_yaml = serde_yaml_ng::to_value(&hooks_config).map_err(|e| e.to_string())?;
         if let serde_yaml_ng::Value::Mapping(ref mut map) = doc {
             map.insert(
                 serde_yaml_ng::Value::String("hooks".to_string()),

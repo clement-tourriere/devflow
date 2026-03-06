@@ -206,7 +206,8 @@ fn register_workspace_state(
         executed_command: existing.as_ref().and_then(|b| b.executed_command.clone()),
         execution_status: existing.as_ref().and_then(|b| b.execution_status.clone()),
         executed_at: existing.as_ref().and_then(|b| b.executed_at),
-        sandboxed: sandboxed.unwrap_or_else(|| existing.as_ref().map(|b| b.sandboxed).unwrap_or(false)),
+        sandboxed: sandboxed
+            .unwrap_or_else(|| existing.as_ref().map(|b| b.sandboxed).unwrap_or(false)),
     };
 
     if let Err(e) = state_mgr.register_workspace_by_dir(project_dir, workspace) {

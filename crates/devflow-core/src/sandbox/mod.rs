@@ -94,11 +94,8 @@ impl SandboxPolicy {
 
         #[cfg(target_os = "macos")]
         let (seatbelt_file, seatbelt_path) = if platform_cap == PlatformCapability::Seatbelt {
-            let profile = seatbelt::generate_seatbelt_profile(
-                workspace_dir,
-                &extra_read,
-                &extra_write,
-            );
+            let profile =
+                seatbelt::generate_seatbelt_profile(workspace_dir, &extra_read, &extra_write);
             match seatbelt::write_profile_to_temp(&profile) {
                 Ok(tmp) => {
                     let path = tmp.path().to_path_buf();
@@ -255,18 +252,8 @@ mod tests {
             default_for_agents: true,
             ..Default::default()
         };
-        assert!(resolve_sandbox_enabled(
-            false,
-            false,
-            true,
-            Some(&config)
-        ));
-        assert!(!resolve_sandbox_enabled(
-            false,
-            false,
-            false,
-            Some(&config)
-        ));
+        assert!(resolve_sandbox_enabled(false, false, true, Some(&config)));
+        assert!(!resolve_sandbox_enabled(false, false, false, Some(&config)));
     }
 
     #[test]

@@ -32,3 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Multiplexer support** — Terminal multiplexer integration (tmux, zellij) with `--open` flag.
 - **Three-tier configuration** — `.devflow.yml` (team) -> `.devflow.local.yml` (local) -> environment variables.
 - **JSON output + non-interactive mode** — For CI/CD and AI agent workflows.
+
+## v0.2.0 (2026-03-06)
+
+### Feat
+
+- devflow — universal development environment tool

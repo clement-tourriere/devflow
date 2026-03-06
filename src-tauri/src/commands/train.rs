@@ -81,7 +81,8 @@ pub async fn merge_check(
     let cfg = load_config(&project_path)?;
     let target = target.unwrap_or_else(|| cfg.git.main_workspace.clone());
 
-    let vcs_repo = vcs::detect_vcs_provider(&project_path).map_err(crate::commands::format_error)?;
+    let vcs_repo =
+        vcs::detect_vcs_provider(&project_path).map_err(crate::commands::format_error)?;
 
     let merge_config = cfg.merge.unwrap_or_default();
     let checks = devflow_core::merge::build_checks_from_config(&merge_config);
@@ -118,12 +119,15 @@ pub async fn rebase_workspace(
     let cfg = load_config(&project_path)?;
     let target = target.unwrap_or_else(|| cfg.git.main_workspace.clone());
 
-    let vcs_repo = vcs::detect_vcs_provider(&project_path).map_err(crate::commands::format_error)?;
+    let vcs_repo =
+        vcs::detect_vcs_provider(&project_path).map_err(crate::commands::format_error)?;
     vcs_repo
         .checkout_workspace(&workspace)
         .map_err(crate::commands::format_error)?;
 
-    let result = vcs_repo.rebase(&target).map_err(crate::commands::format_error)?;
+    let result = vcs_repo
+        .rebase(&target)
+        .map_err(crate::commands::format_error)?;
 
     Ok(RebaseResultDto {
         success: result.success,
@@ -144,7 +148,8 @@ pub async fn merge_workspace(
     let target = target.unwrap_or_else(|| cfg.git.main_workspace.clone());
     let project_dir = std::path::Path::new(&project_path);
 
-    let vcs_repo = vcs::detect_vcs_provider(&project_path).map_err(crate::commands::format_error)?;
+    let vcs_repo =
+        vcs::detect_vcs_provider(&project_path).map_err(crate::commands::format_error)?;
 
     // Run readiness checks
     if let Some(ref merge_config) = cfg.merge {
@@ -185,8 +190,7 @@ pub async fn merge_workspace(
         }
     }
 
-    let merge_vcs =
-        vcs::detect_vcs_provider(&merge_dir).map_err(crate::commands::format_error)?;
+    let merge_vcs = vcs::detect_vcs_provider(&merge_dir).map_err(crate::commands::format_error)?;
 
     if merge_dir == project_dir.to_path_buf() {
         merge_vcs
@@ -257,18 +261,19 @@ pub async fn train_add(
     };
 
     let engine = MergeTrainEngine::new(project_dir, &cfg);
-    engine.enqueue(&workspace, &target).map_err(crate::commands::format_error)
+    engine
+        .enqueue(&workspace, &target)
+        .map_err(crate::commands::format_error)
 }
 
 #[tauri::command]
-pub async fn train_remove(
-    project_path: String,
-    workspace: String,
-) -> Result<(), String> {
+pub async fn train_remove(project_path: String, workspace: String) -> Result<(), String> {
     let cfg = load_config(&project_path)?;
     let project_dir = std::path::Path::new(&project_path);
     let engine = MergeTrainEngine::new(project_dir, &cfg);
-    engine.dequeue(&workspace).map_err(crate::commands::format_error)
+    engine
+        .dequeue(&workspace)
+        .map_err(crate::commands::format_error)
 }
 
 #[tauri::command]
@@ -281,7 +286,9 @@ pub async fn train_status(
     let project_dir = std::path::Path::new(&project_path);
 
     let engine = MergeTrainEngine::new(project_dir, &cfg);
-    let train = engine.status(&target).map_err(crate::commands::format_error)?;
+    let train = engine
+        .status(&target)
+        .map_err(crate::commands::format_error)?;
 
     Ok(train.map(|t| MergeTrainDto {
         id: t.id,
@@ -344,5 +351,7 @@ pub async fn train_resume(project_path: String, target: Option<String>) -> Resul
     let target = target.unwrap_or_else(|| cfg.git.main_workspace.clone());
     let project_dir = std::path::Path::new(&project_path);
     let engine = MergeTrainEngine::new(project_dir, &cfg);
-    engine.resume(&target).map_err(crate::commands::format_error)
+    engine
+        .resume(&target)
+        .map_err(crate::commands::format_error)
 }

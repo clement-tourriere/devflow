@@ -60,10 +60,8 @@ impl CommandGuard {
             });
         }
 
-        let mut blocked_patterns: Vec<Regex> = patterns
-            .iter()
-            .filter_map(|p| Regex::new(p).ok())
-            .collect();
+        let mut blocked_patterns: Vec<Regex> =
+            patterns.iter().filter_map(|p| Regex::new(p).ok()).collect();
 
         // Add extra block patterns
         for extra in extra_block {

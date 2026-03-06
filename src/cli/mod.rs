@@ -90,9 +90,17 @@ Examples:
         from: Option<String>,
         #[arg(short = 'x', long, help = "Run a command after switching")]
         execute: Option<String>,
-        #[arg(long, short = 'd', help = "Run -x command in a detached multiplexer session")]
+        #[arg(
+            long,
+            short = 'd',
+            help = "Run -x command in a detached multiplexer session"
+        )]
         detach: bool,
-        #[arg(long, short = 'o', help = "Open an interactive multiplexer session in the workspace")]
+        #[arg(
+            long,
+            short = 'o',
+            help = "Open an interactive multiplexer session in the workspace"
+        )]
         open: bool,
         #[arg(last = true, help = "Arguments passed to the -x command")]
         execute_args: Vec<String>,
@@ -106,7 +114,10 @@ Examples:
         dry_run: bool,
         #[arg(long, help = "Include gitignored files in worktree (overrides config)")]
         no_respect_gitignore: bool,
-        #[arg(long, help = "Create workspace in sandboxed mode (restricted filesystem + commands)")]
+        #[arg(
+            long,
+            help = "Create workspace in sandboxed mode (restricted filesystem + commands)"
+        )]
         sandboxed: bool,
         #[arg(long, help = "Disable sandbox even if default is enabled")]
         no_sandbox: bool,
@@ -1185,8 +1196,10 @@ pub async fn handle_command(
 
                         if install_recipe {
                             if let Some(recipe) = recipes::find_recipe("sync-ai-configs") {
-                                let mut hooks_config = init_config.hooks.clone().unwrap_or_default();
-                                let result = recipes::merge_recipe_into_config(&mut hooks_config, &recipe);
+                                let mut hooks_config =
+                                    init_config.hooks.clone().unwrap_or_default();
+                                let result =
+                                    recipes::merge_recipe_into_config(&mut hooks_config, &recipe);
                                 init_config.hooks = Some(hooks_config);
                                 init_config.save_to_file(&init_config_path)?;
                                 println!(

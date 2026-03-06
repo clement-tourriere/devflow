@@ -13,8 +13,7 @@ pub(super) fn handle_sync_ai_configs(json_output: bool) -> Result<()> {
         None => Config::default(),
     };
 
-    let vcs_repo = vcs::detect_vcs_provider(".")
-        .context("Not inside a VCS repository")?;
+    let vcs_repo = vcs::detect_vcs_provider(".").context("Not inside a VCS repository")?;
 
     let current_dir = std::env::current_dir()?;
 
@@ -27,10 +26,13 @@ pub(super) fn handle_sync_ai_configs(json_output: bool) -> Result<()> {
     let canonical_main = main_dir.canonicalize().unwrap_or(main_dir.clone());
     if canonical_current == canonical_main {
         if json_output {
-            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                "status": "skipped",
-                "reason": "already in main worktree",
-            }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "skipped",
+                    "reason": "already in main worktree",
+                }))?
+            );
         } else {
             println!("Already in the main worktree, nothing to sync.");
         }
@@ -71,7 +73,10 @@ pub(super) fn handle_sync_ai_configs(json_output: bool) -> Result<()> {
                     Err(e) => {
                         log::warn!("Failed to merge {}/{}: {}", dir_name, settings_file, e);
                         if !json_output {
-                            eprintln!("Warning: Failed to merge {}/{}: {}", dir_name, settings_file, e);
+                            eprintln!(
+                                "Warning: Failed to merge {}/{}: {}",
+                                dir_name, settings_file, e
+                            );
                         }
                     }
                 }
@@ -94,11 +99,14 @@ pub(super) fn handle_sync_ai_configs(json_output: bool) -> Result<()> {
     }
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "status": "ok",
-            "synced_dirs": synced_dirs,
-            "synced_files": synced_files,
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": "ok",
+                "synced_dirs": synced_dirs,
+                "synced_files": synced_files,
+            }))?
+        );
     } else if synced_dirs.is_empty() && synced_files.is_empty() {
         println!("No AI configs to sync.");
     } else {
@@ -122,16 +130,14 @@ pub(super) fn handle_sync_ai_configs(json_output: bool) -> Result<()> {
 /// Reads both source and destination, merges `permissions.allow` arrays
 /// (deduplicated), writes the result to destination.
 fn merge_claude_permissions(src: &Path, dst: &Path) -> Result<bool> {
-    let src_content = std::fs::read_to_string(src)
-        .context("Failed to read source settings")?;
-    let src_json: serde_json::Value = serde_json::from_str(&src_content)
-        .context("Failed to parse source settings JSON")?;
+    let src_content = std::fs::read_to_string(src).context("Failed to read source settings")?;
+    let src_json: serde_json::Value =
+        serde_json::from_str(&src_content).context("Failed to parse source settings JSON")?;
 
     let dst_json: serde_json::Value = if dst.is_file() {
-        let content = std::fs::read_to_string(dst)
-            .context("Failed to read destination settings")?;
-        serde_json::from_str(&content)
-            .context("Failed to parse destination settings JSON")?
+        let content =
+            std::fs::read_to_string(dst).context("Failed to read destination settings")?;
+        serde_json::from_str(&content).context("Failed to parse destination settings JSON")?
     } else {
         serde_json::json!({})
     };
@@ -152,7 +158,10 @@ fn merge_claude_permissions(src: &Path, dst: &Path) -> Result<bool> {
 }
 
 /// Merge two JSON values, with special handling for `permissions.allow` arrays.
-fn merge_json_permissions(base: &serde_json::Value, overlay: &serde_json::Value) -> serde_json::Value {
+fn merge_json_permissions(
+    base: &serde_json::Value,
+    overlay: &serde_json::Value,
+) -> serde_json::Value {
     match (base, overlay) {
         (serde_json::Value::Object(base_map), serde_json::Value::Object(overlay_map)) => {
             let mut result = base_map.clone();
@@ -224,7 +233,9 @@ fn additive_copy_dir_inner(
         let name = file_name.to_string_lossy();
 
         // Check exclusion against relative path from src_root
-        let rel = entry.path().strip_prefix(src_root)
+        let rel = entry
+            .path()
+            .strip_prefix(src_root)
             .unwrap_or(Path::new(&*name))
             .to_path_buf();
         if exclude.iter().any(|e| rel == Path::new(e)) {
@@ -325,7 +336,10 @@ mod tests {
 
         // Should only copy sub/b.txt (a.txt already exists)
         assert_eq!(count, 1);
-        assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "existing");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("a.txt")).unwrap(),
+            "existing"
+        );
         assert_eq!(std::fs::read_to_string(dst.join("sub/b.txt")).unwrap(), "b");
 
         let _ = std::fs::remove_dir_all(&tmp);

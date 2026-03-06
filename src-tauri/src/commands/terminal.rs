@@ -20,27 +20,66 @@ fn sandbox_shell_env(working_dir: &str) -> HashMap<String, String> {
     let tmp_dir = std::env::temp_dir().join("devflow-shell");
 
     env.insert("HOME".to_string(), shell_home.display().to_string());
-    env.insert("DEVFLOW_REAL_HOME".to_string(), real_home.display().to_string());
-    env.insert("XDG_CACHE_HOME".to_string(), cache_dir.display().to_string());
-    env.insert("XDG_STATE_HOME".to_string(), state_dir.display().to_string());
-    env.insert("XDG_DATA_HOME".to_string(), real_home.join(".local/share").display().to_string());
-    env.insert("XDG_CONFIG_HOME".to_string(), real_home.join(".config").display().to_string());
+    env.insert(
+        "DEVFLOW_REAL_HOME".to_string(),
+        real_home.display().to_string(),
+    );
+    env.insert(
+        "XDG_CACHE_HOME".to_string(),
+        cache_dir.display().to_string(),
+    );
+    env.insert(
+        "XDG_STATE_HOME".to_string(),
+        state_dir.display().to_string(),
+    );
+    env.insert(
+        "XDG_DATA_HOME".to_string(),
+        real_home.join(".local/share").display().to_string(),
+    );
+    env.insert(
+        "XDG_CONFIG_HOME".to_string(),
+        real_home.join(".config").display().to_string(),
+    );
     env.insert("ZDOTDIR".to_string(), zdotdir.display().to_string());
-    env.insert("ZSH_COMPDUMP".to_string(), zdotdir.join(".zcompdump").display().to_string());
-    env.insert("STARSHIP_CACHE".to_string(), cache_dir.join("starship").display().to_string());
+    env.insert(
+        "ZSH_COMPDUMP".to_string(),
+        zdotdir.join(".zcompdump").display().to_string(),
+    );
+    env.insert(
+        "STARSHIP_CACHE".to_string(),
+        cache_dir.join("starship").display().to_string(),
+    );
     env.insert("STARSHIP_LOG".to_string(), "error".to_string());
     env.insert(
         "STARSHIP_CONFIG".to_string(),
-        real_home.join(".config/starship.toml").display().to_string(),
+        real_home
+            .join(".config/starship.toml")
+            .display()
+            .to_string(),
     );
-    env.insert("MISE_CACHE_DIR".to_string(), cache_dir.join("mise").display().to_string());
-    env.insert("MISE_STATE_DIR".to_string(), state_dir.join("mise").display().to_string());
-    env.insert("MISE_DATA_DIR".to_string(), data_dir.join("mise").display().to_string());
+    env.insert(
+        "MISE_CACHE_DIR".to_string(),
+        cache_dir.join("mise").display().to_string(),
+    );
+    env.insert(
+        "MISE_STATE_DIR".to_string(),
+        state_dir.join("mise").display().to_string(),
+    );
+    env.insert(
+        "MISE_DATA_DIR".to_string(),
+        data_dir.join("mise").display().to_string(),
+    );
     env.insert(
         "MISE_GLOBAL_CONFIG_FILE".to_string(),
-        real_home.join(".config/mise/config.toml").display().to_string(),
+        real_home
+            .join(".config/mise/config.toml")
+            .display()
+            .to_string(),
     );
-    env.insert("DOCKER_CONFIG".to_string(), config_dir.join("docker").display().to_string());
+    env.insert(
+        "DOCKER_CONFIG".to_string(),
+        config_dir.join("docker").display().to_string(),
+    );
     env.insert("TMPDIR".to_string(), tmp_dir.display().to_string());
     env.insert("LC_ALL".to_string(), "en_US.UTF-8".to_string());
     env.insert("LANG".to_string(), "en_US.UTF-8".to_string());
@@ -109,22 +148,19 @@ fn prepare_sandbox_shell_home(working_dir: &str) -> Result<HashMap<String, Strin
             .join("mise")
             .display()
             .to_string(),
-        Path::new(&xdg_data_home)
-            .join("mise")
-            .display()
-            .to_string(),
+        Path::new(&xdg_data_home).join("mise").display().to_string(),
     ];
 
     for dir in required_dirs {
         if dir.is_empty() {
             continue;
         }
-        std::fs::create_dir_all(&dir).map_err(|e| {
-            format!("Failed to prepare sandbox shell directory '{}': {}", dir, e)
-        })?;
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("Failed to prepare sandbox shell directory '{}': {}", dir, e))?;
     }
 
-    let home = dirs::home_dir().ok_or_else(|| "Failed to resolve user home directory".to_string())?;
+    let home =
+        dirs::home_dir().ok_or_else(|| "Failed to resolve user home directory".to_string())?;
     let zdotdir = PathBuf::from(zdotdir);
 
     for (source_name, target_name) in [
@@ -161,10 +197,7 @@ fn prepare_sandbox_shell_home(working_dir: &str) -> Result<HashMap<String, Strin
                     "source $ZSH/oh-my-zsh.sh",
                     "plugins=(git)\nsource $ZSH/oh-my-zsh.sh",
                 );
-                content = content.replace(
-                    "$HOME/.bun",
-                    &format!("{}/.bun", home.display()),
-                );
+                content = content.replace("$HOME/.bun", &format!("{}/.bun", home.display()));
                 content = content.replace(
                     "autoload -U compinit && compinit",
                     "# devflow sandbox: oh-my-zsh handles compinit",
@@ -175,10 +208,8 @@ fn prepare_sandbox_shell_home(working_dir: &str) -> Result<HashMap<String, Strin
                     "eval \"$(fnm env --use-on-cd --shell zsh)\"",
                     "# devflow sandbox: disabled fnm use-on-cd",
                 );
-                content = content.replace(
-                    "eval \"`fnm env`\"",
-                    "# devflow sandbox: disabled fnm env",
-                );
+                content =
+                    content.replace("eval \"`fnm env`\"", "# devflow sandbox: disabled fnm env");
                 content = content.replace(
                     "eval \"$(/Users/ctourriere/.local/bin/mise activate zsh)\"",
                     "# devflow sandbox: disabled mise activate",
@@ -327,8 +358,7 @@ fn build_sandboxed_shell(
     {
         use devflow_core::sandbox::seatbelt;
 
-        let profile =
-            seatbelt::generate_seatbelt_profile(workspace_dir, &extra_read, &extra_write);
+        let profile = seatbelt::generate_seatbelt_profile(workspace_dir, &extra_read, &extra_write);
 
         // Write profile to a persistent location (not tempfile, since the terminal lives long)
         let profile_dir = dirs::data_local_dir()
@@ -497,24 +527,24 @@ pub async fn create_terminal(
     workspace_name: Option<String>,
 ) -> Result<TerminalSessionInfo, String> {
     // Determine working directory
-    let mut working_dir = if let (Some(ref pp), Some(ref workspace)) = (&project_path, &workspace_name)
-    {
-        // Try to find worktree path for this workspace
-        let vcs = devflow_core::vcs::detect_vcs_provider(pp).ok();
-        let worktree_path = vcs
-            .as_ref()
-            .and_then(|v| v.worktree_path(workspace).ok().flatten());
-        worktree_path
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| pp.clone())
-    } else if let Some(ref pp) = project_path {
-        pp.clone()
-    } else {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("/"))
-            .display()
-            .to_string()
-    };
+    let mut working_dir =
+        if let (Some(ref pp), Some(ref workspace)) = (&project_path, &workspace_name) {
+            // Try to find worktree path for this workspace
+            let vcs = devflow_core::vcs::detect_vcs_provider(pp).ok();
+            let worktree_path = vcs
+                .as_ref()
+                .and_then(|v| v.worktree_path(workspace).ok().flatten());
+            worktree_path
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| pp.clone())
+        } else if let Some(ref pp) = project_path {
+            pp.clone()
+        } else {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("/"))
+                .display()
+                .to_string()
+        };
 
     if !Path::new(&working_dir).is_dir() {
         if let Some(ref pp) = project_path {
@@ -568,12 +598,12 @@ pub async fn create_terminal(
     };
 
     // Check if this workspace is sandboxed — if so, wrap the shell with sandbox-exec
-    let sandbox_state = if let (Some(ref pp), Some(ref workspace)) = (&project_path, &workspace_name)
-    {
-        is_workspace_sandboxed(pp, workspace)
-    } else {
-        false
-    };
+    let sandbox_state =
+        if let (Some(ref pp), Some(ref workspace)) = (&project_path, &workspace_name) {
+            is_workspace_sandboxed(pp, workspace)
+        } else {
+            false
+        };
 
     #[cfg(target_os = "macos")]
     if sandbox_state {

@@ -207,9 +207,7 @@ pub(crate) async fn run_add_service_wizard(
         },
         generic: None,
         plugin: None,
-        docker: discovered
-            .as_ref()
-            .and_then(|d| d.docker_settings.clone()),
+        docker: discovered.as_ref().and_then(|d| d.docker_settings.clone()),
     };
 
     // Store service in local state
@@ -676,7 +674,9 @@ pub(super) async fn handle_service_provider_command(
         } else if matches!(&cmd, super::ServiceCommands::Cleanup { .. }) {
             println!("No services configured. Nothing to clean up.");
         } else {
-            println!("No services configured. This project uses workspaces without database services.");
+            println!(
+                "No services configured. This project uses workspaces without database services."
+            );
         }
         return Ok(());
     }

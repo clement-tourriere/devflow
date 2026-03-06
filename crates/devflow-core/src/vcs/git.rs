@@ -1103,12 +1103,7 @@ impl VcsProvider for GitRepository {
 
         let mut rebase = self
             .repo
-            .rebase(
-                Some(&head_annotated),
-                None,
-                Some(&onto_annotated),
-                None,
-            )
+            .rebase(Some(&head_annotated), None, Some(&onto_annotated), None)
             .context("Failed to start rebase")?;
 
         let sig = self
@@ -1131,9 +1126,9 @@ impl VcsProvider for GitRepository {
                             .flatten()
                             .filter_map(|c| {
                                 c.ok().and_then(|entry| {
-                                    entry.our.map(|e| {
-                                        String::from_utf8_lossy(&e.path).to_string()
-                                    })
+                                    entry
+                                        .our
+                                        .map(|e| String::from_utf8_lossy(&e.path).to_string())
                                 })
                             })
                             .collect();

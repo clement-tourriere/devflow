@@ -27,15 +27,13 @@ pub async fn handle_train_command(
 
     match action {
         TrainAction::Add { target, workspace } => {
-            let target = target
-                .as_deref()
-                .unwrap_or(&config.git.main_workspace);
+            let target = target.as_deref().unwrap_or(&config.git.main_workspace);
 
             let workspace = match workspace {
                 Some(w) => w,
                 None => {
-                    let vcs_repo = vcs::detect_vcs_provider(".")
-                        .context("Failed to open VCS repository")?;
+                    let vcs_repo =
+                        vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
                     vcs_repo
                         .current_workspace()?
                         .ok_or_else(|| anyhow::anyhow!("Could not determine current workspace"))?
@@ -75,9 +73,7 @@ pub async fn handle_train_command(
             }
         }
         TrainAction::Status { target } => {
-            let target = target
-                .as_deref()
-                .unwrap_or(&config.git.main_workspace);
+            let target = target.as_deref().unwrap_or(&config.git.main_workspace);
 
             let engine = MergeTrainEngine::new(&project_dir, config);
             let train = engine.status(target)?;
@@ -99,10 +95,7 @@ pub async fn handle_train_command(
                             devflow_core::merge::train::MergeTrainEntryStatus::NeedsRebase => "⚠",
                             devflow_core::merge::train::MergeTrainEntryStatus::Cancelled => "⊘",
                         };
-                        println!(
-                            "  {} {} [{:?}]",
-                            status_icon, entry.workspace, entry.status
-                        );
+                        println!("  {} {} [{:?}]", status_icon, entry.workspace, entry.status);
                         if let Some(ref err) = entry.error {
                             println!("    Error: {}", err);
                         }
@@ -117,9 +110,7 @@ pub async fn handle_train_command(
             stop_on_failure,
             cleanup,
         } => {
-            let target = target
-                .as_deref()
-                .unwrap_or(&config.git.main_workspace);
+            let target = target.as_deref().unwrap_or(&config.git.main_workspace);
 
             if !json_output {
                 println!("Running merge train for '{}'...", target);
@@ -158,9 +149,7 @@ pub async fn handle_train_command(
             }
         }
         TrainAction::Pause { target } => {
-            let target = target
-                .as_deref()
-                .unwrap_or(&config.git.main_workspace);
+            let target = target.as_deref().unwrap_or(&config.git.main_workspace);
 
             let engine = MergeTrainEngine::new(&project_dir, config);
             engine.pause(target)?;
@@ -178,9 +167,7 @@ pub async fn handle_train_command(
             }
         }
         TrainAction::Resume { target } => {
-            let target = target
-                .as_deref()
-                .unwrap_or(&config.git.main_workspace);
+            let target = target.as_deref().unwrap_or(&config.git.main_workspace);
 
             let engine = MergeTrainEngine::new(&project_dir, config);
             engine.resume(target)?;

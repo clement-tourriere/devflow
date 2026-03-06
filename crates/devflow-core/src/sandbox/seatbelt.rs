@@ -48,10 +48,7 @@ pub fn generate_seatbelt_profile(
     ));
 
     // Temp directory (write access)
-    profile.push_str(&format!(
-        "(allow file-write* (subpath \"{}\"))\n",
-        tmpdir
-    ));
+    profile.push_str(&format!("(allow file-write* (subpath \"{}\"))\n", tmpdir));
 
     // Standard sink used heavily by shell startup scripts.
     profile.push_str("(allow file-write* (literal \"/dev/null\"))\n");

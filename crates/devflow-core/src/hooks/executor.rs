@@ -259,8 +259,16 @@ impl HookEngine {
         // Validate command against sandbox policy (applies to both background and blocking)
         if let Some(ref sandbox_cfg) = self.sandbox_config {
             let guard = sandbox::command_guard::CommandGuard::from_config(
-                &sandbox_cfg.commands.as_ref().map(|c| c.extra_block.clone()).unwrap_or_default(),
-                &sandbox_cfg.commands.as_ref().map(|c| c.allow.clone()).unwrap_or_default(),
+                &sandbox_cfg
+                    .commands
+                    .as_ref()
+                    .map(|c| c.extra_block.clone())
+                    .unwrap_or_default(),
+                &sandbox_cfg
+                    .commands
+                    .as_ref()
+                    .map(|c| c.allow.clone())
+                    .unwrap_or_default(),
             );
             guard.check(&rendered_command)?;
         }

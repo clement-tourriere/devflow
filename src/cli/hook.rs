@@ -889,16 +889,15 @@ fn handle_hook_recipes(json_output: bool) -> Result<()> {
 fn handle_hook_install(recipe_name: &str, json_output: bool, non_interactive: bool) -> Result<()> {
     use devflow_core::hooks::recipes;
 
-    let recipe = recipes::find_recipe(recipe_name)
-        .ok_or_else(|| anyhow::anyhow!(
+    let recipe = recipes::find_recipe(recipe_name).ok_or_else(|| {
+        anyhow::anyhow!(
             "Recipe '{}' not found. Run 'devflow hook recipes' to see available recipes.",
             recipe_name
-        ))?;
+        )
+    })?;
 
     let config_file = devflow_core::config::Config::find_config_file()?
-        .ok_or_else(|| anyhow::anyhow!(
-            "No .devflow.yml found. Run 'devflow init' first."
-        ))?;
+        .ok_or_else(|| anyhow::anyhow!("No .devflow.yml found. Run 'devflow init' first."))?;
 
     let config = devflow_core::config::Config::from_file(&config_file)?;
     let mut hooks_config = config.hooks.unwrap_or_default();
@@ -910,10 +909,7 @@ fn handle_hook_install(recipe_name: &str, json_output: bool, non_interactive: bo
         println!("This will add the following hooks:");
         for (phase, phase_hooks) in &recipe.hooks {
             for (name, entry) in phase_hooks {
-                let existing = hooks_config
-                    .get(phase)
-                    .and_then(|h| h.get(name))
-                    .is_some();
+                let existing = hooks_config.get(phase).and_then(|h| h.get(name)).is_some();
                 let cmd = match entry {
                     devflow_core::hooks::HookEntry::Simple(c) => c.clone(),
                     devflow_core::hooks::HookEntry::Extended(e) => e.command.clone(),
@@ -947,7 +943,10 @@ fn handle_hook_install(recipe_name: &str, json_output: bool, non_interactive: bo
         if json_output {
             println!("{}", serde_json::to_string_pretty(&result)?);
         } else {
-            println!("All hooks from recipe '{}' are already installed.", recipe_name);
+            println!(
+                "All hooks from recipe '{}' are already installed.",
+                recipe_name
+            );
         }
         return Ok(());
     }

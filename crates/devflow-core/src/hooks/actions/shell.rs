@@ -39,7 +39,15 @@ pub fn run_shell_command(
     template_engine: &TemplateEngine,
     print_stdout: bool,
 ) -> Result<()> {
-    run_shell_command_sandboxed(command, working_dir, environment, context, template_engine, print_stdout, None)
+    run_shell_command_sandboxed(
+        command,
+        working_dir,
+        environment,
+        context,
+        template_engine,
+        print_stdout,
+        None,
+    )
 }
 
 /// Low-level shell command runner with optional sandbox enforcement.

@@ -1022,9 +1022,16 @@ pub(super) async fn handle_branch_command(
                 ))
             } else {
                 let is_sandboxed = devflow_core::sandbox::resolve_sandbox_enabled(
-                    false, false, false, config.sandbox.as_ref(),
+                    false,
+                    false,
+                    false,
+                    config.sandbox.as_ref(),
                 );
-                if is_sandboxed { Some(true) } else { None }
+                if is_sandboxed {
+                    Some(true)
+                } else {
+                    None
+                }
             };
 
             if dry_run {
@@ -1199,7 +1206,9 @@ pub(super) async fn handle_branch_command(
 
             // Execute command or open interactive session in workspace
             if open || execute.is_some() {
-                let workspace = workspace_name.as_deref().unwrap_or(&config.git.main_workspace);
+                let workspace = workspace_name
+                    .as_deref()
+                    .unwrap_or(&config.git.main_workspace);
                 let cmd = execute.as_deref().unwrap_or("");
                 execute_in_workspace(
                     config,
@@ -2194,7 +2203,10 @@ async fn execute_in_workspace(
                         Some("tmux new-session -d -s {session} -c {dir} {cmd}".to_string())
                     }
                     Some(name) => {
-                        log::warn!("Configured multiplexer '{}' not found, falling back to auto-detection", name);
+                        log::warn!(
+                            "Configured multiplexer '{}' not found, falling back to auto-detection",
+                            name
+                        );
                         None
                     }
                     None => None,
@@ -2575,7 +2587,13 @@ async fn handle_merge_command(
                     }
                 } else {
                     for check in &report.checks {
-                        let icon = if check.passed { "✓" } else if check.severity == devflow_core::merge::CheckSeverity::Error { "✗" } else { "⚠" };
+                        let icon = if check.passed {
+                            "✓"
+                        } else if check.severity == devflow_core::merge::CheckSeverity::Error {
+                            "✗"
+                        } else {
+                            "⚠"
+                        };
                         println!("  {} {} — {}", icon, check.check_name, check.message);
                         if let Some(ref suggestion) = check.suggestion {
                             println!("    Suggestion: {}", suggestion);
@@ -2593,19 +2611,20 @@ async fn handle_merge_command(
                 }
 
                 if !report.ready {
-                    anyhow::bail!(
-                        "Merge readiness checks failed. Use --force to skip checks."
-                    );
+                    anyhow::bail!("Merge readiness checks failed. Use --force to skip checks.");
                 }
             }
         } else if check_only {
             if json_output {
-                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                    "source": source,
-                    "target": target_workspace,
-                    "ready": true,
-                    "checks": [],
-                }))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "source": source,
+                        "target": target_workspace,
+                        "ready": true,
+                        "checks": [],
+                    }))?
+                );
             } else {
                 println!("No merge checks configured. Merge is ready.");
             }
@@ -3010,9 +3029,7 @@ async fn handle_rebase_command(
         println!("Rebasing '{}' onto '{}'...", source, target_workspace);
     }
 
-    let result = vcs_repo
-        .rebase(target_workspace)
-        .context("Rebase failed")?;
+    let result = vcs_repo.rebase(target_workspace).context("Rebase failed")?;
 
     if result.success {
         if !json_output {

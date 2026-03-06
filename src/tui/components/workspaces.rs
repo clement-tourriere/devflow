@@ -856,10 +856,7 @@ impl Component for WorkspacesComponent {
                             .unwrap_or_else(|| "main".to_string());
                         Action::ShowConfirm {
                             title: "Merge Workspace".to_string(),
-                            message: format!(
-                                "Merge '{}' into '{}'?",
-                                row.workspace.name, default
-                            ),
+                            message: format!("Merge '{}' into '{}'?", row.workspace.name, default),
                             on_confirm: Box::new(Action::MergeWorkspace {
                                 source: row.workspace.name.clone(),
                                 target: default,
@@ -883,10 +880,7 @@ impl Component for WorkspacesComponent {
                             .unwrap_or_else(|| "main".to_string());
                         Action::ShowConfirm {
                             title: "Rebase Workspace".to_string(),
-                            message: format!(
-                                "Rebase '{}' onto '{}'?",
-                                row.workspace.name, default
-                            ),
+                            message: format!("Rebase '{}' onto '{}'?", row.workspace.name, default),
                             on_confirm: Box::new(Action::RebaseWorkspace {
                                 source: row.workspace.name.clone(),
                                 target: default,

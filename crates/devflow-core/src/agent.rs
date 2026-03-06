@@ -116,22 +116,22 @@ pub fn generate_claude_skill(config: &Config, _project_dir: &Path) -> Result<Str
     skill.push_str("1. Create an isolated workspace and run a command:\n");
     skill.push_str("   ```bash\n");
     skill.push_str("   # Sandboxed AI agent in a new workspace\n");
-    skill.push_str("   devflow switch -c --sandboxed agent/<task-id> -x claude -- 'Fix the bug'\n\n");
+    skill.push_str(
+        "   devflow switch -c --sandboxed agent/<task-id> -x claude -- 'Fix the bug'\n\n",
+    );
     skill.push_str("   # Or detached in background\n");
-    skill.push_str("   devflow switch -c --sandboxed agent/<task-id> -x claude --detach -- 'Fix the bug'\n");
+    skill.push_str(
+        "   devflow switch -c --sandboxed agent/<task-id> -x claude --detach -- 'Fix the bug'\n",
+    );
     skill.push_str("   ```\n");
     skill.push_str("2. Or create workspace first, then work interactively:\n");
     skill.push_str("   ```bash\n");
     skill.push_str("   OUTPUT=$(devflow --json --non-interactive switch -c agent/<task-id>)\n");
-    skill.push_str(
-        "   WORKTREE=$(echo \"$OUTPUT\" | jq -r '.worktree_path // empty')\n",
-    );
+    skill.push_str("   WORKTREE=$(echo \"$OUTPUT\" | jq -r '.worktree_path // empty')\n");
     skill.push_str("   [ -n \"$WORKTREE\" ] && cd \"$WORKTREE\"\n");
     skill.push_str("   ```\n");
     if !services.is_empty() {
-        skill.push_str(
-            "3. Get connection info: `devflow --json connection agent/<task-id>`\n",
-        );
+        skill.push_str("3. Get connection info: `devflow --json connection agent/<task-id>`\n");
         skill.push_str("4. Do your work in the isolated environment\n");
         skill.push_str("5. Commit with AI message: `devflow commit --ai`\n");
         skill.push_str("6. Clean up when done: `devflow remove agent/<task-id>`\n\n");
@@ -147,7 +147,8 @@ pub fn generate_claude_skill(config: &Config, _project_dir: &Path) -> Result<Str
     skill.push_str("- `--non-interactive`: Skip prompts, use defaults (hooks still run but require pre-approval)\n");
     skill.push_str("- `--no-verify` on `switch`: Skip **all** hooks entirely (not recommended — use `--non-interactive` instead)\n\n");
     skill.push_str("### Hook Pre-Approval\n\n");
-    skill.push_str("In `--non-interactive` mode, hooks with shell commands require pre-approval:\n");
+    skill
+        .push_str("In `--non-interactive` mode, hooks with shell commands require pre-approval:\n");
     skill.push_str("```bash\n");
     skill.push_str("devflow hook approvals add \"<command>\"  # Approve a specific hook command\n");
     skill.push_str("devflow hook approvals list              # List approved hooks\n");

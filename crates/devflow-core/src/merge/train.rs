@@ -219,8 +219,7 @@ impl MergeTrainEngine {
             if !report.ready {
                 train.entries[idx].status = MergeTrainEntryStatus::NeedsRebase;
                 train.entries[idx].completed_at = Some(Utc::now());
-                train.entries[idx].error =
-                    Some("Merge readiness checks failed".to_string());
+                train.entries[idx].error = Some("Merge readiness checks failed".to_string());
                 self.save_train(&train)?;
                 return Ok(Some(train.entries[idx].clone()));
             }
@@ -243,14 +242,19 @@ impl MergeTrainEngine {
                 if let Err(e) = repo.checkout_workspace(&workspace) {
                     train.entries[idx].status = MergeTrainEntryStatus::Failed;
                     train.entries[idx].completed_at = Some(Utc::now());
-                    train.entries[idx].error = Some(format!("Failed to checkout source for rebase: {}", e));
+                    train.entries[idx].error =
+                        Some(format!("Failed to checkout source for rebase: {}", e));
                     self.save_train(&train)?;
                     return Ok(Some(train.entries[idx].clone()));
                 }
             }
             match repo.rebase(target) {
                 Ok(result) if result.success => {
-                    log::info!("Rebased {} commits for '{}'", result.commits_replayed, workspace);
+                    log::info!(
+                        "Rebased {} commits for '{}'",
+                        result.commits_replayed,
+                        workspace
+                    );
                 }
                 Ok(result) => {
                     train.entries[idx].status = MergeTrainEntryStatus::Failed;
@@ -291,7 +295,11 @@ impl MergeTrainEngine {
                 if cleanup {
                     // Best-effort cleanup of source workspace
                     if let Err(e) = repo.delete_workspace(&workspace) {
-                        log::warn!("Failed to delete workspace '{}' during train cleanup: {}", workspace, e);
+                        log::warn!(
+                            "Failed to delete workspace '{}' during train cleanup: {}",
+                            workspace,
+                            e
+                        );
                     }
                 }
             }

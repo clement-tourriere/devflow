@@ -306,7 +306,6 @@ impl TerminalManager {
             let _ = self.close_session(&id).await;
         }
     }
-
 }
 
 impl Default for TerminalManager {

@@ -32,8 +32,8 @@ impl MergeCheck for SequentialFileCheck {
         let target_files = repo.changed_files_since(&base, target)?;
 
         let file_re = Regex::new(&self.file_pattern).unwrap_or_else(|_| Regex::new(".*").unwrap());
-        let dir_glob =
-            glob::Pattern::new(&self.directory_pattern).unwrap_or_else(|_| glob::Pattern::new("*").unwrap());
+        let dir_glob = glob::Pattern::new(&self.directory_pattern)
+            .unwrap_or_else(|_| glob::Pattern::new("*").unwrap());
 
         // Group added files by their parent directory
         let source_dirs = group_matching_files(&source_files, &dir_glob, &file_re);
@@ -71,9 +71,7 @@ impl MergeCheck for SequentialFileCheck {
                     conflict_files.len()
                 ),
                 files: conflict_files,
-                suggestion: Some(
-                    "Renumber the files on one branch before merging".to_string(),
-                ),
+                suggestion: Some("Renumber the files on one branch before merging".to_string()),
             })
         }
     }

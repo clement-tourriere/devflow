@@ -34,13 +34,19 @@ pub fn apply_landlock(
     let read_access = AccessFs::from_read(abi);
     let write_access = AccessFs::from_all(abi);
 
-    let mut ruleset = Ruleset::default()
-        .handle_access(write_access)?
-        .create()?;
+    let mut ruleset = Ruleset::default().handle_access(write_access)?.create()?;
 
     // System read-only paths
     let system_read_paths = [
-        "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/proc", "/dev", "/nix",
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/lib",
+        "/lib64",
+        "/etc",
+        "/proc",
+        "/dev",
+        "/nix",
         "/opt/homebrew",
     ];
 
@@ -54,7 +60,9 @@ pub fn apply_landlock(
 
     // User tool directories (read-only)
     if let Some(home) = dirs::home_dir() {
-        let user_read_dirs = [".cargo", ".rustup", ".nvm", ".local", ".bun", ".npm", ".config"];
+        let user_read_dirs = [
+            ".cargo", ".rustup", ".nvm", ".local", ".bun", ".npm", ".config",
+        ];
         for dir in &user_read_dirs {
             let full_path = home.join(dir);
             if full_path.exists() {

@@ -1,6 +1,7 @@
 [tools]
 cargo = "latest"
 rust = "latest"
+"pipx:pre-commit" = "latest"
 
 [tasks.docs]
 description = "Serve documentation site locally"
@@ -86,3 +87,4 @@ run = "sh -c 'cz bump --dry-run --yes --allow-no-commit --increment PATCH || tes
 [tasks.release]
 description = "Create release commit, changelog, and tag via Commitizen"
 run = "cz bump --yes"
+

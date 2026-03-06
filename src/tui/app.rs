@@ -668,10 +668,7 @@ impl App {
                 ref source,
                 ref target,
             } => {
-                self.set_status(
-                    format!("Merging '{}' into '{}'...", source, target),
-                    false,
-                );
+                self.set_status(format!("Merging '{}' into '{}'...", source, target), false);
                 let source = source.clone();
                 let target = target.clone();
                 let config = self.context.config.clone();
@@ -736,10 +733,7 @@ impl App {
                 ref source,
                 ref target,
             } => {
-                self.set_status(
-                    format!("Rebasing '{}' onto '{}'...", source, target),
-                    false,
-                );
+                self.set_status(format!("Rebasing '{}' onto '{}'...", source, target), false);
                 let source = source.clone();
                 let target = target.clone();
                 let project_dir = self

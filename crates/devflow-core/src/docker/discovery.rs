@@ -157,8 +157,7 @@ pub async fn discover_containers(
             database.as_deref(),
         );
 
-        let (command, extra_env, restart_policy) =
-            extract_docker_settings(&inspect, &service_type);
+        let (command, extra_env, restart_policy) = extract_docker_settings(&inspect, &service_type);
 
         discovered.push(DiscoveredContainer {
             container_id: container_id.to_string(),

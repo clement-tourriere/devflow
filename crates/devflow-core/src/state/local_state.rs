@@ -432,10 +432,7 @@ impl LocalStateManager {
     // ── Merge train CRUD ─────────────────────────────────────────────
 
     /// Get all merge trains for a project.
-    pub fn get_merge_trains(
-        &self,
-        project_dir: &Path,
-    ) -> Vec<crate::merge::train::MergeTrain> {
+    pub fn get_merge_trains(&self, project_dir: &Path) -> Vec<crate::merge::train::MergeTrain> {
         let config_path = project_dir.join(".devflow.yml");
         self.get_project_key(&config_path)
             .and_then(|key| self.state.projects.get(&key))
@@ -485,11 +482,7 @@ impl LocalStateManager {
     // ── Workspace relationship queries ──────────────────────────────
 
     /// Get child workspaces (workspaces whose parent is `workspace`).
-    pub fn get_children(
-        &self,
-        project_dir: &Path,
-        workspace: &str,
-    ) -> Vec<DevflowWorkspace> {
+    pub fn get_children(&self, project_dir: &Path, workspace: &str) -> Vec<DevflowWorkspace> {
         self.get_workspaces_by_dir(project_dir)
             .into_iter()
             .filter(|w| w.parent.as_deref() == Some(workspace))
@@ -497,11 +490,7 @@ impl LocalStateManager {
     }
 
     /// Get sibling workspaces (workspaces with the same parent).
-    pub fn get_siblings(
-        &self,
-        project_dir: &Path,
-        workspace: &str,
-    ) -> Vec<DevflowWorkspace> {
+    pub fn get_siblings(&self, project_dir: &Path, workspace: &str) -> Vec<DevflowWorkspace> {
         let workspaces = self.get_workspaces_by_dir(project_dir);
         let parent = workspaces
             .iter()

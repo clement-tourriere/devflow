@@ -75,7 +75,9 @@ pub async fn run_lifecycle_hooks(
 
     // If the workspace is sandboxed, attach sandbox config to the engine
     let sandbox_config = resolve_workspace_sandbox_config(config, project_dir, workspace_name);
-    let engine = engine.with_quiet_output(!opts.verbose_hooks).with_sandbox(sandbox_config);
+    let engine = engine
+        .with_quiet_output(!opts.verbose_hooks)
+        .with_sandbox(sandbox_config);
 
     if opts.verbose_hooks {
         engine.run_phase_verbose(&phase, &context).await?;
