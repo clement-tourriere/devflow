@@ -7,8 +7,9 @@ import {
   addOrInitProject,
   getProjectDetail,
   detectVcsInfo,
+  detectGitBranches,
 } from "../../utils/invoke";
-import type { ProjectEntry, ProjectDetail, VcsInfo } from "../../types";
+import type { ProjectEntry, ProjectDetail, VcsInfo, GitBranchInfo } from "../../types";
 import ConfirmDialog from "../../components/ConfirmDialog";
 import Modal from "../../components/Modal";
 
@@ -44,6 +45,11 @@ function ProjectList() {
   const [vcsInfo, setVcsInfo] = useState<VcsInfo | null>(null);
   const [hasExistingConfig, setHasExistingConfig] = useState(false);
   const [hasWorktreeConfig, setHasWorktreeConfig] = useState(false);
+
+  // Branch detection state
+  const [branchInfo, setBranchInfo] = useState<GitBranchInfo | null>(null);
+  const [selectedBranch, setSelectedBranch] = useState<string>("");
+  const [branchSearch, setBranchSearch] = useState("");
 
   // User selections
   const [selectedVcs, setSelectedVcs] = useState<string>("git");
@@ -93,6 +99,17 @@ function ProjectList() {
         setSelectedVcs("git");
       }
 
+      // Detect branches if VCS exists
+      if (detectedVcsInfo?.existing_vcs) {
+        try {
+          const info = await detectGitBranches(dirPath);
+          setBranchInfo(info);
+          setSelectedBranch(info.default_branch || "");
+        } catch {
+          setBranchInfo(null);
+        }
+      }
+
       // Detect existing config
       try {
         const detail = await getProjectDetail(dirPath);
@@ -124,6 +141,9 @@ function ProjectList() {
     setBranchingMode("worktree");
     setHasExistingConfig(false);
     setHasWorktreeConfig(false);
+    setBranchInfo(null);
+    setSelectedBranch("");
+    setBranchSearch("");
   };
 
   const handleModalSubmit = async () => {
@@ -138,10 +158,11 @@ function ProjectList() {
     try {
       // Pass VCS preference only when no VCS already exists
       const vcsPref = vcsInfo?.existing_vcs ? undefined : selectedVcs;
-      await addOrInitProject(selectedPath, normalized, vcsPref, branchingMode === "worktree");
-      const setupPath = `/projects/${encodeURIComponent(selectedPath)}/setup`;
+      await addOrInitProject(selectedPath, normalized, vcsPref, branchingMode === "worktree", selectedBranch || undefined);
+      window.dispatchEvent(new CustomEvent("devflow:projects-changed"));
+      const projectDetailPath = `/projects/${encodeURIComponent(selectedPath)}`;
       handleModalClose();
-      navigate(setupPath);
+      navigate(projectDetailPath);
     } catch (e) {
       setModalError(`${e}`);
     } finally {
@@ -154,6 +175,7 @@ function ProjectList() {
     try {
       await removeProject(removeTarget);
       setRemoveTarget(null);
+      window.dispatchEvent(new CustomEvent("devflow:projects-changed"));
       await loadProjects();
     } catch (e) {
       alert(`Failed to remove: ${e}`);
@@ -443,6 +465,100 @@ function ProjectList() {
                 already initialized
               </span>
             </div>
+          </div>
+        )}
+
+        {/* Main branch selector (when VCS exists and branches detected) */}
+        {vcsInfo?.existing_vcs && branchInfo && (
+          <div style={{ marginBottom: 16 }}>
+            <label
+              style={{
+                display: "block",
+                marginBottom: 6,
+                fontSize: 13,
+                color: "var(--text-secondary)",
+                fontWeight: 500,
+              }}
+            >
+              Main Branch
+            </label>
+            {branchInfo.branches.length > 0 ? (
+              <>
+                {branchInfo.branches.length > 5 && (
+                  <input
+                    type="text"
+                    value={branchSearch}
+                    onChange={(e) => setBranchSearch(e.target.value)}
+                    placeholder="Search branches..."
+                    style={{ width: "100%", marginBottom: 6, fontSize: 13 }}
+                  />
+                )}
+                <div
+                  style={{
+                    maxHeight: 140,
+                    overflowY: "auto",
+                    border: "1px solid var(--border)",
+                    borderRadius: 6,
+                    background: "var(--bg-primary)",
+                  }}
+                >
+                  {branchInfo.branches
+                    .filter((b) =>
+                      !branchSearch || b.toLowerCase().includes(branchSearch.toLowerCase())
+                    )
+                    .map((branch) => {
+                      const isDefault = branch === branchInfo.default_branch;
+                      const isSelected = branch === selectedBranch;
+                      return (
+                        <div
+                          key={branch}
+                          onClick={() => setSelectedBranch(branch)}
+                          style={{
+                            padding: "6px 10px",
+                            cursor: "pointer",
+                            fontSize: 13,
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 8,
+                            background: isSelected
+                              ? "var(--accent-bg, rgba(59,130,246,0.12))"
+                              : "transparent",
+                            borderBottom: "1px solid var(--border)",
+                          }}
+                        >
+                          <span
+                            className="mono"
+                            style={{
+                              fontWeight: isSelected ? 600 : 400,
+                              color: isSelected
+                                ? "var(--accent)"
+                                : "var(--text-primary)",
+                            }}
+                          >
+                            {branch}
+                          </span>
+                          {isDefault && (
+                            <span
+                              className="badge badge-info"
+                              style={{ fontSize: 10, padding: "1px 6px" }}
+                            >
+                              detected
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                </div>
+              </>
+            ) : (
+              <input
+                type="text"
+                value={selectedBranch}
+                onChange={(e) => setSelectedBranch(e.target.value)}
+                placeholder="e.g. main"
+                style={{ width: "100%", fontSize: 13 }}
+              />
+            )}
           </div>
         )}
 

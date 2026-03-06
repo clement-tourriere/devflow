@@ -467,6 +467,7 @@ function ProjectDetail() {
     setActionLoading("remove");
     try {
       await removeProject(projectPath);
+      window.dispatchEvent(new CustomEvent("devflow:projects-changed"));
       navigate("/projects");
     } catch (e) {
       alert(`${e}`);
@@ -481,6 +482,7 @@ function ProjectDetail() {
     try {
       await destroyProject(projectPath);
       await removeProject(projectPath);
+      window.dispatchEvent(new CustomEvent("devflow:projects-changed"));
       navigate("/projects");
     } catch (e) {
       alert(`Destroy failed: ${e}`);

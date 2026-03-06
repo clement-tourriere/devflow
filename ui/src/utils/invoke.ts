@@ -29,6 +29,7 @@ import type {
   OrphanProjectEntry,
   OrphanCleanupResult,
   VcsInfo,
+  GitBranchInfo,
   TerminalSessionInfo,
   WorkspaceCreationMode,
   PruneResult,
@@ -44,12 +45,14 @@ export const getProjectDetail = (projectPath: string) =>
   invoke<ProjectDetail>("get_project_detail", { projectPath });
 export const initProject = (path: string, name?: string, vcsPreference?: string, worktreeEnabled?: boolean) =>
   invoke<ProjectEntry>("init_project", { path, name, vcsPreference, worktreeEnabled });
-export const addOrInitProject = (path: string, name?: string, vcsPreference?: string, worktreeEnabled?: boolean) =>
-  invoke<ProjectEntry>("add_or_init_project", { path, name, vcsPreference, worktreeEnabled });
+export const addOrInitProject = (path: string, name?: string, vcsPreference?: string, worktreeEnabled?: boolean, mainBranch?: string) =>
+  invoke<ProjectEntry>("add_or_init_project", { path, name, vcsPreference, worktreeEnabled, mainBranch });
 
 // VCS
 export const detectVcsInfo = (path: string) =>
   invoke<VcsInfo>("detect_vcs_info", { path });
+export const detectGitBranches = (path: string) =>
+  invoke<GitBranchInfo>("detect_git_branches", { path });
 
 // Workspaces
 export const listWorkspaces = (projectPath: string) =>

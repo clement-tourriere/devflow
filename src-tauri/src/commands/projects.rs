@@ -129,6 +129,34 @@ pub async fn detect_vcs_info(path: String) -> Result<VcsInfo, String> {
     })
 }
 
+#[derive(Serialize)]
+pub struct GitBranchInfo {
+    pub branches: Vec<String>,
+    pub default_branch: Option<String>,
+}
+
+#[tauri::command]
+pub async fn detect_git_branches(path: String) -> Result<GitBranchInfo, String> {
+    let abs_path = std::path::Path::new(&path)
+        .canonicalize()
+        .map_err(|e| format!("Invalid path: {}", e))?;
+
+    let vcs = devflow_core::vcs::detect_vcs_provider(&abs_path)
+        .map_err(|e| format!("No VCS detected: {}", e))?;
+
+    let default_branch = vcs.default_workspace().ok().flatten();
+
+    let branches: Vec<String> = vcs
+        .list_workspaces()
+        .map(|ws| ws.into_iter().map(|w| w.name).collect())
+        .unwrap_or_default();
+
+    Ok(GitBranchInfo {
+        branches,
+        default_branch,
+    })
+}
+
 #[tauri::command]
 pub async fn init_project(
     app: tauri::AppHandle,
@@ -244,6 +272,7 @@ pub async fn add_or_init_project(
     name: Option<String>,
     vcs_preference: Option<String>,
     worktree_enabled: Option<bool>,
+    main_branch: Option<String>,
 ) -> Result<ProjectEntry, String> {
     let dir = std::path::Path::new(&path);
     if !dir.is_dir() {
@@ -302,6 +331,9 @@ pub async fn add_or_init_project(
         // Create a new config
         let mut config = devflow_core::config::Config::default();
         config.name = Some(project_name.clone());
+        if let Some(ref branch) = main_branch {
+            config.git.main_workspace = branch.clone();
+        }
         if wt_enabled {
             config.worktree = Some(devflow_core::config::WorktreeConfig::recommended_default());
         }
@@ -327,14 +359,16 @@ pub async fn add_or_init_project(
     }
 
     // Register default devflow workspace
-    let main_workspace = if config_path.exists() {
-        devflow_core::config::Config::from_file(&config_path)
-            .ok()
-            .map(|c| c.git.main_workspace.clone())
-            .unwrap_or_else(|| "main".to_string())
-    } else {
-        "main".to_string()
-    };
+    let main_workspace = main_branch.clone().unwrap_or_else(|| {
+        if config_path.exists() {
+            devflow_core::config::Config::from_file(&config_path)
+                .ok()
+                .map(|c| c.git.main_workspace.clone())
+                .unwrap_or_else(|| "main".to_string())
+        } else {
+            "main".to_string()
+        }
+    });
 
     if let Ok(mut state_mgr) = devflow_core::state::LocalStateManager::new() {
         if let Err(e) = state_mgr.ensure_default_workspace(&abs_path, &main_workspace) {

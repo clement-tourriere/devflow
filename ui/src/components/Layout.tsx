@@ -43,10 +43,17 @@ function Layout() {
     };
     window.addEventListener("devflow:settings-updated", handleSettingsUpdate);
 
+    // Listen for project list changes (add/remove)
+    const handleProjectsChanged = () => {
+      listProjects().then(setProjects).catch(() => {});
+    };
+    window.addEventListener("devflow:projects-changed", handleProjectsChanged);
+
     return () => {
       unlistenProxy.then((fn) => fn());
       unlistenNav.then((fn) => fn());
       window.removeEventListener("devflow:settings-updated", handleSettingsUpdate);
+      window.removeEventListener("devflow:projects-changed", handleProjectsChanged);
     };
   }, [navigate]);
 

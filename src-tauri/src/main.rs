@@ -78,6 +78,7 @@ fn main() {
             commands::projects::detect_orphan_projects,
             commands::projects::cleanup_orphan_project,
             commands::projects::detect_vcs_info,
+            commands::projects::detect_git_branches,
             // Workspaces
             commands::workspaces::list_workspaces,
             commands::workspaces::get_connection_info,

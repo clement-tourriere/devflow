@@ -295,6 +295,11 @@ export interface VcsInfo {
   available_tools: string[];
 }
 
+export interface GitBranchInfo {
+  branches: string[];
+  default_branch: string | null;
+}
+
 export interface TerminalSessionInfo {
   id: string;
   label: string;
