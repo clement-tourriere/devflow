@@ -1,7 +1,7 @@
 use bollard::query_parameters::{InspectContainerOptions, ListContainersOptions};
 use bollard::Docker;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 const LABEL_DEVFLOW_MANAGED: &str = "devflow.managed";
@@ -34,6 +34,9 @@ pub struct DiscoveredContainer {
     pub is_compose: bool,
     pub compose_project: Option<String>,
     pub compose_service: Option<String>,
+    pub command: Vec<String>,
+    pub extra_env: HashMap<String, String>,
+    pub restart_policy: Option<String>,
 }
 
 /// Discover running Docker containers that match known service types.
@@ -154,6 +157,9 @@ pub async fn discover_containers(
             database.as_deref(),
         );
 
+        let (command, extra_env, restart_policy) =
+            extract_docker_settings(&inspect, &service_type);
+
         discovered.push(DiscoveredContainer {
             container_id: container_id.to_string(),
             container_name,
@@ -168,6 +174,9 @@ pub async fn discover_containers(
             is_compose,
             compose_project,
             compose_service,
+            command,
+            extra_env,
+            restart_policy,
         });
     }
 
@@ -439,6 +448,105 @@ pub fn default_port(service_type: &DiscoveredServiceType) -> u16 {
         DiscoveredServiceType::ClickHouse => 8123,
         DiscoveredServiceType::Redis => 6379,
     }
+}
+
+/// Extract custom Docker settings (command, extra environment, restart policy) from a container inspect.
+fn extract_docker_settings(
+    inspect: &bollard::models::ContainerInspectResponse,
+    service_type: &DiscoveredServiceType,
+) -> (Vec<String>, HashMap<String, String>, Option<String>) {
+    // Command
+    let command = inspect
+        .config
+        .as_ref()
+        .and_then(|c| c.cmd.clone())
+        .unwrap_or_default();
+
+    // Extra environment — filter out well-known keys
+    let known_env_keys: HashSet<&str> = match service_type {
+        DiscoveredServiceType::Postgres => [
+            "POSTGRES_USER",
+            "POSTGRES_PASSWORD",
+            "POSTGRES_DB",
+            "PGUSER",
+            "PGPASSWORD",
+            "PGDATABASE",
+            "PGDATA",
+            "PG_MAJOR",
+            "PG_VERSION",
+            "PG_SHA256",
+        ]
+        .into_iter()
+        .collect(),
+        DiscoveredServiceType::MySQL => [
+            "MYSQL_ROOT_PASSWORD",
+            "MYSQL_USER",
+            "MYSQL_PASSWORD",
+            "MYSQL_DATABASE",
+            "MYSQL_MAJOR",
+            "MYSQL_VERSION",
+            "MARIADB_ROOT_PASSWORD",
+            "MARIADB_USER",
+            "MARIADB_PASSWORD",
+            "MARIADB_DATABASE",
+        ]
+        .into_iter()
+        .collect(),
+        DiscoveredServiceType::ClickHouse => [
+            "CLICKHOUSE_USER",
+            "CLICKHOUSE_PASSWORD",
+            "CLICKHOUSE_DB",
+            "CLICKHOUSE_SKIP_USER_SETUP",
+        ]
+        .into_iter()
+        .collect(),
+        DiscoveredServiceType::Redis => ["REDIS_PASSWORD"].into_iter().collect(),
+    };
+    let always_skip: HashSet<&str> = [
+        "PATH",
+        "GOSU_VERSION",
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "HOME",
+        "HOSTNAME",
+    ]
+    .into_iter()
+    .collect();
+
+    let env_vars = extract_env_vars(inspect);
+    let extra_env: HashMap<String, String> = env_vars
+        .into_iter()
+        .filter(|(k, _)| !known_env_keys.contains(k.as_str()) && !always_skip.contains(k.as_str()))
+        .collect();
+
+    // Restart policy
+    let restart_policy = inspect
+        .host_config
+        .as_ref()
+        .and_then(|hc| hc.restart_policy.as_ref())
+        .and_then(|rp| rp.name.as_ref())
+        .and_then(|name| {
+            let name_str = name.to_string();
+            if name_str.is_empty() || name_str == "no" {
+                None
+            } else {
+                // Append max retry count for on-failure
+                if let Some(count) = inspect
+                    .host_config
+                    .as_ref()
+                    .and_then(|hc| hc.restart_policy.as_ref())
+                    .and_then(|rp| rp.maximum_retry_count)
+                {
+                    if name_str == "on-failure" && count > 0 {
+                        return Some(format!("on-failure:{count}"));
+                    }
+                }
+                Some(name_str)
+            }
+        });
+
+    (command, extra_env, restart_policy)
 }
 
 #[cfg(test)]

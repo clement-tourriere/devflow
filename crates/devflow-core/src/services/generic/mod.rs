@@ -18,7 +18,7 @@ use chrono::Utc;
 use futures_util::TryStreamExt;
 use tokio::time::{sleep, Instant};
 
-use crate::config::GenericDockerConfig;
+use crate::config::{DockerCustomSettings, GenericDockerConfig};
 use crate::services::{
     local_docker::{
         collect_container_logs, inspect_container_status, list_managed_service_containers,
@@ -50,6 +50,8 @@ pub struct GenericDockerProvider {
     healthcheck: Option<String>,
     /// Docker client.
     client: Docker,
+    /// Custom Docker settings from the `docker:` config section.
+    docker_settings: DockerCustomSettings,
 }
 
 impl GenericDockerProvider {
@@ -57,6 +59,7 @@ impl GenericDockerProvider {
         project_name: &str,
         service_name: &str,
         config: &GenericDockerConfig,
+        docker_settings: Option<&DockerCustomSettings>,
     ) -> anyhow::Result<Self> {
         let client =
             Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon. Is Docker installed and running? Check with: docker info")?;
@@ -72,6 +75,7 @@ impl GenericDockerProvider {
             command: config.command.clone(),
             healthcheck: config.healthcheck.clone(),
             client,
+            docker_settings: docker_settings.cloned().unwrap_or_default(),
         })
     }
 
@@ -213,18 +217,31 @@ impl GenericDockerProvider {
             .as_ref()
             .map(|c| vec!["/bin/sh".to_string(), "-c".to_string(), c.clone()]);
 
-        let config = ContainerCreateBody {
+        let mut host_config = HostConfig {
+            binds,
+            port_bindings: Some(port_bindings),
+            ..Default::default()
+        };
+
+        let mut config = ContainerCreateBody {
             image: Some(self.image.clone()),
             env: Some(self.build_env()),
             labels: Some(labels),
             cmd,
-            host_config: Some(HostConfig {
-                binds,
-                port_bindings: Some(port_bindings),
-                ..Default::default()
-            }),
             ..Default::default()
         };
+
+        // Apply docker custom settings (inline GenericDockerConfig fields take precedence,
+        // so apply docker_settings first — inline values already set above won't be overwritten)
+        if !self.docker_settings.is_empty() {
+            crate::docker::settings::apply_custom_settings(
+                &mut config,
+                &mut host_config,
+                &self.docker_settings,
+            );
+        }
+
+        config.host_config = Some(host_config);
 
         let options = CreateContainerOptions {
             name: Some(container_name.to_string()),

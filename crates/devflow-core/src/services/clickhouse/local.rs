@@ -18,7 +18,7 @@ use chrono::Utc;
 use futures_util::TryStreamExt;
 use tokio::time::{sleep, Instant};
 
-use crate::config::ClickHouseConfig;
+use crate::config::{ClickHouseConfig, DockerCustomSettings};
 use crate::services::{
     local_docker::{
         collect_container_logs, inspect_container_status, list_managed_service_containers,
@@ -42,6 +42,7 @@ pub struct ClickHouseLocalProvider {
     user: String,
     password: Option<String>,
     client: Docker,
+    docker_settings: DockerCustomSettings,
 }
 
 impl ClickHouseLocalProvider {
@@ -49,6 +50,7 @@ impl ClickHouseLocalProvider {
         project_name: &str,
         service_name: &str,
         config: &ClickHouseConfig,
+        docker_settings: Option<&DockerCustomSettings>,
     ) -> anyhow::Result<Self> {
         let client =
             Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon. Is Docker installed and running? Check with: docker info")?;
@@ -72,6 +74,7 @@ impl ClickHouseLocalProvider {
             user: config.user.clone(),
             password: config.password.clone(),
             client,
+            docker_settings: docker_settings.cloned().unwrap_or_default(),
         })
     }
 
@@ -203,17 +206,28 @@ impl ClickHouseLocalProvider {
         labels.insert("devflow.service-type".to_string(), "clickhouse".to_string());
         labels.insert("devflow.workspace".to_string(), workspace_name.to_string());
 
-        let config = ContainerCreateBody {
+        let mut host_config = HostConfig {
+            binds: Some(vec![mount]),
+            port_bindings: Some(port_bindings),
+            ..Default::default()
+        };
+
+        let mut config = ContainerCreateBody {
             image: Some(self.image.clone()),
             env: Some(env),
             labels: Some(labels),
-            host_config: Some(HostConfig {
-                binds: Some(vec![mount]),
-                port_bindings: Some(port_bindings),
-                ..Default::default()
-            }),
             ..Default::default()
         };
+
+        if !self.docker_settings.is_empty() {
+            crate::docker::settings::apply_custom_settings(
+                &mut config,
+                &mut host_config,
+                &self.docker_settings,
+            );
+        }
+
+        config.host_config = Some(host_config);
 
         let options = CreateContainerOptions {
             name: Some(container_name.to_string()),

@@ -123,8 +123,8 @@ pub(crate) async fn run_add_service_wizard(
         }
     } else {
         use inquire::Text;
-        let default_name = if let Some((_, _, ref disc_name)) = discovered {
-            disc_name.as_str()
+        let default_name = if let Some(ref disc) = discovered {
+            disc.name.as_str()
         } else {
             match service_type.as_str() {
                 "clickhouse" => "analytics",
@@ -153,8 +153,8 @@ pub(crate) async fn run_add_service_wizard(
 
     let is_local = services::factory::ProviderType::is_local(&provider_type);
 
-    let discovered_image = discovered.as_ref().map(|(img, _, _)| img.clone());
-    let discovered_seed = discovered.as_ref().map(|(_, seed, _)| seed.clone());
+    let discovered_image = discovered.as_ref().map(|d| d.image.clone());
+    let discovered_seed = discovered.as_ref().map(|d| d.seed_url.clone());
 
     // Build named service config
     let named_cfg = devflow_core::config::NamedServiceConfig {
@@ -207,6 +207,9 @@ pub(crate) async fn run_add_service_wizard(
         },
         generic: None,
         plugin: None,
+        docker: discovered
+            .as_ref()
+            .and_then(|d| d.docker_settings.clone()),
     };
 
     // Store service in local state
@@ -379,6 +382,7 @@ pub(super) async fn handle_service_dispatch(
                     },
                     generic: None,
                     plugin: None,
+                    docker: None,
                 };
 
                 let mut state = LocalStateManager::new()?;
@@ -2146,14 +2150,22 @@ async fn handle_discover(
     Ok(())
 }
 
+/// Info extracted from a discovered Docker container during `service add`.
+pub(super) struct DiscoveredServiceInfo {
+    pub image: String,
+    pub seed_url: String,
+    pub name: String,
+    pub docker_settings: Option<devflow_core::config::DockerCustomSettings>,
+}
+
 /// Offer discovered Docker containers to the user during `service add` interactive wizard.
-/// Returns `(image, seed_url, name_suggestion)` if user picks a container, or `None` to skip.
+/// Returns `DiscoveredServiceInfo` if user picks a container, or `None` to skip.
 pub(super) async fn offer_discovered_containers(
     service_type: &str,
     project_root: Option<&Path>,
     non_interactive: bool,
     json_output: bool,
-) -> Option<(String, String, String)> {
+) -> Option<DiscoveredServiceInfo> {
     if non_interactive || json_output {
         return None;
     }
@@ -2202,7 +2214,24 @@ pub(super) async fn offer_discovered_containers(
                 c.container_name
                     .replace(|ch: char| !ch.is_alphanumeric() && ch != '-', "-")
             });
-            Some((c.image.clone(), c.connection_url.clone(), name))
+            let docker_settings = {
+                let settings = devflow_core::config::DockerCustomSettings {
+                    command: c.command.clone(),
+                    environment: c.extra_env.clone(),
+                    restart_policy: c.restart_policy.clone(),
+                };
+                if settings.is_empty() {
+                    None
+                } else {
+                    Some(settings)
+                }
+            };
+            Some(DiscoveredServiceInfo {
+                image: c.image.clone(),
+                seed_url: c.connection_url.clone(),
+                name,
+                docker_settings,
+            })
         }
         Err(_) => None,
     }

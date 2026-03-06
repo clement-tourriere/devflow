@@ -103,8 +103,13 @@ pub async fn create_provider_from_named_config(
                     named.name
                 )
             })?;
-            let provider = ClickHouseLocalProvider::new(&project_name, &named.name, ch_config)
-                .context("Failed to create ClickHouse provider")?;
+            let provider = ClickHouseLocalProvider::new(
+                &project_name,
+                &named.name,
+                ch_config,
+                named.docker.as_ref(),
+            )
+            .context("Failed to create ClickHouse provider")?;
             Ok(Box::new(provider))
         }
         #[cfg(not(feature = "service-local"))]
@@ -121,8 +126,13 @@ pub async fn create_provider_from_named_config(
                     named.service_type
                 )
             })?;
-            let provider = MySQLLocalProvider::new(&project_name, &named.name, mysql_config)
-                .context("Failed to create MySQL provider")?;
+            let provider = MySQLLocalProvider::new(
+                &project_name,
+                &named.name,
+                mysql_config,
+                named.docker.as_ref(),
+            )
+            .context("Failed to create MySQL provider")?;
             Ok(Box::new(provider))
         }
         #[cfg(not(feature = "service-local"))]
@@ -138,8 +148,13 @@ pub async fn create_provider_from_named_config(
                     named.name
                 )
             })?;
-            let provider = GenericDockerProvider::new(&project_name, &named.name, generic_config)
-                .context("Failed to create generic Docker provider")?;
+            let provider = GenericDockerProvider::new(
+                &project_name,
+                &named.name,
+                generic_config,
+                named.docker.as_ref(),
+            )
+            .context("Failed to create generic Docker provider")?;
             Ok(Box::new(provider))
         }
         #[cfg(not(feature = "service-local"))]
@@ -180,9 +195,10 @@ async fn create_postgres_provider(
         #[cfg(feature = "service-local")]
         ProviderType::Local => {
             let local_config = named.local.as_ref();
-            let provider = LocalProvider::new(&named.name, config, local_config)
-                .await
-                .context("Failed to create local provider")?;
+            let provider =
+                LocalProvider::new(&named.name, config, local_config, named.docker.as_ref())
+                    .await
+                    .context("Failed to create local provider")?;
             Ok(Box::new(provider))
         }
         #[cfg(feature = "service-neon")]

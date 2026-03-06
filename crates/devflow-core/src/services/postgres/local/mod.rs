@@ -18,7 +18,7 @@ use super::super::{
     ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceCapabilities, ServiceProvider,
     WorkspaceInfo,
 };
-use crate::config::{Config, LocalServiceConfig};
+use crate::config::{Config, DockerCustomSettings, LocalServiceConfig};
 use docker::{DockerRuntime, ReserveBranchSpec, StartBranchSpec};
 use model::BranchState;
 use state::{NewBranch, NewProject, Store};
@@ -42,6 +42,7 @@ pub struct LocalProvider {
     data_root: PathBuf,
     /// Canonical filesystem path of the project directory (for orphan detection).
     project_path: Option<String>,
+    docker_settings: DockerCustomSettings,
 }
 
 impl LocalProvider {
@@ -49,6 +50,7 @@ impl LocalProvider {
         service_name: &str,
         config: &Config,
         local_config: Option<&LocalServiceConfig>,
+        docker_settings: Option<&DockerCustomSettings>,
     ) -> Result<Self> {
         let image = local_config
             .and_then(|c| c.image.as_deref())
@@ -123,6 +125,7 @@ impl LocalProvider {
             storage,
             data_root,
             project_path,
+            docker_settings: docker_settings.cloned().unwrap_or_default(),
         })
     }
 
@@ -308,6 +311,7 @@ impl ServiceProvider for LocalProvider {
                 project_name: self.project_name.clone(),
                 service_name: self.service_name.clone(),
                 workspace_name: workspace_name.to_string(),
+                docker_settings: self.docker_settings.clone(),
             })
             .await?;
 
@@ -417,6 +421,7 @@ impl ServiceProvider for LocalProvider {
                     project_name: self.project_name.clone(),
                     service_name: self.service_name.clone(),
                     workspace_name: workspace_name.to_string(),
+                    docker_settings: self.docker_settings.clone(),
                 })
                 .await?;
 
@@ -479,6 +484,7 @@ impl ServiceProvider for LocalProvider {
                 project_name: self.project_name.clone(),
                 service_name: self.service_name.clone(),
                 workspace_name: workspace_name.to_string(),
+                docker_settings: self.docker_settings.clone(),
             })
             .await?;
 
@@ -585,6 +591,7 @@ impl ServiceProvider for LocalProvider {
                     project_name: self.project_name.clone(),
                     service_name: self.service_name.clone(),
                     workspace_name: workspace_name.to_string(),
+                    docker_settings: self.docker_settings.clone(),
                 })
                 .await?;
 

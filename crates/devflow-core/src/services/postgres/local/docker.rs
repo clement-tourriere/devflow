@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::{collections::HashSet, path::PathBuf, time::Duration};
 
+use crate::config::DockerCustomSettings;
+
 use anyhow::{anyhow, Context};
 use bollard::exec::StartExecOptions;
 use bollard::models::{
@@ -49,6 +51,7 @@ pub struct StartBranchSpec {
     pub project_name: String,
     pub service_name: String,
     pub workspace_name: String,
+    pub docker_settings: DockerCustomSettings,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -214,7 +217,13 @@ impl DockerRuntime {
         labels.insert("devflow.service-type".to_string(), "postgres".to_string());
         labels.insert("devflow.workspace".to_string(), spec.workspace_name.clone());
 
-        let config = ContainerCreateBody {
+        let mut host_config = HostConfig {
+            binds: Some(vec![mount]),
+            port_bindings: Some(port_bindings),
+            ..Default::default()
+        };
+
+        let mut config = ContainerCreateBody {
             image: Some(spec.image.clone()),
             user: get_host_uid_gid(),
             env: Some(vec![
@@ -223,13 +232,18 @@ impl DockerRuntime {
                 format!("POSTGRES_DB={}", spec.pg_db),
             ]),
             labels: Some(labels),
-            host_config: Some(HostConfig {
-                binds: Some(vec![mount]),
-                port_bindings: Some(port_bindings),
-                ..Default::default()
-            }),
             ..Default::default()
         };
+
+        if !spec.docker_settings.is_empty() {
+            crate::docker::settings::apply_custom_settings(
+                &mut config,
+                &mut host_config,
+                &spec.docker_settings,
+            );
+        }
+
+        config.host_config = Some(host_config);
 
         let options = CreateContainerOptions {
             name: Some(spec.container_name.clone()),

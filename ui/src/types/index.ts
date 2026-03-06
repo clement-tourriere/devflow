@@ -216,6 +216,9 @@ export interface DiscoveredContainer {
   is_compose: boolean;
   compose_project: string | null;
   compose_service: string | null;
+  command: string[];
+  extra_env: Record<string, string>;
+  restart_policy: string | null;
 }
 
 export interface AddServiceRequest {
@@ -225,6 +228,9 @@ export interface AddServiceRequest {
   auto_workspace?: boolean;
   image?: string;
   seed_from?: string;
+  docker_command?: string[];
+  docker_environment?: Record<string, string>;
+  docker_restart_policy?: string;
 }
 
 export interface AppSettings {

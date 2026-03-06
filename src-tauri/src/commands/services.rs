@@ -1,5 +1,6 @@
 use devflow_core::config::{
-    ClickHouseConfig, GenericDockerConfig, LocalServiceConfig, MySQLConfig, NamedServiceConfig,
+    ClickHouseConfig, DockerCustomSettings, GenericDockerConfig, LocalServiceConfig, MySQLConfig,
+    NamedServiceConfig,
 };
 use devflow_core::docker::discovery;
 use devflow_core::services;
@@ -30,6 +31,9 @@ pub struct AddServiceRequest {
     pub auto_workspace: Option<bool>,
     pub image: Option<String>,
     pub seed_from: Option<String>,
+    pub docker_command: Option<Vec<String>>,
+    pub docker_environment: Option<HashMap<String, String>>,
+    pub docker_restart_policy: Option<String>,
 }
 
 #[tauri::command]
@@ -103,6 +107,18 @@ fn build_named_config(request: &AddServiceRequest) -> Result<NamedServiceConfig,
         mysql: None,
         generic: None,
         plugin: None,
+        docker: {
+            let settings = DockerCustomSettings {
+                command: request.docker_command.clone().unwrap_or_default(),
+                environment: request.docker_environment.clone().unwrap_or_default(),
+                restart_policy: request.docker_restart_policy.clone(),
+            };
+            if settings.is_empty() {
+                None
+            } else {
+                Some(settings)
+            }
+        },
     };
 
     match request.service_type.as_str() {
@@ -702,6 +718,9 @@ pub struct DiscoveredContainerEntry {
     pub is_compose: bool,
     pub compose_project: Option<String>,
     pub compose_service: Option<String>,
+    pub command: Vec<String>,
+    pub extra_env: std::collections::HashMap<String, String>,
+    pub restart_policy: Option<String>,
 }
 
 #[tauri::command]
@@ -739,6 +758,9 @@ pub async fn discover_docker_containers(
             is_compose: c.is_compose,
             compose_project: c.compose_project,
             compose_service: c.compose_service,
+            command: c.command,
+            extra_env: HashMap::new(),
+            restart_policy: c.restart_policy,
         })
         .collect())
 }

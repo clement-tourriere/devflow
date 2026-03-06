@@ -85,6 +85,24 @@ pub struct NamedServiceConfig {
     pub generic: Option<GenericDockerConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin: Option<PluginConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker: Option<DockerCustomSettings>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DockerCustomSettings {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub environment: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_policy: Option<String>,
+}
+
+impl DockerCustomSettings {
+    pub fn is_empty(&self) -> bool {
+        self.command.is_empty() && self.environment.is_empty() && self.restart_policy.is_none()
+    }
 }
 
 fn default_provider_type() -> String {
@@ -278,9 +296,12 @@ pub struct AgentConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ExecuteConfig {
     /// Template for detached execution. Placeholders: {session}, {dir}, {cmd}
-    /// Default (when tmux available): "tmux new-session -d -s {session} -c {dir} sh -c {cmd}"
+    /// Default (when tmux available): "tmux new-session -d -s {session} -c {dir} {cmd}"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detach_command: Option<String>,
+    /// Preferred multiplexer: "tmux" or "zellij". Auto-detected if not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multiplexer: Option<String>,
 }
 
 /// Configuration for commit message generation.

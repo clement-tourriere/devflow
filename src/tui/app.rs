@@ -1014,6 +1014,7 @@ impl App {
                             },
                             generic: None,
                             plugin: None,
+                            docker: None,
                         };
 
                         let mut state = devflow_core::state::LocalStateManager::new()?;

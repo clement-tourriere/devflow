@@ -57,6 +57,12 @@ function AddServiceModal({
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  // Docker custom settings state
+  const [dockerCommand, setDockerCommand] = useState("");
+  const [dockerEnv, setDockerEnv] = useState("");
+  const [dockerRestartPolicy, setDockerRestartPolicy] = useState("");
+  const [dockerSettingsExpanded, setDockerSettingsExpanded] = useState(false);
+
   // Docker discovery state
   const [discoveredContainers, setDiscoveredContainers] = useState<DiscoveredContainer[]>([]);
   const [discoveryLoading, setDiscoveryLoading] = useState(false);
@@ -98,6 +104,10 @@ function AddServiceModal({
       setError(null);
       setSelectedDiscovery(null);
       setDiscoveryExpanded(true);
+      setDockerCommand("");
+      setDockerEnv("");
+      setDockerRestartPolicy("");
+      setDockerSettingsExpanded(false);
       runDiscovery("postgres");
     }
   }, [open, runDiscovery]);
@@ -108,6 +118,10 @@ function AddServiceModal({
       setImage(defaultImageForType(svcType));
       setSeed("");
       setName(defaultNameForType(svcType));
+      setDockerCommand("");
+      setDockerEnv("");
+      setDockerRestartPolicy("");
+      setDockerSettingsExpanded(false);
       return;
     }
     setSelectedDiscovery(container.container_id);
@@ -115,6 +129,15 @@ function AddServiceModal({
     setSeed(container.connection_url);
     const derivedName = container.compose_service || container.container_name.replace(/[^a-zA-Z0-9-]/g, "-");
     setName(derivedName);
+
+    // Pre-fill docker settings from discovered container (command + restart only, NOT env vars for safety)
+    const cmd = container.command.join(" ");
+    setDockerCommand(cmd);
+    setDockerEnv("");
+    setDockerRestartPolicy(container.restart_policy || "");
+    if (cmd || container.restart_policy) {
+      setDockerSettingsExpanded(true);
+    }
   };
 
   const handleServiceTypeChange = (type: string) => {
@@ -122,6 +145,10 @@ function AddServiceModal({
     setName(defaultNameForType(type));
     setImage(defaultImageForType(type));
     setSelectedDiscovery(null);
+    setDockerCommand("");
+    setDockerEnv("");
+    setDockerRestartPolicy("");
+    setDockerSettingsExpanded(false);
     if (type !== "postgres") {
       setProvider("local");
     }
@@ -140,6 +167,24 @@ function AddServiceModal({
     setError(null);
     setSubmitting(true);
     try {
+      // Parse docker settings
+      const cmdParts = dockerCommand.trim()
+        ? dockerCommand.trim().split(/\s+/)
+        : undefined;
+      const envMap = dockerEnv.trim()
+        ? Object.fromEntries(
+            dockerEnv
+              .trim()
+              .split("\n")
+              .filter((l) => l.includes("="))
+              .map((l) => {
+                const idx = l.indexOf("=");
+                return [l.slice(0, idx), l.slice(idx + 1)];
+              })
+          )
+        : undefined;
+      const restartPolicy = dockerRestartPolicy.trim() || undefined;
+
       const request: AddServiceRequest = {
         name: name.trim(),
         service_type: svcType,
@@ -147,6 +192,9 @@ function AddServiceModal({
         auto_workspace: autoWorkspace,
         image: image.trim() || undefined,
         seed_from: seed.trim() || undefined,
+        docker_command: cmdParts,
+        docker_environment: envMap,
+        docker_restart_policy: restartPolicy,
       };
       await onAdd(request);
       onClose();
@@ -256,6 +304,16 @@ function AddServiceModal({
                         {c.image} &middot; {c.host}:{c.port}
                         {c.username && <span> &middot; {c.username}</span>}
                       </div>
+                      {(c.command.length > 0 || c.restart_policy) && (
+                        <div style={{ color: "var(--text-muted)", fontSize: 11, marginTop: 2, display: "flex", flexWrap: "wrap", gap: "4px 10px" }}>
+                          {c.command.length > 0 && (
+                            <span title={c.command.join(" ")}>cmd: {c.command.join(" ").length > 40 ? c.command.join(" ").slice(0, 40) + "…" : c.command.join(" ")}</span>
+                          )}
+                          {c.restart_policy && (
+                            <span>restart: {c.restart_policy}</span>
+                          )}
+                        </div>
+                      )}
                     </button>
                   ))}
                 </div>
@@ -328,6 +386,85 @@ function AddServiceModal({
           style={{ width: "100%" }}
         />
       </div>
+
+      {/* Docker Settings (collapsible) */}
+      {(provider === "local" || svcType !== "postgres") && (
+        <div style={{ marginBottom: 16 }}>
+          <button
+            onClick={() => setDockerSettingsExpanded(!dockerSettingsExpanded)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              background: "none",
+              border: "none",
+              color: "var(--text-secondary)",
+              cursor: "pointer",
+              padding: 0,
+              fontSize: 13,
+              fontWeight: 500,
+              marginBottom: dockerSettingsExpanded ? 10 : 0,
+            }}
+          >
+            <span style={{ transform: dockerSettingsExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s", display: "inline-block" }}>&#9654;</span>
+            Docker Settings
+            {(dockerCommand.trim() || dockerEnv.trim() || dockerRestartPolicy.trim()) && (
+              <span style={{ background: "var(--accent)", color: "#fff", borderRadius: 10, padding: "1px 7px", fontSize: 11, fontWeight: 600, marginLeft: 4 }}>
+                customized
+              </span>
+            )}
+          </button>
+          {dockerSettingsExpanded && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingLeft: 2 }}>
+              <div>
+                <label style={{ display: "block", marginBottom: 4, fontSize: 12, color: "var(--text-muted)", fontWeight: 500 }}>
+                  Command
+                </label>
+                <input
+                  type="text"
+                  value={dockerCommand}
+                  onChange={(e) => setDockerCommand(e.target.value)}
+                  placeholder='e.g. postgres -c max_locks_per_transaction=256 -c fsync=off'
+                  style={{ width: "100%", fontSize: 13 }}
+                />
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+                  Overrides the default container entrypoint arguments.
+                </div>
+              </div>
+              <div>
+                <label style={{ display: "block", marginBottom: 4, fontSize: 12, color: "var(--text-muted)", fontWeight: 500 }}>
+                  Extra Environment Variables
+                </label>
+                <textarea
+                  value={dockerEnv}
+                  onChange={(e) => setDockerEnv(e.target.value)}
+                  placeholder={"POSTGRES_INITDB_ARGS=--no-locale\nCUSTOM_VAR=value"}
+                  rows={3}
+                  style={{ width: "100%", fontSize: 13, fontFamily: "monospace", resize: "vertical" }}
+                />
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+                  One KEY=VALUE per line. Added alongside default service variables.
+                </div>
+              </div>
+              <div>
+                <label style={{ display: "block", marginBottom: 4, fontSize: 12, color: "var(--text-muted)", fontWeight: 500 }}>
+                  Restart Policy
+                </label>
+                <select
+                  value={dockerRestartPolicy}
+                  onChange={(e) => setDockerRestartPolicy(e.target.value)}
+                  style={{ width: "100%", fontSize: 13 }}
+                >
+                  <option value="">None (default)</option>
+                  <option value="always">always</option>
+                  <option value="unless-stopped">unless-stopped</option>
+                  <option value="on-failure">on-failure</option>
+                </select>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Auto-workspace toggle */}
       <div style={{ marginBottom: 16 }}>
