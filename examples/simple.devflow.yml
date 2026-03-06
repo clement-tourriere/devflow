@@ -1,0 +1,39 @@
+# Simple devflow configuration
+# This example shows a minimal setup with a single local PostgreSQL service.
+# All sections are optional — even an empty file is valid.
+
+git:
+  auto_create_on_workspace: true
+  auto_switch_on_workspace: true
+  main_workspace: main
+  exclude_workspaces:
+    - main
+    - master
+
+behavior:
+  auto_cleanup: false
+  max_workspaces: 10
+  naming_strategy: prefix
+
+# Single service using modern services array syntax
+services:
+  - name: app-db
+    type: local
+    service_type: postgres
+    auto_workspace: true
+    default: true
+    local:
+      image: postgres:17
+
+# Update .env after workspace creation/switch
+hooks:
+  post-create:
+    update-env:
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
+      working_dir: "."
+    notify:
+      command: "echo 'Service environment ready for workspace {{ workspace }}!'"
+  post-switch:
+    update-env:
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
+      working_dir: "."

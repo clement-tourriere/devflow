@@ -1,0 +1,88 @@
+[tools]
+cargo = "latest"
+rust = "latest"
+
+[tasks.docs]
+description = "Serve documentation site locally"
+run = "open http://localhost:8787 & python3 -m http.server 8787 -d docs"
+
+[tasks.build]
+description = "Build the project (debug)"
+run = "cargo build"
+
+[tasks."build:release"]
+description = "Build the project (release, optimized)"
+run = "cargo build --release"
+
+[tasks.test]
+description = "Run all tests"
+run = "cargo test --workspace"
+
+[tasks.check]
+description = "Run cargo check (fast compile check)"
+run = "cargo check --workspace"
+
+[tasks.lint]
+description = "Run clippy lints"
+run = "cargo clippy --workspace -- -D warnings"
+
+[tasks.fmt]
+description = "Format code"
+run = "cargo fmt"
+
+[tasks."fmt:check"]
+description = "Check code formatting without modifying"
+run = "cargo fmt -- --check"
+
+[tasks.dev]
+description = "Build and run devflow (debug)"
+run = "cargo run --"
+raw = true
+
+[tasks.clean]
+description = "Clean build artifacts"
+run = "cargo clean"
+
+[tasks."generate-llms"]
+description = "Generate llms.txt and llms-full.txt from source"
+depends = ["build"]
+run = "./scripts/generate-llms-txt.sh"
+
+[tasks."generate-llms:check"]
+description = "Verify llms.txt files are up to date"
+depends = ["build"]
+run = "./scripts/generate-llms-txt.sh --check"
+
+[tasks."gui"]
+description = "Run the desktop GUI in development mode (hot-reload)"
+run = """
+(cd ui && bun install --frozen-lockfile 2>/dev/null || bun install)
+cargo tauri dev
+"""
+
+[tasks."gui:build"]
+description = "Build the desktop GUI for production"
+run = """
+(cd ui && bun install --frozen-lockfile 2>/dev/null || bun install)
+cargo tauri build
+"""
+
+[tasks."gui:install"]
+description = "Install frontend dependencies for the desktop GUI"
+run = "cd ui && bun install"
+
+[tasks.ci]
+description = "Run full CI pipeline (fmt check + clippy + test)"
+run = """
+cargo fmt -- --check
+cargo clippy --workspace -- -D warnings
+cargo test --workspace
+"""
+
+[tasks."release:dry-run"]
+description = "Preview next Commitizen release bump"
+run = "sh -c 'cz bump --dry-run --yes --allow-no-commit --increment PATCH || test $? -eq 3'"
+
+[tasks.release]
+description = "Create release commit, changelog, and tag via Commitizen"
+run = "cz bump --yes"

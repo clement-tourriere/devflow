@@ -1,0 +1,113 @@
+[workspace]
+members = [".", "crates/devflow-core", "crates/devflow-proxy", "crates/devflow-terminal", "src-tauri"]
+resolver = "2"
+
+[package]
+name = "devflow"
+version = "0.1.0"
+edition = "2021"
+description = "Universal development environment branching tool — worktrees, databases, and stateful services"
+authors = ["Clément Tourrière <clement.tourriere@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/clement-tourriere/devflow"
+
+[[bin]]
+name = "devflow"
+path = "src/main.rs"
+
+[features]
+default = ["service-local", "service-neon", "service-dblab", "service-xata", "llm", "tui"]
+tui = ["dep:ratatui", "dep:crossterm", "devflow-core/service-local"]
+service-local = ["devflow-core/service-local"]
+service-neon = ["devflow-core/service-neon"]
+service-dblab = ["devflow-core/service-dblab"]
+service-xata = ["devflow-core/service-xata"]
+llm = ["devflow-core/llm"]
+
+[dependencies]
+# Core library
+devflow-core = { path = "crates/devflow-core" }
+devflow-proxy = { path = "crates/devflow-proxy" }
+
+# CLI and argument parsing
+clap = { version = "4.5", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
+clap_complete = "4.5"
+
+# Serialization
+serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
+serde_yaml_ng = { version = "0.10", default-features = false }
+serde_json = "1.0"
+
+# Async runtime
+tokio = { version = "1.46", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "macros", "process", "fs"] }
+
+# Error handling
+anyhow = "1.0"
+
+# Async trait support
+async-trait = "0.1"
+
+# Text matching
+regex = { version = "1.11", default-features = false, features = ["std", "perf-cache"] }
+
+# Logging
+log = { version = "0.4", default-features = false, features = ["release_max_level_off"] }
+env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
+
+# Tool detection on PATH
+which = "8.0.0"
+
+# Password input
+rpassword = { version = "7.4", default-features = false }
+
+# Terminal UI for interactive selection
+inquire = { version = "0.9", default-features = false, features = ["crossterm"] }
+
+# Date/time handling
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# HTTP client (for proxy status queries)
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+
+# Ordered maps for deterministic hook execution
+indexmap = { version = "2", default-features = false, features = ["serde"] }
+
+# Cross-platform Copy-on-Write file copies (APFS clonefile, ioctl FICLONE, ReFS)
+reflink-copy = "0.1"
+
+# Work-stealing parallelism for directory copies
+rayon = "1.10"
+
+# Unix process signals (replace Command::new("kill"))
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", default-features = false, features = ["signal"] }
+
+# TUI framework
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"], optional = true }
+crossterm = { version = "0.28", default-features = false, features = ["events", "use-dev-tty"], optional = true }
+
+[profile.release]
+# Aggressive size optimization
+opt-level = "s"        # Optimize for size with better runtime performance than "z"
+lto = "fat"            # Fat Link Time Optimization for maximum size reduction
+codegen-units = 1      # Reduce parallel code generation units
+panic = "abort"        # Abort on panic instead of unwinding
+strip = true           # Strip symbols and debug info
+overflow-checks = false # Disable overflow checks for smaller binary
+debug-assertions = false # Disable debug assertions
+incremental = false    # Disable incremental compilation
+
+[profile.dev]
+# Keep development builds fast
+opt-level = 0
+debug = true
+split-debuginfo = "unpacked"  # Skip dsymutil on macOS, saves 1-5s per incremental build
+
+# Optimize heavy C/crypto deps in dev — these run slowly at opt-level 0
+# and never need debugging. No impact on incremental build times.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 1
+[profile.dev.package.ring]
+opt-level = 2
+[profile.dev.package.aws-lc-sys]
+opt-level = 2

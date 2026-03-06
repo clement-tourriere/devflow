@@ -1,0 +1,49 @@
+[package]
+name = "devflow-proxy"
+version = "0.1.0"
+edition = "2021"
+description = "Native reverse proxy for devflow — auto-discovers Docker containers and provides HTTPS access"
+authors = ["Clément Tourrière <clement.tourriere@gmail.com>"]
+license = "MIT"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.46", features = ["rt-multi-thread", "net", "time", "macros", "process", "fs", "signal", "sync", "io-util"] }
+
+# HTTP server & reverse proxy
+hyper = { version = "1.5", features = ["full"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "server-graceful", "http1", "http2"] }
+http-body-util = "0.1"
+bytes = "1"
+
+# TLS
+tokio-rustls = "0.26"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2.0"
+
+# Certificate generation
+rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+time = "0.3"
+
+# Docker API
+bollard = { version = "0.20", default-features = false, features = ["ssl"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+
+# Logging
+log = { version = "0.4", features = ["release_max_level_off"] }
+
+# File system paths
+dirs = "6.0"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3.20"

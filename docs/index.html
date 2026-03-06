@@ -1,0 +1,3545 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>devflow — Universal Development Environment Tool</title>
+<meta name="description" content="Branch your code, branch everything else too. devflow gives every Git branch its own databases, caches, and services — cloned instantly via Copy-on-Write.">
+<link rel="icon" type="image/png" href="icon.png">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" id="hljs-light">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" id="hljs-dark" disabled>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/yaml.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/rust.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+<style>
+/* ===== CSS Custom Properties (Light Theme) ===== */
+:root {
+  --bg: #ffffff;
+  --bg-alt: #f6f8fa;
+  --bg-sidebar: #f0f2f5;
+  --bg-code: #f6f8fa;
+  --bg-hero: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
+  --text: #1a1a2e;
+  --text-secondary: #555e6e;
+  --text-muted: #8892a4;
+  --text-hero: #f1f5f9;
+  --border: #e2e8f0;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --accent-light: #dbeafe;
+  --accent-bg: #eff6ff;
+  --green: #10b981;
+  --green-bg: #ecfdf5;
+  --orange: #f59e0b;
+  --orange-bg: #fffbeb;
+  --red: #ef4444;
+  --red-bg: #fef2f2;
+  --purple: #8b5cf6;
+  --purple-bg: #f5f3ff;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05);
+  --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.05);
+  --radius: 8px;
+  --sidebar-width: 280px;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", Menlo, Monaco, Consolas, monospace;
+}
+
+/* ===== Dark Theme ===== */
+[data-theme="dark"] {
+  --bg: #0f172a;
+  --bg-alt: #1e293b;
+  --bg-sidebar: #1a2235;
+  --bg-code: #1e293b;
+  --bg-hero: linear-gradient(135deg, #020617 0%, #0f172a 50%, #1e293b 100%);
+  --text: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --text-hero: #f1f5f9;
+  --border: #334155;
+  --accent: #60a5fa;
+  --accent-hover: #93bbfd;
+  --accent-light: #1e3a5f;
+  --accent-bg: #172554;
+  --green: #34d399;
+  --green-bg: #064e3b;
+  --orange: #fbbf24;
+  --orange-bg: #78350f;
+  --red: #f87171;
+  --red-bg: #7f1d1d;
+  --purple: #a78bfa;
+  --purple-bg: #4c1d95;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+  --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.4);
+  --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.5);
+}
+
+/* ===== Reset & Base ===== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+body {
+  font-family: var(--font-sans);
+  color: var(--text);
+  background: var(--bg);
+  line-height: 1.7;
+  font-size: 16px;
+  transition: background 0.3s, color 0.3s;
+}
+
+/* ===== Scrollbar ===== */
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: var(--bg-alt); }
+::-webkit-scrollbar-thumb { background: var(--text-muted); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+
+/* ===== Layout ===== */
+.sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: var(--sidebar-width);
+  height: 100vh;
+  overflow-y: auto;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+  padding: 20px 0;
+  z-index: 100;
+  transition: transform 0.3s, background 0.3s;
+}
+.sidebar-header {
+  padding: 8px 24px 20px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+.sidebar-header h2 {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: -0.3px;
+}
+.sidebar-header .version {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.sidebar nav { padding: 0 12px; }
+.sidebar nav a {
+  display: block;
+  padding: 6px 12px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 14px;
+  border-radius: 6px;
+  transition: all 0.15s;
+  line-height: 1.5;
+}
+.sidebar nav a:hover {
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+.sidebar nav a.active {
+  color: var(--accent);
+  background: var(--accent-bg);
+  font-weight: 600;
+}
+.sidebar nav .nav-group {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-muted);
+  padding: 16px 12px 6px;
+}
+.sidebar nav .nav-sub {
+  padding-left: 24px;
+  font-size: 13px;
+}
+
+.main {
+  margin-left: var(--sidebar-width);
+  min-height: 100vh;
+}
+
+/* ===== Theme Toggle ===== */
+.theme-toggle {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 200;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  transition: all 0.2s;
+  box-shadow: var(--shadow-md);
+}
+.theme-toggle:hover {
+  transform: scale(1.1);
+  box-shadow: var(--shadow-lg);
+}
+
+/* ===== Mobile Toggle ===== */
+.mobile-toggle {
+  display: none;
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  z-index: 200;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  width: 40px;
+  height: 40px;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  box-shadow: var(--shadow-md);
+}
+
+/* ===== Hero ===== */
+.hero {
+  background: var(--bg-hero);
+  color: var(--text-hero);
+  padding: 80px 60px 60px;
+  position: relative;
+  overflow: hidden;
+}
+.hero::after {
+  content: '';
+  position: absolute;
+  top: -50%;
+  right: -20%;
+  width: 600px;
+  height: 600px;
+  background: radial-gradient(circle, rgba(59,130,246,0.08) 0%, transparent 70%);
+  pointer-events: none;
+}
+.hero h1 {
+  font-size: 48px;
+  font-weight: 800;
+  letter-spacing: -1.5px;
+  line-height: 1.1;
+  margin-bottom: 16px;
+}
+.hero h1 span { color: var(--accent); }
+.hero .tagline {
+  font-size: 20px;
+  color: #94a3b8;
+  max-width: 600px;
+  margin-bottom: 32px;
+  line-height: 1.5;
+}
+.hero-features {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+  margin-bottom: 40px;
+}
+.hero-feature {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 15px;
+  color: #cbd5e1;
+}
+.hero-feature .icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.hero-feature .icon.blue { background: rgba(59,130,246,0.2); }
+.hero-feature .icon.green { background: rgba(16,185,129,0.2); }
+.hero-feature .icon.purple { background: rgba(139,92,246,0.2); }
+.hero-feature .icon.orange { background: rgba(245,158,11,0.2); }
+.hero-install {
+  background: rgba(0,0,0,0.3);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  max-width: 560px;
+  color: #e2e8f0;
+  line-height: 1.8;
+  position: relative;
+}
+.hero-install .comment { color: #64748b; }
+.hero-install .cmd { color: #60a5fa; }
+
+/* ===== Content Sections ===== */
+.section {
+  padding: 60px;
+  border-bottom: 1px solid var(--border);
+}
+.section:last-child { border-bottom: none; }
+.section h2 {
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+.section h2 .number {
+  color: var(--accent);
+  font-weight: 800;
+  margin-right: 8px;
+}
+.section .section-desc {
+  font-size: 17px;
+  color: var(--text-secondary);
+  margin-bottom: 36px;
+  max-width: 700px;
+}
+.section h3 {
+  font-size: 22px;
+  font-weight: 600;
+  margin-top: 40px;
+  margin-bottom: 12px;
+  color: var(--text);
+  padding-top: 8px;
+}
+.section h4 {
+  font-size: 17px;
+  font-weight: 600;
+  margin-top: 28px;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+.section p {
+  margin-bottom: 16px;
+  max-width: 780px;
+}
+.section ul, .section ol {
+  margin-bottom: 16px;
+  padding-left: 24px;
+  max-width: 780px;
+}
+.section li { margin-bottom: 6px; }
+
+/* ===== Code Blocks ===== */
+pre {
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  overflow-x: auto;
+  margin-bottom: 20px;
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+pre code {
+  font-family: var(--font-mono);
+  background: none;
+  padding: 0;
+  border: none;
+  font-size: inherit;
+}
+code {
+  font-family: var(--font-mono);
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 0.9em;
+}
+pre code { border: none; padding: 0; }
+
+/* ===== Tables ===== */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 24px;
+  font-size: 14px;
+}
+th, td {
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+th {
+  background: var(--bg-alt);
+  font-weight: 600;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+}
+tr:hover td { background: var(--bg-alt); }
+
+/* ===== Callouts ===== */
+.callout {
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  margin-bottom: 20px;
+  font-size: 14px;
+  line-height: 1.6;
+  display: flex;
+  gap: 12px;
+}
+.callout .callout-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.callout-info { background: var(--accent-bg); border-left: 3px solid var(--accent); }
+.callout-success { background: var(--green-bg); border-left: 3px solid var(--green); }
+.callout-warning { background: var(--orange-bg); border-left: 3px solid var(--orange); }
+.callout-danger { background: var(--red-bg); border-left: 3px solid var(--red); }
+
+/* ===== Badges ===== */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  letter-spacing: 0.3px;
+}
+.badge-blue { background: var(--accent-bg); color: var(--accent); border: 1px solid var(--accent); }
+.badge-green { background: var(--green-bg); color: var(--green); border: 1px solid var(--green); }
+.badge-orange { background: var(--orange-bg); color: var(--orange); border: 1px solid var(--orange); }
+.badge-purple { background: var(--purple-bg); color: var(--purple); border: 1px solid var(--purple); }
+.badge-red { background: var(--red-bg); color: var(--red); border: 1px solid var(--red); }
+
+/* ===== Cards ===== */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.card {
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  transition: box-shadow 0.2s, transform 0.2s;
+}
+.card:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+.card h4 {
+  margin-top: 0;
+  margin-bottom: 8px;
+  font-size: 16px;
+}
+.card p {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 0;
+}
+
+/* ===== Steps ===== */
+.steps { counter-reset: step; margin-bottom: 24px; }
+.step {
+  position: relative;
+  padding-left: 48px;
+  margin-bottom: 24px;
+  counter-increment: step;
+}
+.step::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: white;
+  font-weight: 700;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.step h4 { margin-top: 4px; }
+
+/* ===== Architecture Diagram ===== */
+.diagram {
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  margin-bottom: 24px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+/* ===== Config Example Block ===== */
+.config-field {
+  margin-bottom: 12px;
+  padding: 12px 16px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.config-field .field-name {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--accent);
+  font-size: 14px;
+}
+.config-field .field-type {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-left: 8px;
+}
+.config-field .field-default {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--green);
+  margin-left: 8px;
+}
+.config-field .field-desc {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+/* ===== Responsive ===== */
+@media (max-width: 900px) {
+  .sidebar { transform: translateX(-100%); }
+  .sidebar.open { transform: translateX(0); }
+  .main { margin-left: 0; }
+  .mobile-toggle { display: flex; }
+  .hero { padding: 60px 24px 40px; }
+  .hero h1 { font-size: 32px; }
+  .section { padding: 40px 24px; }
+  .hero-features { grid-template-columns: 1fr; }
+}
+@media (max-width: 600px) {
+  .card-grid { grid-template-columns: 1fr; }
+  table { font-size: 12px; }
+  th, td { padding: 8px 10px; }
+}
+
+/* ===== Footer ===== */
+.footer {
+  padding: 40px 60px;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 14px;
+  text-align: center;
+}
+.footer a { color: var(--accent); text-decoration: none; }
+.footer a:hover { text-decoration: underline; }
+
+/* ===== Utility ===== */
+a { color: var(--accent); }
+a:hover { color: var(--accent-hover); }
+strong { font-weight: 600; }
+hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 32px 0;
+}
+.mt-0 { margin-top: 0; }
+.mb-0 { margin-bottom: 0; }
+.text-muted { color: var(--text-muted); }
+.text-sm { font-size: 14px; }
+.flex { display: flex; }
+.gap-2 { gap: 8px; }
+.flex-wrap { flex-wrap: wrap; }
+</style>
+</head>
+<body>
+
+<!-- Mobile sidebar toggle -->
+<button class="mobile-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle navigation">&#9776;</button>
+
+<!-- Theme toggle -->
+<button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle dark mode" title="Toggle dark mode">&#9790;</button>
+
+<!-- ===== SIDEBAR ===== -->
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>devflow</h2>
+    <div class="version">v0.1.0 &middot; MIT License</div>
+  </div>
+  <nav>
+    <a href="#hero">Home</a>
+
+    <div class="nav-group">Getting Started</div>
+    <a href="#getting-started">Quick Start</a>
+    <a href="#installation" class="nav-sub">Installation</a>
+    <a href="#adding-services" class="nav-sub">Adding Services</a>
+    <a href="#shell-integration" class="nav-sub">Shell Integration</a>
+    <a href="#existing-project" class="nav-sub">Existing Project</a>
+    <a href="#mise" class="nav-sub">Using mise</a>
+
+    <div class="nav-group">Concepts</div>
+    <a href="#core-concepts">Core Concepts</a>
+    <a href="#cow-storage" class="nav-sub">Copy-on-Write Storage</a>
+    <a href="#service-lifecycle" class="nav-sub">Service Lifecycle</a>
+
+    <div class="nav-group">Configuration</div>
+    <a href="#configuration">Configuration</a>
+    <a href="#config-hierarchy" class="nav-sub">Config Hierarchy</a>
+    <a href="#config-schema" class="nav-sub">Full Schema</a>
+    <a href="#env-vars" class="nav-sub">Environment Variables</a>
+
+    <div class="nav-group">Providers</div>
+    <a href="#providers">Providers</a>
+    <a href="#provider-local" class="nav-sub">Local Docker</a>
+    <a href="#provider-template" class="nav-sub">PostgreSQL Template</a>
+    <a href="#provider-neon" class="nav-sub">Neon</a>
+    <a href="#provider-dblab" class="nav-sub">DBLab</a>
+    <a href="#provider-xata" class="nav-sub">Xata</a>
+    <a href="#provider-plugin" class="nav-sub">Plugin</a>
+
+    <div class="nav-group">Features</div>
+    <a href="#services">Services</a>
+    <a href="#worktrees">Worktrees</a>
+    <a href="#hooks">Hooks</a>
+    <a href="#seeding">Seeding</a>
+    <a href="#reverse-proxy">Reverse Proxy</a>
+    <a href="#desktop-gui">Desktop GUI</a>
+    <a href="#tui-dashboard">TUI Dashboard</a>
+    <a href="#ai-automation">AI &amp; Automation</a>
+    <a href="#agent-skills" class="nav-sub">Agent Skills</a>
+    <a href="#agent-integration" class="nav-sub">Agent Integration</a>
+    <a href="#vcs-support">VCS Support</a>
+
+    <div class="nav-group">Reference</div>
+    <a href="#cli-reference">CLI Reference</a>
+    <a href="#examples">Examples &amp; Recipes</a>
+    <a href="#troubleshooting">Troubleshooting</a>
+  </nav>
+</aside>
+
+<!-- ===== MAIN CONTENT ===== -->
+<div class="main">
+
+<!-- ===== HERO ===== -->
+<section class="hero" id="hero">
+  <img src="banner.jpg" alt="devflow" style="max-width: 420px; width: 100%; margin-bottom: 24px; border-radius: 12px;" />
+  <h1>Branch your code.<br><span>Branch everything else too.</span></h1>
+  <p class="tagline">
+    devflow gives every branch its own databases, caches, and services &mdash; cloned instantly via Copy-on-Write.
+    Switch branches and your entire stack switches with you, automatically.
+  </p>
+
+  <div class="hero-features">
+    <div class="hero-feature">
+      <div class="icon blue"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div>
+      <div><strong>Automatic</strong><br>Git hooks sync your entire stack on checkout</div>
+    </div>
+    <div class="hero-feature">
+      <div class="icon green"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
+      <div><strong>Instant</strong><br>Copy-on-Write &mdash; clone a 50 GB database in seconds</div>
+    </div>
+    <div class="hero-feature">
+      <div class="icon purple"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></div>
+      <div><strong>Multi-Service</strong><br>Postgres, ClickHouse, MySQL, Redis &mdash; local, cloud, or plugin</div>
+    </div>
+    <div class="hero-feature">
+      <div class="icon purple"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></div>
+      <div><strong>CLI, TUI &amp; GUI</strong><br><a href="#tui-dashboard" style="color: var(--purple); text-decoration: underline;">Terminal dashboard</a>, <a href="#desktop-gui" style="color: var(--purple); text-decoration: underline;">desktop app</a>, or plain command line</div>
+    </div>
+    <div class="hero-feature">
+      <div class="icon green"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg></div>
+      <div><strong>AI-Ready</strong><br>Agent <a href="#agent-skills" style="color: var(--green); text-decoration: underline;">skills</a> for Claude Code, Cursor &amp; OpenCode</div>
+    </div>
+    <div class="hero-feature">
+      <div class="icon orange"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></div>
+      <div><strong>Hooks &amp; Plugins</strong><br>MiniJinja lifecycle hooks, custom providers, reverse proxy</div>
+    </div>
+  </div>
+
+  <div class="hero-install">
+    <span class="comment"># Install and get started in 30 seconds</span><br>
+    <span class="cmd">cargo install</span> --git https://github.com/clement-tourriere/devflow.git<br>
+    <span class="cmd">cd</span> ~/my-project<br>
+    <span class="cmd">devflow init</span><br>
+    <span class="cmd">devflow switch</span> -c feature/my-feature
+  </div>
+</section>
+
+<!-- ================================================================== -->
+<!-- GETTING STARTED                                                     -->
+<!-- ================================================================== -->
+<section class="section" id="getting-started">
+  <h2><span class="number">01</span> Getting Started</h2>
+  <p class="section-desc">
+    Get from zero to isolated workspace environments in minutes. This section covers installation, your first workspace, and automatic Git integration.
+  </p>
+
+  <div class="callout callout-info">
+    <span class="callout-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></span>
+    <div><strong>Prefer a graphical interface?</strong> devflow ships with a <a href="#desktop-gui">Desktop GUI</a> (Tauri + React) that lets you manage projects, workspaces, services, and hooks without the command line. Install it with <code>mise run gui:build</code>, or run <code>mise run gui</code> for dev mode. You can also use the <a href="#tui-dashboard">TUI dashboard</a> (<code>devflow tui</code>) for a keyboard-driven terminal UI.</div>
+  </div>
+
+  <h3 id="quick-start">Quick Start (CLI)</h3>
+  <div class="steps">
+    <div class="step">
+      <h4>Step 1: Initialize</h4>
+      <p>Navigate to your Git repository and run <code>devflow init</code>. The interactive wizard sets up your config and installs Git hooks automatically.</p>
+<pre><code class="language-bash">cd ~/my-project
+devflow init</code></pre>
+      <p>This creates a <code>.devflow.yml</code> config file and installs Git hooks for automatic workspace switching.</p>
+    </div>
+
+    <div class="step">
+      <h4>Step 2: Create a workspace</h4>
+      <p>Create your first isolated workspace. devflow clones your services instantly using Copy-on-Write storage.</p>
+<pre><code class="language-bash">devflow switch -c feature/my-feature</code></pre>
+      <p>You can also use Git directly &mdash; <code>git checkout -b feature/my-feature</code> triggers the same flow via the hooks that <code>devflow init</code> installed. If you skipped hook installation during init (or used <code>--non-interactive</code>), run <code>devflow install-hooks</code> first.</p>
+    </div>
+
+    <div class="step">
+      <h4>Step 3: Develop, switch, repeat</h4>
+      <p>Make changes in isolation. When you switch branches, your services switch with you automatically.</p>
+<pre><code class="language-bash"># Work on your feature...
+npm run migrate
+npm test
+
+# Switch back to main — your services switch automatically
+git checkout main
+
+# See all your workspaces
+devflow list</code></pre>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong>What is a workspace?</strong>
+    <p>A workspace is a named environment (usually matching a Git branch) that bundles its own isolated copies of every service you've configured &mdash; databases, caches, queues, or any Docker container. When you <code>git checkout feature/auth</code>, devflow pauses the current services and starts the ones for <code>feature/auth</code>, so your data never leaks between branches. Workspaces are created instantly via Copy-on-Write &mdash; even a 50 GB database is cloned in under a second.</p>
+  </div>
+
+  <h3 id="installation">Installation</h3>
+
+  <h4>Requirements</h4>
+  <ul>
+    <li><strong><a href="https://mise.jdx.dev">mise</a></strong> &mdash; manages the Rust toolchain automatically (or install Rust 1.70+ manually)</li>
+    <li><strong>Docker</strong> &mdash; for local services (<a href="https://www.docker.com/products/docker-desktop/">Docker Desktop</a> or <a href="https://orbstack.dev">OrbStack</a> on macOS, <code>docker.io</code> on Linux)</li>
+    <li><strong>Git</strong> &mdash; any recent version</li>
+  </ul>
+
+  <h4>macOS</h4>
+  <p>No special setup needed. APFS cloning is used automatically for Copy-on-Write storage.</p>
+<pre><code class="language-bash"># Build and install devflow
+git clone https://github.com/clement-tourriere/devflow.git
+cd devflow
+mise trust && mise install   # installs the Rust toolchain
+cargo install --path .</code></pre>
+
+  <h4>Ubuntu / Debian</h4>
+<pre><code class="language-bash"># Install Docker
+sudo apt-get update
+sudo apt-get install -y docker.io
+sudo usermod -aG docker $USER
+newgrp docker
+
+# Build and install devflow
+git clone https://github.com/clement-tourriere/devflow.git
+cd devflow
+mise trust && mise install   # installs the Rust toolchain
+cargo install --path .</code></pre>
+
+  <h4>Optional: ZFS on Linux (for instant branching)</h4>
+  <p>If you're on ext4 (the default) and want near-instant Copy-on-Write branching:</p>
+<pre><code class="language-bash"># Install ZFS tools
+sudo apt-get install -y zfsutils-linux
+
+# Let devflow create a file-backed pool (recommended)
+devflow setup-zfs                    # 10G pool named "devflow"
+devflow setup-zfs --size 20G         # Custom size
+devflow setup-zfs --pool-name mypool # Custom name</code></pre>
+
+  <h4>Verify installation</h4>
+<pre><code class="language-bash">devflow --help
+devflow doctor</code></pre>
+
+  <!-- Adding Services -->
+  <h3 id="adding-services">Adding Services (optional)</h3>
+  <p>By default, <code>devflow init</code> asks you to add services. You can also add or change them at any time with <code>devflow service add</code>.</p>
+
+  <div class="steps">
+    <div class="step">
+      <h4>Add a database</h4>
+      <p>Use the interactive wizard, or pass flags directly:</p>
+<pre><code class="language-bash"># Interactive — walks you through service type, provider, and name
+devflow service add app-db
+
+# Or specify everything on the command line
+devflow service add app-db --provider local --service-type postgres</code></pre>
+    </div>
+
+    <div class="step">
+      <h4>Seed from existing data (optional)</h4>
+      <p>If you have existing schema or data you want every workspace to inherit:</p>
+<pre><code class="language-bash"># Seed from a running PostgreSQL instance
+devflow service add app-db --provider local --service-type postgres \
+  --from postgresql://user:pass@localhost:5432/myapp
+
+# Or seed from a SQL dump file
+devflow service add app-db --provider local --service-type postgres \
+  --from ./backup.sql</code></pre>
+      <p>Every workspace created from main automatically inherits this data via Copy-on-Write &mdash; no extra copies needed.</p>
+    </div>
+
+    <div class="step">
+      <h4>Check connection info</h4>
+<pre><code class="language-bash"># Get connection string
+devflow connection main
+# → postgresql://postgres:postgres@localhost:55432/myapp
+
+# Or export as environment variable
+eval $(devflow connection main --format env)
+# → sets DATABASE_URL=postgresql://...</code></pre>
+    </div>
+  </div>
+
+  <!-- Shell Integration -->
+  <h3 id="shell-integration">Shell Integration</h3>
+  <p>devflow emits <code>DEVFLOW_CD=&lt;path&gt;</code> on context-changing commands (for example <code>switch</code>, <code>init &lt;dir&gt;</code>, and TUI open with <code>o</code>). To auto-<code>cd</code>, add the shell wrapper to your profile:</p>
+
+<pre><code class="language-bash"># Bash (~/.bashrc)
+eval "$(devflow shell-init bash)"
+
+# Zsh (~/.zshrc)
+eval "$(devflow shell-init zsh)"
+
+# Fish (~/.config/fish/config.fish)
+devflow shell-init fish | source
+
+# Auto-detect shell
+eval "$(devflow shell-init)"</code></pre>
+
+  <p>The wrapper detects <code>DEVFLOW_CD=&lt;path&gt;</code> directives and automatically changes your working directory in the parent shell.</p>
+
+  <!-- Existing Project -->
+  <h3 id="existing-project">Adding devflow to an Existing Project</h3>
+  <p>
+    Already have a project with a running database? devflow can adopt it. Here's how to add workspace-isolated services to an existing codebase.
+  </p>
+
+  <div class="steps">
+    <div class="step">
+      <h4>Initialize in your existing repo</h4>
+      <p>Navigate to your project's Git repository root and run <code>devflow init</code>. Then add a service with <code>devflow service add</code>. The interactive wizard walks you through service type, provider, and name selection.</p>
+<pre><code class="language-bash">cd ~/my-existing-project
+devflow init
+devflow service add app-db --provider local --service-type postgres</code></pre>
+      <p>This creates a <code>.devflow.yml</code> config file and starts a fresh "main" service workspace. If you already have a <code>.devflow.yml</code>, use <code>--force</code> to overwrite:</p>
+<pre><code class="language-bash">devflow init --force</code></pre>
+    </div>
+
+    <div class="step">
+      <h4>Seed from your existing database</h4>
+      <p>If you have existing schema/data you want to keep, seed when adding the service:</p>
+<pre><code class="language-bash"># Seed from a running PostgreSQL instance
+devflow service add app-db --provider local --service-type postgres --from postgresql://user:pass@localhost:5432/myapp
+
+# Or seed from a SQL dump file
+devflow service add app-db --provider local --service-type postgres --from ./backup.sql
+
+# Or seed from an S3 backup
+devflow service add app-db --provider local --service-type postgres --from s3://my-backups/postgres/latest.dump</code></pre>
+      <p>Every workspace created from main will automatically inherit this data via Copy-on-Write &mdash; no extra copies needed.</p>
+    </div>
+
+    <div class="step">
+      <h4>Add local overrides (optional)</h4>
+      <p>If team members need different settings (ports, images, credentials), create a <code>.devflow.local.yml</code> next to <code>.devflow.yml</code>. This file is merged on top of the main config and should be gitignored.</p>
+<pre><code class="language-yaml"># .devflow.local.yml — personal overrides, not committed
+services:
+  - name: app-db
+    local:
+      port_range_start: 60000    # Avoid conflicts with your local PG</code></pre>
+<pre><code class="language-bash"># Add to .gitignore
+echo ".devflow.local.yml" >> .gitignore</code></pre>
+    </div>
+
+    <div class="step">
+      <h4>Verify your setup</h4>
+<pre><code class="language-bash">devflow doctor</code></pre>
+      <p><code>devflow doctor</code> checks your config, Docker, Git hooks, storage driver, and connectivity. Fix any issues it reports before continuing.</p>
+    </div>
+
+    <div class="step">
+      <h4>Update your app's connection string</h4>
+      <p>Point your application at the devflow-managed database instead of your manually-managed one. Use <code>devflow connection</code> to get the new connection info:</p>
+<pre><code class="language-bash"># Get connection string
+devflow connection main
+# → postgresql://postgres:postgres@localhost:55432/myapp
+
+# Or export as environment variable
+eval $(devflow connection main --format env)
+# → sets DATABASE_URL=postgresql://...</code></pre>
+      <p>Update your <code>.env</code>, <code>settings.py</code>, <code>database.yml</code>, or equivalent to use this URL. From now on, devflow manages your database lifecycle.</p>
+    </div>
+
+    <div class="step">
+      <h4>Start branching</h4>
+      <p>You're set. Create a feature workspace and devflow handles the rest:</p>
+<pre><code class="language-bash">git checkout -b feature/new-schema
+# → devflow automatically creates an isolated database clone
+
+# Run your migrations safely — they only affect this workspace
+npm run migrate   # or: python manage.py migrate / rails db:migrate
+
+# Switch back — main database is untouched
+git checkout main</code></pre>
+    </div>
+  </div>
+
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div><strong>Framework examples:</strong> See the <a href="#examples">Examples &amp; Recipes</a> section for framework-specific walkthroughs (Django, Rails, Node.js/Prisma) including migration hooks and Docker Compose integration.</div>
+  </div>
+
+  <!-- mise -->
+  <h3 id="mise">Using mise as a Task Runner</h3>
+  <p>
+    <a href="https://mise.jdx.dev">mise</a> is a polyglot dev tool manager and task runner. devflow ships with a <code>mise.toml</code> that provides pre-configured tasks for building, testing, and serving documentation. If you use mise, it also manages your Rust and Cargo toolchain automatically.
+  </p>
+
+  <h4>Install mise</h4>
+<pre><code class="language-bash"># macOS
+brew install mise
+
+# Linux
+curl https://mise.jdx.dev/install.sh | sh
+
+# Then activate (add to your shell profile)
+eval "$(mise activate bash)"   # or zsh/fish</code></pre>
+
+  <h4>Available tasks</h4>
+  <table>
+    <thead>
+      <tr><th>Command</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>mise run build</code></td><td>Build devflow (debug mode)</td></tr>
+      <tr><td><code>mise run build:release</code></td><td>Build devflow (optimized release)</td></tr>
+      <tr><td><code>mise run test</code></td><td>Run all tests</td></tr>
+      <tr><td><code>mise run lint</code></td><td>Run clippy lints</td></tr>
+      <tr><td><code>mise run fmt</code></td><td>Format code</td></tr>
+      <tr><td><code>mise run docs</code></td><td>Serve documentation site locally at <code>localhost:8787</code></td></tr>
+      <tr><td><code>mise run ci</code></td><td>Run the full CI pipeline (fmt + clippy + test)</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-success">
+    <span class="callout-icon">&#10003;</span>
+    <div>With mise, new contributors can get started with just <code>mise install && mise run build</code> &mdash; no need to manually install Rust or configure toolchains.</div>
+  </div>
+
+</section>
+
+<!-- ================================================================== -->
+<!-- CORE CONCEPTS                                                       -->
+<!-- ================================================================== -->
+<section class="section" id="core-concepts">
+  <h2><span class="number">02</span> Core Concepts</h2>
+  <p class="section-desc">
+    Understand how devflow workspaces your development environment and the architecture behind instant, isolated environment branching.
+  </p>
+
+  <h3>How Branching Works</h3>
+
+  <div class="diagram">        ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+        │  Desktop GUI │  │     TUI      │  │     CLI      │
+        │ (Tauri+React)│  │  (ratatui)   │  │  (clap)      │
+        └──────┬───────┘  └──────┬───────┘  └──────┬───────┘
+               └─────────────────┼─────────────────┘
+                                 ▼
+       ┌─────────────────────────────────────────────────────┐
+       │                    devflow-core                     │
+       ├─────────────────────────────────────────────────────┤
+       │                    Hook Engine                      │
+       │   (MiniJinja templates, conditions, approvals)      │
+       ├──────────────┬──────────────────────────────────────┤
+       │  VCS Layer   │           Service Layer              │
+       │              │                                      │
+       │ ┌─────────┐  │  ┌──────────────────────────────┐    │
+       │ │  Git    │  │  │    ServiceProvider trait     │    │
+       │ │workspace│  │  │  (create/delete/switch/      │    │
+       │ │    +    │  │  │   connect/start/stop)        │    │
+       │ │ worktree│  │  ├───────┬───────┬──────────────┤    │
+       │ ├─────────┤  │  │Postgre│Click- │MySQL/        │    │
+       │ │   jj    │  │  │SQL    │House  │Generic/      │    │
+       │ │ support │  │  │(local,│(local)│Plugin        │    │
+       │ └─────────┘  │  │ neon, │       │              │    │
+       │              │  │ dblab,│       │              │    │
+       │              │  │ xata) │       │              │    │
+       │              │  └───────┴───────┴──────────────┘    │
+       ├──────────────┴──────────────┬───────────────────────┤
+       │    Configuration Layer      │    Reverse Proxy      │
+       │  (.devflow.yml / env vars)  │  (HTTPS *.localhost)  │
+       ├─────────────────────────────┴───────────────────────┤
+       │                  State Management                   │
+       │           (~/.config/devflow/local_state.yml)       │
+       └─────────────────────────────────────────────────────┘</div>
+
+  <p>The core loop is simple:</p>
+  <ol>
+    <li><strong>Git checkout</strong> triggers the <code>post-checkout</code> hook</li>
+    <li>The hook calls <code>devflow git-hook</code>, which detects the workspace change</li>
+    <li>devflow orchestrates across all configured providers &mdash; creating or switching service workspaces</li>
+    <li>Lifecycle hooks fire (e.g., update <code>.env</code>, run migrations)</li>
+    <li>If worktrees are enabled, the shell wrapper <code>cd</code>s you into the right directory</li>
+  </ol>
+
+  <h3 id="cow-storage">Copy-on-Write Storage</h3>
+  <p>When you create a workspace with the local Docker provider, devflow clones the entire data directory from the parent. With Copy-on-Write filesystems, this clone is <strong>near-instant</strong> and uses <strong>almost no extra disk space</strong>. Only blocks that change after the clone are duplicated.</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Filesystem</th>
+        <th>Platform</th>
+        <th>CoW Method</th>
+        <th>Setup Required</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>APFS</strong></td>
+        <td>macOS</td>
+        <td><code>cp -c</code> clone</td>
+        <td>None (automatic)</td>
+      </tr>
+      <tr>
+        <td><strong>ZFS</strong></td>
+        <td>Linux</td>
+        <td>Snapshots + clones</td>
+        <td><code>devflow setup-zfs</code></td>
+      </tr>
+      <tr>
+        <td><strong>Btrfs</strong></td>
+        <td>Linux</td>
+        <td>Reflink copy</td>
+        <td>None (if filesystem is Btrfs)</td>
+      </tr>
+      <tr>
+        <td><strong>XFS</strong></td>
+        <td>Linux</td>
+        <td>Reflink copy</td>
+        <td>None (if created with reflink support)</td>
+      </tr>
+      <tr>
+        <td><strong>ext4 / other</strong></td>
+        <td>Any</td>
+        <td>Full copy (fallback)</td>
+        <td>None (works, just slower)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div>devflow auto-detects the best storage method available. Run <code>devflow doctor</code> to see which method is being used. On macOS, APFS cloning is always available with no setup.</div>
+  </div>
+
+  <h3>ZFS Deep Dive</h3>
+  <p>ZFS provides the most powerful Copy-on-Write support with true snapshots and clones:</p>
+<pre><code class="language-bash"># devflow creates a ZFS dataset per project
+# zfs list shows something like:
+devflow/myapp           # project dataset
+devflow/myapp@main      # snapshot of main workspace
+devflow/myapp/feature   # clone from snapshot (instant, zero-copy)</code></pre>
+  <p>The <code>devflow setup-zfs</code> command creates a file-backed ZFS pool &mdash; no spare disk required. During <code>devflow init</code> on Linux, devflow auto-detects ZFS tools and offers to create the pool for you.</p>
+
+  <h3 id="service-lifecycle">Service Lifecycle</h3>
+  <p>Each local service workspace goes through these states:</p>
+
+  <div class="diagram">  Provisioning ──▶ Running ──▶ Stopped ──▶ (deleted)
+       │              │            │
+       │              ▼            │
+       └──────────▶ Failed ◀──────┘</div>
+
+  <table>
+    <thead>
+      <tr><th>State</th><th>Description</th><th>Commands</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><span class="badge badge-blue">Provisioning</span></td><td>Container being created, data being cloned</td><td><code>create</code></td></tr>
+      <tr><td><span class="badge badge-green">Running</span></td><td>Container active and accepting connections</td><td><code>start</code>, <code>switch</code></td></tr>
+      <tr><td><span class="badge badge-orange">Stopped</span></td><td>Container paused, data preserved</td><td><code>stop</code></td></tr>
+      <tr><td><span class="badge badge-red">Failed</span></td><td>Container crashed or failed to start</td><td><code>logs</code>, <code>reset</code></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ================================================================== -->
+<!-- CONFIGURATION                                                       -->
+<!-- ================================================================== -->
+<section class="section" id="configuration">
+  <h2><span class="number">03</span> Configuration</h2>
+  <p class="section-desc">
+    devflow is configured via YAML files and environment variables. From a minimal single-line setup to a complex multi-service orchestration, the config system scales with your needs.
+  </p>
+
+  <h3 id="config-hierarchy">Config Hierarchy</h3>
+  <p>Configuration is merged from three sources (highest precedence first):</p>
+
+  <table>
+    <thead>
+      <tr><th>Priority</th><th>Source</th><th>Purpose</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="badge badge-red">1</span></td>
+        <td><strong>Environment Variables</strong></td>
+        <td>Quick toggles, CI/CD overrides, secrets</td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-orange">2</span></td>
+        <td><strong><code>.devflow.local.yml</code></strong></td>
+        <td>Machine-specific overrides (add to <code>.gitignore</code>)</td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-blue">3</span></td>
+        <td><strong><code>.devflow.yml</code></strong></td>
+        <td>Team shared configuration (committed to Git)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div>Services are stored in <strong>local state</strong> (<code>~/.config/devflow/local_state.yml</code>), not in the committed config file. This keeps API keys and machine-specific settings out of your repo.</div>
+  </div>
+
+  <p>Use <code>devflow config -v</code> to see the effective config with precedence details (which value came from which source).</p>
+
+  <h3 id="config-schema">Full Configuration Schema</h3>
+  <p>All sections are optional. An empty <code>.devflow.yml</code> file is valid.</p>
+
+  <h4>Minimal Config</h4>
+<pre><code class="language-yaml"># This is all you need — devflow init generates this
+services:
+  - name: app-db
+    type: local
+    service_type: postgres
+    default: true
+    local:
+      image: postgres:17</code></pre>
+
+  <h4>Complete Reference</h4>
+<pre><code class="language-yaml"># ============================================
+# Git Integration
+# ============================================
+git:
+  auto_create_on_workspace: true          # Create service workspaces on git checkout
+  auto_switch_on_workspace: true          # Switch services on git checkout
+  main_workspace: main                    # Main git workspace (auto-detected on init)
+  workspace_filter_regex: "^feature/.*"  # Regex — only workspace for matching patterns
+  exclude_workspaces:                    # Never create service workspaces for these
+    - main
+    - master
+    - develop
+
+# ============================================
+# Behavior
+# ============================================
+behavior:
+  max_workspaces: 10                     # Max workspaces before cleanup triggers
+
+# ============================================
+# Services
+# ============================================
+services:
+  - name: app-db                       # Unique name for this service
+    type: local                        # Provider type
+    service_type: postgres             # Service type
+    auto_workspace: true                  # Workspace this service with git (default: true)
+    default: true                      # Default target for -s flag
+    local:
+      image: postgres:17
+
+  - name: analytics
+    type: local
+    service_type: clickhouse
+    auto_workspace: true
+    clickhouse:
+      image: clickhouse/clickhouse-server:latest
+      port_range_start: 59000          # HTTP port (native = HTTP + 877)
+      data_root: ~/.local/share/devflow
+      user: default                    # ClickHouse user
+      password: ""                     # ClickHouse password
+
+  - name: app-mysql
+    type: local
+    service_type: mysql
+    auto_workspace: true
+    mysql:
+      image: mysql:8                   # Docker image
+      port_range_start: 53306          # First port to try
+      data_root: ~/.local/share/devflow
+      root_password: dev               # MySQL root password
+      database: myapp                  # Default database
+      user: dev                        # Application user
+      password: dev                    # Application password
+
+  - name: cache
+    type: local
+    service_type: generic
+    auto_workspace: false                 # Shared across all workspaces
+    generic:
+      image: redis:7-alpine            # Any Docker image
+      port_mapping: "6379:6379"        # host:container port mapping
+      port_range_start: 56000          # Used if port_mapping is omitted
+      environment:                     # Environment variables for container
+        REDIS_MAXMEMORY: "100mb"
+      volumes:                         # Additional volume mounts
+        - "/data/redis:/data"
+      command: "redis-server --save 60 1"  # Override container command
+      healthcheck: "redis-cli ping"    # Healthcheck command
+
+  - name: cloud-db
+    type: neon
+    service_type: postgres
+    auto_workspace: true
+    neon:
+      api_key: ${NEON_API_KEY}         # Supports ${ENV_VAR} interpolation
+      project_id: ${NEON_PROJECT_ID}
+      base_url: https://console.neon.tech/api/v2  # Default
+
+  - name: staging-db
+    type: dblab
+    service_type: postgres
+    auto_workspace: true
+    dblab:
+      api_url: https://dblab.example.com
+      auth_token: ${DBLAB_TOKEN}
+
+  - name: xata-db
+    type: xata
+    service_type: postgres
+    auto_workspace: true
+    xata:
+      api_key: ${XATA_API_KEY}
+      organization_id: my-org
+      project_id: my-project
+      base_url: https://api.xata.tech  # Default
+
+  - name: custom-service
+    type: local
+    service_type: plugin
+    auto_workspace: true
+    plugin:
+      name: my-plugin                  # Resolved as devflow-plugin-my-plugin on PATH
+      # path: /usr/local/bin/my-plugin # Or use an explicit path
+      timeout: 30                      # Timeout per invocation (seconds)
+      config:                          # Opaque JSON forwarded to the plugin
+        region: us-east-1
+        tier: development
+
+# ============================================
+# Worktree Configuration
+# ============================================
+worktree:
+  enabled: true                        # Create Git worktrees per workspace
+  path_template: "../{repo}.{workspace}"  # Where worktrees are created
+  copy_files:                          # Files to copy into new worktrees
+    - .env.local
+    - .env
+  copy_ignored: true                   # Copy files even if gitignored
+
+# ============================================
+# Lifecycle Hooks (MiniJinja templates)
+# ============================================
+hooks:
+  post-create:
+    install: "npm ci"
+    env-setup:
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
+      working_dir: "."
+      continue_on_error: false
+      condition: "file_exists:package.json"
+      environment:
+        NODE_ENV: development
+      background: false
+    migrate: "npm run migrate"
+
+  post-switch:
+    update-env:
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
+
+  pre-merge:
+    test:
+      command: "npm test"
+      continue_on_error: false
+
+# ============================================
+# AI Commit Messages
+# ============================================
+commit:
+  generation:
+    command: "claude -p --model haiku"  # External CLI (preferred)
+    # Falls back to OpenAI-compatible API if no command set:
+    # api_key: ${DEVFLOW_LLM_API_KEY}
+    # api_url: https://api.openai.com/v1
+    # model: gpt-4o-mini
+
+# ============================================
+# AI Agent Integration
+# ============================================
+agent:
+  command: claude                       # Default agent tool
+  workspace_prefix: "agent/"              # Prefix for agent workspaces</code></pre>
+
+  <div class="callout callout-warning">
+    <span class="callout-icon">&#9888;</span>
+    <div>Use the <code>services</code> array syntax to configure one or more service providers.</div>
+  </div>
+
+  <h3>Config Value Interpolation</h3>
+  <p>API keys and secrets in service configs support <code>${ENV_VAR}</code> syntax for environment variable interpolation:</p>
+<pre><code class="language-yaml">neon:
+  api_key: ${NEON_API_KEY}        # Resolved at runtime from environment
+  project_id: ${NEON_PROJECT_ID}</code></pre>
+
+  <h3>Workspace Name Sanitization</h3>
+  <p>devflow automatically sanitizes Git workspace names for use as database identifiers:</p>
+  <ul>
+    <li>Converted to lowercase</li>
+    <li>Non-alphanumeric characters replaced with <code>_</code></li>
+    <li>Leading digits removed</li>
+    <li>Double underscores collapsed</li>
+    <li>Truncated to 63 characters (with a hash suffix if truncated)</li>
+  </ul>
+  <p>Example: <code>feature/Auth-System</code> becomes <code>devflow_feature_auth_system</code> (with prefix naming strategy).</p>
+
+  <h3 id="env-vars">Environment Variables</h3>
+
+  <table>
+    <thead>
+      <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>DEVFLOW_DISABLED</code></td><td>Completely disable devflow</td><td><code>false</code></td></tr>
+      <tr><td><code>DEVFLOW_SKIP_HOOKS</code></td><td>Skip Git hook execution</td><td><code>false</code></td></tr>
+      <tr><td><code>DEVFLOW_AUTO_CREATE</code></td><td>Override <code>auto_create_on_workspace</code></td><td>config value</td></tr>
+      <tr><td><code>DEVFLOW_AUTO_SWITCH</code></td><td>Override <code>auto_switch_on_workspace</code></td><td>config value</td></tr>
+      <tr><td><code>DEVFLOW_BRANCH_FILTER_REGEX</code></td><td>Override workspace filter regex</td><td>config value</td></tr>
+      <tr><td><code>DEVFLOW_DISABLED_BRANCHES</code></td><td>Comma-separated workspaces to skip</td><td>&mdash;</td></tr>
+      <tr><td><code>DEVFLOW_CURRENT_BRANCH_DISABLED</code></td><td>Disable for current workspace only</td><td><code>false</code></td></tr>
+      <tr><td><code>DEVFLOW_ZFS_DATASET</code></td><td>Force a specific ZFS dataset</td><td>auto-detected</td></tr>
+      <tr><td><code>DEVFLOW_LLM_API_KEY</code></td><td>API key for AI commit messages</td><td>&mdash;</td></tr>
+      <tr><td><code>DEVFLOW_LLM_API_URL</code></td><td>LLM endpoint URL</td><td>OpenAI</td></tr>
+      <tr><td><code>DEVFLOW_LLM_MODEL</code></td><td>LLM model name</td><td><code>gpt-4o-mini</code></td></tr>
+      <tr><td><code>DEVFLOW_COMMIT_COMMAND</code></td><td>External CLI for commit messages (e.g., <code>claude -p</code>)</td><td>&mdash;</td></tr>
+      <tr><td><code>DEVFLOW_AGENT_COMMAND</code></td><td>Default agent command (e.g., <code>claude</code>, <code>codex</code>)</td><td><code>claude</code></td></tr>
+      <tr><td><code>DEVFLOW_CONTEXT_BRANCH</code></td><td>Override current workspace context (for CI)</td><td>auto-detected</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ================================================================== -->
+<!-- PROVIDERS                                                           -->
+<!-- ================================================================== -->
+<section class="section" id="providers">
+  <h2><span class="number">04</span> Providers</h2>
+  <p class="section-desc">
+    Providers define <em>where</em> and <em>how</em> your service workspaces run. From local Docker containers to cloud APIs to custom plugins, devflow supports a range of deployment targets.
+  </p>
+
+  <div class="card-grid">
+    <div class="card">
+      <h4><span class="badge badge-green">local</span> Local Docker</h4>
+      <p>Docker containers with Copy-on-Write storage. Supports PostgreSQL, ClickHouse, MySQL, and any Docker image.</p>
+    </div>
+    <div class="card">
+      <h4><span class="badge badge-purple">neon</span> Neon</h4>
+      <p>Neon's serverless Postgres with instant branching via their API.</p>
+    </div>
+    <div class="card">
+      <h4><span class="badge badge-purple">dblab</span> DBLab</h4>
+      <p>Database Lab Engine for thin-clone development databases.</p>
+    </div>
+    <div class="card">
+      <h4><span class="badge badge-purple">xata</span> Xata</h4>
+      <p>Xata's managed Postgres with workspace support.</p>
+    </div>
+    <div class="card">
+      <h4><span class="badge badge-orange">plugin</span> Plugin</h4>
+      <p>Custom providers via JSON-over-stdio protocol. Build your own in any language.</p>
+    </div>
+  </div>
+
+  <!-- Local Docker -->
+  <h3 id="provider-local">Local Docker Provider</h3>
+  <p>The default and most feature-rich provider. Each workspace gets its own Docker container with bind-mounted data. Copy-on-Write storage makes branching near-instant.</p>
+
+  <h4>PostgreSQL (Local)</h4>
+<pre><code class="language-yaml">services:
+  - name: app-db
+    type: local
+    service_type: postgres
+    default: true
+    local:
+      image: postgres:17           # Any PostgreSQL Docker image
+      port_range_start: 55432      # Ports are auto-assigned starting here
+      postgres_user: postgres      # Superuser name
+      postgres_password: postgres  # Superuser password
+      postgres_db: myapp           # Default database
+      data_root: ~/.local/share/devflow  # Data directory root
+      storage: auto                # auto | zfs | apfs | reflink | copy</code></pre>
+  <p>Containers are named <code>devflow-{project}-{workspace}</code>. Each gets a unique port, so multiple workspaces can run simultaneously.</p>
+
+  <h4>ClickHouse (Local)</h4>
+<pre><code class="language-yaml">services:
+  - name: analytics
+    type: local
+    service_type: clickhouse
+    auto_workspace: true
+    clickhouse:
+      image: clickhouse/clickhouse-server:latest
+      port_range_start: 59000    # HTTP port; native port = HTTP + 877
+      data_root: ~/.local/share/devflow
+      user: default              # ClickHouse user
+      password: ""               # ClickHouse password</code></pre>
+  <p>Containers are named <code>devflow-ch-{service}-{workspace}</code>. Two consecutive ports are allocated (HTTP + native protocol).</p>
+
+  <h4>MySQL / MariaDB (Local)</h4>
+<pre><code class="language-yaml">services:
+  - name: app-mysql
+    type: local
+    service_type: mysql
+    auto_workspace: true
+    mysql:
+      image: mysql:8             # Or mariadb:11
+      port_range_start: 53306
+      data_root: ~/.local/share/devflow
+      root_password: dev         # MySQL root password
+      database: myapp            # Default database
+      user: dev                  # Application user
+      password: dev              # Application password</code></pre>
+  <p>Containers are named <code>devflow-mysql-{service}-{workspace}</code>.</p>
+
+  <h4>Generic Docker (Any Image)</h4>
+<pre><code class="language-yaml">services:
+  - name: cache
+    type: local
+    service_type: generic
+    auto_workspace: false           # Shared across workspaces (no data cloning)
+    generic:
+      image: redis:7-alpine
+      port_mapping: "6379:6379"  # Explicit host:container mapping
+      environment:
+        REDIS_MAXMEMORY: "100mb"
+      volumes:
+        - "/tmp/redis-data:/data"
+      command: "redis-server --save 60 1"
+      healthcheck: "redis-cli ping"</code></pre>
+  <p>Containers are named <code>devflow-{service}-{workspace}</code>. The generic provider does <strong>not</strong> support data cloning from parent workspaces &mdash; set <code>auto_workspace: false</code> to share a single instance across workspaces, or <code>true</code> for separate empty containers per workspace.</p>
+
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div>If <code>port_mapping</code> is omitted, devflow auto-assigns ports starting from <code>port_range_start</code> (default: 56000).</div>
+  </div>
+
+  <!-- Neon -->
+  <h3 id="provider-neon">Neon</h3>
+  <p>Neon provides serverless PostgreSQL with instant, copy-on-write branching built into their cloud platform.</p>
+<pre><code class="language-yaml">services:
+  - name: cloud-db
+    type: neon
+    service_type: postgres
+    auto_workspace: true
+    neon:
+      api_key: ${NEON_API_KEY}
+      project_id: ${NEON_PROJECT_ID}
+      base_url: https://console.neon.tech/api/v2  # Default</code></pre>
+
+  <p>Neon supports <strong>point-in-time branching</strong> &mdash; you can create a workspace from a specific timestamp, not just the current state.</p>
+
+  <!-- DBLab -->
+  <h3 id="provider-dblab">DBLab</h3>
+  <p>Database Lab Engine creates thin clones of production-size databases for development and testing.</p>
+<pre><code class="language-yaml">services:
+  - name: staging-db
+    type: dblab
+    service_type: postgres
+    auto_workspace: true
+    dblab:
+      api_url: https://dblab.example.com
+      auth_token: ${DBLAB_TOKEN}</code></pre>
+
+  <!-- Xata -->
+  <h3 id="provider-xata">Xata</h3>
+  <p>Xata provides managed PostgreSQL with workspace support through their platform API.</p>
+<pre><code class="language-yaml">services:
+  - name: xata-db
+    type: xata
+    service_type: postgres
+    auto_workspace: true
+    xata:
+      api_key: ${XATA_API_KEY}
+      organization_id: my-org
+      project_id: my-project
+      base_url: https://api.xata.tech  # Default</code></pre>
+
+  <!-- Plugin -->
+  <h3 id="provider-plugin">Plugin Provider</h3>
+  <p>Build custom providers in any language. Plugins are standalone executables that communicate with devflow via a JSON-over-stdio protocol.</p>
+
+  <h4>Configuration</h4>
+<pre><code class="language-yaml">services:
+  - name: custom-service
+    type: local
+    service_type: plugin
+    auto_workspace: true
+    plugin:
+      name: my-plugin              # Resolved as devflow-plugin-my-plugin on PATH
+      # path: /usr/local/bin/my-plugin  # Or explicit path
+      timeout: 30                  # Per-invocation timeout (seconds)
+      config:                      # Opaque JSON forwarded to the plugin
+        region: us-east-1
+        tier: development</code></pre>
+
+  <h4>Protocol</h4>
+  <p>Requests are JSON objects written to the plugin's stdin, one per line. The plugin writes a JSON response to stdout.</p>
+
+  <p><strong>Request format:</strong></p>
+<pre><code class="language-json">{
+  "method": "create_workspace",
+  "params": {
+    "workspace_name": "feature-auth",
+    "from_workspace": "main"
+  },
+  "config": {
+    "region": "us-east-1",
+    "tier": "development"
+  },
+  "service_name": "custom-service"
+}</code></pre>
+
+  <p><strong>Response format (success):</strong></p>
+<pre><code class="language-json">{
+  "ok": true,
+  "result": {
+    "host": "localhost",
+    "port": 5432,
+    "database": "mydb",
+    "user": "dev",
+    "password": "secret"
+  }
+}</code></pre>
+
+  <p><strong>Response format (error):</strong></p>
+<pre><code class="language-json">{
+  "ok": false,
+  "error": "Failed to create workspace: quota exceeded"
+}</code></pre>
+
+  <h4>Required Methods</h4>
+  <table>
+    <thead>
+      <tr><th>Method</th><th>Params</th><th>Expected Result</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>create_workspace</code></td><td><code>workspace_name</code>, <code>from_workspace</code></td><td>ConnectionInfo</td></tr>
+      <tr><td><code>delete_workspace</code></td><td><code>workspace_name</code></td><td><code>{}</code></td></tr>
+      <tr><td><code>list_workspaces</code></td><td>&mdash;</td><td><code>[{name, created_at}]</code></td></tr>
+      <tr><td><code>workspace_exists</code></td><td><code>workspace_name</code></td><td><code>{exists: bool}</code></td></tr>
+      <tr><td><code>switch_to_branch</code></td><td><code>workspace_name</code></td><td>ConnectionInfo</td></tr>
+      <tr><td><code>get_connection_info</code></td><td><code>workspace_name</code></td><td>ConnectionInfo</td></tr>
+      <tr><td><code>doctor</code></td><td>&mdash;</td><td><code>{healthy: bool, messages: [...]}</code></td></tr>
+    </tbody>
+  </table>
+
+  <h4>Scaffolding a Plugin</h4>
+<pre><code class="language-bash"># Print a Bash plugin scaffold script (stdout)
+devflow plugin init my-plugin --lang bash > devflow-plugin-my-plugin
+chmod +x devflow-plugin-my-plugin
+
+# Print a Python plugin scaffold script (stdout)
+devflow plugin init my-plugin --lang python > devflow-plugin-my-plugin.py
+
+# Verify a plugin is working
+devflow plugin check my-plugin</code></pre>
+</section>
+
+<!-- ================================================================== -->
+<!-- SERVICES                                                            -->
+<!-- ================================================================== -->
+<section class="section" id="services">
+  <h2><span class="number">05</span> Services</h2>
+  <p class="section-desc">
+    Services are the stateful resources (databases, caches, queues) that devflow workspaces alongside your Git workflow. One project can manage many services simultaneously.
+  </p>
+
+  <h3>Single vs. Multi-Service</h3>
+  <p>For simple projects with one database:</p>
+<pre><code class="language-yaml"># Single service — simple and clean
+services:
+  - name: app-db
+    type: local
+    service_type: postgres
+    default: true
+    local:
+      image: postgres:17</code></pre>
+
+  <p>For projects with multiple databases or services:</p>
+<pre><code class="language-yaml"># Multiple services — each branched independently
+services:
+  - name: app-db
+    type: local
+    service_type: postgres
+    auto_workspace: true
+    default: true
+    local:
+      image: postgres:17
+
+  - name: cache
+    type: local
+    service_type: generic
+    auto_workspace: false         # Shared — not branched per git workspace
+    generic:
+      image: redis:7-alpine
+      port_mapping: "6379:6379"</code></pre>
+
+  <h3>auto_workspace and default</h3>
+  <table>
+    <thead>
+      <tr><th>Flag</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>auto_workspace: true</code></td>
+        <td>This service is automatically branched when you create/switch/delete Git workspaces. Set to <code>false</code> to share a single instance across all workspaces (e.g., Redis cache).</td>
+      </tr>
+      <tr>
+        <td><code>default: true</code></td>
+        <td>When you run <code>devflow connection &lt;workspace&gt;</code> without <code>-s</code>, this is the service whose connection info is shown. Only one service should be marked as default.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Targeting Specific Services</h3>
+  <p>Use the <code>-s</code> flag to target a specific named service:</p>
+<pre><code class="language-bash"># Get connection info for the analytics service
+devflow connection feature/auth -s analytics
+
+# Start a specific service
+devflow service start feature/auth -s app-db
+
+# Seed a specific service
+devflow service seed feature/auth -s app-db --from dump.sql</code></pre>
+
+  <h3>Multi-Provider Orchestration</h3>
+  <p>When you run <code>devflow service create</code>, <code>switch</code>, or <code>service delete</code>, devflow orchestrates across <strong>all</strong> services with <code>auto_workspace: true</code>. Operations are performed sequentially with <strong>partial failure tolerance</strong> &mdash; if one provider fails, the others continue.</p>
+
+  <h3>Connection Info Formats</h3>
+<pre><code class="language-bash"># URI format (default)
+devflow connection feature/auth
+# → postgresql://postgres:postgres@localhost:55433/myapp
+
+# Environment variable format
+devflow connection feature/auth --format env
+# → DATABASE_URL=postgresql://postgres:postgres@localhost:55433/myapp
+# → DATABASE_HOST=localhost
+# → DATABASE_PORT=55433
+# → DATABASE_USER=postgres
+# → DATABASE_PASSWORD=postgres
+# → DATABASE_NAME=myapp
+
+# JSON format
+devflow connection feature/auth --format json
+# → {"host":"localhost","port":55433,"database":"myapp",...}</code></pre>
+</section>
+
+<!-- ================================================================== -->
+<!-- WORKTREES                                                           -->
+<!-- ================================================================== -->
+<section class="section" id="worktrees">
+  <h2><span class="number">06</span> Worktrees</h2>
+  <p class="section-desc">
+    Git worktrees let you have multiple workspaces checked out simultaneously in different directories. devflow manages worktrees automatically and integrates them with service branching.
+  </p>
+
+  <h3>Why Worktrees?</h3>
+  <ul>
+    <li><strong>True parallel development</strong> &mdash; work on two features at once without stashing</li>
+    <li><strong>Instant context switching</strong> &mdash; just <code>cd</code> to another directory</li>
+    <li><strong>No rebuild needed</strong> &mdash; each worktree has its own <code>node_modules</code>, build cache, etc.</li>
+    <li><strong>PR reviews without disruption</strong> &mdash; check out a PR in a new worktree while your feature stays running</li>
+  </ul>
+
+  <h3>Configuration</h3>
+<pre><code class="language-yaml">worktree:
+  enabled: true
+  path_template: "../{repo}.{workspace}"  # Where worktrees are created
+  copy_files:                          # Files to copy into new worktrees
+    - .env.local
+    - .env
+    - .env.development
+  copy_ignored: true                   # Copy even if files are gitignored</code></pre>
+
+  <h4>Path Template Variables</h4>
+  <table>
+    <thead>
+      <tr><th>Variable</th><th>Description</th><th>Example</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>{repo}</code></td><td>Repository directory name</td><td><code>my-project</code></td></tr>
+      <tr><td><code>{workspace}</code></td><td>Workspace name (slashes become dashes)</td><td><code>feature-auth</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>With the default template <code>../&#123;repo&#125;.&#123;workspace&#125;</code>, workspace <code>feature/auth</code> of repo <code>my-project</code> creates a worktree at <code>../my-project.feature-auth/</code>.</p>
+
+  <h3>The Switch Command</h3>
+  <p><code>devflow switch</code> is the primary command for working with worktrees. It handles Git checkout, worktree creation, service switching, and hook execution in one step.</p>
+
+<pre><code class="language-bash"># Interactive picker — fuzzy search across all workspaces
+devflow switch
+
+# Switch to an existing workspace
+devflow switch feature/auth
+
+# Create a new workspace and switch to it
+devflow switch -c feature/payment
+
+# Create from a specific base workspace
+devflow switch -c feature/payment -b develop
+
+# Switch without touching services
+devflow switch feature/auth --no-services
+
+# Switch and run a command in the worktree
+devflow switch feature/auth -x "npm install"
+
+# Dry run — show what would happen
+devflow switch feature/auth --dry-run</code></pre>
+
+  <h3>Shell Integration (Required for auto-cd)</h3>
+  <p>For <code>devflow switch</code> to automatically change your shell's working directory to the worktree, you need the shell wrapper:</p>
+<pre><code class="language-bash"># Add to your shell profile
+eval "$(devflow shell-init)"</code></pre>
+  <p>Without this, <code>devflow switch</code> will print the path but won't <code>cd</code> into it (because a child process can't change the parent shell's directory).</p>
+
+  <h3>Worktree Setup in Existing Worktrees</h3>
+  <p>If you manually created a worktree (e.g., via <code>git worktree add</code>), you can retroactively set up devflow:</p>
+<pre><code class="language-bash"># In the worktree directory
+devflow worktree-setup</code></pre>
+  <p>This copies config files from the main worktree and creates the corresponding service workspace.</p>
+
+  <h3>Example: Full Worktree Workflow</h3>
+<pre><code class="language-bash"># Enable shell integration (one-time setup in ~/.zshrc)
+eval "$(devflow shell-init)"
+
+# Start a new feature — creates worktree + isolated service environment
+devflow switch -c feature/auth
+# → Created worktree at ../my-project.feature-auth
+# → Created service workspace feature/auth
+# → cd ../my-project.feature-auth
+
+# Work on the feature...
+npm run migrate
+npm test
+
+# Jump to another workspace for a PR review (without losing your work)
+devflow switch -c fix/login-bug
+# → Created worktree at ../my-project.fix-login-bug
+# → cd ../my-project.fix-login-bug
+
+# Switch back to your feature — instant, no rebuild needed
+devflow switch feature/auth
+# → cd ../my-project.feature-auth
+
+# Interactive picker for when you forget workspace names
+devflow switch
+# → Shows fuzzy search across all workspaces</code></pre>
+</section>
+
+<!-- ================================================================== -->
+<!-- HOOKS                                                               -->
+<!-- ================================================================== -->
+<section class="section" id="hooks">
+  <h2><span class="number">07</span> Hooks</h2>
+  <p class="section-desc">
+    Lifecycle hooks are MiniJinja-templated commands that run at specific phases of the workspace lifecycle. Use them to run migrations, update <code>.env</code> files, restart services, or run tests.
+  </p>
+
+  <h3>All Hook Phases</h3>
+  <table>
+    <thead>
+      <tr><th>Phase</th><th>Fires When...</th><th>Blocking?</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>pre-switch</code></td><td>Before switching to a workspace</td><td>Yes</td></tr>
+      <tr><td><code>post-create</code></td><td>After creating a new workspace</td><td>Yes</td></tr>
+      <tr><td><code>post-start</code></td><td>After starting a stopped workspace</td><td>No</td></tr>
+      <tr><td><code>post-switch</code></td><td>After switching to a workspace</td><td>No</td></tr>
+      <tr><td><code>pre-remove</code></td><td>Before removing a workspace</td><td>Yes</td></tr>
+      <tr><td><code>post-remove</code></td><td>After removing a workspace</td><td>No</td></tr>
+      <tr><td><code>pre-commit</code></td><td>Before committing (Git pre-commit hook)</td><td>Yes</td></tr>
+      <tr><td><code>pre-merge</code></td><td>Before merging workspaces</td><td>Yes</td></tr>
+      <tr><td><code>post-merge</code></td><td>After merging (Git post-merge hook)</td><td>No</td></tr>
+      <tr><td><code>post-rewrite</code></td><td>After rebase/amend (Git post-rewrite hook)</td><td>No</td></tr>
+      <tr><td><code>pre-service-create</code></td><td>Before creating a service workspace</td><td>Yes</td></tr>
+      <tr><td><code>post-service-create</code></td><td>After creating a service workspace</td><td>No</td></tr>
+      <tr><td><code>pre-service-delete</code></td><td>Before deleting a service workspace</td><td>Yes</td></tr>
+      <tr><td><code>post-service-delete</code></td><td>After deleting a service workspace</td><td>No</td></tr>
+      <tr><td><code>post-service-switch</code></td><td>After switching a service workspace</td><td>No</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div><strong>Blocking hooks</strong> run synchronously and must complete before the operation continues. Non-blocking hooks run in the background via <code>tokio::spawn</code>.</div>
+  </div>
+
+  <h3>Simple vs. Extended Hooks</h3>
+
+  <h4>Simple (string command)</h4>
+<pre><code class="language-yaml">hooks:
+  post-create:
+    migrate: "npm run migrate"
+    seed: "npm run seed"</code></pre>
+
+  <h4>Extended (full options)</h4>
+<pre><code class="language-yaml">hooks:
+  post-create:
+    migrate:
+      command: "npm run migrate"
+      working_dir: "./backend"       # Run in a subdirectory
+      continue_on_error: false       # Fail the operation if hook fails
+      condition: "file_exists:package.json"  # Only run if condition is true
+      background: false              # Run in foreground (blocking)
+      environment:                   # Extra environment variables
+        NODE_ENV: development
+        DATABASE_URL: "{{ service['app-db'].url }}"</code></pre>
+
+  <h3>Template Variables</h3>
+  <p>Hook commands are rendered with <a href="https://docs.rs/minijinja/latest/minijinja/" target="_blank">MiniJinja</a> (Jinja2-compatible). All template variables are available in both commands and environment values.</p>
+
+  <table>
+    <thead>
+      <tr><th>Variable</th><th>Description</th><th>Example</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>{{ workspace }}</code></td><td>Current Git workspace name</td><td><code>feature/auth</code></td></tr>
+      <tr><td><code>{{ repo }}</code></td><td>Repository directory name</td><td><code>my-project</code></td></tr>
+      <tr><td><code>{{ worktree_path }}</code></td><td>Worktree path (if enabled)</td><td><code>../my-project.feature-auth</code></td></tr>
+      <tr><td><code>{{ default_workspace }}</code></td><td>Default workspace</td><td><code>main</code></td></tr>
+      <tr><td><code>{{ commit }}</code></td><td>HEAD commit SHA</td><td><code>a1b2c3d</code></td></tr>
+      <tr><td><code>{{ target }}</code></td><td>Target workspace (merge hooks)</td><td><code>main</code></td></tr>
+      <tr><td><code>{{ base }}</code></td><td>Base/parent workspace (create hooks)</td><td><code>main</code></td></tr>
+      <tr><td><code>{{ service.&lt;name&gt;.host }}</code></td><td>Service host</td><td><code>localhost</code></td></tr>
+      <tr><td><code>{{ service.&lt;name&gt;.port }}</code></td><td>Service port</td><td><code>55433</code></td></tr>
+      <tr><td><code>{{ service.&lt;name&gt;.database }}</code></td><td>Database name</td><td><code>myapp</code></td></tr>
+      <tr><td><code>{{ service.&lt;name&gt;.user }}</code></td><td>Service user</td><td><code>postgres</code></td></tr>
+      <tr><td><code>{{ service.&lt;name&gt;.password }}</code></td><td>Service password</td><td><code>postgres</code></td></tr>
+      <tr><td><code>{{ service.&lt;name&gt;.url }}</code></td><td>Full connection URL</td><td><code>postgresql://...</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div>Use named service access in templates, especially for names containing hyphens (for example: <code>{{ service['app-db'].url }}</code>).</div>
+  </div>
+
+  <h3>Custom Filters</h3>
+  <table>
+    <thead>
+      <tr><th>Filter</th><th>Description</th><th>Example</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>sanitize</code></td>
+        <td>Replace <code>/</code> and <code>\</code> with <code>-</code></td>
+        <td><code>{{ workspace | sanitize }}</code> &rarr; <code>feature-auth</code></td>
+      </tr>
+      <tr>
+        <td><code>sanitize_db</code></td>
+        <td>Database-safe identifier (max 63 chars, hash suffix)</td>
+        <td><code>{{ workspace | sanitize_db }}</code> &rarr; <code>feature_auth</code></td>
+      </tr>
+      <tr>
+        <td><code>hash_port</code></td>
+        <td>Deterministic port in range 10000&ndash;19999</td>
+        <td><code>{{ workspace | hash_port }}</code> &rarr; <code>14523</code></td>
+      </tr>
+      <tr>
+        <td><code>lower</code></td>
+        <td>Lowercase</td>
+        <td><code>{{ workspace | lower }}</code></td>
+      </tr>
+      <tr>
+        <td><code>upper</code></td>
+        <td>Uppercase</td>
+        <td><code>{{ workspace | upper }}</code></td>
+      </tr>
+      <tr>
+        <td><code>replace</code></td>
+        <td>String replacement</td>
+        <td><code>{{ workspace | replace("/", "-") }}</code></td>
+      </tr>
+      <tr>
+        <td><code>truncate</code></td>
+        <td>Truncate to N characters</td>
+        <td><code>{{ workspace | truncate(20) }}</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Conditions</h3>
+  <p>Hook conditions determine whether a hook should run. Conditions are themselves template-rendered.</p>
+
+  <table>
+    <thead>
+      <tr><th>Condition</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>file_exists:path</code></td><td>Run only if file exists</td></tr>
+      <tr><td><code>dir_exists:path</code></td><td>Run only if directory exists</td></tr>
+      <tr><td><code>always</code> / <code>true</code></td><td>Always run</td></tr>
+      <tr><td><code>never</code> / <code>false</code></td><td>Never run (disabled)</td></tr>
+      <tr><td>Any other string</td><td>Executed as a shell command; exit 0 = true</td></tr>
+    </tbody>
+  </table>
+
+<pre><code class="language-yaml">hooks:
+  post-create:
+    # Only run if package.json exists
+    npm-install:
+      command: "npm ci"
+      condition: "file_exists:package.json"
+
+    # Only run if Python project
+    pip-install:
+      command: "pip install -r requirements.txt"
+      condition: "file_exists:requirements.txt"
+
+    # Custom shell condition
+    run-if-staging:
+      command: "npm run seed:staging"
+      condition: "test '{{ workspace }}' = 'staging'"</code></pre>
+
+  <h3>Hook Approval System</h3>
+  <p>For security, hooks from <code>.devflow.yml</code> require user approval before running for the first time. This prevents unexpected commands from executing via Git hooks. In <code>--non-interactive</code> mode, unapproved hooks fail instead of prompting.</p>
+
+  <p>When a new hook is detected, devflow prompts:</p>
+  <ul>
+    <li><strong>Approve always</strong> &mdash; remember and never ask again for this command</li>
+    <li><strong>Approve once</strong> &mdash; run this time, ask again next time</li>
+    <li><strong>Deny</strong> &mdash; skip this hook</li>
+  </ul>
+
+  <p>Approvals are stored in <code>~/.config/devflow/hook_approvals.yml</code>, keyed by project path and command hash.</p>
+
+<pre><code class="language-bash"># View approved hooks
+devflow hook approvals
+
+# Clear all approvals (will re-prompt)
+devflow hook approvals clear</code></pre>
+
+  <h3>Running Hooks Manually</h3>
+<pre><code class="language-bash"># Show all configured hooks
+devflow hook show
+
+# Show hooks for a specific phase
+devflow hook show post-create
+
+# Run all hooks for a phase
+devflow hook run post-create
+
+# Run a specific named hook
+devflow hook run post-create migrate
+
+# Run hooks for a different workspace
+devflow hook run post-create --workspace feature/auth</code></pre>
+
+  <h3>Complete Hook Example</h3>
+<pre><code class="language-yaml">hooks:
+  post-create:
+    # Install dependencies
+    install:
+      command: "npm ci"
+      condition: "file_exists:package.json"
+      continue_on_error: false
+
+    # Generate .env file with all service connection strings
+    env-setup:
+      command: |
+        cat > .env.local << EOF
+        DATABASE_URL={{ service['app-db'].url }}
+        CLICKHOUSE_URL=http://{{ service.analytics.host }}:{{ service.analytics.port }}
+        REDIS_URL=redis://{{ service.cache.host }}:{{ service.cache.port }}
+        EOF
+      working_dir: "."
+
+    # Run database migrations
+    migrate:
+      command: "npm run migrate"
+      environment:
+        DATABASE_URL: "{{ service['app-db'].url }}"
+      continue_on_error: false
+
+  post-switch:
+    # Update .env on every workspace switch
+    update-env:
+      command: |
+        cat > .env.local << EOF
+        DATABASE_URL={{ service['app-db'].url }}
+        CLICKHOUSE_URL=http://{{ service.analytics.host }}:{{ service.analytics.port }}
+        REDIS_URL=redis://{{ service.cache.host }}:{{ service.cache.port }}
+        EOF
+
+  pre-merge:
+    # Run tests before merging
+    test:
+      command: "npm test"
+      continue_on_error: false
+    lint:
+      command: "npm run lint"
+      continue_on_error: false
+
+  post-start:
+    # Start dev server on a deterministic port per workspace
+    dev-server:
+      command: "npm run dev -- --port {{ workspace | hash_port }}"
+      background: true
+
+  post-remove:
+    # Custom cleanup
+    cleanup:
+      command: "docker stop {{ repo }}-{{ workspace | sanitize }}-* 2>/dev/null || true"
+      continue_on_error: true</code></pre>
+</section>
+
+<!-- ================================================================== -->
+<!-- SEEDING                                                             -->
+<!-- ================================================================== -->
+<section class="section" id="seeding">
+  <h2><span class="number">08</span> Seeding</h2>
+  <p class="section-desc">
+    Seed your workspaces with data from production dumps, live databases, or S3 backups. Seeding works during initialization or at any time after workspace creation.
+  </p>
+
+  <h3>Seed Sources</h3>
+
+  <div class="card-grid">
+    <div class="card">
+      <h4>PostgreSQL URL</h4>
+      <p>Live <code>pg_dump</code> from a running PostgreSQL server. Supports any <code>postgresql://</code> or <code>postgres://</code> URL.</p>
+    </div>
+    <div class="card">
+      <h4>Local File</h4>
+      <p>Restore from a <code>.sql</code> (plain text) or <code>.dump</code> (custom format) file on disk.</p>
+    </div>
+    <div class="card">
+      <h4>S3 Object</h4>
+      <p>Download and restore from an S3 bucket. Uses <code>AWS_DEFAULT_REGION</code> / <code>AWS_REGION</code> env vars.</p>
+    </div>
+  </div>
+
+  <h3>Seeding During Service Setup</h3>
+<pre><code class="language-bash"># Seed main workspace from a local dump
+devflow service add app-db --provider local --service-type postgres --from /path/to/dump.sql
+
+# Seed from a live database
+devflow service add app-db --provider local --service-type postgres --from postgresql://readonly:pass@replica:5432/mydb
+
+# Seed from S3
+devflow service add app-db --provider local --service-type postgres --from s3://my-bucket/backups/latest.dump</code></pre>
+
+  <h3>Seeding an Existing Workspace</h3>
+<pre><code class="language-bash"># Seed from a local file
+devflow service seed main --from dump.sql
+
+# Seed from a live database
+devflow service seed feature/auth --from postgresql://readonly:pass@replica:5432/mydb
+
+# Seed from S3
+devflow service seed main --from s3://my-bucket/backups/latest.dump
+
+# Seed a specific service (multi-service)
+devflow service seed main -s app-db --from dump.sql</code></pre>
+
+  <h3>How Seeding Works</h3>
+
+  <h4>From a PostgreSQL URL</h4>
+  <ol>
+    <li>devflow runs <code>pg_dump</code> in an ephemeral Docker container, connecting to the source database</li>
+    <li>The dump is downloaded to a temporary file</li>
+    <li>The dump is uploaded to the target container and restored with <code>pg_restore</code></li>
+  </ol>
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div><code>localhost</code> URLs are automatically rewritten to <code>host.docker.internal</code> so Docker containers can reach databases running on the host machine.</div>
+  </div>
+
+  <h4>From a Local File</h4>
+  <ul>
+    <li><code>.sql</code> files are restored using <code>psql</code></li>
+    <li>All other extensions (e.g., <code>.dump</code>, <code>.backup</code>) are restored using <code>pg_restore</code> (custom format)</li>
+  </ul>
+
+  <h4>From S3</h4>
+  <ol>
+    <li>devflow downloads the object from S3 to a temporary file using the <code>s3</code> crate</li>
+    <li>AWS credentials are read from the standard environment variables</li>
+    <li>The file is then restored using the local file method</li>
+  </ol>
+</section>
+
+<!-- ================================================================== -->
+<!-- REVERSE PROXY                                                       -->
+<!-- ================================================================== -->
+<section class="section" id="reverse-proxy">
+  <h2><span class="number">09</span> Reverse Proxy</h2>
+  <p class="section-desc">
+    devflow includes a native HTTPS reverse proxy that auto-discovers Docker containers and serves them via <code>*.localhost</code> domains with auto-generated TLS certificates.
+  </p>
+
+  <h3>How It Works</h3>
+  <p>The proxy monitors Docker events in real time. When a container starts, devflow automatically maps it to a <code>*.localhost</code> domain, generates a TLS certificate signed by a local CA, and begins forwarding HTTPS traffic to the container.</p>
+
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div>Run <code>devflow proxy trust install</code> once to trust the local CA system-wide. After that, all <code>*.localhost</code> domains work with HTTPS &mdash; no browser warnings or <code>-k</code> flags needed.</div>
+  </div>
+
+  <h3>Quick Start</h3>
+<pre><code class="language-bash"># Start the proxy
+devflow proxy start
+
+# Trust the CA (one-time setup)
+devflow proxy trust install
+
+# See what's being proxied
+devflow proxy list
+
+# Start in background (daemon mode)
+devflow proxy start --daemon
+
+# Stop the proxy
+devflow proxy stop</code></pre>
+
+  <h3>Domain Patterns</h3>
+  <p>Containers are automatically assigned domains based on their type:</p>
+  <table>
+    <thead>
+      <tr><th>Container Type</th><th>Domain Pattern</th><th>Example</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Standalone</td><td><code>container_name.localhost</code></td><td><code>redis.localhost</code></td></tr>
+      <tr><td>Compose service</td><td><code>service.project.localhost</code></td><td><code>api.myapp.localhost</code></td></tr>
+      <tr><td>devflow service</td><td><code>service.workspace.project.localhost</code></td><td><code>app-db.feature-auth.myapp.localhost</code></td></tr>
+      <tr><td>Custom label</td><td>value of <code>devproxy.domain</code> label</td><td><code>custom.localhost</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Custom Ports</h3>
+<pre><code class="language-bash">devflow proxy start --https-port 8443    # Custom HTTPS port
+devflow proxy start --http-port 8080     # Custom HTTP port
+devflow proxy start --api-port 2020      # Custom API port</code></pre>
+
+  <h3>CA Trust Management</h3>
+<pre><code class="language-bash">devflow proxy trust install               # Install CA to system trust
+devflow proxy trust verify                # Check if CA is trusted
+devflow proxy trust remove                # Remove CA from system trust
+devflow proxy trust info                  # Platform-specific instructions</code></pre>
+
+  <h3>API Endpoints</h3>
+  <p>The proxy exposes a local API (default port 2019, localhost only):</p>
+  <table>
+    <thead>
+      <tr><th>Endpoint</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>/api/status</code></td><td>Proxy status and configuration</td></tr>
+      <tr><td><code>/api/targets</code></td><td>Current routing table (all proxied containers)</td></tr>
+      <tr><td><code>/api/ca</code></td><td>Certificate Authority information</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ================================================================== -->
+<!-- DESKTOP GUI                                                         -->
+<!-- ================================================================== -->
+<section class="section" id="desktop-gui">
+  <h2><span class="number">10</span> Desktop GUI</h2>
+  <p class="section-desc">
+    A native desktop application (Tauri 2 + React) for graphical management of projects, workspaces, services, hooks, proxy, and configuration.
+  </p>
+
+  <h3>Getting Started</h3>
+<pre><code class="language-bash"># Development mode (hot-reload)
+mise run gui
+
+# Production build
+mise run gui:build
+
+# Install frontend dependencies only
+mise run gui:install</code></pre>
+  <p>Requires <a href="https://bun.sh">bun</a> (or Node.js 18+) and the <a href="https://v2.tauri.app/start/prerequisites/">Tauri CLI</a>.</p>
+
+  <h3>Features</h3>
+  <div class="card-grid">
+    <div class="card">
+      <h4>Dashboard</h4>
+      <p>Project overview with configuration status, workspace counts, service counts, and proxy status at a glance.</p>
+    </div>
+    <div class="card">
+      <h4>Workspace Management</h4>
+      <p>Create, switch, and delete workspaces. View worktree paths, parent relationships, and connection info. Choose between branch or worktree creation mode.</p>
+    </div>
+    <div class="card">
+      <h4>Service Control</h4>
+      <p>Start, stop, and reset service instances. View logs, check health diagnostics, and manage the full service lifecycle per workspace.</p>
+    </div>
+    <div class="card">
+      <h4>Hook Editor</h4>
+      <p>Three-panel hook management: phase list, hook entries with run/edit/delete, and live MiniJinja template preview with variable browser.</p>
+    </div>
+    <div class="card">
+      <h4>Proxy Dashboard</h4>
+      <p>Proxy status, container discovery table with HTTPS links, and one-click CA trust management. Filter containers by domain, name, or project.</p>
+    </div>
+    <div class="card">
+      <h4>Configuration Editor</h4>
+      <p>Section-based form editor (General, Git, Worktree, Services, Hooks, Agent, Commit) &mdash; no raw YAML editing needed. Validation before save.</p>
+    </div>
+  </div>
+
+  <h3>System Tray</h3>
+  <p>The GUI runs in the system tray with quick access to:</p>
+  <ul>
+    <li>Dashboard toggle</li>
+    <li>Proxy start/stop</li>
+    <li>Project list with workspace shortcuts</li>
+    <li>Workspace activation (with worktree indicator)</li>
+  </ul>
+</section>
+
+<!-- ================================================================== -->
+<!-- TUI DASHBOARD                                                       -->
+<!-- ================================================================== -->
+<section class="section" id="tui-dashboard">
+  <h2><span class="number">11</span> TUI Dashboard</h2>
+  <p class="section-desc">
+    An interactive terminal dashboard for managing workspaces, services, and system diagnostics &mdash; without leaving your terminal.
+  </p>
+
+  <h3>Launch</h3>
+<pre><code class="language-bash">devflow tui</code></pre>
+
+  <h3>Tabs</h3>
+  <table>
+    <thead>
+      <tr><th>Tab</th><th>What it shows</th><th>Key actions</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Workspaces</strong></td>
+        <td>Workspace tree with parent/child relationships, service states, worktree paths</td>
+        <td>Switch workspace, start/stop services, press <code>o</code> to open workspace and exit</td>
+      </tr>
+      <tr>
+        <td><strong>Services</strong></td>
+        <td>Configured services, provider state, and capability information</td>
+        <td>Inspect service inventory and provider support without leaving the terminal</td>
+      </tr>
+      <tr>
+        <td><strong>Proxy</strong></td>
+        <td>Proxy status, trusted CA state, and discovered localhost endpoints</td>
+        <td>Check reverse proxy health and discover running container routes</td>
+      </tr>
+      <tr>
+        <td><strong>System</strong></td>
+        <td>Configuration overview, hook list with template variable reference and scaffold snippets, doctor diagnostics</td>
+        <td>Browse hooks, view template context, check system health</td>
+      </tr>
+      <tr>
+        <td><strong>Logs</strong></td>
+        <td>Service container logs with workspace and service picker</td>
+        <td>Select workspace/service, filter logs, keyboard navigation</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Navigation</h3>
+  <ul>
+    <li><strong>Tab / Shift+Tab</strong> &mdash; Switch between tabs</li>
+    <li><strong>Arrow keys</strong> &mdash; Navigate within tab</li>
+    <li><strong>Enter</strong> &mdash; Select / confirm action</li>
+    <li><strong>o</strong> &mdash; Open selected workspace (exits TUI and cd's into worktree)</li>
+    <li><strong>q / Esc</strong> &mdash; Quit</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div>With shell integration enabled (<code>eval "$(devflow shell-init)"</code>), pressing <code>o</code> in the TUI automatically <code>cd</code>s your shell into the selected workspace's worktree directory.</div>
+  </div>
+</section>
+
+<!-- ================================================================== -->
+<!-- AI & AUTOMATION                                                     -->
+<!-- ================================================================== -->
+<section class="section" id="ai-automation">
+  <h2><span class="number">12</span> AI &amp; Automation</h2>
+  <p class="section-desc">
+    devflow is designed for both human developers and autonomous agents. It provides AI-powered commit messages, structured JSON output for CI/CD pipelines, agent context and skills, optional sandboxed workspaces, and isolated service environments for parallel tasks.
+  </p>
+
+  <div class="callout callout-success">
+    <span class="callout-icon">&#10003;</span>
+    <div>
+      <strong>Why devflow for AI agents?</strong> Each agent task gets its own database &mdash; fully isolated, instantly cloned via Copy-on-Write. No shared state between parallel agents, no conflicts, no cleanup headaches. The <code>--json --non-interactive</code> flags make every command machine-safe, and <code>llms.txt</code> gives agents all the context they need.
+    </div>
+  </div>
+
+  <h3>Sandboxed Workspaces</h3>
+  <p>For higher-risk automation or experimental tasks, create a workspace in sandboxed mode:</p>
+
+<pre><code class="language-bash">devflow switch -c agent/fix-login --sandboxed</code></pre>
+
+  <p>Sandbox support is platform-aware and reduces filesystem or command access where the current system supports it.</p>
+
+  <h3>Smart Merge</h3>
+  <p>devflow also includes an advanced merge workflow with readiness checks, rebase helpers, and merge train support. This feature set is controlled by the Smart Merge setting in the desktop app or global config.</p>
+
+<pre><code class="language-bash">devflow merge --check-only
+devflow rebase develop
+devflow train add
+devflow train status
+devflow train run --cleanup</code></pre>
+
+  <h3 id="agent-integration">Agent Integration</h3>
+  <p>devflow follows the <a href="https://agentskills.io">Agent Skills</a> open standard and the <a href="https://llmstxt.org">llms.txt convention</a>, giving AI coding agents everything they need to manage isolated workspaces autonomously.</p>
+
+  <h4 id="agent-skills">Agent Skills</h4>
+  <p>Run <code>devflow agent skill</code> to generate workspace management skills that AI tools discover automatically:</p>
+
+<pre><code class="language-bash">devflow agent skill</code></pre>
+
+  <p>This creates the following files:</p>
+
+  <table>
+    <thead>
+      <tr><th>Skill</th><th>What It Teaches the Agent</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>devflow-workspace-list</code></td><td>List all workspaces with status (<code>devflow --json list</code>)</td></tr>
+      <tr><td><code>devflow-workspace-switch</code></td><td>Switch to an existing workspace (<code>devflow switch &lt;name&gt;</code>)</td></tr>
+      <tr><td><code>devflow-workspace-create</code></td><td>Create a new workspace with isolated services (<code>devflow switch -c &lt;name&gt;</code>)</td></tr>
+      <tr><td><code>devflow</code></td><td>Overview: configured services, hook phases, automation flags, suggested workflow</td></tr>
+    </tbody>
+  </table>
+
+  <p>Skills are written to <code>.agents/skills/</code> (Agent Skills standard) with symlinks in <code>.claude/skills/</code> for Claude Code compatibility. Claude Code, Cursor, and OpenCode all discover these skills automatically.</p>
+
+  <h4>Agent Context Files</h4>
+  <div class="card-grid">
+    <div class="card">
+      <h4><code>AGENTS.md</code></h4>
+      <p>Agent-first onboarding guide: recommended flags, bootstrap scripts, suggested agent loop, and automation contract. Most AI coding tools automatically read this file.</p>
+    </div>
+    <div class="card">
+      <h4><code>llms.txt</code></h4>
+      <p>Curated index following the <a href="https://llmstxt.org">llms.txt convention</a> &mdash; a concise map of all agent-relevant files, docs, and source code entry points.</p>
+    </div>
+    <div class="card">
+      <h4><code>llms-full.txt</code></h4>
+      <p>Comprehensive flat context dump: every CLI command, the full config schema, all hook phases, and template variables. Designed to be ingested in a single prompt.</p>
+    </div>
+    <div class="card">
+      <h4><code>examples/agent-*.sh</code></h4>
+      <p>Ready-to-use scripts: <code>agent-bootstrap.sh</code> for idempotent repo setup and <code>agent-task.sh</code> for task-scoped workspace environments.</p>
+    </div>
+  </div>
+
+  <h4>Agent Lifecycle</h4>
+  <p>The typical agent workflow follows this pattern:</p>
+
+  <div class="diagram">    ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+    │  Bootstrap   │ ──▶ │    Create    │ ──▶ │     Work     │ ──▶ │   Cleanup    │
+    │              │     │  Workspace   │     │              │     │              │
+    │ devflow init │     │  + Get Conn  │     │ Agent runs   │     │  devflow     │
+    │ agent skill  │     │  devflow     │     │ migrations,  │     │  delete      │
+    │ (idempotent) │     │  switch/     │     │ tests, code  │     │              │
+    │              │     │  create      │     │ against an   │     │ (or reset    │
+    │              │     │              │     │ isolated DB  │     │  to retry)   │
+    └──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
+         once               per task             per task              per task</div>
+
+  <h4>Quick start for agents</h4>
+<pre><code class="language-bash"># One-time bootstrap (idempotent — safe to re-run)
+./examples/agent-bootstrap.sh
+
+# Per-task: create isolated environment and get connection string
+./examples/agent-task.sh issue-123</code></pre>
+
+  <h4>Integration with AI coding tools</h4>
+  <p>Popular AI coding assistants automatically discover devflow's agent context:</p>
+
+  <table>
+    <thead>
+      <tr><th>Tool</th><th>Context File</th><th>Skills</th><th>How It Works</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Claude Code</strong></td><td><code>CLAUDE.md</code></td><td><code>.claude/skills/</code> (symlinks)</td><td>Skills auto-loaded as slash commands; workspace ops available out of the box</td></tr>
+      <tr><td><strong>Cursor</strong></td><td><code>AGENTS.md</code></td><td><code>.agents/skills/</code></td><td>Skills discoverable via Agent Skills standard</td></tr>
+      <tr><td><strong>OpenCode</strong></td><td><code>AGENTS.md</code></td><td><code>.agents/skills/</code></td><td>Skills discoverable via Agent Skills standard</td></tr>
+      <tr><td><strong>GitHub Copilot</strong></td><td><code>AGENTS.md</code></td><td>&mdash;</td><td>Available as workspace context; agent scripts run in Copilot Workspace</td></tr>
+      <tr><td><strong>Custom agents</strong></td><td><code>llms.txt</code> / <code>llms-full.txt</code></td><td>&mdash;</td><td>Machine-readable context; ingest <code>llms-full.txt</code> for complete reference</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div>Run <code>devflow agent skill</code> after <code>devflow init</code> to give your AI tools workspace management capabilities. The generated skills teach agents how to create, switch, and list workspaces &mdash; so they can isolate their own work automatically.</div>
+  </div>
+
+  <h3>Agent Commands</h3>
+  <p>devflow includes built-in commands for AI-friendly context, skill installation, and automation-safe workspace management:</p>
+
+<pre><code class="language-bash"># Install workspace skills for AI coding tools
+devflow agent skill
+
+# Check tracked agent-oriented workspaces
+devflow agent status
+
+# Get project context for the current workspace
+devflow agent context
+devflow agent context --format json
+
+# Create an isolated workspace for an agent task
+devflow --json --non-interactive switch -c agent/fix-login</code></pre>
+
+  <h3>AI Commit Messages</h3>
+  <p>Generate conventional commit messages from your staged changes using any OpenAI-compatible LLM:</p>
+
+<pre><code class="language-bash"># Generate and commit with AI message
+devflow commit --ai
+
+# Generate message but open in editor for review
+devflow commit --ai --edit
+
+# Dry run — see the generated message without committing
+devflow commit --ai --dry-run
+
+# Manual commit message (no AI)
+devflow commit -m "feat: add user authentication"
+
+# Open editor for manual message
+devflow commit</code></pre>
+
+  <h3>LLM Configuration</h3>
+  <p>Configure via environment variables:</p>
+
+  <table>
+    <thead>
+      <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>DEVFLOW_LLM_API_KEY</code></td><td>API key for the LLM provider</td><td>Required (unless local)</td></tr>
+      <tr><td><code>DEVFLOW_LLM_API_URL</code></td><td>API endpoint URL</td><td>OpenAI (<code>https://api.openai.com/v1</code>)</td></tr>
+      <tr><td><code>DEVFLOW_LLM_MODEL</code></td><td>Model name</td><td><code>gpt-4o-mini</code></td></tr>
+    </tbody>
+  </table>
+
+  <h4>Provider Examples</h4>
+<pre><code class="language-bash"># OpenAI (default)
+export DEVFLOW_LLM_API_KEY="sk-..."
+
+# Anthropic (via proxy)
+export DEVFLOW_LLM_API_KEY="sk-ant-..."
+export DEVFLOW_LLM_API_URL="https://api.anthropic.com/v1"
+export DEVFLOW_LLM_MODEL="claude-3-haiku-20240307"
+
+# Ollama (local — no API key needed)
+export DEVFLOW_LLM_API_URL="http://localhost:11434/v1"
+export DEVFLOW_LLM_MODEL="llama3.1"</code></pre>
+
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div>When the API URL contains <code>localhost</code> or <code>127.0.0.1</code>, devflow skips the API key requirement &mdash; perfect for local models with Ollama.</div>
+  </div>
+
+  <p>The system prompt enforces <strong>Conventional Commits</strong> format. Diffs larger than 32KB are truncated with a notice to the model.</p>
+
+  <h3>JSON Output Mode</h3>
+  <p>All core commands support <code>--json</code> for structured output, making devflow trivially scriptable from any language or agent framework.</p>
+
+<pre><code class="language-bash"># Create a workspace and get structured output
+devflow --json switch -c feature/auth
+# → {"name": "feature/auth", "state": "running", ...}
+
+# Get connection info as JSON
+devflow --json connection feature/auth
+# → {"host": "localhost", "port": 55433, "database": "myapp", ...}
+
+# List all workspaces as JSON
+devflow --json list
+# → [{"name": "main", "status": "running"}, ...]
+
+# Status as JSON
+devflow --json status
+# → {"project": "myapp", "current_workspace": "main", "services": [...]}</code></pre>
+
+  <h4>Automation Capabilities</h4>
+  <p>Use this command to detect machine-facing guarantees at runtime:</p>
+<pre><code class="language-bash">devflow --json capabilities
+# → {"schema_version":"1.0", "non_interactive": {...}, ...}</code></pre>
+
+  <h3>Non-Interactive Mode</h3>
+  <p>Skip all prompts and use sensible defaults. Essential for CI/CD, scripts, and AI agents:</p>
+<pre><code class="language-bash"># All commands in non-interactive mode
+devflow --non-interactive switch -c feature/auth
+devflow --non-interactive switch feature/auth        # Hooks run (require pre-approval)
+devflow --non-interactive switch feature/auth --no-verify  # Skip ALL hooks entirely
+devflow --non-interactive destroy --force</code></pre>
+
+  <h4>Automation Contract</h4>
+  <ul>
+    <li>Multi-provider <code>service create</code>, <code>service delete</code>, and <code>switch</code> exit non-zero if any provider fails</li>
+    <li><code>destroy</code> and <code>remove</code> require <code>--force</code> in <code>--json</code> or <code>--non-interactive</code> mode</li>
+    <li>Unapproved hooks fail in non-interactive mode (no approval prompts)</li>
+    <li>Use <code>devflow --json capabilities</code> to detect guarantees at runtime</li>
+  </ul>
+
+  <h3>AI Agent Workflow</h3>
+  <p>Give each AI agent task an isolated environment with its own database, test data, and connection strings. Here's the complete pattern:</p>
+
+<pre><code class="language-bash">#!/bin/bash
+# === AI Agent Sandbox Script ===
+
+# 0. One-time bootstrap (idempotent)
+./examples/agent-bootstrap.sh
+
+# 1. Create isolated environment for the agent task
+BRANCH="agent-task-$TASK_ID"
+OUTPUT=$(devflow --json --non-interactive switch -c "$BRANCH")
+
+# 2. Switch to worktree directory if worktrees are enabled
+WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
+[ -n "$WORKTREE" ] && cd "$WORKTREE"
+
+CONN=$(devflow --json connection "$BRANCH" | jq -r '.connection_string')
+
+# 3. Seed with test data if needed
+devflow --non-interactive service seed "$BRANCH" --from test-data.sql
+
+# 4. Agent works against an isolated development environment
+export DATABASE_URL="$CONN"
+python agent.py --task "$TASK_ID"
+
+# 5. Reset to clean state if agent needs to retry
+devflow --non-interactive service reset "$BRANCH"
+
+# 6. Re-run agent
+python agent.py --task "$TASK_ID"
+
+# 7. Check container logs on failure
+devflow service logs "$BRANCH"
+
+# 8. Clean up
+devflow --non-interactive remove "$BRANCH" --force</code></pre>
+
+  <h3>CI/CD Pipeline Integration</h3>
+<pre><code class="language-yaml"># GitHub Actions example
+name: PR Preview Database
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install devflow
+        run: cargo install --path .
+
+      - name: Create preview environment
+        run: |
+          devflow --json --non-interactive init myapp
+          # --no-verify skips hooks (appropriate for CI where hooks aren't pre-approved)
+          devflow --json --non-interactive switch -c pr-${{ github.event.number }} --no-verify
+
+      - name: Run migrations
+        run: |
+          CONN=$(devflow --json connection pr-${{ github.event.number }} | jq -r '.connection_string')
+          DATABASE_URL="$CONN" npm run migrate
+
+      - name: Run tests
+        run: |
+          CONN=$(devflow --json connection pr-${{ github.event.number }} | jq -r '.connection_string')
+          DATABASE_URL="$CONN" npm test
+
+      - name: Cleanup
+        if: always()
+        run: devflow --non-interactive remove pr-${{ github.event.number }} --force</code></pre>
+</section>
+
+<!-- ================================================================== -->
+<!-- VCS SUPPORT                                                         -->
+<!-- ================================================================== -->
+<section class="section" id="vcs-support">
+  <h2><span class="number">13</span> VCS Support</h2>
+  <p class="section-desc">
+    devflow supports both Git and Jujutsu (jj) version control systems through a unified provider abstraction.
+  </p>
+
+  <h3>Git Integration</h3>
+  <p>Git is the primary and most feature-complete VCS provider, powered by the <code>git2</code> library (libgit2 bindings).</p>
+
+  <h4>Installed Git Hooks</h4>
+  <p><code>devflow install-hooks</code> installs four hooks:</p>
+  <table>
+    <thead>
+      <tr><th>Hook</th><th>Purpose</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>post-checkout</code></td><td>Auto-create/switch service workspaces on <code>git checkout</code></td></tr>
+      <tr><td><code>post-merge</code></td><td>Run post-merge lifecycle hooks after <code>git merge</code></td></tr>
+      <tr><td><code>pre-commit</code></td><td>Run pre-commit lifecycle hooks before <code>git commit</code></td></tr>
+      <tr><td><code>post-rewrite</code></td><td>Run post-rewrite hooks after <code>git rebase</code> / <code>git commit --amend</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>All hook scripts include a <code>devflow auto-generated hook</code> marker, so <code>devflow uninstall-hooks</code> can safely remove only devflow hooks without affecting other hooks.</p>
+
+  <h4>Worktree-Aware Hooks</h4>
+  <p>The post-checkout hook is worktree-aware. It detects whether the checkout happened in the main worktree or a linked worktree (via <code>git rev-parse --git-dir</code> vs <code>--git-common-dir</code>) and passes the appropriate flags to devflow.</p>
+
+  <h4>Main Workspace Detection</h4>
+  <p>devflow auto-detects the main workspace using this priority:</p>
+  <ol>
+    <li>Remote HEAD reference (<code>origin/HEAD</code>)</li>
+    <li>Common names: <code>main</code>, <code>master</code>, <code>develop</code></li>
+    <li>Tracking workspace of the current workspace</li>
+    <li>Current workspace (fallback)</li>
+  </ol>
+
+  <h3>Jujutsu (jj) Support</h3>
+  <p>devflow supports <a href="https://github.com/martinvonz/jj" target="_blank">Jujutsu</a>, a modern VCS that can operate alongside Git. Key mappings:</p>
+
+  <table>
+    <thead>
+      <tr><th>Git Concept</th><th>jj Equivalent</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Branches</td><td>Bookmarks</td></tr>
+      <tr><td>Worktrees</td><td>Workspaces</td></tr>
+      <tr><td><code>git checkout</code></td><td><code>jj workspace add</code></td></tr>
+    </tbody>
+  </table>
+
+  <h4>Auto-Detection</h4>
+  <p>devflow walks up the directory tree looking for <code>.jj/</code> and <code>.git/</code> directories. When both exist (colocated jj repo), jj is preferred. You can have a Git repository managed by jj and devflow will use the jj provider.</p>
+
+  <div class="callout callout-warning">
+    <span class="callout-icon">&#9888;</span>
+    <div>Jujutsu support is functional but less mature than Git. Hook installation and some worktree features may have limitations compared to the Git provider.</div>
+  </div>
+</section>
+
+<!-- ================================================================== -->
+<!-- CLI REFERENCE                                                       -->
+<!-- ================================================================== -->
+<section class="section" id="cli-reference">
+  <h2><span class="number">14</span> CLI Reference</h2>
+  <p class="section-desc">
+    Complete reference for all devflow commands, organized by category. Core automation commands support <code>--json</code> and <code>--non-interactive</code> global flags.
+  </p>
+
+  <h3>Global Flags</h3>
+<pre><code class="language-bash">devflow [--json] [--non-interactive] [-s &lt;service-name&gt;] &lt;command&gt;</code></pre>
+  <table>
+    <thead>
+      <tr><th>Flag</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>--json</code></td><td>Output structured JSON for core automation commands</td></tr>
+      <tr><td><code>--non-interactive</code></td><td>Skip all prompts, use defaults</td></tr>
+      <tr><td><code>-s &lt;name&gt;</code></td><td>Target a specific named service</td></tr>
+    </tbody>
+  </table>
+
+  <hr>
+
+  <h3>Setup &amp; Configuration</h3>
+
+  <h4><code>devflow init [path]</code></h4>
+  <p>Initialize devflow in the current directory (or create/init a path). Creates <code>.devflow.yml</code>.</p>
+<pre><code class="language-bash">devflow init                            # Initialize current directory
+devflow init myapp                      # Create ./myapp and initialize it
+devflow init myapp --name app           # Explicit project name
+devflow init myapp --force              # Overwrite existing config</code></pre>
+
+  <h4><code>devflow service add &lt;name&gt;</code></h4>
+  <p>Add and configure a service provider. Use <code>--from</code> to seed main-workspace service data.</p>
+<pre><code class="language-bash">devflow service add app-db --provider local --service-type postgres
+devflow service add app-db --provider local --service-type postgres --from ./backup.sql
+devflow service add app-db --provider local --service-type postgres --from postgresql://user:pass@host:5432/db</code></pre>
+
+  <h4><code>devflow config</code></h4>
+  <p>Show the current configuration.</p>
+<pre><code class="language-bash">devflow config                           # Show config
+devflow config -v                        # Verbose: show precedence details</code></pre>
+
+  <h4><code>devflow install-hooks</code></h4>
+  <p>Install devflow Git hooks (post-checkout, post-merge, pre-commit, post-rewrite).</p>
+
+  <h4><code>devflow uninstall-hooks</code></h4>
+  <p>Remove devflow Git hooks. Only removes hooks with the devflow marker.</p>
+
+  <h4><code>devflow shell-init [shell]</code></h4>
+  <p>Print shell wrapper function for auto-cd when devflow emits <code>DEVFLOW_CD</code>.</p>
+<pre><code class="language-bash">eval "$(devflow shell-init)"             # Auto-detect shell
+eval "$(devflow shell-init bash)"        # Bash
+eval "$(devflow shell-init zsh)"         # Zsh
+devflow shell-init fish | source         # Fish</code></pre>
+
+  <h4><code>devflow tui</code></h4>
+  <p>Launch the interactive terminal UI dashboard. Provides a rich overview of workspaces, services, and worktrees with keyboard-driven navigation.</p>
+
+  <h4><code>devflow setup-zfs</code></h4>
+  <p>Create a file-backed ZFS pool for Copy-on-Write storage (Linux only).</p>
+<pre><code class="language-bash">devflow setup-zfs                        # 10G pool named "devflow"
+devflow setup-zfs --size 20G             # Custom size
+devflow setup-zfs --pool-name mypool     # Custom pool name</code></pre>
+
+  <h4><code>devflow doctor</code></h4>
+  <p>Run system diagnostics. Checks config, Docker, VCS, hooks, storage, and connectivity.</p>
+
+  <hr>
+
+  <h3>Workspace Management</h3>
+
+  <h4><code>devflow switch [workspace]</code></h4>
+  <p>Switch to an existing workspace/worktree. Use <code>-c</code> to create before switching.</p>
+<pre><code class="language-bash">devflow switch                           # Interactive fuzzy picker
+devflow switch feature/auth              # Switch to existing workspace/worktree
+devflow switch -c feature/new            # Create and switch
+devflow switch -c feature/new --from develop  # Create from specific parent
+devflow switch feature/auth -x "npm ci"  # Run command after switch
+devflow switch feature/auth --no-services # Skip service operations
+devflow switch feature/auth --no-verify  # Skip hooks
+devflow switch --template                # Switch to main/template
+devflow switch feature/auth --dry-run    # Preview what would happen</code></pre>
+
+  <h4><code>devflow link &lt;workspace&gt;</code></h4>
+  <p>Link an existing VCS workspace into the devflow registry (and materialize service workspaces if configured).</p>
+<pre><code class="language-bash">devflow link feature/auth
+devflow link feature/auth --from main</code></pre>
+
+  <h4><code>devflow service create &lt;workspace&gt;</code></h4>
+  <p>Create service workspace(es) only (without switching VCS/worktree).</p>
+<pre><code class="language-bash">devflow service create feature/auth
+devflow service create feature/auth --from develop</code></pre>
+
+  <h4><code>devflow service delete &lt;workspace&gt;</code></h4>
+  <p>Delete service workspace(es) only. Keeps the Git workspace and worktree.</p>
+<pre><code class="language-bash">devflow service delete feature/auth</code></pre>
+
+  <h4><code>devflow remove &lt;workspace&gt;</code></h4>
+  <p>Full cleanup: deletes the Git workspace, worktree, and all service workspaces.</p>
+<pre><code class="language-bash">devflow remove feature/auth
+devflow remove feature/auth --force       # Skip confirmation
+devflow remove feature/auth --keep-services  # Keep service workspaces</code></pre>
+
+  <h4><code>devflow list</code></h4>
+  <p>List all workspaces with enriched status (Git workspace + worktree + service status across all providers).</p>
+
+  <h4><code>devflow graph</code></h4>
+  <p>Render the full environment graph: workspace tree with service status, worktree paths, and provider info.</p>
+<pre><code class="language-bash">devflow graph
+devflow --json graph</code></pre>
+
+  <h4><code>devflow merge [target]</code></h4>
+  <p>Merge the current workspace into the target (defaults to main).</p>
+<pre><code class="language-bash">devflow merge                            # Merge into main
+devflow merge develop                    # Merge into develop
+devflow merge --cleanup                  # Delete source workspace after merge
+devflow merge --dry-run                  # Preview the merge</code></pre>
+
+  <h4><code>devflow cleanup</code></h4>
+  <p>Alias for <code>devflow service cleanup</code>. Remove old service workspaces, keeping the most recent N.</p>
+<pre><code class="language-bash">devflow cleanup                          # Use max_workspaces from config
+devflow cleanup --max-count 5            # Keep only 5 most recent</code></pre>
+
+  <h4><code>devflow service cleanup</code></h4>
+  <p>Clean old workspaces for a specific service target.</p>
+<pre><code class="language-bash">devflow service cleanup
+devflow service cleanup --max-count 5</code></pre>
+
+  <hr>
+
+  <h3>Workspace Lifecycle (Local Provider)</h3>
+
+  <h4><code>devflow service start &lt;workspace&gt;</code></h4>
+  <p>Start a stopped container.</p>
+
+  <h4><code>devflow service stop &lt;workspace&gt;</code></h4>
+  <p>Stop a running container (preserves data).</p>
+
+  <h4><code>devflow service reset &lt;workspace&gt;</code></h4>
+  <p>Reset workspace data to the state of the parent workspace.</p>
+
+  <h4><code>devflow service destroy</code></h4>
+  <p>Destroy all workspaces and data for a service.</p>
+<pre><code class="language-bash">devflow service destroy                   # With confirmation prompt
+devflow service destroy --force           # Skip confirmation</code></pre>
+  <p>In <code>--json</code> or <code>--non-interactive</code> mode, <code>--force</code> is required.</p>
+
+  <h4><code>devflow service seed &lt;workspace&gt; --from &lt;source&gt;</code></h4>
+  <p>Seed a workspace from a PostgreSQL URL, file, or S3 object.</p>
+<pre><code class="language-bash">devflow service seed main --from dump.sql
+devflow service seed main --from postgresql://user:pass@host/db
+devflow service seed main --from s3://bucket/path/to/dump.sql</code></pre>
+
+  <h4><code>devflow service logs &lt;workspace&gt;</code></h4>
+  <p>Show Docker container logs.</p>
+<pre><code class="language-bash">devflow service logs feature/auth                # Last 100 lines (default)
+devflow service logs feature/auth --tail 50      # Last 50 lines</code></pre>
+
+  <hr>
+
+  <h3>Info &amp; Diagnostics</h3>
+
+  <h4><code>devflow status</code></h4>
+  <p>Show project and service status with multi-provider aggregation.</p>
+
+  <h4><code>devflow capabilities</code></h4>
+  <p>Show machine-readable automation guarantees for agents and CI.</p>
+<pre><code class="language-bash">devflow capabilities
+devflow --json capabilities</code></pre>
+
+  <h4><code>devflow service capabilities</code></h4>
+  <p>Show the service provider capability matrix (which operations each configured provider supports).</p>
+<pre><code class="language-bash">devflow service capabilities
+devflow --json service capabilities</code></pre>
+
+  <h4><code>devflow connection &lt;workspace&gt;</code></h4>
+  <p>Show connection info for a workspace.</p>
+<pre><code class="language-bash">devflow connection feature/auth              # URI (default)
+devflow connection feature/auth --format env # Env vars (DATABASE_URL=...)
+devflow connection feature/auth --format json # JSON object
+devflow connection feature/auth -s analytics # Specific service</code></pre>
+
+  <hr>
+
+  <h3>VCS</h3>
+
+  <h4><code>devflow commit</code></h4>
+  <p>Commit staged changes with optional AI-generated messages.</p>
+<pre><code class="language-bash">devflow commit                           # Open editor
+devflow commit -m "feat: add auth"       # Inline message
+devflow commit --ai                      # AI-generated message
+devflow commit --ai --edit               # AI message + editor review
+devflow commit --ai --dry-run            # Preview AI message</code></pre>
+
+  <hr>
+
+  <h3>AI Agents</h3>
+
+  <h4><code>devflow agent status</code></h4>
+  <p>Show agent status across all workspaces.</p>
+
+  <h4><code>devflow agent context</code></h4>
+  <p>Output project context (workspace info, services, connections) for AI agents.</p>
+<pre><code class="language-bash">devflow agent context                    # Markdown format
+devflow agent context --format json      # JSON format
+devflow agent context --workspace feat/x    # Specific workspace</code></pre>
+
+  <h4><code>devflow agent skill</code></h4>
+  <p>Generate project-specific skills/rules for AI tools.</p>
+<pre><code class="language-bash">devflow agent skill
+devflow --json agent skill</code></pre>
+
+  <hr>
+
+  <h3>Hooks</h3>
+
+  <h4><code>devflow hook show [phase]</code></h4>
+  <p>Show configured hooks.</p>
+
+  <h4><code>devflow hook run &lt;phase&gt; [name]</code></h4>
+  <p>Manually run hooks for a specific phase.</p>
+<pre><code class="language-bash">devflow hook run post-create              # All post-create hooks
+devflow hook run post-create migrate      # Just the "migrate" hook
+devflow hook run post-create --workspace feat/x  # For a different workspace</code></pre>
+
+  <h4><code>devflow hook explain &lt;phase&gt;</code></h4>
+  <p>Explain what a hook phase does and show configured hooks for it.</p>
+
+  <h4><code>devflow hook vars</code></h4>
+  <p>Show all template variables available for the current workspace.</p>
+
+  <h4><code>devflow hook render &lt;template&gt;</code></h4>
+  <p>Render a MiniJinja template string against the current workspace context.</p>
+<pre><code class="language-bash">devflow hook render "DATABASE_URL={{ service['app-db'].url }}"</code></pre>
+
+  <h4><code>devflow hook approvals</code></h4>
+  <p>Manage the hook approval store.</p>
+<pre><code class="language-bash">devflow hook approvals list               # List approved hooks
+devflow hook approvals add "npm test"     # Approve a command
+devflow hook approvals clear              # Clear all approvals</code></pre>
+
+  <h4><code>devflow hook triggers</code></h4>
+  <p>Show the VCS event to hook phase mapping.</p>
+
+  <h4><code>devflow hook actions</code></h4>
+  <p>List built-in action types such as shell, replace, write-file, write-env, copy, docker-exec, http, and notify.</p>
+
+  <h4><code>devflow hook recipes</code></h4>
+  <p>List built-in hook recipe bundles you can install into <code>.devflow.yml</code>.</p>
+
+  <h4><code>devflow hook install &lt;recipe&gt;</code></h4>
+  <p>Install a built-in hook recipe without overwriting existing entries.</p>
+<pre><code class="language-bash">devflow hook recipes
+devflow hook install sync-ai-configs</code></pre>
+
+  <hr>
+
+  <h3>AI Agents</h3>
+
+  <h4><code>devflow agent status</code></h4>
+  <p>Show agent status across all workspaces.</p>
+
+  <h4><code>devflow agent context</code></h4>
+  <p>Output project context for AI agents.</p>
+<pre><code class="language-bash">devflow agent context                    # Markdown format
+devflow agent context --format json
+devflow agent context --workspace feat/x</code></pre>
+
+  <h4><code>devflow agent skill</code></h4>
+  <p>Generate project-specific skills/rules for AI tools.</p>
+<pre><code class="language-bash">devflow agent skill
+devflow --json agent skill</code></pre>
+
+  <h4><code>devflow sync-ai-configs</code></h4>
+  <p>Copy AI tool configuration additions from the current worktree back to the main worktree.</p>
+
+  <hr>
+
+  <h3>Reverse Proxy</h3>
+
+  <h4><code>devflow proxy start</code></h4>
+  <p>Start the native HTTPS reverse proxy.</p>
+<pre><code class="language-bash">devflow proxy start                      # Foreground
+devflow proxy start --daemon             # Background
+devflow proxy start --https-port 8443    # Custom HTTPS port</code></pre>
+
+  <h4><code>devflow proxy stop</code></h4>
+  <p>Stop the proxy daemon.</p>
+
+  <h4><code>devflow proxy status</code></h4>
+  <p>Show proxy status.</p>
+
+  <h4><code>devflow proxy list</code></h4>
+  <p>List proxied containers with HTTPS URLs.</p>
+
+  <h4><code>devflow proxy trust</code></h4>
+  <p>Manage CA certificate trust.</p>
+<pre><code class="language-bash">devflow proxy trust install              # Install CA to system trust
+devflow proxy trust verify               # Check if CA is trusted
+devflow proxy trust remove               # Remove CA from system trust
+devflow proxy trust info                 # Platform-specific instructions</code></pre>
+
+  <hr>
+
+  <h3>Plugins</h3>
+
+  <h4><code>devflow plugin list</code></h4>
+  <p>List all configured plugin providers.</p>
+
+  <h4><code>devflow plugin check &lt;name&gt;</code></h4>
+  <p>Verify a plugin provider is reachable and responds correctly.</p>
+
+  <h4><code>devflow plugin init &lt;name&gt;</code></h4>
+  <p>Generate a plugin scaffold.</p>
+<pre><code class="language-bash">devflow plugin init my-plugin --lang bash    # Bash scaffold
+devflow plugin init my-plugin --lang python  # Python scaffold</code></pre>
+
+  <hr>
+
+  <h3>Worktree</h3>
+
+  <h4><code>devflow worktree-setup</code></h4>
+  <p>Set up devflow in an existing Git worktree (copy files, create service workspaces).</p>
+
+  <hr>
+
+  <h3>Other</h3>
+
+  <h4><code>devflow destroy</code></h4>
+  <p>Tear down the entire devflow project (inverse of <code>init</code>). Requires <code>--force</code> in non-interactive mode.</p>
+
+  <h4><code>devflow service discover</code></h4>
+  <p>Auto-discover running Docker containers and suggest adding them as services.</p>
+<pre><code class="language-bash">devflow service discover
+devflow service discover --service-type postgres</code></pre>
+
+  <h4><code>devflow gc</code></h4>
+  <p>Garbage collection &mdash; detect and clean up orphaned projects.</p>
+<pre><code class="language-bash">devflow gc                               # Interactive cleanup
+devflow gc --list                        # List orphans only
+devflow gc --all                         # Clean all orphans
+devflow gc --force                       # Skip confirmation</code></pre>
+
+  <h4><code>devflow capabilities</code></h4>
+  <p>Show machine-readable automation contract summary.</p>
+<pre><code class="language-bash">devflow capabilities
+devflow --json capabilities</code></pre>
+</section>
+
+<!-- ================================================================== -->
+<!-- EXAMPLES & RECIPES                                                  -->
+<!-- ================================================================== -->
+<section class="section" id="examples">
+  <h2><span class="number">15</span> Examples &amp; Recipes</h2>
+  <p class="section-desc">
+    Real-world configuration examples for different frameworks, stacks, and workflows. Copy, paste, and adapt.
+  </p>
+
+  <h3>Node.js / Express with Prisma</h3>
+<pre><code class="language-yaml"># .devflow.yml
+services:
+  - name: app-db
+    type: local
+    service_type: postgres
+    default: true
+    local:
+      image: postgres:17
+
+hooks:
+  post-create:
+    env:
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
+    migrate: "npx prisma migrate deploy"
+    generate: "npx prisma generate"
+
+  post-switch:
+    env:
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
+
+  pre-merge:
+    test: "npm test"
+    lint: "npx eslint ."</code></pre>
+
+  <h3>Django Project</h3>
+<pre><code class="language-yaml"># .devflow.yml
+git:
+  auto_create_on_workspace: true
+  auto_switch_on_workspace: true
+  main_workspace: main
+  exclude_workspaces: [main, master, develop]
+
+behavior:
+  max_workspaces: 5
+
+services:
+  - name: app-db
+    type: local
+    service_type: postgres
+    default: true
+    local:
+      image: postgres:17
+
+hooks:
+  post-create:
+    update-env:
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
+      condition: "file_exists:manage.py"
+    migrate:
+      command: "python manage.py migrate"
+      condition: "file_exists:manage.py"
+    restart-services:
+      command: "docker compose restart"
+      continue_on_error: true
+
+  post-switch:
+    update-env:
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
+      condition: "file_exists:manage.py"
+    restart-services:
+      command: "docker compose restart"
+      continue_on_error: true</code></pre>
+
+  <h3>Ruby on Rails</h3>
+<pre><code class="language-yaml"># .devflow.yml
+services:
+  - name: app-db
+    type: local
+    service_type: postgres
+    default: true
+    local:
+      image: postgres:17
+
+hooks:
+  post-create:
+    env:
+      command: |
+        cat > .env.local << EOF
+        DATABASE_URL={{ service['app-db'].url }}
+        RAILS_ENV=development
+        EOF
+    migrate: "bundle exec rails db:migrate"
+
+  post-switch:
+    env:
+      command: |
+        cat > .env.local << EOF
+        DATABASE_URL={{ service['app-db'].url }}
+        RAILS_ENV=development
+        EOF
+
+  pre-merge:
+    test: "bundle exec rspec"</code></pre>
+
+  <h3>Multi-Service: PostgreSQL + ClickHouse + Redis</h3>
+<pre><code class="language-yaml"># .devflow.yml — Full-stack application
+git:
+  auto_create_on_workspace: true
+  auto_switch_on_workspace: true
+  main_workspace: main
+  exclude_workspaces: [main, master, develop]
+
+behavior:
+  max_workspaces: 10
+
+services:
+  - name: app-db
+    type: local
+    service_type: postgres
+    auto_workspace: true
+    default: true
+    local:
+      image: postgres:17
+
+  - name: analytics
+    type: local
+    service_type: clickhouse
+    auto_workspace: true
+    clickhouse:
+      image: clickhouse/clickhouse-server:latest
+
+  - name: cache
+    type: local
+    service_type: generic
+    auto_workspace: false               # Shared across workspaces
+    generic:
+      image: redis:7-alpine
+      port_mapping: "6379:6379"
+
+worktree:
+  enabled: true
+  path_template: "../{repo}.{workspace}"
+  copy_files: [.env.local, .env]
+  copy_ignored: true
+
+hooks:
+  post-create:
+    install: "npm ci"
+    env-setup:
+      command: |
+        cat > .env.local << EOF
+        DATABASE_URL={{ service['app-db'].url }}
+        CLICKHOUSE_URL=http://{{ service.analytics.host }}:{{ service.analytics.port }}
+        REDIS_URL=redis://localhost:6379
+        EOF
+      working_dir: "."
+    migrate: "npm run migrate"
+
+  post-switch:
+    update-env:
+      command: |
+        cat > .env.local << EOF
+        DATABASE_URL={{ service['app-db'].url }}
+        CLICKHOUSE_URL=http://{{ service.analytics.host }}:{{ service.analytics.port }}
+        REDIS_URL=redis://localhost:6379
+        EOF
+
+  pre-merge:
+    test: "npm test"
+    lint: "npm run lint"</code></pre>
+
+  <h3>Neon Cloud Setup</h3>
+<pre><code class="language-yaml"># .devflow.yml — Zero Docker, fully managed
+services:
+  - name: cloud-db
+    type: neon
+    service_type: postgres
+    auto_workspace: true
+    default: true
+    neon:
+      api_key: ${NEON_API_KEY}
+      project_id: ${NEON_PROJECT_ID}
+
+hooks:
+  post-create:
+    migrate: "npx prisma migrate deploy"
+  post-switch:
+    env:
+      command: "echo DATABASE_URL={{ service.cloud-db.url }} > .env.local"</code></pre>
+
+<pre><code class="language-bash"># Set environment variables
+export NEON_API_KEY="neon_..."
+export NEON_PROJECT_ID="proj_..."
+
+# Initialize
+devflow init myapp
+devflow service add mydb --provider neon --service-type postgres
+devflow install-hooks
+
+# Now every git checkout creates a Neon workspace
+git checkout -b feature/auth</code></pre>
+
+  <h3>Plugin Provider: Custom Bash Plugin</h3>
+<pre><code class="language-bash">#!/bin/bash
+# devflow-plugin-my-custom (saved as executable on PATH)
+# Minimal devflow plugin that manages SQLite databases
+
+set -euo pipefail
+
+# Read JSON request from stdin
+REQUEST=$(cat)
+METHOD=$(echo "$REQUEST" | jq -r '.method')
+PARAMS=$(echo "$REQUEST" | jq -r '.params // {}')
+BRANCH=$(echo "$PARAMS" | jq -r '.workspace_name // ""')
+
+case "$METHOD" in
+  create_workspace)
+    cp "main.db" "${BRANCH}.db" 2>/dev/null || touch "${BRANCH}.db"
+    echo '{"ok": true, "result": {"host": "localhost", "database": "'"${BRANCH}.db"'"}}'
+    ;;
+  delete_workspace)
+    rm -f "${BRANCH}.db"
+    echo '{"ok": true, "result": {}}'
+    ;;
+  list_workspaces)
+    BRANCHES=$(ls *.db 2>/dev/null | sed 's/.db$//' | jq -R . | jq -s 'map({name: .})')
+    echo '{"ok": true, "result": '"$BRANCHES"'}'
+    ;;
+  workspace_exists)
+    if [ -f "${BRANCH}.db" ]; then
+      echo '{"ok": true, "result": {"exists": true}}'
+    else
+      echo '{"ok": true, "result": {"exists": false}}'
+    fi
+    ;;
+  get_connection_info)
+    echo '{"ok": true, "result": {"host": "localhost", "database": "'"${BRANCH}.db"'"}}'
+    ;;
+  switch_to_branch)
+    echo '{"ok": true, "result": {"host": "localhost", "database": "'"${BRANCH}.db"'"}}'
+    ;;
+  doctor)
+    echo '{"ok": true, "result": {"healthy": true, "messages": ["SQLite plugin OK"]}}'
+    ;;
+  *)
+    echo '{"ok": false, "error": "Unknown method: '"$METHOD"'"}'
+    ;;
+esac</code></pre>
+
+<pre><code class="language-yaml"># .devflow.yml — Using the custom plugin
+services:
+  - name: custom-db
+    type: local
+    service_type: plugin
+    auto_workspace: true
+    plugin:
+      name: my-custom               # Finds devflow-plugin-my-custom on PATH
+      timeout: 10</code></pre>
+
+  <h3>Seeding from Production</h3>
+<pre><code class="language-bash"># Initial setup with production seed
+devflow init myapp
+devflow service add app-db --provider local --service-type postgres --from postgresql://readonly:pass@replica.prod.internal:5432/myapp
+
+# Or seed later
+devflow service seed main --from s3://my-company-backups/postgres/nightly-latest.dump
+
+# Every workspace created from main inherits the seeded data via CoW
+git checkout -b feature/auth
+# → Database is an instant copy of the seeded main workspace</code></pre>
+
+  <h3>AI Agent Sandboxing</h3>
+<pre><code class="language-bash">#!/bin/bash
+# === Batch AI Agent Runner ===
+# Creates isolated environments for multiple agent tasks in parallel
+
+TASKS=("fix-login-bug" "add-user-search" "optimize-queries")
+
+for TASK in "${TASKS[@]}"; do
+  (
+    # Create isolated workspace
+    OUTPUT=$(devflow --json --non-interactive switch -c "agent/$TASK")
+
+    # Switch to worktree if enabled
+    WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
+    [ -n "$WORKTREE" ] && cd "$WORKTREE"
+
+    # Get connection string
+    CONN=$(devflow --json connection "agent/$TASK" | jq -r '.connection_string')
+
+    # Run agent with an isolated development environment
+    DATABASE_URL="$CONN" python run_agent.py --task "$TASK"
+
+    # Cleanup
+    devflow --non-interactive remove "agent/$TASK" --force
+  ) &
+done
+
+# Wait for all agents to complete
+wait
+echo "All agent tasks completed."</code></pre>
+
+  <h3>Typical Development Flow</h3>
+<pre><code class="language-bash"># === Day-to-day workflow ===
+
+# Morning: start a new feature
+devflow switch -c feature/user-profiles
+# → Creates worktree at ../my-app.feature-user-profiles
+# → Creates an isolated development workspace environment (CoW clone)
+# → Copies .env.local, runs npm ci, runs migrations
+
+# Make schema changes, add data, iterate...
+npm run migrate
+npm test
+
+# Afternoon: review a teammate's PR
+devflow switch feature/payment-v2
+# → Switches to their worktree + service environment
+# → Your feature workspace's database is untouched
+npm test
+devflow service logs feature/payment-v2  # Check if anything went wrong
+
+# Back to your feature
+devflow switch feature/user-profiles
+# → Instant — everything is exactly as you left it
+
+# Done? Merge and clean up
+devflow merge --cleanup
+# → Merges into main
+# → Deletes the feature workspace, worktree, and service workspaces</code></pre>
+</section>
+
+<!-- ================================================================== -->
+<!-- TROUBLESHOOTING                                                     -->
+<!-- ================================================================== -->
+<section class="section" id="troubleshooting">
+  <h2><span class="number">16</span> Troubleshooting</h2>
+  <p class="section-desc">
+    Common issues and how to resolve them. Start with <code>devflow doctor</code> for automated diagnostics.
+  </p>
+
+  <h3>devflow doctor</h3>
+  <p>The <code>doctor</code> command checks your entire setup:</p>
+<pre><code class="language-bash">devflow doctor</code></pre>
+  <p>It verifies:</p>
+  <ul>
+    <li>Config file exists and is valid</li>
+    <li>You're in a Git/jj repository</li>
+    <li>Git hooks are installed</li>
+    <li>Workspace filter regex is valid</li>
+    <li>Docker is running and accessible</li>
+    <li>Storage driver is available (APFS/ZFS/reflink)</li>
+    <li>Provider-specific connectivity (database connections, API endpoints)</li>
+  </ul>
+
+  <h3>Common Issues</h3>
+
+  <h4>"Permission denied" when running Docker commands</h4>
+<pre><code class="language-bash"># Add yourself to the docker group
+sudo usermod -aG docker $USER
+newgrp docker
+
+# Or on macOS, make sure Docker Desktop is running</code></pre>
+
+  <h4>Port conflicts</h4>
+  <p>If devflow can't find a free port, increase the range or change the start port:</p>
+<pre><code class="language-yaml">local:
+  port_range_start: 60000  # Start from a higher range</code></pre>
+
+  <h4>Service workspace already exists</h4>
+<pre><code class="language-bash"># Delete the service workspace and recreate
+devflow service delete feature/auth
+devflow service create feature/auth</code></pre>
+
+  <h4>Container won't start</h4>
+<pre><code class="language-bash"># Check container logs
+devflow service logs feature/auth
+
+# Reset the workspace data
+devflow service reset feature/auth
+
+# Nuclear option: destroy everything and reinitialize
+devflow destroy --force
+devflow init myapp</code></pre>
+
+  <h4>"Cannot remove current workspace" or "Cannot remove main workspace"</h4>
+  <p>Switch to a different workspace first:</p>
+<pre><code class="language-bash">git checkout main
+devflow remove feature/auth</code></pre>
+
+  <h4>Hooks not firing on git checkout</h4>
+<pre><code class="language-bash"># Verify hooks are installed
+devflow doctor
+
+# Reinstall hooks
+devflow install-hooks
+
+# Check if hooks are disabled
+echo $DEVFLOW_DISABLED      # Should not be "true"
+echo $DEVFLOW_SKIP_HOOKS    # Should not be "true"</code></pre>
+
+  <h4>Slow branching on Linux (ext4)</h4>
+  <p>ext4 doesn't support Copy-on-Write, so devflow does a full copy. Install ZFS for instant branching:</p>
+<pre><code class="language-bash">sudo apt-get install -y zfsutils-linux
+devflow setup-zfs
+devflow doctor  # Verify ZFS is detected</code></pre>
+
+  <h4>devflow switch doesn't change directory</h4>
+  <p>You need the shell wrapper. Without it, <code>devflow switch</code> prints the path but can't change the parent shell's directory.</p>
+<pre><code class="language-bash"># Add to your shell profile:
+eval "$(devflow shell-init)"</code></pre>
+
+  <h4>Temporarily disabling devflow</h4>
+<pre><code class="language-bash"># Disable for one command
+DEVFLOW_DISABLED=true git checkout feature/auth
+
+# Disable for the current session
+export DEVFLOW_DISABLED=true
+
+# Disable for specific workspaces
+export DEVFLOW_DISABLED_BRANCHES=main,release/*
+
+# Disable just the current workspace
+export DEVFLOW_CURRENT_BRANCH_DISABLED=true
+
+# Skip hooks only
+export DEVFLOW_SKIP_HOOKS=true</code></pre>
+
+  <h3>State &amp; Data Locations</h3>
+  <table>
+    <thead>
+      <tr><th>Path</th><th>Contents</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>~/.config/devflow/local_state.yml</code></td><td>Project state (services, current workspace per project)</td></tr>
+      <tr><td><code>~/.config/devflow/hook_approvals.yml</code></td><td>Hook approval records</td></tr>
+      <tr><td><code>~/.local/share/devflow/</code></td><td>Default data root for container volumes</td></tr>
+      <tr><td><code>.devflow.yml</code></td><td>Project config (committed)</td></tr>
+      <tr><td><code>.devflow.local.yml</code></td><td>Local config overrides (gitignored)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Resetting Everything</h3>
+<pre><code class="language-bash"># Remove all containers and data for this project
+devflow destroy --force
+
+# Remove devflow hooks
+devflow uninstall-hooks
+
+# Remove local state (affects all projects)
+rm ~/.config/devflow/local_state.yml
+
+# Remove hook approvals
+rm ~/.config/devflow/hook_approvals.yml
+
+# Remove all container data
+rm -rf ~/.local/share/devflow/</code></pre>
+</section>
+
+<!-- ===== FOOTER ===== -->
+<div class="footer">
+  <p>
+    <strong>devflow</strong> v0.1.0 &mdash; MIT License &mdash;
+    <a href="https://github.com/clement-tourriere/devflow">GitHub</a>
+  </p>
+  <p class="text-muted">Isolated dev environments for every Git workspace &mdash; automatically.</p>
+</div>
+
+</div><!-- /.main -->
+
+<!-- ===== JavaScript ===== -->
+<script>
+// Syntax highlighting
+hljs.highlightAll();
+
+// Theme toggle
+function toggleTheme() {
+  const html = document.documentElement;
+  const current = html.getAttribute('data-theme');
+  const next = current === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  localStorage.setItem('devflow-theme', next);
+  updateThemeButton(next);
+  updateHljsTheme(next);
+}
+
+function updateThemeButton(theme) {
+  const btn = document.querySelector('.theme-toggle');
+  btn.textContent = theme === 'dark' ? '\u2600' : '\u263E';
+}
+
+function updateHljsTheme(theme) {
+  document.getElementById('hljs-light').disabled = (theme === 'dark');
+  document.getElementById('hljs-dark').disabled = (theme !== 'dark');
+}
+
+// Load saved theme or detect system preference
+(function() {
+  const saved = localStorage.getItem('devflow-theme');
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const theme = saved || (prefersDark ? 'dark' : 'light');
+  document.documentElement.setAttribute('data-theme', theme);
+  updateThemeButton(theme);
+  updateHljsTheme(theme);
+})();
+
+// Active sidebar link tracking
+const sections = document.querySelectorAll('.section, .hero');
+const navLinks = document.querySelectorAll('.sidebar nav a');
+
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      const id = entry.target.getAttribute('id');
+      navLinks.forEach(link => {
+        link.classList.toggle('active', link.getAttribute('href') === '#' + id);
+      });
+    }
+  });
+}, { rootMargin: '-80px 0px -70% 0px' });
+
+sections.forEach(section => observer.observe(section));
+
+// Close mobile sidebar on link click
+navLinks.forEach(link => {
+  link.addEventListener('click', () => {
+    document.querySelector('.sidebar').classList.remove('open');
+  });
+});
+</script>
+
+</body>
+</html>
