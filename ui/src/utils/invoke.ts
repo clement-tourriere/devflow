@@ -10,6 +10,11 @@ import type {
   DiscoveredContainer,
   DestroyServiceResult,
   AgentSkillsStatus,
+  InstalledSkillInfo,
+  SkillSearchResult,
+  SkillSearchDetail,
+  SkillDetail,
+  UserSkillInfo,
   HookPhaseEntry,
   VcsHooksActionResult,
   ActionTypeInfo,
@@ -179,6 +184,38 @@ export const uninstallAgentSkills = (projectPath: string) =>
   invoke<void>("uninstall_agent_skills", { projectPath });
 export const checkAgentSkills = (projectPath: string) =>
   invoke<AgentSkillsStatus>("check_agent_skills", { projectPath });
+
+// Skills management
+export const skillList = (projectPath: string) =>
+  invoke<InstalledSkillInfo[]>("skill_list", { projectPath });
+export const skillSearch = (query: string, limit: number) =>
+  invoke<SkillSearchResult[]>("skill_search", { query, limit });
+export const skillSearchDetail = (source: string, name: string) =>
+  invoke<SkillSearchDetail>("skill_search_detail", { source, name });
+export const skillInstall = (projectPath: string, identifier: string) =>
+  invoke<string[]>("skill_install", { projectPath, identifier });
+export const skillRemove = (projectPath: string, name: string) =>
+  invoke<void>("skill_remove", { projectPath, name });
+export const skillUpdate = (projectPath: string, name?: string) =>
+  invoke<string[]>("skill_update", { projectPath, name: name ?? null });
+export const skillShow = (projectPath: string, name: string) =>
+  invoke<SkillDetail>("skill_show", { projectPath, name });
+export const skillCheckUpdates = (projectPath: string) =>
+  invoke<string[]>("skill_check_updates", { projectPath });
+
+// User-scope skills
+export const userSkillList = () =>
+  invoke<UserSkillInfo[]>("user_skill_list");
+export const userSkillInstall = (identifier: string) =>
+  invoke<string[]>("user_skill_install", { identifier });
+export const userSkillRemove = (name: string) =>
+  invoke<void>("user_skill_remove", { name });
+export const userSkillUpdate = (name?: string) =>
+  invoke<string[]>("user_skill_update", { name: name ?? null });
+export const userSkillShow = (name: string) =>
+  invoke<SkillDetail>("user_skill_show", { name });
+export const userSkillCheckUpdates = () =>
+  invoke<string[]>("user_skill_check_updates");
 
 // Hooks
 export const listHooks = (projectPath: string) =>

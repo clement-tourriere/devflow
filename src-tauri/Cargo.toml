@@ -10,7 +10,7 @@ license = "MIT"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-devflow-core = { path = "../crates/devflow-core" }
+devflow-core = { path = "../crates/devflow-core", features = ["skills"] }
 devflow-proxy = { path = "../crates/devflow-proxy" }
 devflow-terminal = { path = "../crates/devflow-terminal" }
 base64 = "0.22"

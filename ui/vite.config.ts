@@ -9,7 +9,7 @@ export default defineConfig({
     strictPort: true,
     open: false,
     watch: {
-      ignored: ["**/src-tauri/**"],
+      ignored: ["**/src-tauri/**", "**/.agents/**", "**/.claude/**", "**/.devflow/**"],
     },
   },
 });

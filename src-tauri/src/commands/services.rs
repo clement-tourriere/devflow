@@ -767,19 +767,18 @@ pub async fn discover_docker_containers(
 
 #[tauri::command]
 pub async fn install_agent_skills(project_path: String) -> Result<Vec<String>, String> {
-    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let project_dir = std::path::Path::new(&project_path);
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(crate::commands::format_error)?;
-
-    devflow_core::agent::install_agent_skills(&config, project_dir)
+    let cache =
+        devflow_core::skills::cache::SkillCache::new().map_err(crate::commands::format_error)?;
+    devflow_core::skills::installer::install_bundled_skills(project_dir, &cache)
         .map_err(crate::commands::format_error)
 }
 
 #[tauri::command]
 pub async fn uninstall_agent_skills(project_path: String) -> Result<(), String> {
     let project_dir = std::path::Path::new(&project_path);
-    devflow_core::agent::uninstall_agent_skills(project_dir).map_err(crate::commands::format_error)
+    devflow_core::agent::uninstall_agent_skills(project_dir)
+        .map_err(crate::commands::format_error)
 }
 
 #[tauri::command]
@@ -787,7 +786,5 @@ pub async fn check_agent_skills(
     project_path: String,
 ) -> Result<devflow_core::agent::SkillInstallStatus, String> {
     let project_dir = std::path::Path::new(&project_path);
-    Ok(devflow_core::agent::check_agent_skills_installed(
-        project_dir,
-    ))
+    Ok(devflow_core::agent::check_agent_skills_installed(project_dir))
 }

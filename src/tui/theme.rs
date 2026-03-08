@@ -104,6 +104,7 @@ pub fn tab_hints(tab_index: usize) -> &'static str {
         2 => "j/k:Navigate  s:Start  x:Stop  r:Refresh",
         3 => "1:Config  2:Hooks  3:Doctor  4:Caps  j/k:Scroll  v/s:HookTpl  r:Refresh",
         4 => "f:Focus  /:Filter  j/k:Scroll  g/G:Top/Bottom  PgUp/PgDn:Page  r:Refresh",
+        5 => "j/k:Navigate  J/K:Scroll  /:Search  d:Remove  u:Update  U:Update All  r:Refresh",
         _ => "",
     }
 }

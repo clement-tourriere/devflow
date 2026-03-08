@@ -8,6 +8,7 @@ mod init;
 mod plugin;
 mod proxy;
 mod service;
+mod skill;
 mod sync_ai_configs;
 mod train;
 pub mod workspace;
@@ -363,6 +364,11 @@ Examples:
         action: AgentCommands,
     },
 
+    // ── Skills Management ──
+    /// Manage agent skills
+    #[command(subcommand)]
+    Skill(SkillCommands),
+
     // ── Proxy ──
     #[command(
         about = "Local reverse proxy (auto-HTTPS for Docker containers)",
@@ -713,10 +719,63 @@ pub enum AgentCommands {
         workspace: Option<String>,
     },
     #[command(
-        about = "Install agent skills for this project",
-        long_about = "Install devflow workspace skills into .agents/skills/ (Agent Skills standard).\n\nSkills are automatically available in Claude Code, Cursor, OpenCode,\nand any tool supporting the agentskills.io standard.\n\nExamples:\n  devflow agent skill"
+        about = "Install bundled workspace skills (use `devflow skill` for full management)",
+        long_about = "Install devflow's bundled workspace skills into .agents/skills/ and .claude/skills/.\n\nFor full skills management (search, install from marketplace, remove, update),\nuse `devflow skill` instead.\n\nExamples:\n  devflow agent skill          # Install bundled skills only\n  devflow skill list            # List all installed skills\n  devflow skill search foo      # Search skills.sh marketplace"
     )]
     Skill,
+}
+
+/// Subcommands for `devflow skill`.
+#[derive(Subcommand)]
+pub enum SkillCommands {
+    #[command(about = "List installed skills")]
+    List {
+        #[arg(long, help = "Include available skills from marketplace")]
+        available: bool,
+        #[arg(long, help = "Show only skills with updates available")]
+        updates: bool,
+        #[arg(long, help = "Operate on user-scope (global) skills")]
+        user: bool,
+    },
+    #[command(about = "Search skills.sh marketplace")]
+    Search {
+        /// Search query
+        query: String,
+        #[arg(long, default_value = "20", help = "Maximum results")]
+        limit: usize,
+    },
+    #[command(about = "Install a skill")]
+    Install {
+        /// Skill identifier: owner/repo, owner/repo/skill-name, or skill name from search
+        identifier: String,
+        #[arg(long, help = "Install specific skill(s) from a repo")]
+        skill: Option<Vec<String>>,
+        #[arg(long, help = "Install to user-scope (global) instead of project")]
+        user: bool,
+    },
+    #[command(about = "Remove a skill")]
+    Remove {
+        /// Skill name to remove
+        name: String,
+        #[arg(long, help = "Remove from user-scope (global) instead of project")]
+        user: bool,
+    },
+    #[command(about = "Update skills to latest versions")]
+    Update {
+        /// Specific skill to update (updates all if omitted)
+        name: Option<String>,
+        #[arg(long, help = "Check for updates without applying")]
+        check: bool,
+        #[arg(long, help = "Update user-scope (global) skills")]
+        user: bool,
+    },
+    #[command(about = "Show details of an installed skill")]
+    Show {
+        /// Skill name
+        name: String,
+        #[arg(long, help = "Show a user-scope (global) skill")]
+        user: bool,
+    },
 }
 
 /// Subcommands for `devflow proxy`.
@@ -1423,6 +1482,9 @@ pub async fn handle_command(
                 &config_path,
             )
             .await?;
+        }
+        Commands::Skill(action) => {
+            skill::handle_skill_command(action, json_output, &config_path).await?;
         }
         Commands::Config { verbose } => {
             if json_output {

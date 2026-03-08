@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
-import { runDoctor, installVcsHooks, uninstallVcsHooks, pruneWorktrees, installAgentSkills, uninstallAgentSkills, checkAgentSkills } from "../../utils/invoke";
-import type { DoctorReport, DoctorServiceReport, AgentSkillsStatus } from "../../types";
+import { runDoctor, installVcsHooks, uninstallVcsHooks, pruneWorktrees, installAgentSkills } from "../../utils/invoke";
+import type { DoctorReport, DoctorServiceReport } from "../../types";
 
 function DoctorPage() {
   const { "*": splat } = useParams();
@@ -15,8 +15,7 @@ function DoctorPage() {
   >(null);
   const [hookActionError, setHookActionError] = useState<string | null>(null);
   const [pruneLoading, setPruneLoading] = useState(false);
-  const [skillsLoading, setSkillsLoading] = useState<"install" | "uninstall" | "update" | null>(null);
-  const [skillStatus, setSkillStatus] = useState<AgentSkillsStatus | null>(null);
+  const [skillsInstallLoading, setSkillsInstallLoading] = useState(false);
 
   const reloadDoctor = useCallback(async () => {
     if (!projectPath) {
@@ -26,12 +25,8 @@ function DoctorPage() {
 
     setLoading(true);
     try {
-      const [results, skills] = await Promise.all([
-        runDoctor(projectPath),
-        checkAgentSkills(projectPath).catch(() => null),
-      ]);
+      const results = await runDoctor(projectPath);
       setReport(results);
-      setSkillStatus(skills);
       setError(null);
     } catch (e) {
       setError(`Doctor failed: ${e}`);
@@ -86,44 +81,16 @@ function DoctorPage() {
   };
 
   const handleInstallSkills = async () => {
-    if (!projectPath || skillsLoading) return;
+    if (!projectPath || skillsInstallLoading) return;
     setHookActionError(null);
-    setSkillsLoading("install");
+    setSkillsInstallLoading(true);
     try {
       await installAgentSkills(projectPath);
       await reloadDoctor();
     } catch (e) {
-      setHookActionError(`Failed to install agent skills: ${e}`);
+      setHookActionError(`Failed to install skills: ${e}`);
     } finally {
-      setSkillsLoading(null);
-    }
-  };
-
-  const handleUninstallSkills = async () => {
-    if (!projectPath || skillsLoading) return;
-    setHookActionError(null);
-    setSkillsLoading("uninstall");
-    try {
-      await uninstallAgentSkills(projectPath);
-      await reloadDoctor();
-    } catch (e) {
-      setHookActionError(`Failed to uninstall agent skills: ${e}`);
-    } finally {
-      setSkillsLoading(null);
-    }
-  };
-
-  const handleUpdateSkills = async () => {
-    if (!projectPath || skillsLoading) return;
-    setHookActionError(null);
-    setSkillsLoading("update");
-    try {
-      await installAgentSkills(projectPath);
-      await reloadDoctor();
-    } catch (e) {
-      setHookActionError(`Failed to update agent skills: ${e}`);
-    } finally {
-      setSkillsLoading(null);
+      setSkillsInstallLoading(false);
     }
   };
 
@@ -203,42 +170,21 @@ function DoctorPage() {
                         {pruneLoading ? "Pruning..." : "Prune"}
                       </button>
                     ) : isSkillsCheck ? (
-                      skillStatus?.update_available && skillStatus.installed_skills.length > 0 ? (
-                        <span style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
-                          <button
-                            className="btn btn-primary"
-                            onClick={handleUpdateSkills}
-                            disabled={skillsLoading !== null}
-                            style={{ padding: "4px 12px", fontSize: 12 }}
-                          >
-                            {skillsLoading === "update" ? "Updating..." : "Update"}
-                          </button>
-                          <button
-                            className="btn-link"
-                            onClick={handleUninstallSkills}
-                            disabled={skillsLoading !== null}
-                            style={{ fontSize: 12, color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}
-                          >
-                            {skillsLoading === "uninstall" ? "Removing..." : "Uninstall"}
-                          </button>
-                        </span>
-                      ) : check.available ? (
-                        <button
-                          className="btn-link"
-                          onClick={handleUninstallSkills}
-                          disabled={skillsLoading !== null}
-                          style={{ fontSize: 12, color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}
+                      check.available ? (
+                        <Link
+                          to={`/projects/${encodeURIComponent(projectPath)}#skills`}
+                          style={{ fontSize: 12, color: "var(--text-muted)", textDecoration: "underline" }}
                         >
-                          {skillsLoading === "uninstall" ? "Removing..." : "Uninstall"}
-                        </button>
+                          Manage Skills
+                        </Link>
                       ) : (
                         <button
                           className="btn btn-primary"
                           onClick={handleInstallSkills}
-                          disabled={skillsLoading !== null}
+                          disabled={skillsInstallLoading}
                           style={{ padding: "4px 12px", fontSize: 12 }}
                         >
-                          {skillsLoading === "install" ? "Installing..." : "Install"}
+                          {skillsInstallLoading ? "Installing..." : "Install"}
                         </button>
                       )
                     ) : (

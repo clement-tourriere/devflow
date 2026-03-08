@@ -335,6 +335,91 @@ devflow agent context
 "#
             .to_string(),
         },
+        SkillFile {
+            relative_path: "devflow-brainstorming/SKILL.md".to_string(),
+            content: r#"---
+name: devflow-brainstorming
+description: "Use before any creative work — creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design through collaborative dialogue, then transitions to implementation in an isolated devflow workspace."
+---
+
+# Brainstorming Ideas Into Designs
+
+## Overview
+
+Help turn ideas into fully formed designs and specs through natural collaborative dialogue.
+
+Start by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design, get user approval, then create an isolated devflow workspace for implementation.
+
+**HARD GATE**: Do NOT write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY task regardless of perceived simplicity.
+
+## Anti-Pattern: "This Is Too Simple To Need A Design"
+
+Every project goes through this process. A todo list, a single-function utility, a config change — all of them. "Simple" projects are where unexamined assumptions cause the most wasted work. The design can be short (a few sentences for truly simple tasks), but you MUST present it and get approval.
+
+## Checklist
+
+Complete these steps in order:
+
+1. **Explore project context** — check files, docs, recent commits, `devflow status`
+2. **Ask clarifying questions** — one at a time, understand purpose/constraints/success criteria
+3. **Propose 2-3 approaches** — with trade-offs and your recommendation
+4. **Present design** — in sections scaled to complexity, get user approval after each section
+5. **Write design doc** — save to `docs/plans/YYYY-MM-DD-<topic>-design.md`
+6. **Create devflow workspace** — create an isolated workspace for implementation (see below)
+7. **Write implementation plan** — break the approved design into concrete tasks
+
+## The Process
+
+### Understanding the idea
+
+- Check out the current project state first (files, docs, recent commits)
+- Run `devflow status` and `devflow list` to understand the workspace context
+- Ask questions one at a time to refine the idea
+- Prefer multiple choice questions when possible, but open-ended is fine too
+- Only one question per message — if a topic needs more exploration, break it into multiple questions
+- Focus on understanding: purpose, constraints, success criteria
+
+### Exploring approaches
+
+- Propose 2-3 different approaches with trade-offs
+- Present options conversationally with your recommendation and reasoning
+- Lead with your recommended option and explain why
+
+### Presenting the design
+
+- Once you believe you understand what you're building, present the design
+- Scale each section to its complexity: a few sentences if straightforward, up to 200-300 words if nuanced
+- Ask after each section whether it looks right so far
+- Cover: architecture, components, data flow, error handling, testing
+- Be ready to go back and clarify if something doesn't make sense
+
+### Transition to implementation
+
+After the user approves the design:
+
+1. Save the design to `docs/plans/YYYY-MM-DD-<topic>-design.md`
+2. Create an isolated devflow workspace for the implementation:
+
+```bash
+OUTPUT=$(devflow --json --non-interactive switch -c --sandboxed feature/<topic>)
+WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
+[ -n "$WORKTREE" ] && cd "$WORKTREE"
+```
+
+3. Write the implementation plan as `docs/plans/YYYY-MM-DD-<topic>-plan.md` in the new workspace
+4. Begin implementation in the isolated workspace — changes are contained and won't affect other work
+
+## Key Principles
+
+- **One question at a time** — Don't overwhelm with multiple questions
+- **Multiple choice preferred** — Easier to answer than open-ended when possible
+- **YAGNI ruthlessly** — Remove unnecessary features from all designs
+- **Explore alternatives** — Always propose 2-3 approaches before settling
+- **Incremental validation** — Present design, get approval before moving on
+- **Isolate work** — Use devflow workspaces so implementation doesn't interfere with ongoing work
+"#
+            .to_string(),
+        },
     ]
 }
 
@@ -343,6 +428,7 @@ const MANAGED_SKILL_DIRS: &[&str] = &[
     "devflow-workspace-list",
     "devflow-workspace-switch",
     "devflow-workspace-create",
+    "devflow-brainstorming",
 ];
 
 /// Install all agent skills into `.agents/skills/` under the project directory.
@@ -352,6 +438,9 @@ const MANAGED_SKILL_DIRS: &[&str] = &[
 ///
 /// Also creates per-skill symlinks in `.claude/skills/` pointing back to
 /// `.agents/skills/` so Claude Code picks them up too.
+///
+/// When the `skills` feature is enabled, also updates `.devflow/skills.lock`
+/// so the skills management system and GUI/TUI can see installed skills.
 ///
 /// Returns the list of written file paths.
 pub fn install_agent_skills(_config: &Config, project_dir: &Path) -> Result<Vec<String>> {
@@ -371,6 +460,10 @@ pub fn install_agent_skills(_config: &Config, project_dir: &Path) -> Result<Vec<
 
     // Symlink each skill dir in .claude/skills/ → ../../.agents/skills/<name>
     ensure_claude_skill_symlinks(project_dir)?;
+
+    // Update skills.lock so the skills management system stays in sync
+    #[cfg(feature = "skills")]
+    sync_skills_lock(project_dir)?;
 
     Ok(written)
 }
@@ -406,6 +499,40 @@ fn ensure_claude_skill_symlinks(project_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Sync the skills.lock file with the bundled skills that were just written to disk.
+///
+/// This ensures that the skills management system (GUI, TUI, CLI `skill list`)
+/// can see skills installed by `install_agent_skills()`.
+#[cfg(feature = "skills")]
+fn sync_skills_lock(project_dir: &Path) -> Result<()> {
+    use crate::skills::{bundled::bundled_skills, manifest, types::InstalledSkill};
+    use chrono::Utc;
+
+    let mut lock = manifest::load_lock(project_dir)?;
+    let now = Utc::now();
+
+    for skill in bundled_skills() {
+        // Only add/update if not already in lock or if content changed
+        let needs_update = match lock.skills.get(&skill.name) {
+            Some(existing) => existing.content_hash != skill.content_hash,
+            None => true,
+        };
+        if needs_update {
+            lock.skills.insert(
+                skill.name.clone(),
+                InstalledSkill {
+                    source: skill.source,
+                    content_hash: skill.content_hash,
+                    installed_at: now,
+                },
+            );
+        }
+    }
+
+    manifest::save_lock(project_dir, &lock)?;
+    Ok(())
+}
+
 /// Remove all devflow-managed skills from `.agents/skills/` and their Claude symlinks.
 pub fn uninstall_agent_skills(project_dir: &Path) -> Result<()> {
     let skills_dir = project_dir.join(SKILLS_DIR);
@@ -424,6 +551,18 @@ pub fn uninstall_agent_skills(project_dir: &Path) -> Result<()> {
             std::fs::remove_file(&claude_link)?;
         } else if claude_link.exists() {
             std::fs::remove_dir_all(&claude_link)?;
+        }
+    }
+
+    // Remove uninstalled skills from skills.lock
+    #[cfg(feature = "skills")]
+    {
+        use crate::skills::manifest;
+        if let Ok(mut lock) = manifest::load_lock(project_dir) {
+            for dir_name in MANAGED_SKILL_DIRS {
+                lock.skills.remove(*dir_name);
+            }
+            let _ = manifest::save_lock(project_dir, &lock);
         }
     }
 

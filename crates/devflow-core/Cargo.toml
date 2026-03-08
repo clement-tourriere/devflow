@@ -15,6 +15,7 @@ service-xata = ["dep:reqwest"]
 llm = ["dep:reqwest"]
 sandbox = ["dep:tempfile"]
 sandbox-landlock = ["dep:landlock"]
+skills = ["dep:reqwest", "dep:sha2"]
 
 [dependencies]
 # Serialization
@@ -77,6 +78,10 @@ futures-util = { version = "0.3", default-features = false, features = ["std"], 
 
 # Tar archive creation (for bollard upload_to_container)
 tar = { version = "0.4", default-features = false, optional = true }
+
+# Content hashing for skill versioning
+sha2 = { version = "0.10", optional = true }
+
 which = "8.0.0"
 
 # Password input

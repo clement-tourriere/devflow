@@ -296,6 +296,56 @@ export interface AgentSkillsStatus {
   stale_skills: string[];
 }
 
+export interface InstalledSkillInfo {
+  name: string;
+  source: SkillSource;
+  content_hash: string;
+  installed_at: string;
+}
+
+export interface SkillSource {
+  type: "bundled" | "github";
+  owner?: string;
+  repo?: string;
+  path?: string;
+}
+
+export interface SkillSearchResult {
+  id: string;
+  name: string;
+  source: string;
+  installs: number;
+}
+
+export interface SkillDetail {
+  name: string;
+  source: SkillSource;
+  content_hash: string;
+  installed_at: string;
+  content: string;
+}
+
+export interface SkillSearchDetail {
+  name: string;
+  source: string;
+  description: string;
+  content: string;
+}
+
+export interface UserSkillInfo {
+  name: string;
+  source: SkillSource;
+  content_hash: string;
+  installed_at: string;
+  agents: string[];
+  /** Whether this skill is managed by devflow (true) or discovered externally (false). */
+  managed: boolean;
+  /** For external skills: which agent this was discovered in (e.g. "opencode", "codex"). */
+  external_agent?: string;
+  /** For external skills: short description from frontmatter. */
+  description?: string;
+}
+
 export interface VcsInfo {
   existing_vcs: string | null;
   available_tools: string[];

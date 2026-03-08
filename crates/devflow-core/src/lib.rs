@@ -10,4 +10,6 @@ pub mod state;
 pub mod vcs;
 
 pub mod agent;
+#[cfg(feature = "skills")]
+pub mod skills;
 pub mod workspace;

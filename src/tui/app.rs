@@ -16,6 +16,7 @@ use super::components::logs::LogsComponent;
 use super::components::proxy_tab::ProxyTabComponent;
 use super::components::services_tab::ServicesTabComponent;
 use super::components::system::SystemComponent;
+use super::components::skills_tab::SkillsTabComponent;
 use super::components::workspaces::WorkspacesComponent;
 use super::components::Component;
 use super::context::DevflowContext;
@@ -48,12 +49,13 @@ enum ModalState {
 /// Main TUI application
 pub struct App {
     pub(super) context: DevflowContext,
-    // Components (5 tabs)
+    // Components (6 tabs)
     workspaces: WorkspacesComponent,
     services_tab: ServicesTabComponent,
     proxy_tab: ProxyTabComponent,
     system: SystemComponent,
     logs: LogsComponent,
+    skills: SkillsTabComponent,
     // State
     active_tab: usize,
     modal: ModalState,
@@ -69,7 +71,7 @@ pub struct App {
 
 impl App {
     pub fn new(context: DevflowContext) -> Self {
-        let tab_names = vec!["Workspaces", "Services", "Proxy", "System", "Logs"];
+        let tab_names = vec!["Workspaces", "Services", "Proxy", "System", "Logs", "Skills"];
         let (bg_tx, bg_rx) = mpsc::unbounded_channel();
         Self {
             context,
@@ -78,6 +80,7 @@ impl App {
             proxy_tab: ProxyTabComponent::new(),
             system: SystemComponent::new(),
             logs: LogsComponent::new(),
+            skills: SkillsTabComponent::new(),
             active_tab: 0,
             modal: ModalState::None,
             status_message: None,
@@ -100,6 +103,7 @@ impl App {
         self.spawn_fetch_services();
         self.spawn_fetch_capabilities();
         self.spawn_fetch_proxy_status();
+        self.spawn_fetch_skills();
         self.load_sync_data();
     }
 
@@ -269,6 +273,475 @@ impl App {
                     let _ = tx.send(Action::Error(format!("Service switch failed: {}", e)));
                 }
             }
+        });
+    }
+
+    /// Spawn a background task to load installed skills.
+    fn spawn_fetch_skills(&self) {
+        let project_dir = self
+            .context
+            .config_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|d| d.to_path_buf())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let tx = self.bg_tx.clone();
+        tokio::spawn(async move {
+            let lock = devflow_core::skills::manifest::load_lock(&project_dir);
+            let bundled = devflow_core::skills::bundled::bundled_skills();
+            let updates = devflow_core::skills::installer::check_updates(&project_dir, &bundled)
+                .unwrap_or_default();
+
+            match lock {
+                Ok(lock) => {
+                    let installed: Vec<super::action::SkillEntry> = lock
+                        .skills
+                        .iter()
+                        .map(|(name, skill)| {
+                            let source_label = match &skill.source {
+                                devflow_core::skills::SkillSource::Bundled => {
+                                    "bundled".to_string()
+                                }
+                                devflow_core::skills::SkillSource::Github {
+                                    owner, repo, ..
+                                } => {
+                                    format!("{}/{}", owner, repo)
+                                }
+                            };
+                            // Try to read content
+                            let skill_path = project_dir
+                                .join(".agents/skills")
+                                .join(name)
+                                .join("SKILL.md");
+                            let content = std::fs::read_to_string(&skill_path).ok();
+
+                            super::action::SkillEntry {
+                                name: name.clone(),
+                                source_label,
+                                content_hash: skill.content_hash.clone(),
+                                installed_at: skill
+                                    .installed_at
+                                    .format("%Y-%m-%d %H:%M")
+                                    .to_string(),
+                                content,
+                                managed: true,
+                            }
+                        })
+                        .collect();
+
+                    let update_names: Vec<String> =
+                        updates.into_iter().map(|(name, _, _)| name).collect();
+
+                    let _ = tx.send(Action::DataLoaded(super::action::DataPayload::Skills(
+                        super::action::SkillsTabData {
+                            installed,
+                            updates_available: update_names,
+                        },
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(Action::Error(format!("Failed to load skills: {}", e)));
+                }
+            }
+        });
+    }
+
+    /// Spawn a background task to load user-scope installed skills.
+    fn spawn_fetch_user_skills(&self) {
+        let tx = self.bg_tx.clone();
+        tokio::spawn(async move {
+            match devflow_core::skills::user_installer::list_user_skills() {
+                Ok(lock) => {
+                    let user_dir = devflow_core::skills::user_installer::user_skills_dir()
+                        .unwrap_or_default();
+                    let mut installed: Vec<super::action::SkillEntry> = lock
+                        .skills
+                        .iter()
+                        .map(|(name, skill)| {
+                            let source_label = match &skill.source {
+                                devflow_core::skills::SkillSource::Bundled => {
+                                    "bundled".to_string()
+                                }
+                                devflow_core::skills::SkillSource::Github {
+                                    owner, repo, ..
+                                } => {
+                                    format!("{}/{}", owner, repo)
+                                }
+                            };
+                            let skill_path = user_dir.join(name).join("SKILL.md");
+                            let content = std::fs::read_to_string(&skill_path).ok();
+
+                            super::action::SkillEntry {
+                                name: name.clone(),
+                                source_label,
+                                content_hash: skill.content_hash.clone(),
+                                installed_at: skill
+                                    .installed_at
+                                    .format("%Y-%m-%d %H:%M")
+                                    .to_string(),
+                                content,
+                                managed: true,
+                            }
+                        })
+                        .collect();
+
+                    // Discover external skills and merge
+                    if let Ok(external) =
+                        devflow_core::skills::user_installer::discover_external_skills()
+                    {
+                        let managed_names: std::collections::HashSet<String> =
+                            installed.iter().map(|s| s.name.clone()).collect();
+                        for ext in external {
+                            if managed_names.contains(&ext.name) {
+                                continue;
+                            }
+                            installed.push(super::action::SkillEntry {
+                                name: ext.name,
+                                source_label: format!("external · {}", ext.agent),
+                                content_hash: ext.content_hash,
+                                installed_at: String::new(),
+                                content: Some(ext.content),
+                                managed: false,
+                            });
+                        }
+                    }
+
+                    // Check for updates (use bundled as baseline for user-scope too)
+                    let bundled = devflow_core::skills::bundled::bundled_skills();
+                    let updates = devflow_core::skills::user_installer::check_user_updates(&bundled)
+                        .unwrap_or_default();
+                    let update_names: Vec<String> =
+                        updates.into_iter().map(|(name, _, _)| name).collect();
+
+                    let _ = tx.send(Action::DataLoaded(super::action::DataPayload::UserSkills(
+                        super::action::SkillsTabData {
+                            installed,
+                            updates_available: update_names,
+                        },
+                    )));
+                }
+                Err(e) => {
+                    let _ =
+                        tx.send(Action::Error(format!("Failed to load user skills: {}", e)));
+                }
+            }
+        });
+    }
+
+    /// Spawn a background task to install a skill at user scope.
+    fn spawn_user_skill_install(&self, identifier: String) {
+        let tx = self.bg_tx.clone();
+        tokio::spawn(async move {
+            let parts: Vec<&str> = identifier.split('/').collect();
+            if parts.len() < 3 {
+                let _ = tx.send(Action::Error(format!(
+                    "Invalid skill identifier: {}",
+                    identifier
+                )));
+                return;
+            }
+            let (owner, repo, skill_name) = (parts[0], parts[1], parts[2]);
+            let cache = match devflow_core::skills::cache::SkillCache::new() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(Action::Error(format!("Cache error: {}", e)));
+                    return;
+                }
+            };
+            match devflow_core::skills::marketplace::fetch_skill(owner, repo, skill_name).await {
+                Ok(skill) => {
+                    match devflow_core::skills::user_installer::install_user_skill(&skill, &cache) {
+                        Ok(_) => {
+                            let _ = tx.send(Action::OperationComplete {
+                                success: true,
+                                message: format!("Installed user skill: {}", skill_name),
+                            });
+                            let _ = tx.send(Action::Refresh);
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Action::Error(format!(
+                                "User skill install failed: {}",
+                                e
+                            )));
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(Action::Error(format!("Fetch failed: {}", e)));
+                }
+            }
+        });
+    }
+
+    /// Spawn a background task to remove a user-scope skill.
+    fn spawn_user_skill_remove(&self, name: String) {
+        let tx = self.bg_tx.clone();
+        tokio::spawn(async move {
+            match devflow_core::skills::user_installer::remove_user_skill(&name) {
+                Ok(_) => {
+                    let _ = tx.send(Action::OperationComplete {
+                        success: true,
+                        message: format!("Removed user skill: {}", name),
+                    });
+                    let _ = tx.send(Action::Refresh);
+                }
+                Err(e) => {
+                    let _ = tx.send(Action::Error(format!("User skill remove failed: {}", e)));
+                }
+            }
+        });
+    }
+
+    /// Spawn a background task to update user-scope skill(s).
+    fn spawn_user_skill_update(&self, name: Option<String>) {
+        let tx = self.bg_tx.clone();
+        tokio::spawn(async move {
+            let lock = match devflow_core::skills::user_installer::list_user_skills() {
+                Ok(l) => l,
+                Err(e) => {
+                    let _ = tx.send(Action::Error(format!("Lock load failed: {}", e)));
+                    return;
+                }
+            };
+            let cache = match devflow_core::skills::cache::SkillCache::new() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(Action::Error(format!("Cache error: {}", e)));
+                    return;
+                }
+            };
+
+            let bundled = devflow_core::skills::bundled::bundled_skills();
+            let skills_to_check: Vec<String> = if let Some(ref n) = name {
+                vec![n.clone()]
+            } else {
+                lock.skills.keys().cloned().collect()
+            };
+
+            let mut updated = Vec::new();
+            for skill_name in &skills_to_check {
+                if let Some(installed) = lock.skills.get(skill_name) {
+                    let new_skill = match &installed.source {
+                        devflow_core::skills::SkillSource::Bundled => bundled
+                            .iter()
+                            .find(|s| s.name == *skill_name)
+                            .cloned(),
+                        devflow_core::skills::SkillSource::Github { owner, repo, .. } => {
+                            devflow_core::skills::marketplace::fetch_skill(
+                                owner, repo, skill_name,
+                            )
+                            .await
+                            .ok()
+                        }
+                    };
+                    if let Some(new) = new_skill {
+                        if new.content_hash != installed.content_hash {
+                            if devflow_core::skills::user_installer::install_user_skill(
+                                &new, &cache,
+                            )
+                            .is_ok()
+                            {
+                                updated.push(skill_name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            let msg = if updated.is_empty() {
+                "All user skills are up to date.".to_string()
+            } else {
+                format!("Updated user skills: {}", updated.join(", "))
+            };
+            let _ = tx.send(Action::OperationComplete {
+                success: true,
+                message: msg,
+            });
+            let _ = tx.send(Action::Refresh);
+        });
+    }
+
+    /// Spawn a background task to search the skills marketplace.
+    fn spawn_skill_search(&self, query: String) {
+        let tx = self.bg_tx.clone();
+        tokio::spawn(async move {
+            match devflow_core::skills::marketplace::search(&query, 20).await {
+                Ok(results) => {
+                    let entries: Vec<super::action::SkillSearchEntry> = results
+                        .into_iter()
+                        .map(|r| super::action::SkillSearchEntry {
+                            name: r.name,
+                            source: r.source,
+                            installs: r.installs,
+                        })
+                        .collect();
+                    let _ = tx.send(Action::SkillSearchResults(entries));
+                }
+                Err(e) => {
+                    let _ = tx.send(Action::Error(format!("Skill search failed: {}", e)));
+                }
+            }
+        });
+    }
+
+    /// Spawn a background task to install a skill from the marketplace.
+    fn spawn_skill_install(&self, identifier: String) {
+        let project_dir = self
+            .context
+            .config_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|d| d.to_path_buf())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let tx = self.bg_tx.clone();
+        tokio::spawn(async move {
+            let parts: Vec<&str> = identifier.split('/').collect();
+            if parts.len() < 3 {
+                let _ = tx.send(Action::Error(format!(
+                    "Invalid skill identifier: {}",
+                    identifier
+                )));
+                return;
+            }
+            let (owner, repo, skill_name) = (parts[0], parts[1], parts[2]);
+            let cache = match devflow_core::skills::cache::SkillCache::new() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(Action::Error(format!("Cache error: {}", e)));
+                    return;
+                }
+            };
+            match devflow_core::skills::marketplace::fetch_skill(owner, repo, skill_name).await {
+                Ok(skill) => {
+                    match devflow_core::skills::installer::install_skill(
+                        &project_dir,
+                        &skill,
+                        &cache,
+                    ) {
+                        Ok(_) => {
+                            let _ = tx.send(Action::OperationComplete {
+                                success: true,
+                                message: format!("Installed skill: {}", skill_name),
+                            });
+                            let _ = tx.send(Action::Refresh);
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Action::Error(format!("Install failed: {}", e)));
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(Action::Error(format!("Fetch failed: {}", e)));
+                }
+            }
+        });
+    }
+
+    /// Spawn a background task to remove an installed skill.
+    fn spawn_skill_remove(&self, name: String) {
+        let project_dir = self
+            .context
+            .config_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|d| d.to_path_buf())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let tx = self.bg_tx.clone();
+        tokio::spawn(async move {
+            match devflow_core::skills::installer::remove_skill(&project_dir, &name) {
+                Ok(_) => {
+                    let _ = tx.send(Action::OperationComplete {
+                        success: true,
+                        message: format!("Removed skill: {}", name),
+                    });
+                    let _ = tx.send(Action::Refresh);
+                }
+                Err(e) => {
+                    let _ = tx.send(Action::Error(format!("Remove failed: {}", e)));
+                }
+            }
+        });
+    }
+
+    /// Spawn a background task to update skill(s).
+    fn spawn_skill_update(&self, name: Option<String>) {
+        let project_dir = self
+            .context
+            .config_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|d| d.to_path_buf())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let tx = self.bg_tx.clone();
+        tokio::spawn(async move {
+            let cache = match devflow_core::skills::cache::SkillCache::new() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(Action::Error(format!("Cache error: {}", e)));
+                    return;
+                }
+            };
+            let lock = match devflow_core::skills::manifest::load_lock(&project_dir) {
+                Ok(l) => l,
+                Err(e) => {
+                    let _ = tx.send(Action::Error(format!("Lock load failed: {}", e)));
+                    return;
+                }
+            };
+
+            let bundled = devflow_core::skills::bundled::bundled_skills();
+            let skills_to_check: Vec<String> = if let Some(ref n) = name {
+                vec![n.clone()]
+            } else {
+                lock.skills.keys().cloned().collect()
+            };
+
+            let mut updated = Vec::new();
+            for skill_name in &skills_to_check {
+                if let Some(installed) = lock.skills.get(skill_name) {
+                    let new_skill = match &installed.source {
+                        devflow_core::skills::SkillSource::Bundled => bundled
+                            .iter()
+                            .find(|s| s.name == *skill_name)
+                            .cloned(),
+                        devflow_core::skills::SkillSource::Github { owner, repo, .. } => {
+                            devflow_core::skills::marketplace::fetch_skill(
+                                owner, repo, skill_name,
+                            )
+                            .await
+                            .ok()
+                        }
+                    };
+                    if let Some(new) = new_skill {
+                        if new.content_hash != installed.content_hash {
+                            if devflow_core::skills::installer::install_skill(
+                                &project_dir,
+                                &new,
+                                &cache,
+                            )
+                            .is_ok()
+                            {
+                                updated.push(skill_name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            let msg = if updated.is_empty() {
+                "All skills are up to date.".to_string()
+            } else {
+                format!("Updated: {}", updated.join(", "))
+            };
+            let _ = tx.send(Action::OperationComplete {
+                success: true,
+                message: msg,
+            });
+            let _ = tx.send(Action::Refresh);
         });
     }
 
@@ -517,6 +990,7 @@ impl App {
                 KeyCode::Char('3') => return Action::SelectTab(2),
                 KeyCode::Char('4') => return Action::SelectTab(3),
                 KeyCode::Char('5') => return Action::SelectTab(4),
+                KeyCode::Char('6') => return Action::SelectTab(5),
                 _ => {}
             }
         }
@@ -528,6 +1002,7 @@ impl App {
             KeyCode::F(3) => return Action::SelectTab(2),
             KeyCode::F(4) => return Action::SelectTab(3),
             KeyCode::F(5) => return Action::SelectTab(4),
+            KeyCode::F(6) => return Action::SelectTab(5),
             _ => {}
         }
 
@@ -538,6 +1013,7 @@ impl App {
             2 => self.proxy_tab.handle_key_event(key),
             3 => self.system.handle_key_event(key),
             4 => self.logs.handle_key_event(key),
+            5 => self.skills.handle_key_event(key),
             _ => Action::None,
         }
     }
@@ -554,6 +1030,7 @@ impl App {
             2 => self.proxy_tab.on_blur(),
             3 => self.system.on_blur(),
             4 => self.logs.on_blur(),
+            5 => self.skills.on_blur(),
             _ => {}
         }
         self.active_tab = new_tab;
@@ -564,6 +1041,7 @@ impl App {
             2 => self.proxy_tab.on_focus(),
             3 => self.system.on_focus(),
             4 => self.logs.on_focus(),
+            5 => self.skills.on_focus(),
             _ => {}
         }
     }
@@ -596,6 +1074,11 @@ impl App {
                 // Re-snapshot VCS data (sync, fast) and spawn async fetches
                 self.context.refresh_vcs_snapshot();
                 self.load_initial_data();
+                // If user-scope is active, also fetch user skills
+                use super::components::skills_tab::SkillScope;
+                if self.skills.scope() == SkillScope::User {
+                    self.spawn_fetch_user_skills();
+                }
             }
             Action::SwitchServices(ref name) => {
                 if self.context.service_configs().is_empty() {
@@ -898,6 +1381,11 @@ impl App {
                                 });
                             }
                         }
+                        InputTarget::SkillSearch => {
+                            if !text.is_empty() {
+                                self.process_action(Action::SkillSearch(text));
+                            }
+                        }
                     }
                 }
             }
@@ -1168,9 +1656,55 @@ impl App {
                     }
                 });
             }
+            Action::SkillSearch(ref query) => {
+                self.set_status(format!("Searching for '{}'...", query), false);
+                self.spawn_skill_search(query.clone());
+            }
+            Action::SkillSearchResults(_) => {
+                self.dispatch_action(&action);
+            }
+            Action::SkillInstall(ref identifier) => {
+                self.set_status(format!("Installing '{}'...", identifier), false);
+                self.spawn_skill_install(identifier.clone());
+            }
+            Action::SkillRemove(ref name) => {
+                self.set_status(format!("Removing '{}'...", name), false);
+                self.spawn_skill_remove(name.clone());
+            }
+            Action::SkillUpdate(ref name) => {
+                let msg = match name {
+                    Some(n) => format!("Updating '{}'...", n),
+                    None => "Updating all skills...".to_string(),
+                };
+                self.set_status(msg, false);
+                self.spawn_skill_update(name.clone());
+            }
+            Action::SkillToggleScope => {
+                // The component already toggled its scope; fetch data for the new scope
+                use super::components::skills_tab::SkillScope;
+                match self.skills.scope() {
+                    SkillScope::Project => self.spawn_fetch_skills(),
+                    SkillScope::User => self.spawn_fetch_user_skills(),
+                }
+            }
+            Action::UserSkillInstall(ref identifier) => {
+                self.set_status(format!("Installing user skill '{}'...", identifier), false);
+                self.spawn_user_skill_install(identifier.clone());
+            }
+            Action::UserSkillRemove(ref name) => {
+                self.set_status(format!("Removing user skill '{}'...", name), false);
+                self.spawn_user_skill_remove(name.clone());
+            }
+            Action::UserSkillUpdate(ref name) => {
+                let msg = match name {
+                    Some(n) => format!("Updating user skill '{}'...", n),
+                    None => "Updating all user skills...".to_string(),
+                };
+                self.set_status(msg, false);
+                self.spawn_user_skill_update(name.clone());
+            }
             Action::InstallAgentSkills => {
                 self.set_status("Installing agent skills...".to_string(), false);
-                let config = self.context.config.clone();
                 let project_dir = self
                     .context
                     .config_path
@@ -1181,13 +1715,19 @@ impl App {
                     .unwrap_or_else(|| std::path::PathBuf::from("."));
                 let tx = self.bg_tx.clone();
                 tokio::spawn(async move {
-                    match devflow_core::agent::install_agent_skills(&config, &project_dir) {
-                        Ok(paths) => {
+                    match devflow_core::skills::cache::SkillCache::new()
+                        .and_then(|cache| {
+                            devflow_core::skills::installer::install_bundled_skills(
+                                &project_dir,
+                                &cache,
+                            )
+                        }) {
+                        Ok(names) => {
                             let _ = tx.send(Action::OperationComplete {
                                 success: true,
-                                message: format!("Installed {} agent skill files", paths.len()),
+                                message: format!("Installed {} skills", names.len()),
                             });
-                            let _ = tx.send(Action::RunDoctor);
+                            let _ = tx.send(Action::Refresh);
                         }
                         Err(e) => {
                             let _ = tx.send(Action::Error(format!(
@@ -1209,6 +1749,7 @@ impl App {
         self.proxy_tab.update(action);
         self.system.update(action);
         self.logs.update(action);
+        self.skills.update(action);
     }
 
     fn set_status(&mut self, message: String, is_error: bool) {
@@ -1303,6 +1844,7 @@ impl App {
             2 => self.proxy_tab.render(frame, area, self.spinner_frame()),
             3 => self.system.render(frame, area, self.spinner_frame()),
             4 => self.logs.render(frame, area, self.spinner_frame()),
+            5 => self.skills.render(frame, area, self.spinner_frame()),
             _ => {}
         }
     }
@@ -1310,7 +1852,7 @@ impl App {
     fn render_status(&self, frame: &mut Frame, area: Rect) {
         // Build the status line: left = hints, right = status message (or nothing)
         let tab_hints = theme::tab_hints(self.active_tab);
-        let global_hints = "q:Quit  ?:Help  Tab/Shift+Tab:Views  1-5:View";
+        let global_hints = "q:Quit  ?:Help  Tab/Shift+Tab:Views  1-6:View";
 
         match &self.status_message {
             Some((msg, is_error, _)) => {

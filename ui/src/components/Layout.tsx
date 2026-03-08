@@ -175,6 +175,16 @@ function Layout() {
             Terminal
           </a>
 
+          <div className="nav-section">Tools</div>
+          <NavLink
+            to="/skills"
+            className={({ isActive }) =>
+              `nav-item${isActive ? " active" : ""}`
+            }
+          >
+            Skills
+          </NavLink>
+
           <div className="nav-section">App</div>
           <NavLink
             to="/settings"

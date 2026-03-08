@@ -95,15 +95,17 @@ pub(super) async fn handle_agent_command(
 
         super::AgentCommands::Skill => {
             let project_dir = std::env::current_dir()?;
-            let written = devflow_core::agent::install_agent_skills(config, &project_dir)?;
+            let cache = devflow_core::skills::cache::SkillCache::new()?;
+            let installed =
+                devflow_core::skills::installer::install_bundled_skills(&project_dir, &cache)?;
             if json_output {
                 println!(
                     "{}",
-                    serde_json::to_string(&serde_json::json!({"paths": written}))?
+                    serde_json::to_string(&serde_json::json!({"installed": installed}))?
                 );
             } else {
-                for path in &written {
-                    println!("Installed: {}", path);
+                for name in &installed {
+                    println!("Installed: {}", name);
                 }
             }
             Ok(())

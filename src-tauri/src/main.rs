@@ -102,6 +102,22 @@ fn main() {
             commands::services::install_agent_skills,
             commands::services::uninstall_agent_skills,
             commands::services::check_agent_skills,
+            // Skills
+            commands::skills::skill_list,
+            commands::skills::skill_search,
+            commands::skills::skill_install,
+            commands::skills::skill_remove,
+            commands::skills::skill_update,
+            commands::skills::skill_show,
+            commands::skills::skill_search_detail,
+            commands::skills::skill_check_updates,
+            // User-scope Skills
+            commands::skills::user_skill_list,
+            commands::skills::user_skill_install,
+            commands::skills::user_skill_remove,
+            commands::skills::user_skill_update,
+            commands::skills::user_skill_show,
+            commands::skills::user_skill_check_updates,
             // Hooks
             commands::hooks::list_hooks,
             commands::hooks::render_template,

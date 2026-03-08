@@ -22,8 +22,6 @@ import {
   listContainers,
   getProxyStatus,
   runDoctor,
-  checkAgentSkills,
-  installAgentSkills,
 } from "../../utils/invoke";
 import type {
   ProjectDetail as ProjectDetailType,
@@ -35,13 +33,13 @@ import type {
   ContainerEntry,
   ProxyStatus,
   WorkspaceCreationMode,
-  AgentSkillsStatus,
 } from "../../types";
 import Modal from "../../components/Modal";
 import ConfirmDialog from "../../components/ConfirmDialog";
 import AddServiceModal from "../../components/AddServiceModal";
 import { useTerminal } from "../../context/TerminalContext";
 import { recordProjectAccess } from "../../utils/recentProjects";
+import ProjectSkillsTab from "./ProjectSkillsTab";
 
 interface WorkspaceSwitchedEvent {
   project_path: string;
@@ -61,10 +59,10 @@ function ProjectDetail() {
   const [error, setError] = useState<string | null>(null);
   const [setupIssueCount, setSetupIssueCount] = useState(0);
 
-  // Agent skills staleness
-  const [skillStatus, setSkillStatus] = useState<AgentSkillsStatus | null>(null);
-  const [skillsUpdating, setSkillsUpdating] = useState(false);
-  const [skillsDismissed, setSkillsDismissed] = useState(false);
+  // Tab state — sync with URL hash
+  const [activeTab, setActiveTab] = useState<"overview" | "skills">(
+    window.location.hash === "#skills" ? "skills" : "overview"
+  );
 
   // Service workspace tracking: { "service-name": ServiceWorkspaceInfo[] }
   const [serviceWorkspaces, setServiceWorkspaces] = useState<
@@ -211,25 +209,23 @@ function ProjectDetail() {
         setSetupIssueCount(failCount);
       })
       .catch(() => setSetupIssueCount(0));
-    // Also check agent skills staleness
-    checkAgentSkills(projectPath)
-      .then((status) => setSkillStatus(status))
-      .catch(() => setSkillStatus(null));
   }, [detail?.has_config, projectPath]);
 
-  const handleUpdateSkills = async () => {
-    if (!projectPath || skillsUpdating) return;
-    setSkillsUpdating(true);
-    try {
-      await installAgentSkills(projectPath);
-      const status = await checkAgentSkills(projectPath);
-      setSkillStatus(status);
-    } catch {
-      // Silently fail — user can use Setup page for detailed errors
-    } finally {
-      setSkillsUpdating(false);
+  // Sync tab state with URL hash
+  useEffect(() => {
+    const onHashChange = () => {
+      setActiveTab(window.location.hash === "#skills" ? "skills" : "overview");
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+
+  useEffect(() => {
+    const newHash = activeTab === "skills" ? "#skills" : "";
+    if (window.location.hash !== newHash) {
+      window.history.replaceState(null, "", newHash || window.location.pathname + window.location.search);
     }
-  };
+  }, [activeTab]);
 
   const handleCreateWorkspace = async () => {
     if (!newWorkspaceName.trim() || isCreatingWorkspace) return;
@@ -598,53 +594,52 @@ function ProjectDetail() {
         </div>
       </div>
 
-      {/* Agent skills update notification */}
-      {skillStatus?.update_available && skillStatus.installed_skills.length > 0 && !skillsDismissed && (
-        <div
-          className="card"
+      {/* Tab bar */}
+      <div style={{
+        display: "flex",
+        borderBottom: "1px solid var(--border)",
+        marginBottom: 16,
+        gap: 0,
+      }}>
+        <button
+          onClick={() => setActiveTab("overview")}
           style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "10px 16px",
-            borderLeft: "3px solid var(--warning)",
-            gap: 12,
+            padding: "8px 16px",
+            fontSize: 14,
+            fontWeight: activeTab === "overview" ? 600 : 400,
+            color: activeTab === "overview" ? "var(--text-primary)" : "var(--text-muted)",
+            background: "none",
+            border: "none",
+            borderBottom: activeTab === "overview" ? "2px solid var(--accent)" : "2px solid transparent",
+            cursor: "pointer",
+            marginBottom: -1,
           }}
         >
-          <div style={{ flex: 1, fontSize: 13 }}>
-            <strong>Agent skills update available</strong>
-            <span style={{ color: "var(--text-secondary)", marginLeft: 8 }}>
-              {skillStatus.stale_skills.length > 0 && `${skillStatus.stale_skills.length} outdated`}
-              {skillStatus.stale_skills.length > 0 && skillStatus.missing_skills.length > 0 && ", "}
-              {skillStatus.missing_skills.length > 0 && `${skillStatus.missing_skills.length} new`}
-            </span>
-          </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <button
-              className="btn btn-primary"
-              onClick={handleUpdateSkills}
-              disabled={skillsUpdating}
-              style={{ padding: "4px 14px", fontSize: 12 }}
-            >
-              {skillsUpdating ? "Updating..." : "Update"}
-            </button>
-            <button
-              className="btn-link"
-              onClick={() => setSkillsDismissed(true)}
-              style={{
-                fontSize: 12,
-                color: "var(--text-muted)",
-                background: "none",
-                border: "none",
-                cursor: "pointer",
-                padding: "4px 6px",
-              }}
-            >
-              Dismiss
-            </button>
-          </div>
-        </div>
-      )}
+          Overview
+        </button>
+        <button
+          onClick={() => setActiveTab("skills")}
+          style={{
+            padding: "8px 16px",
+            fontSize: 14,
+            fontWeight: activeTab === "skills" ? 600 : 400,
+            color: activeTab === "skills" ? "var(--text-primary)" : "var(--text-muted)",
+            background: "none",
+            border: "none",
+            borderBottom: activeTab === "skills" ? "2px solid var(--accent)" : "2px solid transparent",
+            cursor: "pointer",
+            marginBottom: -1,
+          }}
+        >
+          Skills
+        </button>
+      </div>
+
+      {/* Skills tab */}
+      {activeTab === "skills" && <ProjectSkillsTab projectPath={projectPath} />}
+
+      {/* Overview tab */}
+      {activeTab === "overview" && (<>
 
       {/* Workspaces card */}
       <div className="card">
@@ -1309,6 +1304,8 @@ function ProjectDetail() {
           </button>
         </div>
       </div>
+
+      </>)}
 
       {/* Destroy Project Confirmation */}
       <Modal

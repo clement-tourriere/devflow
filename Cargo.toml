@@ -16,8 +16,9 @@ name = "devflow"
 path = "src/main.rs"
 
 [features]
-default = ["service-local", "service-neon", "service-dblab", "service-xata", "llm", "tui"]
+default = ["service-local", "service-neon", "service-dblab", "service-xata", "llm", "tui", "skills"]
 tui = ["dep:ratatui", "dep:crossterm", "devflow-core/service-local"]
+skills = ["devflow-core/skills"]
 service-local = ["devflow-core/service-local"]
 service-neon = ["devflow-core/service-neon"]
 service-dblab = ["devflow-core/service-dblab"]
