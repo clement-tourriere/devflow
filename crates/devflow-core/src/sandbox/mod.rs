@@ -160,7 +160,8 @@ impl SandboxPolicy {
     /// On macOS: rewrites the command to run under sandbox-exec.
     /// On Linux: sets pre_exec for Landlock (unsafe, runs in child after fork).
     /// On unsupported: no-op (command guard still applies).
-    pub fn apply_to_command(&self, _cmd: &mut std::process::Command) -> Result<()> {
+    #[allow(unused_variables)]
+    pub fn apply_to_command(&self, cmd: &mut std::process::Command) -> Result<()> {
         match &self.platform {
             #[cfg(target_os = "linux")]
             PlatformCapability::Landlock { .. } => {
