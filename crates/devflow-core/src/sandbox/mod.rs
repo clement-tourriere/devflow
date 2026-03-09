@@ -175,7 +175,7 @@ impl SandboxPolicy {
                     use std::os::unix::process::CommandExt;
                     cmd.pre_exec(move || {
                         landlock::apply_landlock(&workspace_dir, &extra_read, &extra_write)
-                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                            .map_err(std::io::Error::other)
                     });
                 }
             }

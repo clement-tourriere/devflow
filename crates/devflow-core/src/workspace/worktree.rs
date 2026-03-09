@@ -234,8 +234,10 @@ mod tests {
 
     #[test]
     fn test_resolve_repo_name_from_config() {
-        let mut config = Config::default();
-        config.name = Some("my-project".to_string());
+        let config = Config {
+            name: Some("my-project".to_string()),
+            ..Default::default()
+        };
         assert_eq!(
             resolve_repo_name(&config, Path::new("/tmp/foo")),
             "my-project"
