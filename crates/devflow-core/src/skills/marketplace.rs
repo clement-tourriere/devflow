@@ -36,9 +36,7 @@ fn urlencoded(s: &str) -> String {
 
 /// Build a reqwest client with user-agent and optional GitHub token.
 fn github_client() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .user_agent("devflow")
-        .build()?)
+    Ok(reqwest::Client::builder().user_agent("devflow").build()?)
 }
 
 /// Build a GET request, adding GITHUB_TOKEN auth if available.
@@ -172,10 +170,7 @@ async fn list_repo_dirs(
     path: &str,
 ) -> Result<Vec<String>> {
     let url = if path.is_empty() {
-        format!(
-            "https://api.github.com/repos/{}/{}/contents",
-            owner, repo
-        )
+        format!("https://api.github.com/repos/{}/{}/contents", owner, repo)
     } else {
         format!(
             "https://api.github.com/repos/{}/{}/contents/{}",

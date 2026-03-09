@@ -167,6 +167,7 @@ impl WorkspacesComponent {
         self.normalize_service_focus();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn flatten_node_static(
         workspace: &EnrichedBranch,
         depth: usize,

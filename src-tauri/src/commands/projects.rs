@@ -220,8 +220,10 @@ pub async fn init_project(
     // Create default .devflow.yml if it doesn't exist
     let config_path = abs_path.join(".devflow.yml");
     if !config_path.exists() {
-        let mut config = devflow_core::config::Config::default();
-        config.name = Some(project_name.clone());
+        let mut config = devflow_core::config::Config {
+            name: Some(project_name.clone()),
+            ..Default::default()
+        };
         // Enable worktrees based on user selection (defaults to enabled)
         if worktree_enabled.unwrap_or(true) {
             config.worktree = Some(devflow_core::config::WorktreeConfig::recommended_default());
@@ -329,8 +331,10 @@ pub async fn add_or_init_project(
 
     if !config_path.exists() {
         // Create a new config
-        let mut config = devflow_core::config::Config::default();
-        config.name = Some(project_name.clone());
+        let mut config = devflow_core::config::Config {
+            name: Some(project_name.clone()),
+            ..Default::default()
+        };
         if let Some(ref branch) = main_branch {
             config.git.main_workspace = branch.clone();
         }
@@ -618,12 +622,10 @@ pub async fn destroy_project(project_path: String) -> Result<DestroyResult, Stri
     if let Some(ref repo) = vcs_repo {
         if let Ok(worktrees) = repo.list_worktrees() {
             for wt in worktrees.iter().filter(|wt| !wt.is_main) {
-                if repo.remove_worktree(&wt.path).is_ok() {
+                if repo.remove_worktree(&wt.path).is_ok()
+                    || (wt.path.exists() && std::fs::remove_dir_all(&wt.path).is_ok())
+                {
                     worktrees_removed += 1;
-                } else if wt.path.exists() {
-                    if std::fs::remove_dir_all(&wt.path).is_ok() {
-                        worktrees_removed += 1;
-                    }
                 }
             }
         }
@@ -651,10 +653,8 @@ pub async fn destroy_project(project_path: String) -> Result<DestroyResult, Stri
     }
 
     // 6. Delete config files
-    if config_path.exists() {
-        if std::fs::remove_file(&config_path).is_ok() {
-            config_deleted = true;
-        }
+    if config_path.exists() && std::fs::remove_file(&config_path).is_ok() {
+        config_deleted = true;
     }
     if local_config_path.exists() {
         let _ = std::fs::remove_file(&local_config_path);

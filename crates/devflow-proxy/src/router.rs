@@ -57,4 +57,10 @@ impl Router {
         let routes = self.routes.read().await;
         routes.len()
     }
+
+    /// Check if there are no active routes.
+    pub async fn is_empty(&self) -> bool {
+        let routes = self.routes.read().await;
+        routes.is_empty()
+    }
 }

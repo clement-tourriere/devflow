@@ -23,7 +23,7 @@ pub(super) enum ServiceAggregation {
 /// In non-interactive/JSON mode, requires explicit parameters.
 pub(crate) async fn run_add_service_wizard(
     config: &mut Config,
-    config_path: &std::path::PathBuf,
+    config_path: &Path,
     non_interactive: bool,
     json_output: bool,
     from: Option<&str>,
@@ -1885,6 +1885,7 @@ pub(super) fn print_enriched_branch_list(
     }
 
     // Recursive tree printer
+    #[allow(clippy::too_many_arguments)]
     fn print_node(
         name: &str,
         prefix: &str,
@@ -1897,7 +1898,7 @@ pub(super) fn print_enriched_branch_list(
         service_names: &HashSet<String>,
         wt_lookup: &HashMap<String, PathBuf>,
         config: &Config,
-        #[allow(unused_variables)] git_branches: &[devflow_core::vcs::WorkspaceInfo],
+        _git_branches: &[devflow_core::vcs::WorkspaceInfo],
     ) {
         let is_current =
             current_git.as_deref() == Some(name) || current_normalized.as_deref() == Some(name);
@@ -1965,7 +1966,7 @@ pub(super) fn print_enriched_branch_list(
                     service_names,
                     wt_lookup,
                     config,
-                    git_branches,
+                    _git_branches,
                 );
             }
         }
@@ -2126,10 +2127,7 @@ async fn handle_discover(
         return Ok(());
     }
 
-    println!(
-        "{:<25} {:<40} {:<25} {}",
-        "NAME", "IMAGE", "HOST:PORT", "TYPE"
-    );
+    println!("{:<25} {:<40} {:<25} TYPE", "NAME", "IMAGE", "HOST:PORT");
     println!("{}", "-".repeat(100));
     for c in &containers {
         let compose_label = if c.is_compose {

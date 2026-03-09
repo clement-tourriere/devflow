@@ -264,8 +264,6 @@ impl SkillsTabComponent {
                                     .add_modifier(Modifier::BOLD)
                             } else if raw_line.starts_with("```") {
                                 Style::default().fg(theme::TEXT_MUTED)
-                            } else if raw_line.starts_with("- ") {
-                                Style::default().fg(theme::TEXT_PRIMARY)
                             } else {
                                 Style::default().fg(theme::TEXT_PRIMARY)
                             };

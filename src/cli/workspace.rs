@@ -342,6 +342,7 @@ fn print_enriched_branch_list(
     }
 
     // Recursive tree printer
+    #[allow(clippy::too_many_arguments)]
     fn print_node(
         name: &str,
         prefix: &str,
@@ -355,7 +356,7 @@ fn print_enriched_branch_list(
         wt_lookup: &HashMap<String, PathBuf>,
         sandbox_lookup: &HashSet<String>,
         config: &Config,
-        #[allow(unused_variables)] git_branches: &[devflow_core::vcs::WorkspaceInfo],
+        #[allow(unused_variables)] _git_branches: &[devflow_core::vcs::WorkspaceInfo],
     ) {
         let is_current =
             current_git.as_deref() == Some(name) || current_normalized.as_deref() == Some(name);
@@ -428,7 +429,7 @@ fn print_enriched_branch_list(
                     wt_lookup,
                     sandbox_lookup,
                     config,
-                    git_branches,
+                    _git_branches,
                 );
             }
         }
@@ -1046,7 +1047,7 @@ pub(super) async fn handle_branch_command(
                     };
                     let workspace_exists = vcs::detect_vcs_provider(".")
                         .ok()
-                        .and_then(|repo| repo.workspace_exists(&workspace).ok());
+                        .and_then(|repo| repo.workspace_exists(workspace).ok());
 
                     let project_dir = config_path
                         .as_ref()
@@ -1177,7 +1178,7 @@ pub(super) async fn handle_branch_command(
                 } else {
                     handle_switch_command(
                         config,
-                        &workspace,
+                        workspace,
                         config_path,
                         create,
                         from.as_deref(),
@@ -2077,6 +2078,7 @@ pub(super) async fn handle_switch_command(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_switch_to_main(
     config: &Config,
     config_path: &Option<std::path::PathBuf>,
@@ -2508,6 +2510,7 @@ async fn handle_remove_command(
 
 // ── Merge ──────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_merge_command(
     config: &Config,
     target: Option<&str>,

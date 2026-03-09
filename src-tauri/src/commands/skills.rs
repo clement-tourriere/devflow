@@ -1,8 +1,8 @@
 use serde::Serialize;
 
 use devflow_core::skills::{
-    bundled::bundled_skills, cache::SkillCache, installer, manifest, marketplace,
-    types::SkillLock, user_installer, InstalledSkill, SkillSource,
+    bundled::bundled_skills, cache::SkillCache, installer, manifest, marketplace, types::SkillLock,
+    user_installer, InstalledSkill, SkillSource,
 };
 
 #[derive(Serialize)]
@@ -184,13 +184,11 @@ pub async fn skill_update(
     for skill_name in &skills_to_check {
         if let Some(installed) = lock.skills.get(skill_name) {
             let new_skill = match &installed.source {
-                SkillSource::Bundled => bundled_skills()
-                    .into_iter()
-                    .find(|s| s.name == *skill_name),
+                SkillSource::Bundled => {
+                    bundled_skills().into_iter().find(|s| s.name == *skill_name)
+                }
                 SkillSource::Github { owner, repo, .. } => {
-                    marketplace::fetch_skill(owner, repo, skill_name)
-                        .await
-                        .ok()
+                    marketplace::fetch_skill(owner, repo, skill_name).await.ok()
                 }
             };
 
@@ -406,13 +404,11 @@ pub async fn user_skill_update(name: Option<String>) -> Result<Vec<String>, Stri
     for skill_name in &skills_to_check {
         if let Some(installed) = lock.skills.get(skill_name) {
             let new_skill = match &installed.source {
-                SkillSource::Bundled => bundled_skills()
-                    .into_iter()
-                    .find(|s| s.name == *skill_name),
+                SkillSource::Bundled => {
+                    bundled_skills().into_iter().find(|s| s.name == *skill_name)
+                }
                 SkillSource::Github { owner, repo, .. } => {
-                    marketplace::fetch_skill(owner, repo, skill_name)
-                        .await
-                        .ok()
+                    marketplace::fetch_skill(owner, repo, skill_name).await.ok()
                 }
             };
 
@@ -432,15 +428,13 @@ pub async fn user_skill_update(name: Option<String>) -> Result<Vec<String>, Stri
 pub async fn user_skill_show(name: String) -> Result<SkillDetail, String> {
     // First try devflow-managed user skills
     match user_installer::show_user_skill(&name) {
-        Ok((installed, content)) => {
-            return Ok(SkillDetail {
-                name,
-                source: installed.source,
-                content_hash: installed.content_hash,
-                installed_at: installed.installed_at.format("%Y-%m-%d %H:%M").to_string(),
-                content,
-            });
-        }
+        Ok((installed, content)) => Ok(SkillDetail {
+            name,
+            source: installed.source,
+            content_hash: installed.content_hash,
+            installed_at: installed.installed_at.format("%Y-%m-%d %H:%M").to_string(),
+            content,
+        }),
         Err(_) => {
             // Not a managed skill — try external skills
             if let Ok(external) = user_installer::discover_external_skills() {

@@ -166,6 +166,7 @@ pub struct CreateWorkspaceResult {
     pub worktree_path: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn create_workspace(
     app: tauri::AppHandle,

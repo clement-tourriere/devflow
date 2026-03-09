@@ -160,7 +160,7 @@ async fn main() -> Result<()> {
                     .map(|s| s.clone().hide(false))
                     .collect();
                 for sub in subcmds {
-                    cmd = cmd.mut_subcommand(sub.get_name().to_string(), |_| sub.clone());
+                    cmd = cmd.mut_subcommand(sub.get_name(), |_| sub.clone());
                 }
                 cmd = cmd.help_template(FULL_HELP_TEMPLATE);
                 cmd.print_help()?;

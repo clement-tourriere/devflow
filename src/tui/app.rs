@@ -15,8 +15,8 @@ use super::components::help;
 use super::components::logs::LogsComponent;
 use super::components::proxy_tab::ProxyTabComponent;
 use super::components::services_tab::ServicesTabComponent;
-use super::components::system::SystemComponent;
 use super::components::skills_tab::SkillsTabComponent;
+use super::components::system::SystemComponent;
 use super::components::workspaces::WorkspacesComponent;
 use super::components::Component;
 use super::context::DevflowContext;
@@ -71,7 +71,14 @@ pub struct App {
 
 impl App {
     pub fn new(context: DevflowContext) -> Self {
-        let tab_names = vec!["Workspaces", "Services", "Proxy", "System", "Logs", "Skills"];
+        let tab_names = vec![
+            "Workspaces",
+            "Services",
+            "Proxy",
+            "System",
+            "Logs",
+            "Skills",
+        ];
         let (bg_tx, bg_rx) = mpsc::unbounded_channel();
         Self {
             context,
@@ -300,9 +307,7 @@ impl App {
                         .iter()
                         .map(|(name, skill)| {
                             let source_label = match &skill.source {
-                                devflow_core::skills::SkillSource::Bundled => {
-                                    "bundled".to_string()
-                                }
+                                devflow_core::skills::SkillSource::Bundled => "bundled".to_string(),
                                 devflow_core::skills::SkillSource::Github {
                                     owner, repo, ..
                                 } => {
@@ -353,16 +358,14 @@ impl App {
         tokio::spawn(async move {
             match devflow_core::skills::user_installer::list_user_skills() {
                 Ok(lock) => {
-                    let user_dir = devflow_core::skills::user_installer::user_skills_dir()
-                        .unwrap_or_default();
+                    let user_dir =
+                        devflow_core::skills::user_installer::user_skills_dir().unwrap_or_default();
                     let mut installed: Vec<super::action::SkillEntry> = lock
                         .skills
                         .iter()
                         .map(|(name, skill)| {
                             let source_label = match &skill.source {
-                                devflow_core::skills::SkillSource::Bundled => {
-                                    "bundled".to_string()
-                                }
+                                devflow_core::skills::SkillSource::Bundled => "bundled".to_string(),
                                 devflow_core::skills::SkillSource::Github {
                                     owner, repo, ..
                                 } => {
@@ -409,8 +412,9 @@ impl App {
 
                     // Check for updates (use bundled as baseline for user-scope too)
                     let bundled = devflow_core::skills::bundled::bundled_skills();
-                    let updates = devflow_core::skills::user_installer::check_user_updates(&bundled)
-                        .unwrap_or_default();
+                    let updates =
+                        devflow_core::skills::user_installer::check_user_updates(&bundled)
+                            .unwrap_or_default();
                     let update_names: Vec<String> =
                         updates.into_iter().map(|(name, _, _)| name).collect();
 
@@ -422,8 +426,7 @@ impl App {
                     )));
                 }
                 Err(e) => {
-                    let _ =
-                        tx.send(Action::Error(format!("Failed to load user skills: {}", e)));
+                    let _ = tx.send(Action::Error(format!("Failed to load user skills: {}", e)));
                 }
             }
         });
@@ -460,10 +463,8 @@ impl App {
                             let _ = tx.send(Action::Refresh);
                         }
                         Err(e) => {
-                            let _ = tx.send(Action::Error(format!(
-                                "User skill install failed: {}",
-                                e
-                            )));
+                            let _ =
+                                tx.send(Action::Error(format!("User skill install failed: {}", e)));
                         }
                     }
                 }
@@ -523,27 +524,23 @@ impl App {
             for skill_name in &skills_to_check {
                 if let Some(installed) = lock.skills.get(skill_name) {
                     let new_skill = match &installed.source {
-                        devflow_core::skills::SkillSource::Bundled => bundled
-                            .iter()
-                            .find(|s| s.name == *skill_name)
-                            .cloned(),
+                        devflow_core::skills::SkillSource::Bundled => {
+                            bundled.iter().find(|s| s.name == *skill_name).cloned()
+                        }
                         devflow_core::skills::SkillSource::Github { owner, repo, .. } => {
-                            devflow_core::skills::marketplace::fetch_skill(
-                                owner, repo, skill_name,
-                            )
-                            .await
-                            .ok()
+                            devflow_core::skills::marketplace::fetch_skill(owner, repo, skill_name)
+                                .await
+                                .ok()
                         }
                     };
                     if let Some(new) = new_skill {
-                        if new.content_hash != installed.content_hash {
-                            if devflow_core::skills::user_installer::install_user_skill(
+                        if new.content_hash != installed.content_hash
+                            && devflow_core::skills::user_installer::install_user_skill(
                                 &new, &cache,
                             )
                             .is_ok()
-                            {
-                                updated.push(skill_name.clone());
-                            }
+                        {
+                            updated.push(skill_name.clone());
                         }
                     }
                 }
@@ -704,29 +701,25 @@ impl App {
             for skill_name in &skills_to_check {
                 if let Some(installed) = lock.skills.get(skill_name) {
                     let new_skill = match &installed.source {
-                        devflow_core::skills::SkillSource::Bundled => bundled
-                            .iter()
-                            .find(|s| s.name == *skill_name)
-                            .cloned(),
+                        devflow_core::skills::SkillSource::Bundled => {
+                            bundled.iter().find(|s| s.name == *skill_name).cloned()
+                        }
                         devflow_core::skills::SkillSource::Github { owner, repo, .. } => {
-                            devflow_core::skills::marketplace::fetch_skill(
-                                owner, repo, skill_name,
-                            )
-                            .await
-                            .ok()
+                            devflow_core::skills::marketplace::fetch_skill(owner, repo, skill_name)
+                                .await
+                                .ok()
                         }
                     };
                     if let Some(new) = new_skill {
-                        if new.content_hash != installed.content_hash {
-                            if devflow_core::skills::installer::install_skill(
+                        if new.content_hash != installed.content_hash
+                            && devflow_core::skills::installer::install_skill(
                                 &project_dir,
                                 &new,
                                 &cache,
                             )
                             .is_ok()
-                            {
-                                updated.push(skill_name.clone());
-                            }
+                        {
+                            updated.push(skill_name.clone());
                         }
                     }
                 }
@@ -1715,13 +1708,12 @@ impl App {
                     .unwrap_or_else(|| std::path::PathBuf::from("."));
                 let tx = self.bg_tx.clone();
                 tokio::spawn(async move {
-                    match devflow_core::skills::cache::SkillCache::new()
-                        .and_then(|cache| {
-                            devflow_core::skills::installer::install_bundled_skills(
-                                &project_dir,
-                                &cache,
-                            )
-                        }) {
+                    match devflow_core::skills::cache::SkillCache::new().and_then(|cache| {
+                        devflow_core::skills::installer::install_bundled_skills(
+                            &project_dir,
+                            &cache,
+                        )
+                    }) {
                         Ok(names) => {
                             let _ = tx.send(Action::OperationComplete {
                                 success: true,

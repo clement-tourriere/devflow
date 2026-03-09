@@ -12,7 +12,7 @@ use super::worktree::create_worktree_with_files;
 use super::{LifecycleOptions, ServiceResult, SwitchWorkspaceResult, WorktreeSetupResult};
 
 /// Options specific to workspace switching.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SwitchOptions {
     /// Shared lifecycle options.
     pub lifecycle: LifecycleOptions,
@@ -26,19 +26,6 @@ pub struct SwitchOptions {
     pub copy_ignored: Option<bool>,
     /// Whether the workspace should be sandboxed.
     pub sandboxed: Option<bool>,
-}
-
-impl Default for SwitchOptions {
-    fn default() -> Self {
-        Self {
-            lifecycle: LifecycleOptions::default(),
-            create_if_missing: false,
-            from_workspace: None,
-            copy_files: None,
-            copy_ignored: None,
-            sandboxed: None,
-        }
-    }
 }
 
 /// Switch to a workspace with the full lifecycle: pre-switch hooks,

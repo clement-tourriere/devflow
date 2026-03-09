@@ -2,12 +2,7 @@ use anyhow::{bail, Result};
 use std::path::PathBuf;
 
 use devflow_core::skills::{
-    bundled::bundled_skills,
-    cache::SkillCache,
-    installer,
-    manifest,
-    marketplace,
-    user_installer,
+    bundled::bundled_skills, cache::SkillCache, installer, manifest, marketplace, user_installer,
     SkillSource,
 };
 
@@ -69,10 +64,7 @@ pub(super) async fn handle_skill_command(
                 println!("Run `devflow skill install <name>` to install skills.");
             } else {
                 println!("Installed skills:\n");
-                println!(
-                    "  {:<30} {:<15} {}",
-                    "NAME", "HASH", "SOURCE"
-                );
+                println!("  {:<30} {:<15} SOURCE", "NAME", "HASH");
                 for (name, skill) in &lock.skills {
                     let source_label = match &skill.source {
                         SkillSource::Bundled => "bundled".to_string(),
@@ -111,20 +103,14 @@ pub(super) async fn handle_skill_command(
                 println!("No skills found for \"{}\".", query);
             } else {
                 println!("Search results for \"{}\":\n", query);
-                println!(
-                    "  {:<30} {:<25} {}",
-                    "NAME", "SOURCE", "INSTALLS"
-                );
+                println!("  {:<30} {:<25} INSTALLS", "NAME", "SOURCE");
                 for result in &results {
                     let installs = if result.installs >= 1000 {
                         format!("{:.1}K", result.installs as f64 / 1000.0)
                     } else {
                         result.installs.to_string()
                     };
-                    println!(
-                        "  {:<30} {:<25} {}",
-                        result.name, result.source, installs,
-                    );
+                    println!("  {:<30} {:<25} {}", result.name, result.source, installs,);
                 }
                 println!("\nRun `devflow skill install <source>/<name>` to install.");
             }
@@ -250,11 +236,7 @@ pub(super) async fn handle_skill_command(
             Ok(())
         }
 
-        super::SkillCommands::Update {
-            name,
-            check,
-            user,
-        } => {
+        super::SkillCommands::Update { name, check, user } => {
             let cache = SkillCache::new()?;
             let lock = if user {
                 user_installer::list_user_skills()?
@@ -278,14 +260,10 @@ pub(super) async fn handle_skill_command(
                     let new_skill = match &installed.source {
                         SkillSource::Bundled => {
                             // Check against current bundled version
-                            bundled_skills()
-                                .into_iter()
-                                .find(|s| s.name == *skill_name)
+                            bundled_skills().into_iter().find(|s| s.name == *skill_name)
                         }
                         SkillSource::Github { owner, repo, .. } => {
-                            marketplace::fetch_skill(owner, repo, skill_name)
-                                .await
-                                .ok()
+                            marketplace::fetch_skill(owner, repo, skill_name).await.ok()
                         }
                     };
 
@@ -394,7 +372,7 @@ async fn handle_user_list(json_output: bool) -> Result<()> {
         println!("Run `devflow skill install --user <identifier>` to install globally.");
     } else {
         println!("User-scope skills:\n");
-        println!("  {:<30} {:<15} {}", "NAME", "HASH", "SOURCE");
+        println!("  {:<30} {:<15} SOURCE", "NAME", "HASH");
         for (name, skill) in &lock.skills {
             let source_label = match &skill.source {
                 SkillSource::Bundled => "bundled".to_string(),

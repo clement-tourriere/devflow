@@ -11,21 +11,12 @@ use super::hooks::{run_lifecycle_hooks, run_lifecycle_hooks_best_effort};
 use super::{DeleteWorkspaceResult, LifecycleOptions, ServiceResult};
 
 /// Options specific to workspace deletion.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DeleteOptions {
     /// Shared lifecycle options.
     pub lifecycle: LifecycleOptions,
     /// Whether to keep service workspaces (don't delete databases, etc.).
     pub keep_services: bool,
-}
-
-impl Default for DeleteOptions {
-    fn default() -> Self {
-        Self {
-            lifecycle: LifecycleOptions::default(),
-            keep_services: false,
-        }
-    }
 }
 
 /// Delete a workspace with the full lifecycle: pre-remove hooks,

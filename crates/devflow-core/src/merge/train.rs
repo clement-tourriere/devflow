@@ -323,19 +323,14 @@ impl MergeTrainEngine {
     ) -> Result<Vec<MergeTrainEntry>> {
         let mut results = Vec::new();
 
-        loop {
-            match self.process_next(target, cleanup)? {
-                Some(entry) => {
-                    let failed = matches!(
-                        entry.status,
-                        MergeTrainEntryStatus::Failed | MergeTrainEntryStatus::NeedsRebase
-                    );
-                    results.push(entry);
-                    if failed && stop_on_failure {
-                        break;
-                    }
-                }
-                None => break,
+        while let Some(entry) = self.process_next(target, cleanup)? {
+            let failed = matches!(
+                entry.status,
+                MergeTrainEntryStatus::Failed | MergeTrainEntryStatus::NeedsRebase
+            );
+            results.push(entry);
+            if failed && stop_on_failure {
+                break;
             }
         }
 

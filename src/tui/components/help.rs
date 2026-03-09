@@ -206,7 +206,7 @@ pub fn render_input(frame: &mut Frame, title: &str, input: &str) {
 /// Render a selection dialog overlay.
 pub fn render_select(frame: &mut Frame, title: &str, options: &[String], selected: usize) {
     let height = (options.len() as u16 + 5).min(20);
-    let area = centered_rect(50, height.max(8) as u16, frame.area());
+    let area = centered_rect(50, height.max(8), frame.area());
     frame.render_widget(Clear, area);
 
     let mut lines = vec![Line::raw("")];

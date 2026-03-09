@@ -44,6 +44,7 @@ impl StorageDriver {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "zfs" => Some(Self::Zfs),
@@ -74,6 +75,7 @@ impl BranchState {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "provisioning" => Some(Self::Provisioning),

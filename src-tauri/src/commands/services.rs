@@ -777,8 +777,7 @@ pub async fn install_agent_skills(project_path: String) -> Result<Vec<String>, S
 #[tauri::command]
 pub async fn uninstall_agent_skills(project_path: String) -> Result<(), String> {
     let project_dir = std::path::Path::new(&project_path);
-    devflow_core::agent::uninstall_agent_skills(project_dir)
-        .map_err(crate::commands::format_error)
+    devflow_core::agent::uninstall_agent_skills(project_dir).map_err(crate::commands::format_error)
 }
 
 #[tauri::command]
@@ -786,5 +785,7 @@ pub async fn check_agent_skills(
     project_path: String,
 ) -> Result<devflow_core::agent::SkillInstallStatus, String> {
     let project_dir = std::path::Path::new(&project_path);
-    Ok(devflow_core::agent::check_agent_skills_installed(project_dir))
+    Ok(devflow_core::agent::check_agent_skills_installed(
+        project_dir,
+    ))
 }

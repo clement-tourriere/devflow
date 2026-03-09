@@ -269,7 +269,7 @@ fn build_tray(app: &tauri::App) -> Result<tauri::tray::TrayIcon, Box<dyn std::er
                 );
 
                 let open_item =
-                    MenuItemBuilder::with_id(&format!("project:{}", project.path), "Open project")
+                    MenuItemBuilder::with_id(format!("project:{}", project.path), "Open project")
                         .build(app)?;
                 project_builder = project_builder.item(&open_item);
 
@@ -545,7 +545,7 @@ pub fn update_tray_menu(app: &tauri::AppHandle) {
                 );
 
                 let open_item =
-                    MenuItemBuilder::with_id(&format!("project:{}", project.path), "Open project")
+                    MenuItemBuilder::with_id(format!("project:{}", project.path), "Open project")
                         .build(&handle)
                         .unwrap();
                 project_builder = project_builder.item(&open_item);
