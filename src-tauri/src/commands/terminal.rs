@@ -2,7 +2,7 @@ use crate::state::AppState;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use devflow_terminal::{SessionMetadata, TerminalSessionConfig, TerminalSessionInfo};
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tauri::{Emitter, State};
 
@@ -260,6 +260,7 @@ fn prepare_sandbox_shell_home(working_dir: &str) -> Result<HashMap<String, Strin
 
 #[cfg(target_os = "macos")]
 fn sandbox_shell_candidates() -> Vec<String> {
+    use std::collections::HashSet;
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
 
