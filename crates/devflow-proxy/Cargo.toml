@@ -11,7 +11,7 @@ license = "MIT"
 tokio = { version = "1.46", features = ["rt-multi-thread", "net", "time", "macros", "process", "fs", "signal", "sync", "io-util"] }
 
 # HTTP server & reverse proxy
-hyper = { version = "1.5", features = ["full"] }
+hyper = { version = "1.8", features = ["full"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "server-graceful", "http1", "http2"] }
 http-body-util = "0.1"
 bytes = "1"
