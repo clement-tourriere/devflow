@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use devflow_core::config::GlobalConfig;
 
 pub(super) async fn handle_proxy_command(
     action: super::ProxyCommands,
@@ -10,28 +11,74 @@ pub(super) async fn handle_proxy_command(
             https_port,
             http_port,
             api_port,
+            domain_suffix,
+            no_auto_network,
         } => {
+            // Load global config for proxy defaults
+            let global = GlobalConfig::load()?.unwrap_or_default();
+            let proxy_cfg = global.proxy.unwrap_or_default();
+
+            // Merge: CLI flags → global config → hardcoded defaults
+            let https_port = https_port.or(proxy_cfg.https_port).unwrap_or(443);
+            let http_port = http_port.or(proxy_cfg.http_port).unwrap_or(80);
+            let api_port = api_port.or(proxy_cfg.api_port).unwrap_or(2019);
+            let domain_suffix = domain_suffix
+                .or(proxy_cfg.domain_suffix)
+                .unwrap_or_else(|| "localhost".to_string());
+
+            // Conflict detection: check if proxy is already running
+            if let Ok(status) =
+                reqwest_get_json(&format!("http://127.0.0.1:{}/api/status", api_port)).await
+            {
+                if status["running"].as_bool() == Some(true) {
+                    if json_output {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "error": "proxy_already_running",
+                                "message": "Proxy is already running",
+                                "api_port": api_port,
+                            })
+                        );
+                    } else {
+                        anyhow::bail!(
+                            "Proxy is already running (API responding on port {}). Stop it first with: devflow proxy stop",
+                            api_port
+                        );
+                    }
+                    return Ok(());
+                }
+            }
+
             let config = devflow_proxy::ProxyConfig {
                 https_port,
                 http_port,
                 api_port,
-                domain_suffix: "localhost".to_string(),
+                domain_suffix: domain_suffix.clone(),
+                auto_network: !no_auto_network,
             };
 
             if daemon {
                 // Fork to background
                 let exe = std::env::current_exe()?;
+                let mut args = vec![
+                    "proxy".to_string(),
+                    "start".to_string(),
+                    "--https-port".to_string(),
+                    https_port.to_string(),
+                    "--http-port".to_string(),
+                    http_port.to_string(),
+                    "--api-port".to_string(),
+                    api_port.to_string(),
+                    "--domain-suffix".to_string(),
+                    domain_suffix.clone(),
+                ];
+                if no_auto_network {
+                    args.push("--no-auto-network".to_string());
+                }
+
                 let child = std::process::Command::new(exe)
-                    .args([
-                        "proxy",
-                        "start",
-                        "--https-port",
-                        &https_port.to_string(),
-                        "--http-port",
-                        &http_port.to_string(),
-                        "--api-port",
-                        &api_port.to_string(),
-                    ])
+                    .args(&args)
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
@@ -53,6 +100,7 @@ pub(super) async fn handle_proxy_command(
                             "https_port": https_port,
                             "http_port": http_port,
                             "api_port": api_port,
+                            "domain_suffix": domain_suffix,
                         })
                     );
                 } else {
@@ -60,6 +108,7 @@ pub(super) async fn handle_proxy_command(
                     println!("  HTTPS: https://localhost:{}", https_port);
                     println!("  HTTP:  http://localhost:{}", http_port);
                     println!("  API:   http://localhost:{}", api_port);
+                    println!("  Domain suffix: {}", domain_suffix);
                 }
             } else {
                 // Run in foreground
@@ -67,6 +116,7 @@ pub(super) async fn handle_proxy_command(
                 println!("  HTTPS: 0.0.0.0:{}", https_port);
                 println!("  HTTP:  0.0.0.0:{}", http_port);
                 println!("  API:   127.0.0.1:{}", api_port);
+                println!("  Domain suffix: {}", domain_suffix);
                 println!("Press Ctrl+C to stop");
 
                 let handle = devflow_proxy::run_proxy(config).await?;

@@ -102,7 +102,15 @@ fn should_proxy(container: &ContainerInspectResponse) -> bool {
     }
 
     // Always allow containers with explicit domain labels
-    if labels.contains_key("devproxy.domain") {
+    if labels.contains_key("devproxy.domains") || labels.contains_key("devproxy.domain") {
+        return true;
+    }
+
+    // Always allow containers with VIRTUAL_HOST env var
+    if get_env_vars(container)
+        .iter()
+        .any(|e| e.starts_with("VIRTUAL_HOST="))
+    {
         return true;
     }
 
@@ -122,9 +130,42 @@ fn should_proxy(container: &ContainerInspectResponse) -> bool {
 fn extract_domains(container: &ContainerInspectResponse, domain_suffix: &str) -> Vec<String> {
     let labels = get_labels(container);
 
-    // Custom domain label (highest priority)
-    if let Some(custom) = labels.get("devproxy.domain") {
-        return vec![custom.clone()];
+    // 1. devproxy.domains label (plural) — comma-separated, highest priority
+    if let Some(domains) = labels.get("devproxy.domains") {
+        let result: Vec<String> = domains
+            .split(',')
+            .map(|d| d.trim().to_lowercase())
+            .filter(|d| !d.is_empty())
+            .collect();
+        if !result.is_empty() {
+            return result;
+        }
+    }
+
+    // 2. devproxy.domain label (singular) — also support comma-separated for backward compat
+    if let Some(domains) = labels.get("devproxy.domain") {
+        let result: Vec<String> = domains
+            .split(',')
+            .map(|d| d.trim().to_lowercase())
+            .filter(|d| !d.is_empty())
+            .collect();
+        if !result.is_empty() {
+            return result;
+        }
+    }
+
+    // 3. VIRTUAL_HOST env var — nginx-proxy compat, comma-separated
+    for env in get_env_vars(container) {
+        if let Some(hosts) = env.strip_prefix("VIRTUAL_HOST=") {
+            let result: Vec<String> = hosts
+                .split(',')
+                .map(|d| d.trim().to_lowercase())
+                .filter(|d| !d.is_empty())
+                .collect();
+            if !result.is_empty() {
+                return result;
+            }
+        }
     }
 
     let container_name = container
@@ -134,7 +175,7 @@ fn extract_domains(container: &ContainerInspectResponse, domain_suffix: &str) ->
         .trim_start_matches('/')
         .to_string();
 
-    // devflow-managed: service.workspace.project.suffix
+    // 4. devflow-managed: service.workspace.project.suffix
     if let (Some(project), Some(workspace), Some(service_name)) = (
         labels.get("devflow.project"),
         labels.get("devflow.workspace"),
@@ -143,19 +184,20 @@ fn extract_domains(container: &ContainerInspectResponse, domain_suffix: &str) ->
         return vec![format!(
             "{}.{}.{}.{}",
             service_name, workspace, project, domain_suffix
-        )];
+        )
+        .to_lowercase()];
     }
 
-    // Compose: service.project.suffix
+    // 5. Compose: service.project.suffix
     if let (Some(project), Some(service_name)) = (
         labels.get("com.docker.compose.project"),
         labels.get("com.docker.compose.service"),
     ) {
-        return vec![format!("{}.{}.{}", service_name, project, domain_suffix)];
+        return vec![format!("{}.{}.{}", service_name, project, domain_suffix).to_lowercase()];
     }
 
-    // Standalone: container_name.suffix
-    vec![format!("{}.{}", container_name, domain_suffix)]
+    // 6. Standalone: container_name.suffix
+    vec![format!("{}.{}", container_name, domain_suffix).to_lowercase()]
 }
 
 fn extract_container_ip(container: &ContainerInspectResponse) -> String {
@@ -199,9 +241,15 @@ fn extract_port(container: &ContainerInspectResponse) -> u16 {
         }
     }
 
-    // Environment variable
+    // Environment variables
     for env in get_env_vars(container) {
         if let Some(port_str) = env.strip_prefix("DEVPROXY_PORT=") {
+            if let Ok(port) = port_str.parse::<u16>() {
+                return port;
+            }
+        }
+        // nginx-proxy compat
+        if let Some(port_str) = env.strip_prefix("VIRTUAL_PORT=") {
             if let Ok(port) = port_str.parse::<u16>() {
                 return port;
             }
@@ -301,5 +349,154 @@ mod tests {
         let container = make_container("nginx", labels);
         let targets = extract_proxy_targets(&container, "localhost");
         assert!(targets.is_empty());
+    }
+
+    fn make_container_with_env(
+        name: &str,
+        labels: HashMap<String, String>,
+        env: Vec<String>,
+    ) -> ContainerInspectResponse {
+        let mut networks = HashMap::new();
+        networks.insert(
+            "bridge".to_string(),
+            bollard::models::EndpointSettings {
+                ip_address: Some("172.17.0.2".to_string()),
+                ..Default::default()
+            },
+        );
+        ContainerInspectResponse {
+            id: Some("abc123".to_string()),
+            name: Some(format!("/{}", name)),
+            state: Some(bollard::models::ContainerState {
+                running: Some(true),
+                ..Default::default()
+            }),
+            config: Some(bollard::models::ContainerConfig {
+                labels: Some(labels),
+                env: Some(env),
+                ..Default::default()
+            }),
+            network_settings: Some(bollard::models::NetworkSettings {
+                networks: Some(networks),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_multiple_domains_label() {
+        let mut labels = HashMap::new();
+        labels.insert(
+            "devproxy.domains".to_string(),
+            "app.localhost,api.localhost".to_string(),
+        );
+
+        let container = make_container("test", labels);
+        let targets = extract_proxy_targets(&container, "localhost");
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].domain, "app.localhost");
+        assert_eq!(targets[1].domain, "api.localhost");
+    }
+
+    #[test]
+    fn test_virtual_host_env() {
+        let container = make_container_with_env(
+            "myapp",
+            HashMap::new(),
+            vec!["VIRTUAL_HOST=myapp.localhost".to_string()],
+        );
+        let targets = extract_proxy_targets(&container, "localhost");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].domain, "myapp.localhost");
+    }
+
+    #[test]
+    fn test_virtual_port_env() {
+        let container = make_container_with_env(
+            "myapp",
+            HashMap::new(),
+            vec!["VIRTUAL_PORT=8080".to_string()],
+        );
+        let targets = extract_proxy_targets(&container, "localhost");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].port, 8080);
+    }
+
+    #[test]
+    fn test_domain_priority() {
+        // devproxy.domains takes priority over devproxy.domain
+        let mut labels = HashMap::new();
+        labels.insert(
+            "devproxy.domains".to_string(),
+            "first.localhost".to_string(),
+        );
+        labels.insert(
+            "devproxy.domain".to_string(),
+            "second.localhost".to_string(),
+        );
+
+        let container = make_container("test", labels);
+        let targets = extract_proxy_targets(&container, "localhost");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].domain, "first.localhost");
+    }
+
+    #[test]
+    fn test_domains_trimming() {
+        let mut labels = HashMap::new();
+        labels.insert(
+            "devproxy.domains".to_string(),
+            " app.localhost , api.localhost , ".to_string(),
+        );
+
+        let container = make_container("test", labels);
+        let targets = extract_proxy_targets(&container, "localhost");
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].domain, "app.localhost");
+        assert_eq!(targets[1].domain, "api.localhost");
+    }
+
+    #[test]
+    fn test_domains_lowercased() {
+        let mut labels = HashMap::new();
+        labels.insert(
+            "devproxy.domains".to_string(),
+            "App.LocalHost,API.LOCALHOST".to_string(),
+        );
+
+        let container = make_container("test", labels);
+        let targets = extract_proxy_targets(&container, "localhost");
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].domain, "app.localhost");
+        assert_eq!(targets[1].domain, "api.localhost");
+    }
+
+    #[test]
+    fn test_singular_domain_comma_separated() {
+        let mut labels = HashMap::new();
+        labels.insert(
+            "devproxy.domain".to_string(),
+            "app.localhost,api.localhost".to_string(),
+        );
+
+        let container = make_container("test", labels);
+        let targets = extract_proxy_targets(&container, "localhost");
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].domain, "app.localhost");
+        assert_eq!(targets[1].domain, "api.localhost");
+    }
+
+    #[test]
+    fn test_virtual_host_multiple() {
+        let container = make_container_with_env(
+            "myapp",
+            HashMap::new(),
+            vec!["VIRTUAL_HOST=app.localhost,api.localhost".to_string()],
+        );
+        let targets = extract_proxy_targets(&container, "localhost");
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].domain, "app.localhost");
+        assert_eq!(targets[1].domain, "api.localhost");
     }
 }

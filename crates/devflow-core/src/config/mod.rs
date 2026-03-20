@@ -585,6 +585,22 @@ pub struct GlobalConfig {
     /// merge trains, cascade notifications). Default: `false`.
     #[serde(default)]
     pub smart_merge: bool,
+    /// Global proxy configuration (used by `devflow proxy start`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxyGlobalConfig>,
+}
+
+/// Global proxy settings stored in `~/.config/devflow/config.yml`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProxyGlobalConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_suffix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub https_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_port: Option<u16>,
 }
 
 impl GlobalConfig {

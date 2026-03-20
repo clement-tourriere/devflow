@@ -2,6 +2,7 @@ pub mod api;
 pub mod ca;
 pub mod discovery;
 pub mod monitor;
+pub mod network;
 pub mod platform;
 pub mod router;
 pub mod server;
@@ -28,6 +29,8 @@ pub struct ProxyConfig {
     pub api_port: u16,
     #[serde(default = "default_domain_suffix")]
     pub domain_suffix: String,
+    #[serde(default = "default_auto_network")]
+    pub auto_network: bool,
 }
 
 fn default_https_port() -> u16 {
@@ -42,7 +45,9 @@ fn default_api_port() -> u16 {
 fn default_domain_suffix() -> String {
     "localhost".to_string()
 }
-
+fn default_auto_network() -> bool {
+    true
+}
 impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
@@ -50,6 +55,7 @@ impl Default for ProxyConfig {
             http_port: default_http_port(),
             api_port: default_api_port(),
             domain_suffix: default_domain_suffix(),
+            auto_network: default_auto_network(),
         }
     }
 }
@@ -87,10 +93,17 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
 
     // Load initial containers
     log::info!("Discovering running containers...");
+    let mut initial_containers: Vec<(String, Vec<String>)> = Vec::new();
     match docker_monitor.get_running_containers().await {
         Ok(containers) => {
             for container in &containers {
                 let targets = extract_proxy_targets(container, &config.domain_suffix);
+                if !targets.is_empty() {
+                    let container_id = targets[0].container_id.clone();
+                    let domains: Vec<String> = targets.iter().map(|t| t.domain.clone()).collect();
+                    let aliases = network::strip_suffix_aliases(&domains, &config.domain_suffix);
+                    initial_containers.push((container_id, aliases));
+                }
                 for target in targets {
                     log::info!(
                         "  {} -> {}:{}",
@@ -108,6 +121,27 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
         }
     }
 
+    // Set up shared Docker network for container-to-container resolution
+    let auto_network = config.auto_network;
+    let docker_client = docker_monitor.docker_client();
+    if auto_network {
+        if let Err(e) = network::ensure_network(&docker_client).await {
+            log::warn!("Failed to create devflow network: {}", e);
+        }
+
+        // Connect pre-existing containers to the network
+        for (container_id, aliases) in &initial_containers {
+            if let Err(e) = network::connect_container(&docker_client, container_id, aliases).await
+            {
+                log::warn!(
+                    "Failed to connect {} to devflow network: {}",
+                    &container_id[..12.min(container_id.len())],
+                    e
+                );
+            }
+        }
+    }
+
     // Start Docker event monitor
     let (events_tx, mut events_rx) = mpsc::channel(100);
     let monitor_shutdown = shutdown_rx.clone();
@@ -121,6 +155,7 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
     let router_for_events = router.clone();
     let domain_suffix = config.domain_suffix.clone();
     let events_shutdown = shutdown_rx.clone();
+    let docker_for_events = docker_client.clone();
     tokio::spawn(async move {
         let mut shutdown = events_shutdown;
         loop {
@@ -133,9 +168,16 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
                             match event.action.as_str() {
                                 "start" => {
                                     let targets = extract_proxy_targets(&event.container, &domain_suffix);
+                                    let domains: Vec<String> = targets.iter().map(|t| t.domain.clone()).collect();
+                                    let aliases = network::strip_suffix_aliases(&domains, &domain_suffix);
                                     for target in targets {
                                         log::info!("+ {} -> {}:{}", target.domain, target.container_ip, target.port);
                                         router_for_events.upsert(target).await;
+                                    }
+                                    if auto_network && !aliases.is_empty() {
+                                        if let Err(e) = network::connect_container(&docker_for_events, &container_id, &aliases).await {
+                                            log::warn!("Failed to connect {} to devflow network: {}", &container_id[..12.min(container_id.len())], e);
+                                        }
                                     }
                                 }
                                 "stop" | "die" => {
@@ -201,10 +243,15 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
     });
 
     log::info!(
-        "Proxy started — HTTPS:{} HTTP:{} API:{}",
+        "Proxy started — HTTPS:{} HTTP:{} API:{}{}",
         config.https_port,
         config.http_port,
-        config.api_port
+        config.api_port,
+        if auto_network {
+            format!(" Network:{}", network::DEVFLOW_NETWORK)
+        } else {
+            String::new()
+        },
     );
 
     Ok(ProxyHandle { shutdown_tx })

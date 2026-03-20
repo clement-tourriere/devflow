@@ -123,7 +123,6 @@ pub async fn run_http_server(
                     let service = service_fn(move |req: Request<Incoming>| {
                         let router = router.clone();
                         async move {
-                            // If it has a Host that we know about, redirect to HTTPS
                             let host = req
                                 .headers()
                                 .get(hyper::header::HOST)
@@ -132,6 +131,7 @@ pub async fn run_http_server(
 
                             if let Some(ref hostname) = host {
                                 if router.resolve(hostname).await.is_some() {
+                                    // Redirect to HTTPS
                                     let port_suffix = if https_port == 443 {
                                         String::new()
                                     } else {

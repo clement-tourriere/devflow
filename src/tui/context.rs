@@ -755,6 +755,7 @@ impl DevflowContext {
             http_port: 80,
             api_port: 2019,
             domain_suffix: "localhost".to_string(),
+            auto_network: true,
         };
 
         let exe = std::env::current_exe()?;

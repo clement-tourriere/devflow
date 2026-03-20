@@ -98,6 +98,11 @@ impl DockerMonitor {
         Ok(())
     }
 
+    /// Clone the inner Docker client for use by other components.
+    pub fn docker_client(&self) -> Docker {
+        (*self.docker).clone()
+    }
+
     /// Get all currently running containers.
     pub async fn get_running_containers(&self) -> Result<Vec<ContainerInspectResponse>> {
         let options = ListContainersOptions {

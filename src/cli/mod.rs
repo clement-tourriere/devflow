@@ -785,12 +785,22 @@ pub enum ProxyCommands {
     Start {
         #[arg(long, help = "Run as a background daemon")]
         daemon: bool,
-        #[arg(long, default_value = "443", help = "HTTPS listen port")]
-        https_port: u16,
-        #[arg(long, default_value = "80", help = "HTTP listen port")]
-        http_port: u16,
-        #[arg(long, default_value = "2019", help = "API listen port")]
-        api_port: u16,
+        #[arg(long, help = "HTTPS listen port [default: 443]")]
+        https_port: Option<u16>,
+        #[arg(long, help = "HTTP listen port [default: 80]")]
+        http_port: Option<u16>,
+        #[arg(long, help = "API listen port [default: 2019]")]
+        api_port: Option<u16>,
+        #[arg(
+            long,
+            help = "Domain suffix for auto-discovered containers [default: localhost]"
+        )]
+        domain_suffix: Option<String>,
+        #[arg(
+            long,
+            help = "Disable auto-connecting containers to shared devflow network"
+        )]
+        no_auto_network: bool,
     },
     #[command(about = "Stop the reverse proxy")]
     Stop,
