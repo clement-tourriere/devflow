@@ -616,6 +616,12 @@ hr {
     <a href="#hooks">Hooks</a>
     <a href="#seeding">Seeding</a>
     <a href="#reverse-proxy">Reverse Proxy</a>
+    <a href="#proxy-domain-resolution" class="nav-sub">Domain Resolution</a>
+    <a href="#proxy-port-detection" class="nav-sub">Port Detection</a>
+    <a href="#proxy-container-dns" class="nav-sub">Container DNS</a>
+    <a href="#proxy-https-certs" class="nav-sub">HTTPS &amp; Certificates</a>
+    <a href="#proxy-configuration" class="nav-sub">Configuration</a>
+    <a href="#proxy-api" class="nav-sub">API Endpoints</a>
     <a href="#desktop-gui">Desktop GUI</a>
     <a href="#tui-dashboard">TUI Dashboard</a>
     <a href="#ai-automation">AI &amp; Automation</a>
@@ -2110,7 +2116,7 @@ devflow service seed main -s app-db --from dump.sql</code></pre>
 <section class="section" id="reverse-proxy">
   <h2><span class="number">09</span> Reverse Proxy</h2>
   <p class="section-desc">
-    devflow includes a native HTTPS reverse proxy that auto-discovers Docker containers and serves them via <code>*.localhost</code> domains with auto-generated TLS certificates.
+    The devflow reverse proxy auto-discovers running Docker containers and serves them over HTTPS on <code>*.localhost</code> domains. It handles TLS termination with auto-generated certificates, HTTP-to-HTTPS redirection, and container-to-container DNS resolution via a shared Docker network.
   </p>
 
   <h3>How It Works</h3>
@@ -2122,56 +2128,238 @@ devflow service seed main -s app-db --from dump.sql</code></pre>
   </div>
 
   <h3>Quick Start</h3>
-<pre><code class="language-bash"># Start the proxy
-devflow proxy start
-
-# Trust the CA (one-time setup)
-devflow proxy trust install
-
-# See what's being proxied
-devflow proxy list
-
-# Start in background (daemon mode)
+<pre><code class="language-bash"># Start the proxy (needs root for ports 80/443, or use custom ports)
 devflow proxy start --daemon
 
-# Stop the proxy
-devflow proxy stop</code></pre>
+# Install the CA certificate so browsers trust *.localhost
+devflow proxy trust install
 
-  <h3>Domain Patterns</h3>
-  <p>Containers are automatically assigned domains based on their type:</p>
+# Start any container — it's automatically proxied
+docker run -d --name myapp nginx
+
+# Access it over HTTPS
+curl https://myapp.localhost</code></pre>
+
+  <!-- Domain Resolution -->
+  <h3 id="proxy-domain-resolution">Domain Resolution</h3>
+  <p>Domains are resolved in priority order. The first match wins.</p>
   <table>
     <thead>
-      <tr><th>Container Type</th><th>Domain Pattern</th><th>Example</th></tr>
+      <tr><th>Priority</th><th>Source</th><th>Format</th><th>Example</th></tr>
     </thead>
     <tbody>
-      <tr><td>Standalone</td><td><code>container_name.localhost</code></td><td><code>redis.localhost</code></td></tr>
-      <tr><td>Compose service</td><td><code>service.project.localhost</code></td><td><code>api.myapp.localhost</code></td></tr>
-      <tr><td>devflow service</td><td><code>service.workspace.project.localhost</code></td><td><code>app-db.feature-auth.myapp.localhost</code></td></tr>
-      <tr><td>Custom label</td><td>value of <code>devproxy.domain</code> label</td><td><code>custom.localhost</code></td></tr>
+      <tr><td>1</td><td><code>devproxy.domains</code> label</td><td>Comma-separated, fully qualified</td><td><code>app.localhost, api.localhost</code></td></tr>
+      <tr><td>2</td><td><code>devproxy.domain</code> label</td><td>Comma-separated, fully qualified</td><td><code>myapp.test</code></td></tr>
+      <tr><td>3</td><td><code>VIRTUAL_HOST</code> env var</td><td>Comma-separated (nginx-proxy compatible)</td><td><code>myapp.localhost</code></td></tr>
+      <tr><td>4</td><td>devflow labels</td><td><code>{service}.{workspace}.{project}.{suffix}</code></td><td><code>postgres.feat-1.myapp.localhost</code></td></tr>
+      <tr><td>5</td><td>Compose labels</td><td><code>{service}.{project}.{suffix}</code></td><td><code>web.myapp.localhost</code></td></tr>
+      <tr><td>6</td><td>Container name</td><td><code>{name}.{suffix}</code></td><td><code>myapp.localhost</code></td></tr>
+    </tbody>
+  </table>
+  <p>Levels 4&ndash;6 are auto-generated from container metadata. Level 4 uses <code>devflow.service</code>, <code>devflow.workspace</code>, and <code>devflow.project</code> labels. Level 5 uses <code>com.docker.compose.service</code> and <code>com.docker.compose.project</code> labels. Level 6 is the fallback for standalone containers. All domains are lowercased.</p>
+
+  <h4>Custom domain via label</h4>
+<pre><code class="language-yaml"># docker-compose.yml
+services:
+  web:
+    image: nginx
+    labels:
+      devproxy.domains: "app.localhost, api.localhost"</code></pre>
+
+  <h4>nginx-proxy compatible</h4>
+<pre><code class="language-yaml">services:
+  web:
+    image: nginx
+    environment:
+      VIRTUAL_HOST: myapp.localhost</code></pre>
+
+  <h4>Automatic Compose domain (no config needed)</h4>
+<pre><code class="language-bash"># docker-compose.yml with project "myapp" and service "web"
+# → automatically available at https://web.myapp.localhost
+docker compose -p myapp up -d</code></pre>
+
+  <!-- Port Detection -->
+  <h3 id="proxy-port-detection">Port Detection</h3>
+  <p>The upstream port is resolved in priority order:</p>
+  <table>
+    <thead>
+      <tr><th>Priority</th><th>Source</th><th>Example</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>1</td><td><code>devproxy.port</code> label</td><td><code>devproxy.port=8080</code></td></tr>
+      <tr><td>2</td><td><code>DEVPROXY_PORT</code> env var</td><td><code>DEVPROXY_PORT=3000</code></td></tr>
+      <tr><td>3</td><td><code>VIRTUAL_PORT</code> env var</td><td><code>VIRTUAL_PORT=8080</code></td></tr>
+      <tr><td>4</td><td>Container&rsquo;s exposed ports</td><td><code>EXPOSE 3000</code> in Dockerfile</td></tr>
+      <tr><td>5</td><td>Fallback</td><td><code>80</code></td></tr>
     </tbody>
   </table>
 
-  <h3>Custom Ports</h3>
-<pre><code class="language-bash">devflow proxy start --https-port 8443    # Custom HTTPS port
-devflow proxy start --http-port 8080     # Custom HTTP port
-devflow proxy start --api-port 2020      # Custom API port</code></pre>
+  <h4>Example</h4>
+<pre><code class="language-yaml">services:
+  api:
+    build: .
+    labels:
+      devproxy.port: "3000"</code></pre>
 
-  <h3>CA Trust Management</h3>
-<pre><code class="language-bash">devflow proxy trust install               # Install CA to system trust
-devflow proxy trust verify                # Check if CA is trusted
-devflow proxy trust remove                # Remove CA from system trust
-devflow proxy trust info                  # Platform-specific instructions</code></pre>
+  <!-- Container Filtering -->
+  <h3>Container Filtering</h3>
+  <p>By default, all running containers are proxied. You can exclude specific containers:</p>
+  <ul>
+    <li><strong>Explicit opt-out:</strong> Set the <code>devproxy.enabled=false</code> label to exclude a container.</li>
+    <li><strong>Auto-skipped:</strong> Containers named <code>devproxy*</code> or <code>devflow-proxy*</code> are excluded automatically.</li>
+  </ul>
+  <p>Containers with explicit domain labels (<code>devproxy.domains</code>, <code>devproxy.domain</code>) or the <code>VIRTUAL_HOST</code> env var are always included, even if they match an auto-skip pattern. Non-running containers are always skipped.</p>
 
-  <h3>API Endpoints</h3>
-  <p>The proxy exposes a local API (default port 2019, localhost only):</p>
+  <!-- Container-to-Container DNS -->
+  <h3 id="proxy-container-dns">Container-to-Container DNS</h3>
+  <p>When <code>auto_network</code> is enabled (the default), the proxy creates a <code>devflow</code> bridge network and connects every discovered container to it with DNS aliases matching their domain names.</p>
+
+  <h4>How it works</h4>
+  <ul>
+    <li><strong>Host to container:</strong> <code>https://web.myapp.localhost</code> routes through the proxy with TLS termination.</li>
+    <li><strong>Container to container:</strong> <code>http://web.myapp</code> resolves via Docker&rsquo;s embedded DNS directly, bypassing the proxy.</li>
+  </ul>
+  <p>Each container gets two aliases: the full domain (e.g. <code>web.myapp.localhost</code>) and a suffix-stripped form (e.g. <code>web.myapp</code>). The short form exists because glibc resolves <code>.localhost</code> to <code>127.0.0.1</code> per RFC 6761 before consulting Docker DNS.</p>
+
+  <h4>Testing container-to-container resolution</h4>
+<pre><code class="language-bash"># Start two containers
+docker run -d --name web1 nginx
+docker run -d --name web2 nginx
+
+# From web2, reach web1 by name
+docker exec web2 curl -s http://web1.localhost
+
+# Verify DNS resolution
+docker exec web2 nslookup web1.localhost 127.0.0.11
+
+# With Compose services
+docker compose -p myapp up -d
+docker exec myapp-api-1 curl -s http://web.myapp</code></pre>
+
+  <h4>Verify network membership</h4>
+<pre><code class="language-bash">docker network inspect devflow --format '{{range .Containers}}{{.Name}} {{end}}'</code></pre>
+
+  <p>The <code>devflow</code> network persists across proxy restarts. Remove it manually with <code>docker network rm devflow</code> if needed.</p>
+
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div>Disable auto-networking with <code>--no-auto-network</code> or set <code>auto_network: false</code> in global config.</div>
+  </div>
+
+  <!-- HTTPS & Certificates -->
+  <h3 id="proxy-https-certs">HTTPS &amp; Certificates</h3>
+  <p>On first start, the proxy generates a local Certificate Authority:</p>
+  <ul>
+    <li><strong>CA certificate:</strong> <code>~/.devflow/proxy/ca.crt</code></li>
+    <li><strong>CA private key:</strong> <code>~/.devflow/proxy/ca.key</code> (mode <code>0600</code>)</li>
+  </ul>
+  <p>The CA signs short-lived (1 year) per-domain certificates on demand via SNI. Certificates are cached in memory for the lifetime of the proxy process. HTTP requests to known domains are redirected to HTTPS with a <code>301 Moved Permanently</code>.</p>
+
+  <h4>Trust Management</h4>
+<pre><code class="language-bash">devflow proxy trust install   # Install CA to system trust store
+devflow proxy trust verify    # Check if CA is trusted
+devflow proxy trust remove    # Remove CA from system trust store
+devflow proxy trust info      # Show manual installation instructions</code></pre>
+
+  <h4>Platform details</h4>
   <table>
     <thead>
-      <tr><th>Endpoint</th><th>Description</th></tr>
+      <tr><th>Platform</th><th>Trust store</th></tr>
     </thead>
     <tbody>
-      <tr><td><code>/api/status</code></td><td>Proxy status and configuration</td></tr>
-      <tr><td><code>/api/targets</code></td><td>Current routing table (all proxied containers)</td></tr>
-      <tr><td><code>/api/ca</code></td><td>Certificate Authority information</td></tr>
+      <tr><td>macOS</td><td>Login keychain (<code>~/Library/Keychains/login.keychain-db</code>)</td></tr>
+      <tr><td>Debian/Ubuntu</td><td><code>/usr/local/share/ca-certificates/devflow.crt</code> + <code>update-ca-certificates</code></td></tr>
+      <tr><td>Fedora/RHEL</td><td><code>/etc/pki/ca-trust/source/anchors/devflow.crt</code> + <code>update-ca-trust</code></td></tr>
+      <tr><td>Alpine Linux</td><td><code>/usr/local/share/ca-certificates/devflow.crt</code> + <code>update-ca-certificates</code></td></tr>
+    </tbody>
+  </table>
+  <p>On Linux, <code>sudo</code> is used when a TTY is available; <code>pkexec</code> is tried otherwise. If neither works, manual instructions are printed.</p>
+
+  <!-- Configuration -->
+  <h3 id="proxy-configuration">Configuration</h3>
+
+  <h4>CLI Flags</h4>
+<pre><code class="language-bash">devflow proxy start [OPTIONS]
+
+Options:
+  --daemon              Run as a background daemon
+  --https-port &lt;PORT&gt;   HTTPS listen port [default: 443]
+  --http-port &lt;PORT&gt;    HTTP listen port [default: 80]
+  --api-port &lt;PORT&gt;     API listen port [default: 2019]
+  --domain-suffix &lt;S&gt;   Domain suffix for auto-discovered containers [default: localhost]
+  --no-auto-network     Disable auto-connecting containers to shared devflow network</code></pre>
+
+  <h4>Global Config</h4>
+  <p>Stored at <code>~/.config/devflow/config.yml</code>:</p>
+<pre><code class="language-yaml">proxy:
+  domain_suffix: localhost
+  https_port: 443
+  http_port: 80
+  api_port: 2019</code></pre>
+
+  <h4>Precedence</h4>
+  <p>CLI flags override global config, which overrides built-in defaults.</p>
+
+  <h4>Other Commands</h4>
+<pre><code class="language-bash">devflow proxy stop     # Stop the daemon (sends SIGTERM)
+devflow proxy status   # Show running state, target count, CA status
+devflow proxy list     # List all proxied containers with domains and upstreams</code></pre>
+  <p>All commands support <code>--json</code> for machine-readable output.</p>
+
+  <!-- API Endpoints -->
+  <h3 id="proxy-api">API Endpoints</h3>
+  <p>The API server listens on <code>127.0.0.1:2019</code> (localhost only).</p>
+
+  <h4><code>GET /api/status</code></h4>
+  <p>Returns proxy running state and summary.</p>
+<pre><code class="language-json">{
+  "running": true,
+  "targets": 3,
+  "https_port": 443,
+  "http_port": 80,
+  "ca_installed": true
+}</code></pre>
+
+  <h4><code>GET /api/targets</code></h4>
+  <p>Returns all currently proxied targets.</p>
+<pre><code class="language-json">[
+  {
+    "domain": "web.myapp.localhost",
+    "container_ip": "172.18.0.2",
+    "port": 80,
+    "container_id": "abc123...",
+    "container_name": "myapp-web-1",
+    "project": "myapp",
+    "service": "web",
+    "workspace": null
+  }
+]</code></pre>
+
+  <h4><code>GET /api/ca</code></h4>
+  <p>Returns CA certificate path and trust status.</p>
+<pre><code class="language-json">{
+  "cert_path": "/home/user/.devflow/proxy/ca.crt",
+  "installed": true,
+  "info": "CA certificate: /home/user/.devflow/proxy/ca.crt\n..."
+}</code></pre>
+
+  <!-- Label & Environment Variable Reference -->
+  <h3>Label &amp; Environment Variable Reference</h3>
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Type</th><th>Purpose</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>devproxy.domains</code></td><td>Label</td><td>Custom domain(s), comma-separated. Highest priority.</td></tr>
+      <tr><td><code>devproxy.domain</code></td><td>Label</td><td>Custom domain(s), comma-separated. Alias for <code>devproxy.domains</code>.</td></tr>
+      <tr><td><code>devproxy.port</code></td><td>Label</td><td>Override upstream port.</td></tr>
+      <tr><td><code>devproxy.enabled</code></td><td>Label</td><td>Set to <code>false</code> to exclude a container.</td></tr>
+      <tr><td><code>devflow.project</code></td><td>Label</td><td>Project name for auto-generated domains (level 4).</td></tr>
+      <tr><td><code>devflow.workspace</code></td><td>Label</td><td>Workspace name for auto-generated domains (level 4).</td></tr>
+      <tr><td><code>devflow.service</code></td><td>Label</td><td>Service name for auto-generated domains (level 4).</td></tr>
+      <tr><td><code>VIRTUAL_HOST</code></td><td>Env var</td><td>Custom domain(s), comma-separated. nginx-proxy compatible.</td></tr>
+      <tr><td><code>VIRTUAL_PORT</code></td><td>Env var</td><td>Override upstream port. nginx-proxy compatible.</td></tr>
+      <tr><td><code>DEVPROXY_PORT</code></td><td>Env var</td><td>Override upstream port.</td></tr>
     </tbody>
   </table>
 </section>
