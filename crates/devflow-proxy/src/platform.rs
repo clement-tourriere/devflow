@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use std::process::Command;
 
 use crate::ca::{default_ca_cert_path, CertificateAuthority};
+#[cfg(target_os = "linux")]
+use crate::nss;
 
 /// Detect Alpine Linux by checking for `/etc/alpine-release` or `/sbin/apk`.
 #[cfg(target_os = "linux")]
@@ -75,6 +77,12 @@ fn run_privileged(program: &str, args: &[&str], action_desc: &str) -> Result<()>
 }
 
 /// Install the CA certificate in the system trust store.
+///
+/// On macOS, Firefox trusts the Keychain natively via `ImportEnterpriseRoots`
+/// (enabled by default since Firefox 72), so no extra Firefox work is needed.
+///
+/// On Linux, this also installs a Firefox enterprise policy so Firefox
+/// trusts the CA without requiring `certutil`.
 #[cfg(target_os = "macos")]
 pub fn install_system_trust(ca: &CertificateAuthority) -> Result<()> {
     let cert_path = default_ca_cert_path();
@@ -114,7 +122,7 @@ pub fn install_system_trust(ca: &CertificateAuthority) -> Result<()> {
     )
 }
 
-/// Install the CA certificate in the system trust store.
+/// Install the CA certificate in the system trust store and Firefox policy.
 #[cfg(target_os = "linux")]
 pub fn install_system_trust(ca: &CertificateAuthority) -> Result<()> {
     let cert_path = default_ca_cert_path();
@@ -133,12 +141,10 @@ pub fn install_system_trust(ca: &CertificateAuthority) -> Result<()> {
         run_privileged("cp", &[cert_path_str, debian_path], "copy certificate")?;
         run_privileged("update-ca-certificates", &[], "update system certificates")?;
         log::info!("CA certificate installed (Debian/Ubuntu)");
-        return Ok(());
     } else if std::path::Path::new("/etc/pki/ca-trust/source/anchors").exists() {
         run_privileged("cp", &[cert_path_str, rhel_path], "copy certificate")?;
         run_privileged("update-ca-trust", &[], "update system trust")?;
         log::info!("CA certificate installed (RHEL/Fedora)");
-        return Ok(());
     } else if is_alpine() {
         let alpine_path = "/usr/local/share/ca-certificates/devflow.crt";
         run_privileged(
@@ -149,13 +155,19 @@ pub fn install_system_trust(ca: &CertificateAuthority) -> Result<()> {
         run_privileged("cp", &[cert_path_str, alpine_path], "copy certificate")?;
         run_privileged("update-ca-certificates", &[], "update system certificates")?;
         log::info!("CA certificate installed (Alpine Linux)");
-        return Ok(());
+    } else {
+        anyhow::bail!(
+            "Could not install automatically. Please copy {} to your system CA store and run update-ca-certificates or update-ca-trust.",
+            cert_path.display()
+        )
     }
 
-    anyhow::bail!(
-        "Could not install automatically. Please copy {} to your system CA store and run update-ca-certificates or update-ca-trust.",
-        cert_path.display()
-    )
+    // Install Firefox enterprise policy (ImportEnterpriseRoots doesn't work on Linux)
+    if let Err(e) = nss::install_firefox_policy() {
+        log::warn!("Firefox policy installation skipped: {}", e);
+    }
+
+    Ok(())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -171,7 +183,8 @@ pub fn verify_system_trust() -> Result<bool> {
         return Ok(false);
     }
 
-    // Check if the certificate is in any keychain
+    // Check if the certificate is in any keychain.
+    // Firefox on macOS trusts keychain CAs natively via ImportEnterpriseRoots.
     let output = Command::new("security")
         .args(["find-certificate", "-c", "devflow Root CA"])
         .output()
@@ -186,7 +199,13 @@ pub fn verify_system_trust() -> Result<bool> {
     let debian_path = std::path::Path::new("/usr/local/share/ca-certificates/devflow.crt");
     let rhel_path = std::path::Path::new("/etc/pki/ca-trust/source/anchors/devflow.crt");
     // Alpine uses the same path as Debian (/usr/local/share/ca-certificates/)
-    Ok(debian_path.exists() || rhel_path.exists())
+
+    if debian_path.exists() || rhel_path.exists() {
+        return Ok(true);
+    }
+
+    // Also consider trusted if Firefox policy is installed
+    Ok(nss::verify_firefox_policy())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -256,10 +275,13 @@ pub fn remove_system_trust() -> Result<()> {
     if std::path::Path::new(rhel_path).exists() {
         run_privileged("rm", &[rhel_path], "remove certificate")?;
         run_privileged("update-ca-trust", &[], "update system trust")?;
-        return Ok(());
     }
 
-    anyhow::bail!("No system trust certificate found to remove.")
+    if let Err(e) = nss::remove_firefox_policy() {
+        log::warn!("Firefox policy removal skipped: {}", e);
+    }
+
+    Ok(())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -278,7 +300,8 @@ pub fn trust_info() -> String {
             To trust manually:\n\
             sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain '{}'\n\n\
             To remove:\n\
-            security delete-certificate -c 'devflow Root CA'",
+            security delete-certificate -c 'devflow Root CA'\n\n\
+            Firefox: trusts macOS Keychain automatically",
             cert_path.display(),
             cert_path.display()
         )
@@ -293,19 +316,23 @@ pub fn trust_info() -> String {
             Fedora/RHEL:\n\
             sudo cp {} /etc/pki/ca-trust/source/anchors/devflow.crt && sudo update-ca-trust\n\n\
             Alpine Linux:\n\
-            sudo cp {} /usr/local/share/ca-certificates/devflow.crt && sudo update-ca-certificates",
+            sudo cp {} /usr/local/share/ca-certificates/devflow.crt && sudo update-ca-certificates\n\n\
+            {}",
             cert_path.display(),
             cert_path.display(),
             cert_path.display(),
-            cert_path.display()
+            cert_path.display(),
+            nss::firefox_policy_info()
         )
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         format!(
-            "CA certificate: {}\n\nPlease consult your system documentation for trust installation.",
-            cert_path.display()
+            "CA certificate: {}\n\nPlease consult your system documentation for trust installation.\n\n\
+            {}",
+            cert_path.display(),
+            nss::firefox_policy_info()
         )
     }
 }

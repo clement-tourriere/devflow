@@ -78,11 +78,12 @@ pub async fn stop_proxy(app: tauri::AppHandle, state: State<'_, AppState>) -> Re
     }
 
     let config = state.proxy_config.read().await;
+    let ca_installed = devflow_proxy::platform::verify_system_trust().unwrap_or(false);
     let status = ProxyStatus {
         running: false,
         https_port: config.https_port,
         http_port: config.http_port,
-        ca_installed: devflow_proxy::platform::verify_system_trust().unwrap_or(false),
+        ca_installed,
         ca_path: devflow_proxy::ca::default_ca_cert_path()
             .display()
             .to_string(),

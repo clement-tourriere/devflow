@@ -3,6 +3,7 @@ pub mod ca;
 pub mod discovery;
 pub mod monitor;
 pub mod network;
+pub mod nss;
 pub mod platform;
 pub mod router;
 pub mod server;
