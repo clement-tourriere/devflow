@@ -1,7 +1,8 @@
 [tools]
 cargo = "latest"
 rust = "latest"
-"pipx:pre-commit" = "latest"
+hk = "latest"
+pkl = "latest"
 
 [tasks.docs]
 description = "Serve documentation site locally"
