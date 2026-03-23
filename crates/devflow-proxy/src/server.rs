@@ -181,7 +181,7 @@ async fn handle_request(
     req: Request<Incoming>,
     router: &Router,
     sni_hostname: Option<&str>,
-    _peer_addr: SocketAddr,
+    peer_addr: SocketAddr,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     // Determine the target host from SNI or Host header
     let host = sni_hostname.map(|s| s.to_string()).or_else(|| {
@@ -214,16 +214,13 @@ async fn handle_request(
         }
     };
 
-    // Forward the request to the upstream container
-    let upstream_uri = format!(
-        "http://{}:{}{}",
-        upstream.ip,
-        upstream.port,
-        req.uri()
-            .path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or("/")
-    );
+    // Use origin-form URI (path+query only) for the upstream request
+    let upstream_path = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/")
+        .to_string();
 
     // Build a TCP connection to the upstream
     let upstream_addr = format!("{}:{}", upstream.ip, upstream.port);
@@ -269,7 +266,7 @@ async fn handle_request(
 
     let mut upstream_req = Request::builder()
         .method(parts.method)
-        .uri(&upstream_uri)
+        .uri(&upstream_path)
         .body(Full::new(body_bytes))
         .unwrap();
 
@@ -281,12 +278,27 @@ async fn handle_request(
                 .insert(key.clone(), value.clone());
         }
     }
-    // Set correct Host header for upstream
+    // Set Host to the original hostname, not the upstream IP
+    upstream_req
+        .headers_mut()
+        .insert(hyper::header::HOST, hostname.parse().unwrap());
+    // Add standard reverse proxy headers
+    upstream_req
+        .headers_mut()
+        .insert("x-forwarded-host", hostname.parse().unwrap());
     upstream_req.headers_mut().insert(
-        hyper::header::HOST,
-        format!("{}:{}", upstream.ip, upstream.port)
-            .parse()
-            .unwrap(),
+        "x-forwarded-proto",
+        if sni_hostname.is_some() {
+            "https"
+        } else {
+            "http"
+        }
+        .parse()
+        .unwrap(),
+    );
+    upstream_req.headers_mut().insert(
+        "x-forwarded-for",
+        peer_addr.ip().to_string().parse().unwrap(),
     );
 
     match sender.send_request(upstream_req).await {
