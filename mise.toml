@@ -3,6 +3,8 @@ cargo = "latest"
 rust = "latest"
 hk = "latest"
 pkl = "latest"
+bun = "1.2"
+"cargo:tauri-cli" = "latest"
 
 [tasks.docs]
 description = "Serve documentation site locally"
@@ -57,21 +59,17 @@ run = "./scripts/generate-llms-txt.sh --check"
 
 [tasks."gui"]
 description = "Run the desktop GUI in development mode (hot-reload)"
-run = """
-(cd ui && bun install --frozen-lockfile 2>/dev/null || bun install)
-cargo tauri dev
-"""
+depends = ["gui:install"]
+run = "cargo tauri dev"
 
 [tasks."gui:build"]
-description = "Build the desktop GUI for production"
-run = """
-(cd ui && bun install --frozen-lockfile 2>/dev/null || bun install)
-cargo tauri build
-"""
+description = "Build the desktop GUI for production (release binary + app bundle)"
+depends = ["gui:install"]
+run = "cargo tauri build"
 
 [tasks."gui:install"]
 description = "Install frontend dependencies for the desktop GUI"
-run = "cd ui && bun install"
+run = "cd ui && bun install --frozen-lockfile"
 
 [tasks.ci]
 description = "Run full CI pipeline (fmt check + clippy + test)"
