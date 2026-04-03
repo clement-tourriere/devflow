@@ -2537,7 +2537,7 @@ devflow train run --cleanup</code></pre>
     </tbody>
   </table>
 
-  <p>Skills are written to <code>.agents/skills/</code> (Agent Skills standard) with symlinks in <code>.claude/skills/</code> for Claude Code compatibility. Claude Code, Cursor, and OpenCode all discover these skills automatically.</p>
+  <p>Skills are written directly to <code>.claude/skills/</code>, the universal standard directory. Claude Code, Cursor, and OpenCode all discover these skills automatically.</p>
 
   <h4>Agent Context Files</h4>
   <div class="card-grid">
@@ -2588,9 +2588,9 @@ devflow train run --cleanup</code></pre>
       <tr><th>Tool</th><th>Context File</th><th>Skills</th><th>How It Works</th></tr>
     </thead>
     <tbody>
-      <tr><td><strong>Claude Code</strong></td><td><code>CLAUDE.md</code></td><td><code>.claude/skills/</code> (symlinks)</td><td>Skills auto-loaded as slash commands; workspace ops available out of the box</td></tr>
-      <tr><td><strong>Cursor</strong></td><td><code>AGENTS.md</code></td><td><code>.agents/skills/</code></td><td>Skills discoverable via Agent Skills standard</td></tr>
-      <tr><td><strong>OpenCode</strong></td><td><code>AGENTS.md</code></td><td><code>.agents/skills/</code></td><td>Skills discoverable via Agent Skills standard</td></tr>
+      <tr><td><strong>Claude Code</strong></td><td><code>CLAUDE.md</code></td><td><code>.claude/skills/</code></td><td>Skills auto-loaded as slash commands; workspace ops available out of the box</td></tr>
+      <tr><td><strong>Cursor</strong></td><td><code>AGENTS.md</code></td><td><code>.claude/skills/</code></td><td>Skills discoverable via .claude/skills/ standard</td></tr>
+      <tr><td><strong>OpenCode</strong></td><td><code>AGENTS.md</code></td><td><code>.claude/skills/</code></td><td>Skills discoverable via .claude/skills/ standard</td></tr>
       <tr><td><strong>GitHub Copilot</strong></td><td><code>AGENTS.md</code></td><td>&mdash;</td><td>Available as workspace context; agent scripts run in Copilot Workspace</td></tr>
       <tr><td><strong>Custom agents</strong></td><td><code>llms.txt</code> / <code>llms-full.txt</code></td><td>&mdash;</td><td>Machine-readable context; ingest <code>llms-full.txt</code> for complete reference</td></tr>
     </tbody>

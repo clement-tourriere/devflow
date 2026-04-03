@@ -109,7 +109,7 @@ pub async fn fetch_skill(owner: &str, repo: &str, skill_name: &str) -> Result<Sk
     let paths_to_try = vec![
         format!("skills/{}/SKILL.md", skill_name),
         format!("{}/SKILL.md", skill_name),
-        format!(".agents/skills/{}/SKILL.md", skill_name),
+        format!(".claude/skills/{}/SKILL.md", skill_name),
     ];
 
     for path in &paths_to_try {

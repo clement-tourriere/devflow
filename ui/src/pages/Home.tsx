@@ -212,7 +212,7 @@ function ProjectCard({ project }: { project: ProjectInfo }) {
         </span>
         {d && !d.has_config && (
           <span className="badge badge-warning" style={{ fontSize: 11 }}>
-            setup needed
+            no config
           </span>
         )}
       </div>

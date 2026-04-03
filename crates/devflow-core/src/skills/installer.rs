@@ -6,56 +6,38 @@ use super::manifest;
 use super::types::{InstalledSkill, Skill, SkillSource};
 use chrono::Utc;
 
-/// The standard skills directory (Agent Skills open standard).
-const AGENTS_SKILLS_DIR: &str = ".agents/skills";
+/// The canonical skills directory (`.claude/skills/` is the universal standard).
+const CLAUDE_SKILLS_DIR: &str = ".claude/skills";
 
 /// Install a skill into a project.
 ///
 /// 1. Write content to global cache
-/// 2. Create symlink in `.agents/skills/{name}` -> cache dir
-/// 3. Create symlink in `.claude/skills/{name}` -> `../../.agents/skills/{name}`
-/// 4. Update `.devflow/skills.lock`
+/// 2. Write `SKILL.md` directly into `.claude/skills/{name}/`
+/// 3. Update `.devflow/skills.lock`
 pub fn install_skill(project_dir: &Path, skill: &Skill, cache: &SkillCache) -> Result<()> {
     // 1. Cache the content
-    let cache_dir = match &skill.source {
+    match &skill.source {
         SkillSource::Bundled => {
-            cache.store_bundled(&skill.name, &skill.content_hash, &skill.content)?
+            cache.store_bundled(&skill.name, &skill.content_hash, &skill.content)?;
         }
-        SkillSource::Github { owner, repo, .. } => cache.store(
-            owner,
-            repo,
-            &skill.name,
-            &skill.content_hash,
-            &skill.content,
-        )?,
+        SkillSource::Github { owner, repo, .. } => {
+            cache.store(
+                owner,
+                repo,
+                &skill.name,
+                &skill.content_hash,
+                &skill.content,
+            )?;
+        }
     };
 
-    // 2. Symlink .agents/skills/{name} -> cache dir
-    let agents_dir = project_dir.join(AGENTS_SKILLS_DIR);
-    std::fs::create_dir_all(&agents_dir)?;
-    let agents_link = agents_dir.join(&skill.name);
-    remove_link_or_dir(&agents_link)?;
+    // 2. Write .claude/skills/{name}/SKILL.md directly
+    let skill_dir = project_dir.join(CLAUDE_SKILLS_DIR).join(&skill.name);
+    remove_link_or_dir(&skill_dir)?;
+    std::fs::create_dir_all(&skill_dir)?;
+    std::fs::write(skill_dir.join("SKILL.md"), &skill.content)?;
 
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&cache_dir, &agents_link)?;
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&cache_dir, &agents_link)?;
-
-    // 3. Symlink .claude/skills/{name} -> ../../.agents/skills/{name}
-    let claude_dir = project_dir.join(".claude").join("skills");
-    std::fs::create_dir_all(&claude_dir)?;
-    let claude_link = claude_dir.join(&skill.name);
-    let relative_target = std::path::Path::new("../..")
-        .join(AGENTS_SKILLS_DIR)
-        .join(&skill.name);
-    remove_link_or_dir(&claude_link)?;
-
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&relative_target, &claude_link)?;
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&relative_target, &claude_link)?;
-
-    // 4. Update lock file
+    // 3. Update lock file
     let mut lock = manifest::load_lock(project_dir)?;
     lock.skills.insert(
         skill.name.clone(),
@@ -72,13 +54,9 @@ pub fn install_skill(project_dir: &Path, skill: &Skill, cache: &SkillCache) -> R
 
 /// Remove a skill from a project.
 pub fn remove_skill(project_dir: &Path, skill_name: &str) -> Result<()> {
-    // Remove .agents/skills/{name}
-    let agents_link = project_dir.join(AGENTS_SKILLS_DIR).join(skill_name);
-    remove_link_or_dir(&agents_link)?;
-
     // Remove .claude/skills/{name}
-    let claude_link = project_dir.join(".claude").join("skills").join(skill_name);
-    remove_link_or_dir(&claude_link)?;
+    let skill_dir = project_dir.join(CLAUDE_SKILLS_DIR).join(skill_name);
+    remove_link_or_dir(&skill_dir)?;
 
     // Update lock file
     let mut lock = manifest::load_lock(project_dir)?;
@@ -149,24 +127,24 @@ mod tests {
         assert_eq!(installed.len(), 4);
         assert!(project
             .path()
-            .join(".agents/skills/devflow-workspace-list")
+            .join(".claude/skills/devflow-workspace-list/SKILL.md")
             .exists());
         assert!(project
             .path()
-            .join(".agents/skills/devflow-workspace-switch")
+            .join(".claude/skills/devflow-workspace-switch/SKILL.md")
             .exists());
         assert!(project
             .path()
-            .join(".agents/skills/devflow-workspace-create")
+            .join(".claude/skills/devflow-workspace-create/SKILL.md")
             .exists());
         assert!(project
             .path()
-            .join(".agents/skills/devflow-brainstorming")
+            .join(".claude/skills/devflow-brainstorming/SKILL.md")
             .exists());
-        assert!(project
+        assert!(!project
             .path()
             .join(".claude/skills/devflow-workspace-list")
-            .exists());
+            .is_symlink());
         assert!(project.path().join(".devflow/skills.lock").exists());
     }
 
@@ -181,7 +159,7 @@ mod tests {
 
         assert!(!project
             .path()
-            .join(".agents/skills/devflow-workspace-list")
+            .join(".claude/skills/devflow-workspace-list")
             .exists());
         assert!(!project
             .path()

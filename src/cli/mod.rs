@@ -720,7 +720,7 @@ pub enum AgentCommands {
     },
     #[command(
         about = "Install bundled workspace skills (use `devflow skill` for full management)",
-        long_about = "Install devflow's bundled workspace skills into .agents/skills/ and .claude/skills/.\n\nFor full skills management (search, install from marketplace, remove, update),\nuse `devflow skill` instead.\n\nExamples:\n  devflow agent skill          # Install bundled skills only\n  devflow skill list            # List all installed skills\n  devflow skill search foo      # Search skills.sh marketplace"
+        long_about = "Install devflow's bundled workspace skills into .claude/skills/.\n\nFor full skills management (search, install from marketplace, remove, update),\nuse `devflow skill` instead.\n\nExamples:\n  devflow agent skill          # Install bundled skills only\n  devflow skill list            # List all installed skills\n  devflow skill search foo      # Search skills.sh marketplace"
     )]
     Skill,
 }

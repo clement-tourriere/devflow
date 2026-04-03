@@ -343,7 +343,7 @@ pub(super) async fn handle_skill_command(
 
                     // Try to read content
                     let skill_path = project_dir
-                        .join(".agents/skills")
+                        .join(".claude/skills")
                         .join(&name)
                         .join("SKILL.md");
                     if skill_path.exists() {

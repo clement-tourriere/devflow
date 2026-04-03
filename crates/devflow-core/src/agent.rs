@@ -9,12 +9,12 @@ use std::path::Path;
 use crate::config::Config;
 
 /// The standard skills directory (Agent Skills open standard, supported by Claude Code, Cursor, OpenCode).
-const SKILLS_DIR: &str = ".agents/skills";
+const SKILLS_DIR: &str = ".claude/skills";
 
 /// A generated skill file with its relative path and content.
 #[derive(Debug, Clone)]
 pub struct SkillFile {
-    /// Relative path under `.agents/skills/devflow/`, e.g. `SKILL.md` or `workspace-list/SKILL.md`
+    /// Relative path under `.claude/skills/`, e.g. `devflow-workspace-list/SKILL.md`
     pub relative_path: String,
     pub content: String,
 }
@@ -159,7 +159,7 @@ pub fn generate_claude_skill(config: &Config, _project_dir: &Path) -> Result<Str
 
 /// Generate individual workspace management skills (Agent Skills open standard).
 ///
-/// Each skill is a separate top-level directory under `.agents/skills/`.
+/// Each skill is a separate top-level directory under `.claude/skills/`.
 pub fn generate_workspace_skills() -> Vec<SkillFile> {
     vec![
         SkillFile {
@@ -365,7 +365,7 @@ Complete these steps in order:
 3. **Propose 2-3 approaches** — with trade-offs and your recommendation
 4. **Present design** — in sections scaled to complexity, get user approval after each section
 5. **Write design doc** — save to `docs/plans/YYYY-MM-DD-<topic>-design.md`
-6. **Create devflow workspace** — create an isolated workspace for implementation (see below)
+6. **Optionally create devflow workspace** — only if the user requests isolation or the task is complex (multi-file changes, risky refactors, long-running work)
 7. **Write implementation plan** — break the approved design into concrete tasks
 
 ## The Process
@@ -398,7 +398,14 @@ Complete these steps in order:
 After the user approves the design:
 
 1. Save the design to `docs/plans/YYYY-MM-DD-<topic>-design.md`
-2. Create an isolated devflow workspace for the implementation:
+2. **Evaluate whether an isolated workspace is needed.** Create one if:
+   - The user explicitly asks for isolation
+   - The task involves significant multi-file changes, risky refactors, or long-running work
+   - There's risk of interfering with other ongoing work
+
+   For simple, contained changes, skip workspace creation and work directly in the current workspace.
+
+   To create an isolated workspace:
 
 ```bash
 OUTPUT=$(devflow --json --non-interactive switch -c --sandboxed feature/<topic>)
@@ -406,8 +413,8 @@ WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
 [ -n "$WORKTREE" ] && cd "$WORKTREE"
 ```
 
-3. Write the implementation plan as `docs/plans/YYYY-MM-DD-<topic>-plan.md` in the new workspace
-4. Begin implementation in the isolated workspace — changes are contained and won't affect other work
+3. Write the implementation plan as `docs/plans/YYYY-MM-DD-<topic>-plan.md`
+4. Begin implementation — if in an isolated workspace, changes are contained and won't affect other work
 
 ## Key Principles
 
@@ -431,13 +438,10 @@ const MANAGED_SKILL_DIRS: &[&str] = &[
     "devflow-brainstorming",
 ];
 
-/// Install all agent skills into `.agents/skills/` under the project directory.
+/// Install all agent skills into `.claude/skills/` under the project directory.
 ///
-/// Uses the Agent Skills open standard (agentskills.io), compatible with
-/// Cursor, OpenCode, and other tools that support the standard.
-///
-/// Also creates per-skill symlinks in `.claude/skills/` pointing back to
-/// `.agents/skills/` so Claude Code picks them up too.
+/// Skills are written directly to `.claude/skills/<name>/SKILL.md`, which is
+/// natively discovered by Claude Code, OpenCode, Cursor, and other tools.
 ///
 /// When the `skills` feature is enabled, also updates `.devflow/skills.lock`
 /// so the skills management system and GUI/TUI can see installed skills.
@@ -458,45 +462,11 @@ pub fn install_agent_skills(_config: &Config, project_dir: &Path) -> Result<Vec<
         written.push(full_path.display().to_string());
     }
 
-    // Symlink each skill dir in .claude/skills/ → ../../.agents/skills/<name>
-    ensure_claude_skill_symlinks(project_dir)?;
-
     // Update skills.lock so the skills management system stays in sync
     #[cfg(feature = "skills")]
     sync_skills_lock(project_dir)?;
 
     Ok(written)
-}
-
-/// Create a symlink in `.claude/skills/<name>` → `../../.agents/skills/<name>`
-/// for each devflow-managed skill directory.
-fn ensure_claude_skill_symlinks(project_dir: &Path) -> Result<()> {
-    let claude_skills_dir = project_dir.join(".claude").join("skills");
-    std::fs::create_dir_all(&claude_skills_dir)?;
-
-    for dir_name in MANAGED_SKILL_DIRS {
-        let claude_link = claude_skills_dir.join(dir_name);
-        let relative_target = Path::new("..").join("..").join(SKILLS_DIR).join(dir_name);
-
-        if claude_link.is_symlink() {
-            if let Ok(target) = std::fs::read_link(&claude_link) {
-                if target == relative_target {
-                    continue;
-                }
-            }
-            std::fs::remove_file(&claude_link)?;
-        } else if claude_link.exists() {
-            std::fs::remove_dir_all(&claude_link)?;
-        }
-
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&relative_target, &claude_link)?;
-
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(&relative_target, &claude_link)?;
-    }
-
-    Ok(())
 }
 
 /// Sync the skills.lock file with the bundled skills that were just written to disk.
@@ -533,24 +503,16 @@ fn sync_skills_lock(project_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Remove all devflow-managed skills from `.agents/skills/` and their Claude symlinks.
+/// Remove all devflow-managed skills from `.claude/skills/`.
 pub fn uninstall_agent_skills(project_dir: &Path) -> Result<()> {
     let skills_dir = project_dir.join(SKILLS_DIR);
-    let claude_skills_dir = project_dir.join(".claude").join("skills");
 
     for dir_name in MANAGED_SKILL_DIRS {
-        // Remove canonical directory
         let dir = skills_dir.join(dir_name);
-        if dir.exists() {
+        if dir.is_symlink() {
+            std::fs::remove_file(&dir)?;
+        } else if dir.exists() {
             std::fs::remove_dir_all(&dir)?;
-        }
-
-        // Remove Claude symlink or copy
-        let claude_link = claude_skills_dir.join(dir_name);
-        if claude_link.is_symlink() {
-            std::fs::remove_file(&claude_link)?;
-        } else if claude_link.exists() {
-            std::fs::remove_dir_all(&claude_link)?;
         }
     }
 

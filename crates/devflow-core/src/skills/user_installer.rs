@@ -14,7 +14,7 @@ use super::cache::SkillCache;
 use super::marketplace::parse_frontmatter;
 use super::types::{InstalledSkill, Skill, SkillLock};
 
-const AGENTS_SKILLS_DIR: &str = ".agents/skills";
+const CLAUDE_SKILLS_DIR: &str = ".claude/skills";
 const LOCK_FILENAME: &str = "skills.lock";
 
 /// Get the canonical user-scope skills directory.
@@ -347,43 +347,30 @@ pub fn check_user_updates_from(
     Ok(updates)
 }
 
-/// Symlink user-scope skills from a specific dir into a project.
+/// Copy user-scope skills from a specific dir into a project.
 pub fn inherit_user_skills_into(user_dir: &Path, project_dir: &Path) -> Result<Vec<String>> {
     let lock = load_user_lock(user_dir)?;
-    let agents_dir = project_dir.join(AGENTS_SKILLS_DIR);
-    let claude_dir = project_dir.join(".claude").join("skills");
+    let claude_dir = project_dir.join(CLAUDE_SKILLS_DIR);
     let mut inherited = Vec::new();
 
     for name in lock.skills.keys() {
-        let agents_link = agents_dir.join(name);
+        let skill_dir = claude_dir.join(name);
         // Skip if project already has this skill (project-scope takes precedence)
-        if agents_link.exists() || agents_link.is_symlink() {
+        if skill_dir.exists() || skill_dir.is_symlink() {
             continue;
         }
 
         let user_skill_dir = user_dir.join(name);
-        if !user_skill_dir.join("SKILL.md").exists() {
+        let user_skill_file = user_skill_dir.join("SKILL.md");
+        if !user_skill_file.exists() {
             continue;
         }
 
-        // Symlink .agents/skills/<name> -> user skill dir (absolute)
-        std::fs::create_dir_all(&agents_dir)?;
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&user_skill_dir, &agents_link)?;
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(&user_skill_dir, &agents_link)?;
-
-        // Symlink .claude/skills/<name> -> ../../.agents/skills/<name>
-        std::fs::create_dir_all(&claude_dir)?;
-        let claude_link = claude_dir.join(name);
-        remove_link_or_dir(&claude_link)?;
-        let relative_target = std::path::Path::new("../..")
-            .join(AGENTS_SKILLS_DIR)
-            .join(name);
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&relative_target, &claude_link)?;
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(&relative_target, &claude_link)?;
+        // Write .claude/skills/<name>/SKILL.md directly
+        std::fs::create_dir_all(&skill_dir)?;
+        let content = std::fs::read_to_string(&user_skill_file)
+            .with_context(|| format!("Reading user skill: {:?}", user_skill_file))?;
+        std::fs::write(skill_dir.join("SKILL.md"), content)?;
 
         inherited.push(name.clone());
     }
@@ -538,14 +525,15 @@ mod tests {
         assert_eq!(inherited.len(), 1);
         assert!(project_dir
             .path()
-            .join(".agents/skills")
+            .join(".claude/skills")
             .join(&skills[0].name)
+            .join("SKILL.md")
             .exists());
-        assert!(project_dir
+        assert!(!project_dir
             .path()
             .join(".claude/skills")
             .join(&skills[0].name)
-            .exists());
+            .is_symlink());
     }
 
     #[test]

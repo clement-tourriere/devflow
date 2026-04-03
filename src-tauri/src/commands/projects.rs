@@ -328,6 +328,11 @@ pub async fn add_or_init_project(
 
     let config_path = abs_path.join(".devflow.yml");
     let wt_enabled = worktree_enabled.unwrap_or(true);
+    let resolved_main_branch = main_branch.clone().or_else(|| {
+        devflow_core::vcs::detect_vcs_provider(&abs_path)
+            .ok()
+            .and_then(|vcs| vcs.default_workspace().ok().flatten())
+    });
 
     if !config_path.exists() {
         // Create a new config
@@ -335,7 +340,7 @@ pub async fn add_or_init_project(
             name: Some(project_name.clone()),
             ..Default::default()
         };
-        if let Some(ref branch) = main_branch {
+        if let Some(ref branch) = resolved_main_branch {
             config.git.main_workspace = branch.clone();
         }
         if wt_enabled {
@@ -363,16 +368,11 @@ pub async fn add_or_init_project(
     }
 
     // Register default devflow workspace
-    let main_workspace = main_branch.clone().unwrap_or_else(|| {
-        if config_path.exists() {
-            devflow_core::config::Config::from_file(&config_path)
-                .ok()
-                .map(|c| c.git.main_workspace.clone())
-                .unwrap_or_else(|| "main".to_string())
-        } else {
-            "main".to_string()
-        }
-    });
+    let main_workspace = devflow_core::config::Config::from_file(&config_path)
+        .ok()
+        .map(|c| c.git.main_workspace.clone())
+        .or(resolved_main_branch)
+        .unwrap_or_else(|| "main".to_string());
 
     if let Ok(mut state_mgr) = devflow_core::state::LocalStateManager::new() {
         if let Err(e) = state_mgr.ensure_default_workspace(&abs_path, &main_workspace) {

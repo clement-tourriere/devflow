@@ -134,6 +134,9 @@ function ProjectList() {
                   {p.missing && (
                     <span className="badge badge-danger">missing</span>
                   )}
+                  {!p.missing && p.detail && !p.detail.has_config && (
+                    <span className="badge badge-warning">no config</span>
+                  )}
                   {p.detail?.vcs_type && (
                     <span className="badge" style={{ fontSize: 11 }}>
                       {p.detail.vcs_type}

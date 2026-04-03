@@ -316,7 +316,7 @@ impl App {
                             };
                             // Try to read content
                             let skill_path = project_dir
-                                .join(".agents/skills")
+                                .join(".claude/skills")
                                 .join(name)
                                 .join("SKILL.md");
                             let content = std::fs::read_to_string(&skill_path).ok();

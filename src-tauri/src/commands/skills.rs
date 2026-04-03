@@ -61,12 +61,12 @@ pub async fn skill_list(project_path: String) -> Result<Vec<InstalledSkillInfo>,
 /// Load the skills.lock and reconcile it with what's actually on disk.
 ///
 /// Skills installed by the older `agent::install_agent_skills()` path wrote files
-/// to `.agents/skills/` without updating `skills.lock`. This function detects
+/// to `.claude/skills/` without updating `skills.lock`. This function detects
 /// on-disk bundled skills not tracked in the lock and auto-registers them.
 fn reconcile_lock(project_dir: &std::path::Path) -> anyhow::Result<SkillLock> {
     let mut lock = manifest::load_lock(project_dir)?;
     let bundled = bundled_skills();
-    let agents_dir = project_dir.join(".agents/skills");
+    let agents_dir = project_dir.join(".claude/skills");
 
     let mut changed = false;
     for skill in &bundled {
@@ -214,7 +214,7 @@ pub async fn skill_show(project_path: String, name: String) -> Result<SkillDetai
         .ok_or_else(|| format!("Skill '{}' is not installed.", name))?;
 
     let skill_path = project_dir
-        .join(".agents/skills")
+        .join(".claude/skills")
         .join(&name)
         .join("SKILL.md");
     let content = if skill_path.exists() {

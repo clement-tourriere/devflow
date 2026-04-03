@@ -19,6 +19,7 @@ import {
   destroyService,
   removeProject,
   destroyProject,
+  addOrInitProject,
   listContainers,
   getProxyStatus,
   runDoctor,
@@ -537,7 +538,7 @@ function ProjectDetail() {
               </span>
             )}
             {!detail.has_config && (
-              <span className="badge badge-warning">setup needed</span>
+              <span className="badge badge-warning">no config</span>
             )}
             {detail.vcs_type && (
               <span className="badge">vcs: {detail.vcs_type}</span>
@@ -594,6 +595,68 @@ function ProjectDetail() {
         </div>
       </div>
 
+      {/* Config missing banner */}
+      {!detail.has_config && (
+        <div
+          className="card"
+          style={{
+            borderColor: "var(--warning)",
+            borderWidth: 1,
+            borderStyle: "solid",
+            marginBottom: 16,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 16, justifyContent: "space-between" }}>
+            <div>
+              <div style={{ fontWeight: 600, marginBottom: 4, color: "var(--warning)" }}>
+                Configuration file missing
+              </div>
+              <p style={{ color: "var(--text-secondary)", fontSize: 13, margin: 0 }}>
+                This project is registered in devflow but its <code>.devflow.yml</code> configuration file is missing.
+                Without it, workspaces and services cannot be managed. You can re-initialize the project or remove it from devflow.
+              </p>
+            </div>
+            <div className="flex gap-2" style={{ flexShrink: 0 }}>
+              <button
+                className="btn btn-primary"
+                onClick={async () => {
+                  setActionLoading("reinit");
+                  try {
+                    await addOrInitProject(projectPath, detail.name);
+                    await reload();
+                  } catch (e) {
+                    alert(`Failed to initialize: ${e}`);
+                  } finally {
+                    setActionLoading(null);
+                  }
+                }}
+                disabled={actionLoading === "reinit"}
+              >
+                {actionLoading === "reinit" ? "Initializing..." : "Initialize Project"}
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={async () => {
+                  setActionLoading("remove");
+                  try {
+                    await removeProject(projectPath);
+                    window.dispatchEvent(new CustomEvent("devflow:projects-changed"));
+                    navigate("/projects");
+                  } catch (e) {
+                    alert(`Failed to remove: ${e}`);
+                  } finally {
+                    setActionLoading(null);
+                  }
+                }}
+                disabled={actionLoading === "remove"}
+              >
+                {actionLoading === "remove" ? "Removing..." : "Remove"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Tab bar */}
       <div style={{
         display: "flex",
@@ -639,7 +702,14 @@ function ProjectDetail() {
       {activeTab === "skills" && <ProjectSkillsTab projectPath={projectPath} />}
 
       {/* Overview tab */}
-      {activeTab === "overview" && (<>
+      {activeTab === "overview" && !detail.has_config && (
+        <div className="card" style={{ textAlign: "center", padding: 32 }}>
+          <p style={{ color: "var(--text-muted)", fontSize: 14 }}>
+            Initialize the project configuration to manage workspaces and services.
+          </p>
+        </div>
+      )}
+      {activeTab === "overview" && detail.has_config && (<>
 
       {/* Workspaces card */}
       <div className="card">

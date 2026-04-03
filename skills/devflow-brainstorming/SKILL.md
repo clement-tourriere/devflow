@@ -26,7 +26,7 @@ Complete these steps in order:
 3. **Propose 2-3 approaches** — with trade-offs and your recommendation
 4. **Present design** — in sections scaled to complexity, get user approval after each section
 5. **Write design doc** — save to `docs/plans/YYYY-MM-DD-<topic>-design.md`
-6. **Create devflow workspace** — create an isolated workspace for implementation (see below)
+6. **Optionally create devflow workspace** — only if the user requests isolation or the task is complex (multi-file changes, risky refactors, long-running work)
 7. **Write implementation plan** — break the approved design into concrete tasks
 
 ## The Process
@@ -59,7 +59,14 @@ Complete these steps in order:
 After the user approves the design:
 
 1. Save the design to `docs/plans/YYYY-MM-DD-<topic>-design.md`
-2. Create an isolated devflow workspace for the implementation:
+2. **Evaluate whether an isolated workspace is needed.** Create one if:
+   - The user explicitly asks for isolation
+   - The task involves significant multi-file changes, risky refactors, or long-running work
+   - There's risk of interfering with other ongoing work
+
+   For simple, contained changes, skip workspace creation and work directly in the current workspace.
+
+   To create an isolated workspace:
 
 ```bash
 OUTPUT=$(devflow --json --non-interactive switch -c --sandboxed feature/<topic>)
@@ -67,8 +74,8 @@ WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
 [ -n "$WORKTREE" ] && cd "$WORKTREE"
 ```
 
-3. Write the implementation plan as `docs/plans/YYYY-MM-DD-<topic>-plan.md` in the new workspace
-4. Begin implementation in the isolated workspace — changes are contained and won't affect other work
+3. Write the implementation plan as `docs/plans/YYYY-MM-DD-<topic>-plan.md`
+4. Begin implementation — if in an isolated workspace, changes are contained and won't affect other work
 
 ## Key Principles
 

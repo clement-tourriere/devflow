@@ -503,7 +503,7 @@ devflow agent context --workspace feature/auth
 
 ### `devflow agent skill`
 
-Install project-specific workspace skills into `.agents/skills/` and compatible tool locations.
+Install project-specific workspace skills into `.claude/skills/`.
 
 ```bash
 devflow agent skill
