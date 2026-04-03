@@ -33,6 +33,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Three-tier configuration** — `.devflow.yml` (team) -> `.devflow.local.yml` (local) -> environment variables.
 - **JSON output + non-interactive mode** — For CI/CD and AI agent workflows.
 
+## v0.3.0 (2026-04-03)
+
+### Feat
+
+- **proxy**: add Firefox trust via enterprise policies.json on Linux
+- **skills**: add full skills management system
+
+### Fix
+
+- handle missing configs and simplify skills
+- **proxy**: preserve original Host header and use origin-form URI
+- **gui**: pin bun and tauri-cli in mise, fix hanging bun install
+- gate HashSet import behind cfg(target_os = "macos") for Linux CI
+- resolve remaining clippy errors on Linux CI
+- rename _cmd to cmd in sandbox apply_to_command
+
 ## v0.2.0 (2026-03-06)
 
 ### Feat
