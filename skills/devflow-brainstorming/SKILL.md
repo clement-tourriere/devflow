@@ -71,7 +71,7 @@ After the user approves the design:
 ```bash
 OUTPUT=$(devflow --json --non-interactive switch -c --sandboxed feature/<topic>)
 WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
-[ -n "$WORKTREE" ] && cd "$WORKTREE"
+# For agents, use WORKTREE as the workdir for later tool calls
 ```
 
 3. Write the implementation plan as `docs/plans/YYYY-MM-DD-<topic>-plan.md`

@@ -56,9 +56,8 @@ Equivalent manual flow:
 WORKSPACE="agent/$TASK_ID"
 OUTPUT=$(devflow --json --non-interactive switch -c "$WORKSPACE")
 
-# If worktrees are enabled, switch to the worktree directory
+# If worktrees are enabled, keep this path and use it as the workdir for subsequent agent tool calls
 WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
-[ -n "$WORKTREE" ] && cd "$WORKTREE"
 
 devflow --json service connection "$WORKSPACE"
 ```
@@ -116,9 +115,8 @@ WORKSPACE="agent/$TASK_ID"
 # 1) Create/switch isolated environment for this task
 OUTPUT=$(devflow --json --non-interactive switch -c "$WORKSPACE")
 
-# 2) Switch to worktree directory if worktrees are enabled
+# 2) If a worktree was created, use it as the workdir for subsequent agent tool calls
 WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
-[ -n "$WORKTREE" ] && cd "$WORKTREE"
 
 # 3) Read connection info and run the task
 CONN=$(devflow --json service connection "$WORKSPACE" | jq -r '.connection_string')

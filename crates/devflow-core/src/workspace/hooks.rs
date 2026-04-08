@@ -30,16 +30,28 @@ pub async fn run_lifecycle_hooks(
     phase: HookPhase,
     opts: &LifecycleOptions,
 ) -> Result<()> {
+    let _ =
+        run_lifecycle_hooks_with_result(config, project_dir, workspace_name, phase, opts).await?;
+    Ok(())
+}
+
+/// Run hooks for a lifecycle phase and return a summary.
+pub async fn run_lifecycle_hooks_with_result(
+    config: &Config,
+    project_dir: &Path,
+    workspace_name: &str,
+    phase: HookPhase,
+    opts: &LifecycleOptions,
+) -> Result<crate::hooks::executor::HookRunResult> {
     let Some(ref hooks_config) = config.hooks else {
-        return Ok(());
+        return Ok(crate::hooks::executor::HookRunResult::default());
     };
     if hooks_config.is_empty() {
-        return Ok(());
+        return Ok(crate::hooks::executor::HookRunResult::default());
     }
 
     let mut context = hooks::build_hook_context(config, project_dir, workspace_name).await;
 
-    // Apply trigger overrides from lifecycle options
     if let Some(ref source) = opts.trigger_source {
         context.trigger_source = source.clone();
     }
@@ -47,8 +59,6 @@ pub async fn run_lifecycle_hooks(
         context.vcs_event = Some(event.clone());
     }
 
-    // Use worktree path as working directory when available, so that hooks
-    // like `mise trust` run in the correct directory.
     let working_dir = context
         .worktree_path
         .as_ref()
@@ -73,19 +83,16 @@ pub async fn run_lifecycle_hooks(
         }
     };
 
-    // If the workspace is sandboxed, attach sandbox config to the engine
     let sandbox_config = resolve_workspace_sandbox_config(config, project_dir, workspace_name);
     let engine = engine
         .with_quiet_output(!opts.verbose_hooks)
         .with_sandbox(sandbox_config);
 
     if opts.verbose_hooks {
-        engine.run_phase_verbose(&phase, &context).await?;
+        engine.run_phase_verbose(&phase, &context).await
     } else {
-        engine.run_phase(&phase, &context).await?;
+        engine.run_phase(&phase, &context).await
     }
-
-    Ok(())
 }
 
 /// Best-effort hook execution — logs warnings but never fails the caller.
@@ -95,11 +102,23 @@ pub async fn run_lifecycle_hooks_best_effort(
     workspace_name: &str,
     phase: HookPhase,
     opts: &LifecycleOptions,
-) {
-    if let Err(e) =
-        run_lifecycle_hooks(config, project_dir, workspace_name, phase.clone(), opts).await
+) -> Option<super::LifecycleHookResult> {
+    match run_lifecycle_hooks_with_result(config, project_dir, workspace_name, phase.clone(), opts)
+        .await
     {
-        log::warn!("Hook phase {:?} failed: {}", phase, e);
+        Ok(result) => Some(super::LifecycleHookResult::from_run_result(&phase, result)),
+        Err(e) => {
+            let message = e.to_string();
+            log::warn!("Hook phase {:?} failed: {}", phase, message);
+            Some(super::LifecycleHookResult {
+                phase: phase.to_string(),
+                succeeded: 0,
+                failed: 1,
+                skipped: 0,
+                background: 0,
+                errors: vec![message],
+            })
+        }
     }
 }
 

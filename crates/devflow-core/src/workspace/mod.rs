@@ -4,6 +4,7 @@ pub mod hooks;
 pub mod switch;
 pub mod worktree;
 
+use crate::hooks::HookPhase;
 use crate::services::factory::OrchestrationResult;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -65,6 +66,33 @@ impl From<OrchestrationResult> for ServiceResult {
     }
 }
 
+/// Summary of a lifecycle hook phase execution.
+#[derive(Debug, Clone, Serialize)]
+pub struct LifecycleHookResult {
+    pub phase: String,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub background: usize,
+    pub errors: Vec<String>,
+}
+
+impl LifecycleHookResult {
+    pub fn from_run_result(
+        phase: &HookPhase,
+        result: crate::hooks::executor::HookRunResult,
+    ) -> Self {
+        Self {
+            phase: phase.to_string(),
+            succeeded: result.succeeded,
+            failed: result.failed,
+            skipped: result.skipped,
+            background: result.background,
+            errors: result.errors,
+        }
+    }
+}
+
 /// Result of `create_workspace()`.
 #[derive(Debug, Clone)]
 pub struct CreateWorkspaceResult {
@@ -78,6 +106,8 @@ pub struct CreateWorkspaceResult {
     pub branch_created: bool,
     /// Per-service results from orchestration.
     pub services: Vec<ServiceResult>,
+    /// Lifecycle hook summaries that ran during this operation.
+    pub hooks: Vec<LifecycleHookResult>,
 }
 
 /// Result of `switch_workspace()`.
@@ -93,6 +123,8 @@ pub struct SwitchWorkspaceResult {
     pub branch_created: bool,
     /// Per-service results from orchestration.
     pub services: Vec<ServiceResult>,
+    /// Lifecycle hook summaries that ran during this operation.
+    pub hooks: Vec<LifecycleHookResult>,
 }
 
 /// Result of `delete_workspace()`.
@@ -108,6 +140,8 @@ pub struct DeleteWorkspaceResult {
     pub branch_deleted: bool,
     /// Per-service results from orchestration.
     pub services: Vec<ServiceResult>,
+    /// Lifecycle hook summaries that ran during this operation.
+    pub hooks: Vec<LifecycleHookResult>,
 }
 
 /// Options shared across lifecycle operations.

@@ -19,7 +19,8 @@ description: Create a new devflow workspace with isolated services for a task or
    - If worktrees are enabled, a new Git worktree directory is created
    - Lifecycle hooks (e.g. `post-create`, `post-switch`) run automatically
 3. **Parse the JSON output** to check for `worktree_path`:
-   - If `worktree_path` is present, **change your working directory** to it — this is where you should do all subsequent work
+   - If `worktree_path` is present, use it as the working directory/workdir for subsequent tool calls
+   - Do not rely on shell `cd` to retarget an already running agent session
    - If `worktree_created` is `true`, a new worktree was just created for this workspace
 4. If the project has database services, retrieve connection info with `devflow --json connection $ARGUMENTS`
    - If this returns `"services": "none_configured"`, the project uses workspaces without database services — skip this step
@@ -46,9 +47,8 @@ Create a new sandboxed workspace for a feature:
 ```bash
 OUTPUT=$(devflow --json --non-interactive switch -c --sandboxed feature/my-task)
 
-# If worktrees are enabled, switch to the worktree directory
+# For agents, use WORKTREE as the workdir for later tool calls
 WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
-[ -n "$WORKTREE" ] && cd "$WORKTREE"
 ```
 
 Get connection strings for the new workspace:
@@ -68,7 +68,7 @@ Create a workspace and immediately get full context:
 ```bash
 OUTPUT=$(devflow --json --non-interactive switch -c --sandboxed agent/task-42)
 WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
-[ -n "$WORKTREE" ] && cd "$WORKTREE"
+# For agents, use WORKTREE as the workdir for later tool calls
 devflow --json connection agent/task-42
 devflow agent context
 ```

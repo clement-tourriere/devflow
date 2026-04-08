@@ -41,6 +41,7 @@ pub async fn delete_workspace(
     // VCS is optional — `remove` must work even without a git/jj repo
     let vcs_provider = vcs::detect_vcs_provider(project_dir).ok();
     let normalized = config.get_normalized_workspace_name(workspace_name);
+    let mut hook_results = Vec::new();
 
     // 1. Pre-remove hooks (blocking)
     if !opts.skip_hooks {
@@ -79,14 +80,17 @@ pub async fn delete_workspace(
     let service_results: Vec<ServiceResult> = if !options.keep_services && !opts.skip_services {
         // Pre-service-delete hooks
         if !opts.skip_hooks {
-            run_lifecycle_hooks_best_effort(
+            if let Some(summary) = run_lifecycle_hooks_best_effort(
                 config,
                 project_dir,
                 workspace_name,
                 HookPhase::PreServiceDelete,
                 opts,
             )
-            .await;
+            .await
+            {
+                hook_results.push(summary);
+            }
         }
 
         let results = services::factory::orchestrate_delete(config, &normalized).await?;
@@ -95,14 +99,17 @@ pub async fn delete_workspace(
 
         // Post-service-delete hooks (best-effort)
         if !opts.skip_hooks {
-            run_lifecycle_hooks_best_effort(
+            if let Some(summary) = run_lifecycle_hooks_best_effort(
                 config,
                 project_dir,
                 workspace_name,
                 HookPhase::PostServiceDelete,
                 opts,
             )
-            .await;
+            .await
+            {
+                hook_results.push(summary);
+            }
         }
 
         service_results
@@ -132,14 +139,17 @@ pub async fn delete_workspace(
 
     // 6. Post-remove hooks (best-effort)
     if !opts.skip_hooks {
-        run_lifecycle_hooks_best_effort(
+        if let Some(summary) = run_lifecycle_hooks_best_effort(
             config,
             project_dir,
             workspace_name,
             HookPhase::PostRemove,
             opts,
         )
-        .await;
+        .await
+        {
+            hook_results.push(summary);
+        }
     }
 
     Ok(DeleteWorkspaceResult {
@@ -148,5 +158,6 @@ pub async fn delete_workspace(
         worktree_path: worktree_path_str,
         branch_deleted,
         services: service_results,
+        hooks: hook_results,
     })
 }

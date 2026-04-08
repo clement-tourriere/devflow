@@ -2021,6 +2021,20 @@ pub(super) async fn handle_switch_command(
                 })
             })
             .collect();
+        let hook_results: Vec<serde_json::Value> = result
+            .hooks
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "phase": r.phase,
+                    "succeeded": r.succeeded,
+                    "failed": r.failed,
+                    "skipped": r.skipped,
+                    "background": r.background,
+                    "errors": r.errors,
+                })
+            })
+            .collect();
         let summary = serde_json::json!({
             "workspace": result.workspace,
             "parent": result.parent,
@@ -2030,6 +2044,7 @@ pub(super) async fn handle_switch_command(
             "services_failed": fail_count,
             "services_skipped": no_services,
             "service_results": service_results,
+            "hook_results": hook_results,
         });
         println!("{}", serde_json::to_string_pretty(&summary)?);
     } else if !no_services && !result.services.is_empty() {

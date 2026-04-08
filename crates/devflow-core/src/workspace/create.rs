@@ -7,11 +7,11 @@ use crate::services;
 use crate::state::{DevflowWorkspace, LocalStateManager};
 use crate::vcs;
 
-use super::hooks::run_lifecycle_hooks_best_effort;
+use super::hooks::{run_lifecycle_hooks_best_effort, run_lifecycle_hooks_with_result};
 use super::worktree::create_worktree_with_files;
 use super::{
-    CreateWorkspaceResult, LifecycleOptions, ServiceResult, WorkspaceCreationMode,
-    WorktreeSetupResult,
+    CreateWorkspaceResult, LifecycleHookResult, LifecycleOptions, ServiceResult,
+    WorkspaceCreationMode, WorktreeSetupResult,
 };
 
 /// Options specific to workspace creation.
@@ -65,6 +65,7 @@ pub async fn create_workspace(
         .from_workspace
         .as_deref()
         .map(|fb| config.get_normalized_workspace_name(fb));
+    let mut hook_results = Vec::new();
 
     // Decide whether to create a worktree
     let config_prefers_worktree = config.worktree.as_ref().is_some_and(|wt| wt.enabled);
@@ -101,14 +102,17 @@ pub async fn create_workspace(
 
     // 3. Pre-service-create hooks
     if !opts.skip_hooks {
-        run_lifecycle_hooks_best_effort(
+        if let Some(summary) = run_lifecycle_hooks_best_effort(
             config,
             project_dir,
             workspace_name,
             HookPhase::PreServiceCreate,
             opts,
         )
-        .await;
+        .await
+        {
+            hook_results.push(summary);
+        }
     }
 
     // 4. Service orchestration
@@ -126,14 +130,17 @@ pub async fn create_workspace(
 
     // 5. Post-service-create hooks
     if !opts.skip_hooks {
-        run_lifecycle_hooks_best_effort(
+        if let Some(summary) = run_lifecycle_hooks_best_effort(
             config,
             project_dir,
             workspace_name,
             HookPhase::PostServiceCreate,
             opts,
         )
-        .await;
+        .await
+        {
+            hook_results.push(summary);
+        }
     }
 
     // 6. Register in devflow state
@@ -148,23 +155,30 @@ pub async fn create_workspace(
 
     // 7. Post-create + post-switch hooks
     if !opts.skip_hooks {
-        run_lifecycle_hooks_best_effort(
+        let post_create = run_lifecycle_hooks_with_result(
             config,
             project_dir,
             workspace_name,
             HookPhase::PostCreate,
             opts,
         )
-        .await;
+        .await?;
+        hook_results.push(LifecycleHookResult::from_run_result(
+            &HookPhase::PostCreate,
+            post_create,
+        ));
 
-        run_lifecycle_hooks_best_effort(
+        if let Some(summary) = run_lifecycle_hooks_best_effort(
             config,
             project_dir,
             workspace_name,
             HookPhase::PostSwitch,
             opts,
         )
-        .await;
+        .await
+        {
+            hook_results.push(summary);
+        }
     }
 
     Ok(CreateWorkspaceResult {
@@ -173,6 +187,7 @@ pub async fn create_workspace(
         worktree: worktree_result,
         branch_created: true,
         services: service_results,
+        hooks: hook_results,
     })
 }
 

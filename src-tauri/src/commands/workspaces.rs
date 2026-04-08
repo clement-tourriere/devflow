@@ -164,6 +164,23 @@ pub async fn get_connection_info(
 pub struct CreateWorkspaceResult {
     pub services: Vec<OrchestrationResultDto>,
     pub worktree_path: Option<String>,
+    pub hooks: Vec<HookRunResultDto>,
+}
+
+#[derive(Serialize)]
+pub struct HookRunResultDto {
+    pub phase: String,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub background: usize,
+    pub errors: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct SwitchWorkspaceResult {
+    pub services: Vec<OrchestrationResultDto>,
+    pub hooks: Vec<HookRunResultDto>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -216,6 +233,18 @@ pub async fn create_workspace(
             .worktree
             .as_ref()
             .map(|w| w.path.display().to_string()),
+        hooks: result
+            .hooks
+            .into_iter()
+            .map(|r| HookRunResultDto {
+                phase: r.phase,
+                succeeded: r.succeeded,
+                failed: r.failed,
+                skipped: r.skipped,
+                background: r.background,
+                errors: r.errors,
+            })
+            .collect(),
     };
 
     crate::update_tray_menu(&app);
@@ -227,7 +256,7 @@ pub async fn switch_workspace(
     app: tauri::AppHandle,
     project_path: String,
     workspace_name: String,
-) -> Result<Vec<OrchestrationResultDto>, String> {
+) -> Result<SwitchWorkspaceResult, String> {
     let project_dir = std::path::Path::new(&project_path);
     let config_path = project_dir.join(".devflow.yml");
     let cfg = if config_path.exists() {
@@ -249,15 +278,29 @@ pub async fn switch_workspace(
         .await
         .map_err(crate::commands::format_error)?;
 
-    let response = result
-        .services
-        .into_iter()
-        .map(|r| OrchestrationResultDto {
-            service_name: r.service_name,
-            success: r.success,
-            message: r.message,
-        })
-        .collect();
+    let response = SwitchWorkspaceResult {
+        services: result
+            .services
+            .into_iter()
+            .map(|r| OrchestrationResultDto {
+                service_name: r.service_name,
+                success: r.success,
+                message: r.message,
+            })
+            .collect(),
+        hooks: result
+            .hooks
+            .into_iter()
+            .map(|r| HookRunResultDto {
+                phase: r.phase,
+                succeeded: r.succeeded,
+                failed: r.failed,
+                skipped: r.skipped,
+                background: r.background,
+                errors: r.errors,
+            })
+            .collect(),
+    };
 
     let _ = app.emit(
         "workspace-switched",

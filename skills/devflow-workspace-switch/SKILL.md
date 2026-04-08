@@ -13,7 +13,9 @@ description: Switch to an existing devflow workspace and its isolated services.
 
 1. The workspace name is provided in `$ARGUMENTS`
 2. Run `devflow --json --non-interactive switch $ARGUMENTS` to switch
-3. Parse the JSON output and check for `worktree_path` — if present, change your working directory to it
+3. Parse the JSON output and check for `worktree_path`
+   - In agent tools, do not rely on `cd` inside a shell command to retarget the session
+   - Instead, use `worktree_path` as the working directory/workdir for subsequent tool calls
 4. Verify the switch succeeded with `devflow status`
 5. If the workspace has services, retrieve connection info with `devflow --json connection $ARGUMENTS`
    - If this returns `"services": "none_configured"`, the project uses workspaces without database services — skip this step
@@ -28,7 +30,7 @@ Switch to an existing workspace:
 ```bash
 OUTPUT=$(devflow --json --non-interactive switch my-feature)
 WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
-[ -n "$WORKTREE" ] && cd "$WORKTREE"
+# For agents, use WORKTREE as the workdir for later tool calls
 ```
 
 Verify the switch and get connection info:

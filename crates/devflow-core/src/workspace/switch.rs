@@ -7,9 +7,14 @@ use crate::services;
 use crate::state::{DevflowWorkspace, LocalStateManager};
 use crate::vcs;
 
-use super::hooks::{run_lifecycle_hooks, run_lifecycle_hooks_best_effort};
+use super::hooks::{
+    run_lifecycle_hooks, run_lifecycle_hooks_best_effort, run_lifecycle_hooks_with_result,
+};
 use super::worktree::create_worktree_with_files;
-use super::{LifecycleOptions, ServiceResult, SwitchWorkspaceResult, WorktreeSetupResult};
+use super::{
+    LifecycleHookResult, LifecycleOptions, ServiceResult, SwitchWorkspaceResult,
+    WorktreeSetupResult,
+};
 
 /// Options specific to workspace switching.
 #[derive(Debug, Clone, Default)]
@@ -47,6 +52,7 @@ pub async fn switch_workspace(
 
     let normalized_name = config.get_normalized_workspace_name(workspace_name);
     let worktree_enabled = config.worktree.as_ref().is_some_and(|wt| wt.enabled);
+    let mut hook_results = Vec::new();
 
     // Ensure main workspace is registered in state
     ensure_default_workspace_registered(config, project_dir);
@@ -168,14 +174,17 @@ pub async fn switch_workspace(
             // Post-service-switch hooks (only if any service succeeded)
             let any_success = service_results.iter().any(|r| r.success);
             if any_success && !opts.skip_hooks {
-                run_lifecycle_hooks_best_effort(
+                if let Some(summary) = run_lifecycle_hooks_best_effort(
                     config,
                     project_dir,
                     &normalized_name,
                     HookPhase::PostServiceSwitch,
                     opts,
                 )
-                .await;
+                .await
+                {
+                    hook_results.push(summary);
+                }
             }
 
             service_results
@@ -183,28 +192,37 @@ pub async fn switch_workspace(
             vec![]
         };
 
-    // 5. Post-create hooks (only if branch was freshly created)
-    if branch_created && !opts.skip_hooks {
-        run_lifecycle_hooks_best_effort(
+    let worktree_created = worktree_result.as_ref().is_some_and(|wt| wt.created);
+
+    // 5. Post-create hooks (branch or worktree newly created)
+    if (branch_created || worktree_created) && !opts.skip_hooks {
+        let post_create = run_lifecycle_hooks_with_result(
             config,
             project_dir,
             &normalized_name,
             HookPhase::PostCreate,
             opts,
         )
-        .await;
+        .await?;
+        hook_results.push(LifecycleHookResult::from_run_result(
+            &HookPhase::PostCreate,
+            post_create,
+        ));
     }
 
     // 6. Post-switch hooks (always)
     if !opts.skip_hooks {
-        run_lifecycle_hooks_best_effort(
+        if let Some(summary) = run_lifecycle_hooks_best_effort(
             config,
             project_dir,
             &normalized_name,
             HookPhase::PostSwitch,
             opts,
         )
-        .await;
+        .await
+        {
+            hook_results.push(summary);
+        }
     }
 
     Ok(SwitchWorkspaceResult {
@@ -213,6 +231,7 @@ pub async fn switch_workspace(
         worktree: worktree_result,
         branch_created,
         services: service_results,
+        hooks: hook_results,
     })
 }
 
@@ -259,5 +278,156 @@ fn register_workspace_state(
 
     if let Err(e) = state_mgr.register_workspace_by_dir(project_dir, workspace) {
         log::warn!("Failed to register workspace in devflow state: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, WorktreeConfig};
+    use crate::hooks::{HookEntry, HookPhase, HooksConfig, IndexMap};
+    use crate::vcs::git::GitRepository;
+    use crate::vcs::VcsProvider;
+    use tempfile::TempDir;
+
+    struct TestEnv {
+        _config_home: TempDir,
+        _project_home: TempDir,
+        _old_xdg_config_home: Option<String>,
+        _old_home: Option<String>,
+    }
+
+    impl TestEnv {
+        fn new() -> Self {
+            let config_home = tempfile::tempdir().unwrap();
+            let project_home = tempfile::tempdir().unwrap();
+            let old_xdg_config_home = std::env::var("XDG_CONFIG_HOME").ok();
+            let old_home = std::env::var("HOME").ok();
+            std::env::set_var("XDG_CONFIG_HOME", config_home.path());
+            std::env::set_var("HOME", project_home.path());
+            Self {
+                _config_home: config_home,
+                _project_home: project_home,
+                _old_xdg_config_home: old_xdg_config_home,
+                _old_home: old_home,
+            }
+        }
+    }
+
+    impl Drop for TestEnv {
+        fn drop(&mut self) {
+            if let Some(value) = self._old_xdg_config_home.as_ref() {
+                std::env::set_var("XDG_CONFIG_HOME", value);
+            } else {
+                std::env::remove_var("XDG_CONFIG_HOME");
+            }
+
+            if let Some(value) = self._old_home.as_ref() {
+                std::env::set_var("HOME", value);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    fn setup_repo() -> (TempDir, Config) {
+        let temp = tempfile::tempdir().unwrap();
+        GitRepository::init(temp.path()).unwrap();
+        let config = Config {
+            worktree: Some(WorktreeConfig {
+                enabled: true,
+                path_template: "../{repo}.{workspace}".to_string(),
+                copy_files: Vec::new(),
+                copy_ignored: false,
+                respect_gitignore: true,
+                copy_ai_configs: false,
+                extra_ai_dirs: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        (temp, config)
+    }
+
+    #[tokio::test]
+    async fn switch_workspace_fails_when_post_create_hook_requires_approval() {
+        let _env = TestEnv::new();
+        let (project, mut config) = setup_repo();
+
+        let mut hooks: HooksConfig = IndexMap::new();
+        let mut post_create = IndexMap::new();
+        post_create.insert(
+            "needs-approval".to_string(),
+            HookEntry::Simple("printf blocked > post-create-marker.txt".to_string()),
+        );
+        hooks.insert(HookPhase::PostCreate, post_create);
+        config.hooks = Some(hooks);
+
+        let result = switch_workspace(
+            &config,
+            project.path(),
+            "feature/approval",
+            &SwitchOptions {
+                lifecycle: LifecycleOptions {
+                    hook_approval: crate::workspace::hooks::HookApprovalMode::NonInteractive,
+                    ..Default::default()
+                },
+                create_if_missing: true,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let err = result.expect_err("post-create approval failure should fail switch");
+        let message = err.to_string();
+        assert!(
+            message.contains("Hook 'needs-approval' failed")
+                || message.contains("requires approval")
+        );
+    }
+
+    #[tokio::test]
+    async fn switch_workspace_runs_post_create_for_new_worktree_on_existing_branch() {
+        let _env = TestEnv::new();
+        let (project, mut config) = setup_repo();
+        let repo = GitRepository::new(project.path()).unwrap();
+        repo.create_workspace("feature/existing", Some("main"))
+            .unwrap();
+
+        let mut hooks: HooksConfig = IndexMap::new();
+        let mut post_create = IndexMap::new();
+        post_create.insert(
+            "write-marker".to_string(),
+            HookEntry::Simple("printf created > post-create-marker.txt".to_string()),
+        );
+        hooks.insert(HookPhase::PostCreate, post_create);
+        config.hooks = Some(hooks);
+
+        let result = switch_workspace(
+            &config,
+            project.path(),
+            "feature/existing",
+            &SwitchOptions {
+                lifecycle: LifecycleOptions {
+                    hook_approval: crate::workspace::hooks::HookApprovalMode::NoApproval,
+                    ..Default::default()
+                },
+                create_if_missing: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("switch should succeed");
+
+        assert!(!result.branch_created);
+        assert!(result.worktree.as_ref().is_some_and(|wt| wt.created));
+        assert!(result.hooks.iter().any(|h| h.phase == "post-create"));
+
+        let marker = result
+            .worktree
+            .as_ref()
+            .unwrap()
+            .path
+            .join("post-create-marker.txt");
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "created");
     }
 }

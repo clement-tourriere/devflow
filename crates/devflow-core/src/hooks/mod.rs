@@ -437,10 +437,28 @@ pub async fn build_hook_context(
             if vcs_repo.is_worktree() {
                 Some(canonical_project_dir.to_string_lossy().to_string())
             } else {
+                let normalized = config.get_normalized_workspace_name(workspace_name);
                 vcs_repo
                     .worktree_path(workspace_name)
                     .ok()
                     .flatten()
+                    .or_else(|| {
+                        vcs_repo.list_worktrees().ok().and_then(|worktrees| {
+                            worktrees.into_iter().find_map(|wt| {
+                                let branch = wt.workspace?;
+                                let normalized_branch =
+                                    config.get_normalized_workspace_name(&branch);
+                                if branch == workspace_name
+                                    || normalized_branch == workspace_name
+                                    || normalized_branch == normalized
+                                {
+                                    Some(wt.path)
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                    })
                     .map(|p| p.to_string_lossy().to_string())
             }
         });

@@ -18,8 +18,7 @@ BRANCH="agent/${TASK_ID}"
 # Hooks requiring approval must be pre-approved: devflow hook approvals add "<cmd>"
 OUTPUT=$(devflow --json --non-interactive switch -c "$BRANCH")
 
-# If worktrees are enabled, switch to the worktree directory
+# If worktrees are enabled, capture the path and use it as the workdir for subsequent agent tool calls
 WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
-[ -n "$WORKTREE" ] && cd "$WORKTREE"
 
 devflow --json service connection "$BRANCH"

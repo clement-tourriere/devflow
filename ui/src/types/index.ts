@@ -96,6 +96,12 @@ export interface OrchestrationResult {
 export interface CreateWorkspaceResult {
   services: OrchestrationResult[];
   worktree_path: string | null;
+  hooks: HookRunResult[];
+}
+
+export interface SwitchWorkspaceResult {
+  services: OrchestrationResult[];
+  hooks: HookRunResult[];
 }
 
 export type WorkspaceCreationMode = "default" | "worktree" | "branch";

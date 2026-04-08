@@ -38,6 +38,7 @@ import type {
   TerminalSessionInfo,
   WorkspaceCreationMode,
   PruneResult,
+  SwitchWorkspaceResult,
 } from "../types";
 
 // Projects
@@ -91,7 +92,7 @@ export const createWorkspace = (
     sandboxed,
   });
 export const switchWorkspace = (projectPath: string, workspaceName: string) =>
-  invoke<OrchestrationResult[]>("switch_workspace", {
+  invoke<SwitchWorkspaceResult>("switch_workspace", {
     projectPath,
     workspaceName,
   });
