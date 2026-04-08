@@ -1,6 +1,6 @@
 [package]
 name = "devflow-proxy"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "Native reverse proxy for devflow — auto-discovers Docker containers and provides HTTPS access"
 authors = ["Clément Tourrière <clement.tourriere@gmail.com>"]
