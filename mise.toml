@@ -79,6 +79,10 @@ cargo clippy --workspace -- -D warnings
 cargo test --workspace
 """
 
+[tasks.install]
+description = "Build release and install the CLI to ~/.cargo/bin"
+run = "cargo install --path ."
+
 [tasks."release:dry-run"]
 description = "Preview next Commitizen release bump"
 run = "sh -c 'cz bump --dry-run --yes --allow-no-commit --increment PATCH || test $? -eq 3'"
