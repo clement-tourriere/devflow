@@ -633,9 +633,11 @@ pub(super) async fn handle_service_dispatch(
             force,
             from,
         } => {
-            let config_path_buf = config_path
-                .clone()
-                .unwrap_or_else(|| std::env::current_dir().unwrap().join(".devflow.yml"));
+            let config_path_buf = config_path.clone().unwrap_or_else(|| {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .join(".devflow.yml")
+            });
 
             // When explicit flags are provided, use them directly; otherwise delegate to wizard
             if name.is_some() || provider.is_some() || service_type.is_some() {
@@ -800,9 +802,11 @@ pub(super) async fn handle_service_dispatch(
             }
         }
         super::ServiceCommands::Remove { name } => {
-            let config_path_buf = config_path
-                .clone()
-                .unwrap_or_else(|| std::env::current_dir().unwrap().join(".devflow.yml"));
+            let config_path_buf = config_path.clone().unwrap_or_else(|| {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .join(".devflow.yml")
+            });
 
             let mut state = LocalStateManager::new()?;
             state.remove_service(&config_path_buf, &name)?;

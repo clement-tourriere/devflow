@@ -260,6 +260,9 @@ Requirements:
 - `examples/migrate-existing-app.devflow.yml`
 - `docs/CLI.md`
 - `AGENTS.md`
+- `docs/ARCHITECTURE.md`
+- `CONTRIBUTING.md`
+- `SECURITY.md`
 
 ## License
 

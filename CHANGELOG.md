@@ -146,4 +146,5 @@ includes `processes_stopped`.
 
 ### Feat
 
-- devflow — universal development environment tool
+- Initial public release of devflow as a universal development environment tool
+- All features listed in 0.1.0 shipped as the first tagged release

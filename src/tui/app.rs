@@ -654,11 +654,11 @@ impl App {
             } => {
                 self.set_status(format!("Adding service '{}'...", name), false);
                 let config = self.context.config.clone();
-                let config_path = self
-                    .context
-                    .config_path
-                    .clone()
-                    .unwrap_or_else(|| std::env::current_dir().unwrap().join(".devflow.yml"));
+                let config_path = self.context.config_path.clone().unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                        .join(".devflow.yml")
+                });
                 let svc_type = service_type.clone();
                 let svc_name = name.clone();
                 let tx = self.bg_tx.clone();
@@ -778,11 +778,11 @@ impl App {
                 });
             }
             Action::RemoveServiceConfig(ref name) => {
-                let config_path = self
-                    .context
-                    .config_path
-                    .clone()
-                    .unwrap_or_else(|| std::env::current_dir().unwrap().join(".devflow.yml"));
+                let config_path = self.context.config_path.clone().unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                        .join(".devflow.yml")
+                });
                 match devflow_core::state::LocalStateManager::new() {
                     Ok(mut state) => match state.remove_service(&config_path, name) {
                         Ok(()) => {

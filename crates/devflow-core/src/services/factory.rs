@@ -50,6 +50,7 @@ pub async fn resolve_service_operation_key(
     Ok(resolved)
 }
 
+/// Enumeration of built-in provider backends (feature-gated).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProviderType {
     #[cfg(feature = "service-local")]

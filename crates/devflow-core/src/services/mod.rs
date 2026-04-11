@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Metadata about a service workspace instance (e.g. a per-branch database).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceInfo {
     pub name: String,
@@ -31,6 +32,7 @@ pub struct WorkspaceInfo {
     pub state: Option<String>,
 }
 
+/// Connection details for reaching a service workspace (host, port, credentials).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionInfo {
     pub host: String,
@@ -41,6 +43,7 @@ pub struct ConnectionInfo {
     pub connection_string: Option<String>,
 }
 
+/// High-level metadata about a service project (name, storage driver, image).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectInfo {
     pub name: String,
@@ -48,6 +51,8 @@ pub struct ProjectInfo {
     pub image: Option<String>,
 }
 
+/// Capability matrix for a service provider, used by CLI/TUI to decide
+/// which operations to offer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceCapabilities {
     pub lifecycle: bool,
@@ -59,11 +64,13 @@ pub struct ServiceCapabilities {
     pub max_workspace_name_length: usize,
 }
 
+/// Diagnostic report produced by `ServiceProvider::doctor()`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoctorReport {
     pub checks: Vec<DoctorCheck>,
 }
 
+/// A single check within a `DoctorReport`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoctorCheck {
     pub name: String,
