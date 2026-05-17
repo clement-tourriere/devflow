@@ -100,14 +100,32 @@ export interface DoctorCheck {
   detail: string;
 }
 
+export interface DoctorSummary {
+  total: number;
+  passed: number;
+  failed: number;
+}
+
+export interface DoctorNextStep {
+  check: string;
+  action: string;
+  command?: string;
+}
+
 export interface DoctorServiceReport {
   service: string;
   checks: DoctorCheck[];
+  summary?: DoctorSummary;
+  next_steps?: DoctorNextStep[];
 }
 
 export interface DoctorReport {
   general: DoctorCheck[];
   services: DoctorServiceReport[];
+  healthy?: boolean;
+  failed_checks?: number;
+  summary?: DoctorSummary;
+  next_steps?: DoctorNextStep[];
 }
 
 export interface ConnectionInfo {

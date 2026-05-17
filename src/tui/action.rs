@@ -231,6 +231,7 @@ pub struct DoctorCheckEntry {
     pub name: String,
     pub available: bool,
     pub detail: String,
+    pub next_step: Option<String>,
 }
 
 #[derive(Debug, Clone)]

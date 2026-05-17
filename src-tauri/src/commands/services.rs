@@ -149,7 +149,7 @@ fn normalize_storage_preference(
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_storage_preference;
+    use super::{normalize_storage_preference, run_doctor};
 
     #[test]
     fn storage_preference_normalizes_gui_values() {
@@ -167,6 +167,26 @@ mod tests {
     fn storage_preference_rejects_wrong_service_type() {
         let err = normalize_storage_preference(Some("copy"), "local", "mysql").unwrap_err();
         assert!(err.contains("only supported for local PostgreSQL"));
+    }
+
+    #[tokio::test]
+    async fn run_doctor_reports_summary_and_next_steps() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp = std::env::temp_dir().join(format!("devflow-tauri-doctor-test-{unique}"));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let report = run_doctor(tmp.to_string_lossy().to_string()).await.unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert_eq!(report["healthy"].as_bool(), Some(false));
+        assert!(report["summary"]["failed"].as_u64().unwrap_or(0) > 0);
+        let next_steps = report["next_steps"].as_array().expect("next_steps array");
+        assert!(next_steps
+            .iter()
+            .any(|step| step["command"] == "devflow init"));
     }
 }
 
@@ -409,23 +429,67 @@ pub async fn run_doctor(project_path: String) -> Result<serde_json::Value, Strin
         .map(|c| c.resolve_services())
         .unwrap_or_default();
     let mut reports = Vec::new();
+    let mut all_checks = general_checks.clone();
 
     for svc in &named_services {
         if let Some(ref cfg) = service_config {
-            if let Ok(provider) =
-                services::factory::create_provider_from_named_config(cfg, svc).await
-            {
-                if let Ok(report) = provider.doctor().await {
+            match services::factory::create_provider_from_named_config(cfg, svc).await {
+                Ok(provider) => match provider.doctor().await {
+                    Ok(report) => {
+                        let summary =
+                            devflow_core::doctor::DoctorSummary::from_checks(&report.checks);
+                        let next_steps = devflow_core::doctor::doctor_next_steps(&report.checks);
+                        all_checks.extend(report.checks.clone());
+                        reports.push(serde_json::json!({
+                            "service": svc.name,
+                            "checks": report.checks,
+                            "summary": summary,
+                            "next_steps": next_steps,
+                        }));
+                    }
+                    Err(err) => {
+                        let checks = vec![services::DoctorCheck {
+                            name: "Service doctor".to_string(),
+                            available: false,
+                            detail: crate::commands::format_error(err),
+                        }];
+                        let summary = devflow_core::doctor::DoctorSummary::from_checks(&checks);
+                        let next_steps = devflow_core::doctor::doctor_next_steps(&checks);
+                        all_checks.extend(checks.clone());
+                        reports.push(serde_json::json!({
+                            "service": svc.name,
+                            "checks": checks,
+                            "summary": summary,
+                            "next_steps": next_steps,
+                        }));
+                    }
+                },
+                Err(err) => {
+                    let checks = vec![services::DoctorCheck {
+                        name: "Service doctor".to_string(),
+                        available: false,
+                        detail: crate::commands::format_error(err),
+                    }];
+                    let summary = devflow_core::doctor::DoctorSummary::from_checks(&checks);
+                    let next_steps = devflow_core::doctor::doctor_next_steps(&checks);
+                    all_checks.extend(checks.clone());
                     reports.push(serde_json::json!({
                         "service": svc.name,
-                        "checks": report.checks,
+                        "checks": checks,
+                        "summary": summary,
+                        "next_steps": next_steps,
                     }));
                 }
             }
         }
     }
 
+    let summary = devflow_core::doctor::DoctorSummary::from_checks(&all_checks);
     Ok(serde_json::json!({
+        "healthy": summary.failed == 0,
+        "failed_checks": summary.failed,
+        "summary": summary,
+        "next_steps": devflow_core::doctor::doctor_next_steps(&all_checks),
         "general": general_checks,
         "services": reports,
     }))

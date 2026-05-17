@@ -12,7 +12,7 @@ for near-instant, space-efficient workspace creation.
 - Always pass `--json --non-interactive` for machine-safe execution.
 - Use `--non-interactive` on `switch` to run lifecycle hooks without prompts; unapproved shell hooks are skipped unless pre-approved.
 - Use `devflow --json capabilities` to detect automation guarantees at runtime.
-- Use `devflow --json doctor --strict` as a CI/agent health gate when failures should stop automation.
+- Use `devflow --json doctor --strict` as a CI/agent health gate; inspect `summary` and `next_steps` for remediation.
 - Non-zero exit code means failure; partial multi-provider failures also return non-zero.
 - Note: `--no-verify` skips ALL hooks entirely — only use when hooks are genuinely unwanted.
 - Git uses linked worktrees for every additional workspace; jj uses native workspaces.

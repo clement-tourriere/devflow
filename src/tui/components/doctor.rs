@@ -179,6 +179,15 @@ impl Component for DoctorComponent {
                     Span::raw("      "),
                     Span::styled(&check.detail, Style::default().fg(theme::TEXT_SECONDARY)),
                 ]));
+                if !check.available {
+                    if let Some(next_step) = check.next_step.as_deref() {
+                        lines.push(Line::from(vec![
+                            Span::raw("      "),
+                            Span::styled("Next: ", Style::default().fg(theme::KEY_HINT)),
+                            Span::styled(next_step, Style::default().fg(theme::TEXT_SECONDARY)),
+                        ]));
+                    }
+                }
             }
 
             lines.push(Line::raw(""));

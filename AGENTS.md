@@ -105,9 +105,9 @@ devflow hook explain post-create
 
 # Project health for automation (general checks include hooks, agent guides, worktrees)
 devflow --json doctor
-# Strict mode exits non-zero if any check fails; useful for CI/handoff gates
+# Strict mode exits non-zero if any check fails; inspect summary + next_steps for fixes
 devflow --json doctor --strict
-# Service-only diagnostics are also available
+# Service-only diagnostics expose the same summary + next_steps shape
 devflow --json service doctor --strict
 ```
 

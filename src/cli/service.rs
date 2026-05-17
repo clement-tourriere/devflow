@@ -246,7 +246,7 @@ pub(super) enum ServiceAggregation {
     Capabilities,
 }
 
-fn failed_doctor_checks(report: &services::DoctorReport) -> usize {
+pub(super) fn failed_doctor_checks(report: &services::DoctorReport) -> usize {
     report
         .checks
         .iter()
@@ -254,11 +254,61 @@ fn failed_doctor_checks(report: &services::DoctorReport) -> usize {
         .count()
 }
 
-fn print_doctor_report(name: &str, provider_name: &str, report: &services::DoctorReport) {
+pub(super) fn service_doctor_failure_check(detail: impl Into<String>) -> services::DoctorCheck {
+    services::DoctorCheck {
+        name: "Service doctor".to_string(),
+        available: false,
+        detail: detail.into(),
+    }
+}
+
+pub(super) fn doctor_report_json(report: &services::DoctorReport) -> serde_json::Value {
+    serde_json::json!({
+        "checks": &report.checks,
+        "summary": devflow_core::doctor::DoctorSummary::from_checks(&report.checks),
+        "next_steps": devflow_core::doctor::doctor_next_steps(&report.checks),
+    })
+}
+
+pub(super) fn doctor_checks_json(checks: Vec<services::DoctorCheck>) -> serde_json::Value {
+    let summary = devflow_core::doctor::DoctorSummary::from_checks(&checks);
+    let next_steps = devflow_core::doctor::doctor_next_steps(&checks);
+    serde_json::json!({
+        "checks": checks,
+        "summary": summary,
+        "next_steps": next_steps,
+    })
+}
+
+pub(super) fn print_doctor_report(
+    name: &str,
+    provider_name: &str,
+    report: &services::DoctorReport,
+) {
     println!("[{}] Doctor report ({}):", name, provider_name);
     for check in &report.checks {
         let icon = if check.available { "OK" } else { "FAIL" };
         println!("  [{}] {}: {}", icon, check.name, check.detail);
+    }
+    println!(
+        "  Summary: {}/{} checks passed",
+        devflow_core::doctor::DoctorSummary::from_checks(&report.checks).passed,
+        report.checks.len()
+    );
+    println!();
+}
+
+pub(super) fn print_doctor_next_steps(next_steps: &[devflow_core::doctor::DoctorNextStep]) {
+    if next_steps.is_empty() {
+        return;
+    }
+
+    println!("Next steps:");
+    for step in next_steps {
+        match step.command.as_deref() {
+            Some(command) => println!("  - {}: {} (try `{}`)", step.check, step.action, command),
+            None => println!("  - {}: {}", step.check, step.action),
+        }
     }
     println!();
 }
@@ -975,6 +1025,7 @@ pub(super) async fn handle_service_dispatch(
             }
         }
         super::ServiceCommands::Doctor { strict } => {
+            let mut all_checks: Vec<services::DoctorCheck> = Vec::new();
             let mut failed_checks = 0usize;
 
             if database_name.is_none() {
@@ -987,6 +1038,8 @@ pub(super) async fn handle_service_dispatch(
                                     "healthy": true,
                                     "failed_checks": 0,
                                     "strict": strict,
+                                    "summary": devflow_core::doctor::DoctorSummary::from_checks(&all_checks),
+                                    "next_steps": devflow_core::doctor::doctor_next_steps(&all_checks),
                                     "services": null,
                                     "message": "No services configured for this project",
                                 }))?
@@ -1001,6 +1054,7 @@ pub(super) async fn handle_service_dispatch(
                             match named.provider.doctor().await {
                                 Ok(report) => {
                                     failed_checks += failed_doctor_checks(&report);
+                                    all_checks.extend(report.checks.clone());
                                     if !json_output {
                                         print_doctor_report(
                                             &named.name,
@@ -1008,25 +1062,18 @@ pub(super) async fn handle_service_dispatch(
                                             &report,
                                         );
                                     }
-                                    map.insert(named.name, serde_json::to_value(report)?);
+                                    map.insert(named.name, doctor_report_json(&report));
                                 }
                                 Err(err) => {
                                     failed_checks += 1;
+                                    let check = service_doctor_failure_check(err.to_string());
+                                    all_checks.push(check.clone());
                                     if !json_output {
                                         println!("[{}] Doctor report:", named.name);
                                         println!("  [FAIL] Service doctor: {}", err);
                                         println!();
                                     }
-                                    map.insert(
-                                        named.name,
-                                        serde_json::json!({
-                                            "checks": [{
-                                                "name": "Service doctor",
-                                                "available": false,
-                                                "detail": err.to_string(),
-                                            }]
-                                        }),
-                                    );
+                                    map.insert(named.name, doctor_checks_json(vec![check]));
                                 }
                             }
                         }
@@ -1037,6 +1084,8 @@ pub(super) async fn handle_service_dispatch(
                                     "healthy": failed_checks == 0,
                                     "failed_checks": failed_checks,
                                     "strict": strict,
+                                    "summary": devflow_core::doctor::DoctorSummary::from_checks(&all_checks),
+                                    "next_steps": devflow_core::doctor::doctor_next_steps(&all_checks),
                                     "services": map,
                                 }))?
                             );
@@ -1044,6 +1093,7 @@ pub(super) async fn handle_service_dispatch(
                     }
                     Err(err) => {
                         failed_checks = 1;
+                        all_checks.push(service_doctor_failure_check(err.to_string()));
                         if json_output {
                             println!(
                                 "{}",
@@ -1051,6 +1101,8 @@ pub(super) async fn handle_service_dispatch(
                                     "healthy": false,
                                     "failed_checks": 1,
                                     "strict": strict,
+                                    "summary": devflow_core::doctor::DoctorSummary::from_checks(&all_checks),
+                                    "next_steps": devflow_core::doctor::doctor_next_steps(&all_checks),
                                     "error": err.to_string(),
                                     "services": null,
                                 }))?
@@ -1066,6 +1118,7 @@ pub(super) async fn handle_service_dispatch(
                     Ok(named) => match named.provider.doctor().await {
                         Ok(report) => {
                             failed_checks = failed_doctor_checks(&report);
+                            all_checks.extend(report.checks.clone());
                             if json_output {
                                 println!(
                                     "{}",
@@ -1073,9 +1126,11 @@ pub(super) async fn handle_service_dispatch(
                                         "healthy": failed_checks == 0,
                                         "failed_checks": failed_checks,
                                         "strict": strict,
+                                        "summary": devflow_core::doctor::DoctorSummary::from_checks(&all_checks),
+                                        "next_steps": devflow_core::doctor::doctor_next_steps(&all_checks),
                                         "service": named.name,
                                         "provider": named.provider.provider_name(),
-                                        "report": report,
+                                        "report": doctor_report_json(&report),
                                     }))?
                                 );
                             } else {
@@ -1088,13 +1143,9 @@ pub(super) async fn handle_service_dispatch(
                         }
                         Err(err) => {
                             failed_checks = 1;
-                            let report = serde_json::json!({
-                                "checks": [{
-                                    "name": "Service doctor",
-                                    "available": false,
-                                    "detail": err.to_string(),
-                                }]
-                            });
+                            let check = service_doctor_failure_check(err.to_string());
+                            all_checks.push(check.clone());
+                            let report = doctor_checks_json(vec![check]);
                             if json_output {
                                 println!(
                                     "{}",
@@ -1102,6 +1153,8 @@ pub(super) async fn handle_service_dispatch(
                                         "healthy": false,
                                         "failed_checks": failed_checks,
                                         "strict": strict,
+                                        "summary": devflow_core::doctor::DoctorSummary::from_checks(&all_checks),
+                                        "next_steps": devflow_core::doctor::doctor_next_steps(&all_checks),
                                         "service": named.name,
                                         "provider": named.provider.provider_name(),
                                         "report": report,
@@ -1120,6 +1173,7 @@ pub(super) async fn handle_service_dispatch(
                     },
                     Err(err) => {
                         failed_checks = 1;
+                        all_checks.push(service_doctor_failure_check(err.to_string()));
                         if json_output {
                             println!(
                                 "{}",
@@ -1127,6 +1181,8 @@ pub(super) async fn handle_service_dispatch(
                                     "healthy": false,
                                     "failed_checks": 1,
                                     "strict": strict,
+                                    "summary": devflow_core::doctor::DoctorSummary::from_checks(&all_checks),
+                                    "next_steps": devflow_core::doctor::doctor_next_steps(&all_checks),
                                     "error": err.to_string(),
                                 }))?
                             );
@@ -1135,6 +1191,11 @@ pub(super) async fn handle_service_dispatch(
                         }
                     }
                 }
+            }
+
+            if !json_output {
+                let next_steps = devflow_core::doctor::doctor_next_steps(&all_checks);
+                print_doctor_next_steps(&next_steps);
             }
 
             strict_doctor_result(strict, failed_checks)?;

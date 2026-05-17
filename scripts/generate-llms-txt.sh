@@ -93,7 +93,7 @@ for near-instant, space-efficient workspace creation.
 - Always pass `--json --non-interactive` for machine-safe execution.
 - Use `--non-interactive` on `switch` to run lifecycle hooks without prompts; unapproved shell hooks are skipped unless pre-approved.
 - Use `devflow --json capabilities` to detect automation guarantees at runtime.
-- Use `devflow --json doctor --strict` as a CI/agent health gate when failures should stop automation.
+- Use `devflow --json doctor --strict` as a CI/agent health gate; inspect `summary` and `next_steps` for remediation.
 - Non-zero exit code means failure; partial multi-provider failures also return non-zero.
 - Note: `--no-verify` skips ALL hooks entirely — only use when hooks are genuinely unwanted.
 - Git uses linked worktrees for every additional workspace; jj uses native workspaces.
@@ -183,6 +183,7 @@ Seven service types: postgres, clickhouse, mysql, redis, rustfs/S3, generic
 - Use raw names for commands and consume the reported \`service_key\` for backend identifiers. Never reconstruct it: a migrated workspace may retain a legacy key, while unresolved legacy ownership is blocked.
 - Run \`remove\` from a different workspace; default and current workspaces remain protected even with \`--force\`.
 - \`devflow --json capabilities\` returns a machine-readable contract summary.
+- \`devflow --json doctor --strict\` is the health gate; inspect \`summary\` and \`next_steps\` for remediation.
 
 ## Minimal agent loop
 
@@ -244,7 +245,7 @@ INTRO
 | `devflow service logs <workspace> [--tail N]` | Show container logs |
 | `devflow service connection <workspace> [--format uri\|env\|json]` | Connection info |
 | `devflow service capabilities` | Service provider capability matrix |
-| `devflow service doctor [--strict]` | Service diagnostics; strict mode exits non-zero on failed checks |
+| `devflow service doctor [--strict]` | Service diagnostics with summary/next_steps; strict mode exits non-zero on failed checks |
 | `devflow service cleanup` | Clean up old workspaces for a service |
 
 ### VCS
@@ -261,7 +262,7 @@ INTRO
 | `devflow status` | Project and service status |
 | `devflow capabilities` | Machine-readable automation contract |
 | `devflow config [-v]` | Current configuration |
-| `devflow doctor [--strict]` | System health check; strict mode exits non-zero on failed checks |
+| `devflow doctor [--strict]` | System health check with summary/next_steps; strict mode exits non-zero on failed checks |
 
 ### Setup
 

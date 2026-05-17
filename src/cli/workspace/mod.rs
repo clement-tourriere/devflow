@@ -312,10 +312,12 @@ pub(super) async fn handle_workspace_command(
         super::Commands::Doctor { strict } => {
             let general_checks = super::config::collect_doctor_pre_checks(config, config_path);
             let general_summary = devflow_core::doctor::DoctorSummary::from_checks(&general_checks);
+            let mut all_checks = general_checks.clone();
             let mut failed_checks = general_summary.failed;
             let general_json = serde_json::json!({
-                "checks": general_checks,
+                "checks": &general_checks,
                 "summary": general_summary,
+                "next_steps": devflow_core::doctor::doctor_next_steps(&general_checks),
             });
 
             if !json_output {
@@ -330,42 +332,29 @@ pub(super) async fn handle_workspace_command(
                         for named in providers {
                             let value = match named.provider.doctor().await {
                                 Ok(report) => {
-                                    failed_checks += report
-                                        .checks
-                                        .iter()
-                                        .filter(|check| !check.available)
-                                        .count();
+                                    failed_checks += super::service::failed_doctor_checks(&report);
+                                    all_checks.extend(report.checks.clone());
                                     if !json_output {
-                                        println!(
-                                            "[{}] Doctor report ({}):",
-                                            named.name,
-                                            named.provider.provider_name()
+                                        super::service::print_doctor_report(
+                                            &named.name,
+                                            named.provider.provider_name(),
+                                            &report,
                                         );
-                                        for check in &report.checks {
-                                            let icon = if check.available { "OK" } else { "FAIL" };
-                                            println!(
-                                                "  [{}] {}: {}",
-                                                icon, check.name, check.detail
-                                            );
-                                        }
-                                        println!();
                                     }
-                                    serde_json::to_value(report)?
+                                    super::service::doctor_report_json(&report)
                                 }
                                 Err(err) => {
                                     failed_checks += 1;
+                                    let check = super::service::service_doctor_failure_check(
+                                        err.to_string(),
+                                    );
+                                    all_checks.push(check.clone());
                                     if !json_output {
                                         println!("[{}] Doctor report:", named.name);
                                         println!("  [FAIL] Service doctor: {}", err);
                                         println!();
                                     }
-                                    serde_json::json!({
-                                        "checks": [{
-                                            "name": "Service doctor",
-                                            "available": false,
-                                            "detail": err.to_string(),
-                                        }]
-                                    })
+                                    super::service::doctor_checks_json(vec![check])
                                 }
                             };
                             map.insert(named.name, value);
@@ -374,6 +363,9 @@ pub(super) async fn handle_workspace_command(
                     }
                     Err(err) => {
                         failed_checks += 1;
+                        all_checks.push(super::service::service_doctor_failure_check(
+                            err.to_string(),
+                        ));
                         if !json_output {
                             println!("Services:");
                             println!("  [FAIL] Could not initialize providers: {}", err);
@@ -391,10 +383,15 @@ pub(super) async fn handle_workspace_command(
                             "healthy": failed_checks == 0,
                             "failed_checks": failed_checks,
                             "strict": strict,
+                            "summary": devflow_core::doctor::DoctorSummary::from_checks(&all_checks),
+                            "next_steps": devflow_core::doctor::doctor_next_steps(&all_checks),
                             "general": general_json,
                             "services": services_json,
                         }))?
                     );
+                } else {
+                    let next_steps = devflow_core::doctor::doctor_next_steps(&all_checks);
+                    super::service::print_doctor_next_steps(&next_steps);
                 }
                 if strict && failed_checks > 0 {
                     anyhow::bail!("doctor found {} failing check(s)", failed_checks);
@@ -405,11 +402,8 @@ pub(super) async fn handle_workspace_command(
             match services::factory::resolve_provider(config, database_name).await {
                 Ok(named) => match named.provider.doctor().await {
                     Ok(report) => {
-                        failed_checks += report
-                            .checks
-                            .iter()
-                            .filter(|check| !check.available)
-                            .count();
+                        failed_checks += super::service::failed_doctor_checks(&report);
+                        all_checks.extend(report.checks.clone());
                         if json_output {
                             println!(
                                 "{}",
@@ -417,27 +411,25 @@ pub(super) async fn handle_workspace_command(
                                     "healthy": failed_checks == 0,
                                     "failed_checks": failed_checks,
                                     "strict": strict,
+                                    "summary": devflow_core::doctor::DoctorSummary::from_checks(&all_checks),
+                                    "next_steps": devflow_core::doctor::doctor_next_steps(&all_checks),
                                     "general": general_json,
-                                    "service": report,
+                                    "service": super::service::doctor_report_json(&report),
                                 }))?
                             );
                         } else {
-                            println!("Service ({}):", named.provider.provider_name());
-                            for check in &report.checks {
-                                let icon = if check.available { "OK" } else { "FAIL" };
-                                println!("  [{}] {}: {}", icon, check.name, check.detail);
-                            }
+                            super::service::print_doctor_report(
+                                &named.name,
+                                named.provider.provider_name(),
+                                &report,
+                            );
                         }
                     }
                     Err(err) => {
                         failed_checks += 1;
-                        let service_json = serde_json::json!({
-                            "checks": [{
-                                "name": "Service doctor",
-                                "available": false,
-                                "detail": err.to_string(),
-                            }]
-                        });
+                        let check = super::service::service_doctor_failure_check(err.to_string());
+                        all_checks.push(check.clone());
+                        let service_json = super::service::doctor_checks_json(vec![check]);
                         if json_output {
                             println!(
                                 "{}",
@@ -445,6 +437,8 @@ pub(super) async fn handle_workspace_command(
                                     "healthy": false,
                                     "failed_checks": failed_checks,
                                     "strict": strict,
+                                    "summary": devflow_core::doctor::DoctorSummary::from_checks(&all_checks),
+                                    "next_steps": devflow_core::doctor::doctor_next_steps(&all_checks),
                                     "general": general_json,
                                     "service": service_json,
                                 }))?
@@ -463,6 +457,8 @@ pub(super) async fn handle_workspace_command(
                                 "healthy": failed_checks == 0,
                                 "failed_checks": failed_checks,
                                 "strict": strict,
+                                "summary": devflow_core::doctor::DoctorSummary::from_checks(&all_checks),
+                                "next_steps": devflow_core::doctor::doctor_next_steps(&all_checks),
                                 "general": general_json,
                                 "services": null,
                             }))?
@@ -472,6 +468,10 @@ pub(super) async fn handle_workspace_command(
                         println!("  [WARN] No service provider available (run 'devflow service add' to configure one)");
                     }
                 }
+            }
+            if !json_output {
+                let next_steps = devflow_core::doctor::doctor_next_steps(&all_checks);
+                super::service::print_doctor_next_steps(&next_steps);
             }
             if strict && failed_checks > 0 {
                 anyhow::bail!("doctor found {} failing check(s)", failed_checks);

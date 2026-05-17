@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
 import { runDoctor, installVcsHooks, uninstallVcsHooks, pruneWorktrees, generateAgentGuides } from "../../utils/invoke";
-import type { DoctorCheck, DoctorReport, DoctorServiceReport } from "../../types";
+import type { DoctorCheck, DoctorNextStep, DoctorReport, DoctorServiceReport } from "../../types";
 
 const summarizeChecks = (checks: DoctorCheck[]) => {
   const total = checks.length;
@@ -104,9 +104,9 @@ function DoctorPage() {
     const general = summarizeChecks(report.general);
     const serviceChecks = report.services.flatMap((service) => service.checks);
     const services = summarizeChecks(serviceChecks);
-    const total = general.total + services.total;
-    const passed = general.passed + services.passed;
-    const failed = total - passed;
+    const total = report.summary?.total ?? general.total + services.total;
+    const passed = report.summary?.passed ?? general.passed + services.passed;
+    const failed = report.summary?.failed ?? total - passed;
 
     return (
       <div className="card" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
@@ -122,6 +122,26 @@ function DoctorPage() {
         <span className={`badge ${failed === 0 ? "badge-success" : "badge-warning"}`} style={{ fontSize: 12 }}>
           {failed === 0 ? "All good" : `${failed} action${failed === 1 ? "" : "s"} needed`}
         </span>
+      </div>
+    );
+  };
+
+  const renderNextSteps = (steps: DoctorNextStep[]) => {
+    if (steps.length === 0) return null;
+
+    return (
+      <div className="card">
+        <div className="card-title">Suggested next steps</div>
+        <ul style={{ margin: 0, paddingLeft: 20, color: "var(--text-secondary)" }}>
+          {steps.map((step) => (
+            <li key={`${step.check}-${step.command ?? step.action}`} style={{ marginBottom: 8 }}>
+              <strong style={{ color: "var(--text-primary)" }}>{step.check}:</strong> {step.action}
+              {step.command && (
+                <code className="mono" style={{ marginLeft: 8 }}>{step.command}</code>
+              )}
+            </li>
+          ))}
+        </ul>
       </div>
     );
   };
@@ -260,6 +280,8 @@ function DoctorPage() {
       )}
 
       {!loading && !error && report && renderSummary(report)}
+
+      {!loading && !error && report && renderNextSteps(report.next_steps ?? [])}
 
       {!loading && !error && report &&
         renderServiceReport(

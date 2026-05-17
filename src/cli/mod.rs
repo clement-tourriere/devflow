@@ -248,7 +248,7 @@ Examples:
     ConfigValidate,
     #[command(
         about = "Run diagnostics and check system health",
-        long_about = "Run diagnostics and check system health.\n\nVerifies project setup, generated agent guides, hooks, worktree metadata, storage,\nrequired tools (docker, git/jj), and service reachability. JSON output includes\ngeneral checks with a pass/fail summary for automation. Use --strict in CI or\nagent workflows to exit non-zero when any check fails.\n\nExamples:\n  devflow doctor\n  devflow --json doctor\n  devflow --json doctor --strict"
+        long_about = "Run diagnostics and check system health.\n\nVerifies project setup, generated agent guides, hooks, worktree metadata, storage,\nrequired tools (docker, git/jj), and service reachability. JSON output includes\naggregate summary and next_steps fields for automation. Use --strict in CI or\nagent workflows to exit non-zero when any check fails.\n\nExamples:\n  devflow doctor\n  devflow --json doctor\n  devflow --json doctor --strict"
     )]
     Doctor {
         #[arg(long, help = "Exit non-zero when any doctor check fails")]
@@ -515,7 +515,7 @@ pub enum ServiceCommands {
     Up,
     #[command(
         about = "Run service diagnostics",
-        long_about = "Run diagnostics for configured service providers.\n\nChecks Docker/cloud-provider reachability, storage configuration, state files,\nand provider-specific health. Use --strict in CI/agent workflows to exit\nnon-zero when any service check fails.\n\nExamples:\n  devflow service doctor\n  devflow --json service doctor\n  devflow --json service doctor --strict"
+        long_about = "Run diagnostics for configured service providers.\n\nChecks Docker/cloud-provider reachability, storage configuration, state files,\nand provider-specific health. JSON output includes summary and next_steps fields.\nUse --strict in CI/agent workflows to exit non-zero when any service check fails.\n\nExamples:\n  devflow service doctor\n  devflow --json service doctor\n  devflow --json service doctor --strict"
     )]
     Doctor {
         #[arg(long, help = "Exit non-zero when any service doctor check fails")]

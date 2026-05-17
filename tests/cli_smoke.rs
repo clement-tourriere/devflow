@@ -109,6 +109,10 @@ fn json_service_doctor_runs_without_services() {
     assert_eq!(json["healthy"].as_bool(), Some(true));
     assert_eq!(json["strict"].as_bool(), Some(true));
     assert_eq!(json["failed_checks"].as_u64(), Some(0));
+    assert_eq!(json["summary"]["failed"].as_u64(), Some(0));
+    assert!(json["next_steps"]
+        .as_array()
+        .is_some_and(|steps| steps.is_empty()));
 }
 
 #[test]
@@ -200,6 +204,9 @@ fn json_doctor_runs() {
     assert!(json["general"]["summary"]["total"].as_u64().unwrap_or(0) >= 2);
     assert!(json["healthy"].is_boolean());
     assert!(json["failed_checks"].is_number());
+    assert!(json["summary"]["total"].as_u64().unwrap_or(0) >= checks.len() as u64);
+    assert!(json["next_steps"].is_array());
+    assert!(json["general"]["next_steps"].is_array());
 }
 
 #[test]
@@ -211,6 +218,10 @@ fn json_doctor_strict_exits_nonzero_on_failed_checks() {
     assert_eq!(json["healthy"].as_bool(), Some(false));
     assert_eq!(json["strict"].as_bool(), Some(true));
     assert!(json["failed_checks"].as_u64().unwrap_or(0) > 0);
+    let next_steps = json["next_steps"].as_array().expect("next_steps array");
+    assert!(next_steps
+        .iter()
+        .any(|step| step["command"] == "devflow init"));
 }
 
 #[test]

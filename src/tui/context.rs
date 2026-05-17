@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use devflow_core::config::Config;
 use devflow_core::hooks::HookEntry;
-use devflow_core::services::factory;
+use devflow_core::services::{factory, DoctorCheck};
 use devflow_core::vcs;
 
 use super::action::*;
@@ -92,6 +92,32 @@ fn ensure_vcs_ref_deleted(workspace: &str, deleted: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn format_doctor_next_step(step: &devflow_core::doctor::DoctorNextStep) -> String {
+    match step.command.as_deref() {
+        Some(command) => format!("{} Try `{}`.", step.action, command),
+        None => step.action.clone(),
+    }
+}
+
+fn doctor_check_entries(checks: Vec<DoctorCheck>) -> Vec<DoctorCheckEntry> {
+    let next_steps = devflow_core::doctor::doctor_next_steps(&checks);
+    checks
+        .into_iter()
+        .map(|check| {
+            let next_step = next_steps
+                .iter()
+                .find(|step| step.check == check.name)
+                .map(format_doctor_next_step);
+            DoctorCheckEntry {
+                name: check.name,
+                available: check.available,
+                detail: check.detail,
+                next_step,
+            }
+        })
+        .collect()
 }
 
 impl DevflowContext {
@@ -327,34 +353,39 @@ impl DevflowContext {
             config_path.as_deref(),
             &project_dir,
         );
-        let providers = factory::create_all_providers(config).await?;
         let mut entries = vec![DoctorEntry {
             service_name: "General".to_string(),
-            checks: general_checks
-                .into_iter()
-                .map(|c| DoctorCheckEntry {
-                    name: c.name,
-                    available: c.available,
-                    detail: c.detail,
-                })
-                .collect(),
+            checks: doctor_check_entries(general_checks),
         }];
 
-        for named in &providers {
-            if let Ok(report) = named.provider.doctor().await {
+        let providers = match factory::create_all_providers(config).await {
+            Ok(providers) => providers,
+            Err(err) => {
                 entries.push(DoctorEntry {
-                    service_name: named.name.clone(),
-                    checks: report
-                        .checks
-                        .into_iter()
-                        .map(|c| DoctorCheckEntry {
-                            name: c.name,
-                            available: c.available,
-                            detail: c.detail,
-                        })
-                        .collect(),
+                    service_name: "Services".to_string(),
+                    checks: doctor_check_entries(vec![DoctorCheck {
+                        name: "Service doctor".to_string(),
+                        available: false,
+                        detail: err.to_string(),
+                    }]),
                 });
+                return Ok(entries);
             }
+        };
+
+        for named in &providers {
+            let checks = match named.provider.doctor().await {
+                Ok(report) => report.checks,
+                Err(err) => vec![DoctorCheck {
+                    name: "Service doctor".to_string(),
+                    available: false,
+                    detail: err.to_string(),
+                }],
+            };
+            entries.push(DoctorEntry {
+                service_name: named.name.clone(),
+                checks: doctor_check_entries(checks),
+            });
         }
 
         Ok(entries)

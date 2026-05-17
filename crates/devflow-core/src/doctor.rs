@@ -25,6 +25,93 @@ impl DoctorSummary {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorNextStep {
+    pub check: String,
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+/// Convert failed doctor checks into actionable remediation hints for CLI,
+/// TUI, GUI, and automation surfaces.
+pub fn doctor_next_steps(checks: &[DoctorCheck]) -> Vec<DoctorNextStep> {
+    checks
+        .iter()
+        .filter(|check| !check.available)
+        .map(next_step_for_check)
+        .collect()
+}
+
+fn next_step_for_check(check: &DoctorCheck) -> DoctorNextStep {
+    let (action, command) = match check.name.as_str() {
+        "Config file" => (
+            "Create a devflow configuration file for this project.",
+            Some("devflow init"),
+        ),
+        "Config syntax" => ("Fix .devflow.yml syntax, then rerun doctor.", None),
+        "VCS repository" => (
+            "Run devflow from a Git or Jujutsu repository.",
+            Some("git init"),
+        ),
+        "VCS hooks" if check.detail.contains("shell integration") => (
+            "Enable shell integration for VCS events that cannot use native hooks.",
+            Some("devflow shell-init bash"),
+        ),
+        "VCS hooks" => (
+            "Install devflow-managed VCS hooks for automatic workspace switching.",
+            Some("devflow install-hooks"),
+        ),
+        "Worktree metadata" => (
+            "Prune stale VCS worktree metadata.",
+            Some("git worktree prune"),
+        ),
+        "Workspace registry paths" => (
+            "Inspect stale workspace registry entries and remove workspaces that no longer exist.",
+            Some("devflow gc --list"),
+        ),
+        "Workspace filter regex" => ("Fix git.workspace_filter_regex in .devflow.yml.", None),
+        "Agent guides" => (
+            "Generate or refresh project-specific agent guide files.",
+            Some("devflow agent skill"),
+        ),
+        "Docker" => (
+            "Start Docker and verify the daemon is reachable.",
+            Some("docker info"),
+        ),
+        "Service doctor" => (
+            "Run service diagnostics and inspect the reported provider error.",
+            Some("devflow service doctor"),
+        ),
+        "Data root" => (
+            "Ensure the configured service data root exists and is writable.",
+            None,
+        ),
+        "Port range" => (
+            "Choose an unprivileged service port range starting at 1024 or higher.",
+            None,
+        ),
+        "Configured storage preference" => (
+            "Choose an available storage driver or set local.storage to copy.",
+            None,
+        ),
+        name if name.starts_with("Storage:") => (
+            "Use an available storage driver or set local.storage to copy.",
+            None,
+        ),
+        _ => (
+            "Review the failing check detail and rerun devflow doctor after fixing it.",
+            None,
+        ),
+    };
+
+    DoctorNextStep {
+        check: check.name.clone(),
+        action: action.to_string(),
+        command: command.map(str::to_string),
+    }
+}
+
 fn check(name: &str, available: bool, detail: impl Into<String>) -> DoctorCheck {
     DoctorCheck {
         name: name.to_string(),
@@ -235,6 +322,25 @@ mod tests {
                 failed: 1,
             }
         );
+    }
+
+    #[test]
+    fn doctor_next_steps_are_actionable_for_common_failures() {
+        let checks = vec![
+            check("Config file", false, "not found"),
+            check("Agent guides", false, "missing"),
+            check("Docker", false, "daemon unavailable"),
+            check("ok", true, "done"),
+        ];
+
+        let next_steps = doctor_next_steps(&checks);
+        assert_eq!(next_steps.len(), 3);
+        assert_eq!(next_steps[0].command.as_deref(), Some("devflow init"));
+        assert_eq!(
+            next_steps[1].command.as_deref(),
+            Some("devflow agent skill")
+        );
+        assert_eq!(next_steps[2].command.as_deref(), Some("docker info"));
     }
 
     #[test]

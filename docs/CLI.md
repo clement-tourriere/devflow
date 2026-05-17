@@ -155,6 +155,8 @@ devflow service add app-db --provider local --service-type postgres --from postg
 devflow service add app-db --provider local --service-type postgres --from s3://bucket/path/dump.sql
 ```
 
+For local PostgreSQL services, `--storage` (or `local.storage` in config) accepts `auto`, `zfs`, `apfs_clone`, `reflink`, or `copy`; the GUI Add Service dialog exposes the same storage preference. `auto` probes the best available CoW driver; `copy` is the portable fallback; explicit CoW drivers fail fast if unavailable. `devflow doctor` and `devflow service doctor` report the selected default, validate any configured storage preference, and include remediation `next_steps` for failed checks.
+
 ### `devflow service remove <name>`
 
 Remove a service configuration from the project.
@@ -187,7 +189,7 @@ devflow --json service capabilities
 
 ### `devflow service doctor`
 
-Run diagnostics for configured service providers. JSON output includes `healthy` and `failed_checks`; use `--strict` in CI/agent workflows to exit non-zero when a service check fails.
+Run diagnostics for configured service providers. JSON output includes `healthy`, `failed_checks`, `summary`, and `next_steps`; use `--strict` in CI/agent workflows to exit non-zero when a service check fails.
 
 ```bash
 devflow service doctor
@@ -605,7 +607,7 @@ devflow config -v
 
 ### `devflow doctor`
 
-Run diagnostics for config, VCS hooks, generated agent guides, worktree metadata, Docker, storage, and service connectivity. JSON output includes `healthy`, `failed_checks`, `general.checks`, and `general.summary` for automation. Use `--strict` in CI/agent workflows to exit non-zero when any check fails.
+Run diagnostics for config, VCS hooks, generated agent guides, worktree metadata, Docker, storage, and service connectivity. JSON output includes `healthy`, `failed_checks`, aggregate `summary`, actionable `next_steps`, `general.checks`, and `general.summary` for automation. Use `--strict` in CI/agent workflows to exit non-zero when any check fails.
 
 ```bash
 devflow doctor
