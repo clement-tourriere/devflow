@@ -94,6 +94,7 @@ PROJECT_ROOT=$(devflow --json list | jq -r '.project.root')
 | `devflow service logs <workspace> [--tail N]` | Show container logs |
 | `devflow service connection <workspace> [--format uri\|env\|json]` | Connection info |
 | `devflow service capabilities` | Service provider capability matrix |
+| `devflow service doctor [--strict]` | Service diagnostics; strict mode exits non-zero on failed checks |
 | `devflow service cleanup` | Clean up old workspaces for a service |
 
 ### VCS
@@ -110,7 +111,7 @@ PROJECT_ROOT=$(devflow --json list | jq -r '.project.root')
 | `devflow status` | Project and service status |
 | `devflow capabilities` | Machine-readable automation contract |
 | `devflow config [-v]` | Current configuration |
-| `devflow doctor` | System health check |
+| `devflow doctor [--strict]` | System health check; strict mode exits non-zero on failed checks |
 
 ### Setup
 

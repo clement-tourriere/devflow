@@ -248,9 +248,12 @@ Examples:
     ConfigValidate,
     #[command(
         about = "Run diagnostics and check system health",
-        long_about = "Run diagnostics and check system health.\n\nVerifies project setup, generated agent guides, hooks, worktree metadata, storage,\nrequired tools (docker, git/jj), and service reachability. JSON output includes\ngeneral checks with a pass/fail summary for automation.\n\nExamples:\n  devflow doctor\n  devflow --json doctor"
+        long_about = "Run diagnostics and check system health.\n\nVerifies project setup, generated agent guides, hooks, worktree metadata, storage,\nrequired tools (docker, git/jj), and service reachability. JSON output includes\ngeneral checks with a pass/fail summary for automation. Use --strict in CI or\nagent workflows to exit non-zero when any check fails.\n\nExamples:\n  devflow doctor\n  devflow --json doctor\n  devflow --json doctor --strict"
     )]
-    Doctor,
+    Doctor {
+        #[arg(long, help = "Exit non-zero when any doctor check fails")]
+        strict: bool,
+    },
     #[command(
         about = "Update devflow to the latest release",
         long_about = "Update devflow to the latest GitHub release.\n\nDownloads the release binary for this platform, verifies its SHA-256 checksum,\nand atomically replaces the current executable (the previous binary is\nrestored if the new one fails to run).\n\nExamples:\n  devflow update                   # Update to the latest release\n  devflow update --check           # Only check whether an update exists\n  devflow update --version 0.5.0   # Install a specific version\n  devflow update --force           # Reinstall even if up to date"
@@ -510,6 +513,14 @@ pub enum ServiceCommands {
         long_about = "Ensure every configured shared global engine (type: shared, or service_type rustfs/redis) is running.\n\nStarts the single global container per engine if it isn't up yet — a pre-warm / reconcile step. Per-workspace (CoW) and cloud services are skipped.\n\nExamples:\n  devflow service up"
     )]
     Up,
+    #[command(
+        about = "Run service diagnostics",
+        long_about = "Run diagnostics for configured service providers.\n\nChecks Docker/cloud-provider reachability, storage configuration, state files,\nand provider-specific health. Use --strict in CI/agent workflows to exit\nnon-zero when any service check fails.\n\nExamples:\n  devflow service doctor\n  devflow --json service doctor\n  devflow --json service doctor --strict"
+    )]
+    Doctor {
+        #[arg(long, help = "Exit non-zero when any service doctor check fails")]
+        strict: bool,
+    },
     #[command(about = "Show service capabilities")]
     Capabilities,
     #[command(
@@ -916,7 +927,7 @@ pub async fn handle_command(
             | Commands::GitHook { .. }
             | Commands::WorktreeSetup
             | Commands::Remove { .. }
-            | Commands::Doctor
+            | Commands::Doctor { .. }
     );
 
     // Check if command requires configuration file

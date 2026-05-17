@@ -101,6 +101,17 @@ fn service_help() {
 }
 
 #[test]
+fn json_service_doctor_runs_without_services() {
+    let out = run_in_repo(&["--json", "service", "doctor", "--strict"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid service doctor JSON");
+    assert_eq!(json["healthy"].as_bool(), Some(true));
+    assert_eq!(json["strict"].as_bool(), Some(true));
+    assert_eq!(json["failed_checks"].as_u64(), Some(0));
+}
+
+#[test]
 fn service_add_rejects_invalid_local_postgres_storage() {
     let out = run_in_repo(&[
         "--non-interactive",
@@ -187,6 +198,19 @@ fn json_doctor_runs() {
     assert!(checks.iter().any(|check| check["name"] == "Config file"));
     assert!(checks.iter().any(|check| check["name"] == "Agent guides"));
     assert!(json["general"]["summary"]["total"].as_u64().unwrap_or(0) >= 2);
+    assert!(json["healthy"].is_boolean());
+    assert!(json["failed_checks"].is_number());
+}
+
+#[test]
+fn json_doctor_strict_exits_nonzero_on_failed_checks() {
+    let out = run_in_repo(&["--json", "doctor", "--strict"]);
+    assert!(!out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid doctor JSON");
+    assert_eq!(json["healthy"].as_bool(), Some(false));
+    assert_eq!(json["strict"].as_bool(), Some(true));
+    assert!(json["failed_checks"].as_u64().unwrap_or(0) > 0);
 }
 
 #[test]

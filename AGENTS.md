@@ -102,6 +102,13 @@ devflow hook render "DATABASE_URL={{ service['app-db'].url }}"
 
 # Explain what a hook phase does
 devflow hook explain post-create
+
+# Project health for automation (general checks include hooks, agent guides, worktrees)
+devflow --json doctor
+# Strict mode exits non-zero if any check fails; useful for CI/handoff gates
+devflow --json doctor --strict
+# Service-only diagnostics are also available
+devflow --json service doctor --strict
 ```
 
 ## Suggested Agent Loop

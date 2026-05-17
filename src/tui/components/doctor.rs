@@ -206,6 +206,10 @@ impl Component for DoctorComponent {
                     Style::default().fg(theme::LOG_WARN),
                 ));
             }
+            lines.push(Line::styled(
+                "  CI/agent gate: devflow --json doctor --strict",
+                Style::default().fg(theme::TEXT_MUTED),
+            ));
         } else {
             lines.push(Line::styled(
                 "No doctor results available",

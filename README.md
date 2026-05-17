@@ -253,6 +253,8 @@ Requirements:
 - Docker or a compatible container runtime for local services
 - Optional: `bun` and Tauri prerequisites for desktop GUI development
 
+Run `devflow --json doctor --strict` for a health check that exits non-zero when checks fail.
+
 ## More examples
 
 - `examples/simple.devflow.yml`

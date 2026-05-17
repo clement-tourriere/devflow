@@ -24,6 +24,9 @@ cargo test --workspace
 # Check formatting and lints
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
+
+# Run the local release-candidate gate used before handoff
+./scripts/release-check.sh
 ```
 
 ### Optional: Desktop GUI
@@ -83,6 +86,7 @@ Valid scopes include: `workspace`, `service`, `proxy`, `hooks`, `config`, `tui`,
 - Use `#[tokio::test]` for async tests
 - Integration tests go in `scripts/integration-test.sh`
 - Run the full suite: `cargo test --workspace`
+- Before release handoff, run `./scripts/release-check.sh` (format, diff whitespace, generated guidance, Rust checks/tests/build, and UI build). In initialized projects, also use `devflow --json doctor --strict` / `devflow --json service doctor --strict` as health gates.
 
 ### Pull Requests
 

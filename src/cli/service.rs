@@ -243,8 +243,31 @@ fn public_workspace_info(
 /// Internal enum for multi-service aggregation dispatch.
 pub(super) enum ServiceAggregation {
     Status,
-    Doctor,
     Capabilities,
+}
+
+fn failed_doctor_checks(report: &services::DoctorReport) -> usize {
+    report
+        .checks
+        .iter()
+        .filter(|check| !check.available)
+        .count()
+}
+
+fn print_doctor_report(name: &str, provider_name: &str, report: &services::DoctorReport) {
+    println!("[{}] Doctor report ({}):", name, provider_name);
+    for check in &report.checks {
+        let icon = if check.available { "OK" } else { "FAIL" };
+        println!("  [{}] {}: {}", icon, check.name, check.detail);
+    }
+    println!();
+}
+
+fn strict_doctor_result(strict: bool, failed_checks: usize) -> Result<()> {
+    if strict && failed_checks > 0 {
+        anyhow::bail!("service doctor found {} failing check(s)", failed_checks);
+    }
+    Ok(())
 }
 
 fn normalize_storage_flag(
@@ -950,6 +973,171 @@ pub(super) async fn handle_service_dispatch(
                     println!("Lifecycle: supported (start/stop/reset)");
                 }
             }
+        }
+        super::ServiceCommands::Doctor { strict } => {
+            let mut failed_checks = 0usize;
+
+            if database_name.is_none() {
+                match services::factory::create_all_providers(config).await {
+                    Ok(providers) if providers.is_empty() => {
+                        if json_output {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&serde_json::json!({
+                                    "healthy": true,
+                                    "failed_checks": 0,
+                                    "strict": strict,
+                                    "services": null,
+                                    "message": "No services configured for this project",
+                                }))?
+                            );
+                        } else {
+                            println!("No services configured for this project.");
+                        }
+                    }
+                    Ok(providers) => {
+                        let mut map = serde_json::Map::new();
+                        for named in providers {
+                            match named.provider.doctor().await {
+                                Ok(report) => {
+                                    failed_checks += failed_doctor_checks(&report);
+                                    if !json_output {
+                                        print_doctor_report(
+                                            &named.name,
+                                            named.provider.provider_name(),
+                                            &report,
+                                        );
+                                    }
+                                    map.insert(named.name, serde_json::to_value(report)?);
+                                }
+                                Err(err) => {
+                                    failed_checks += 1;
+                                    if !json_output {
+                                        println!("[{}] Doctor report:", named.name);
+                                        println!("  [FAIL] Service doctor: {}", err);
+                                        println!();
+                                    }
+                                    map.insert(
+                                        named.name,
+                                        serde_json::json!({
+                                            "checks": [{
+                                                "name": "Service doctor",
+                                                "available": false,
+                                                "detail": err.to_string(),
+                                            }]
+                                        }),
+                                    );
+                                }
+                            }
+                        }
+                        if json_output {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&serde_json::json!({
+                                    "healthy": failed_checks == 0,
+                                    "failed_checks": failed_checks,
+                                    "strict": strict,
+                                    "services": map,
+                                }))?
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        failed_checks = 1;
+                        if json_output {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&serde_json::json!({
+                                    "healthy": false,
+                                    "failed_checks": 1,
+                                    "strict": strict,
+                                    "error": err.to_string(),
+                                    "services": null,
+                                }))?
+                            );
+                        } else {
+                            println!("Services:");
+                            println!("  [FAIL] Could not initialize providers: {}", err);
+                        }
+                    }
+                }
+            } else {
+                match services::factory::resolve_provider(config, database_name).await {
+                    Ok(named) => match named.provider.doctor().await {
+                        Ok(report) => {
+                            failed_checks = failed_doctor_checks(&report);
+                            if json_output {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&serde_json::json!({
+                                        "healthy": failed_checks == 0,
+                                        "failed_checks": failed_checks,
+                                        "strict": strict,
+                                        "service": named.name,
+                                        "provider": named.provider.provider_name(),
+                                        "report": report,
+                                    }))?
+                                );
+                            } else {
+                                print_doctor_report(
+                                    &named.name,
+                                    named.provider.provider_name(),
+                                    &report,
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            failed_checks = 1;
+                            let report = serde_json::json!({
+                                "checks": [{
+                                    "name": "Service doctor",
+                                    "available": false,
+                                    "detail": err.to_string(),
+                                }]
+                            });
+                            if json_output {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&serde_json::json!({
+                                        "healthy": false,
+                                        "failed_checks": failed_checks,
+                                        "strict": strict,
+                                        "service": named.name,
+                                        "provider": named.provider.provider_name(),
+                                        "report": report,
+                                    }))?
+                                );
+                            } else {
+                                println!(
+                                    "[{}] Doctor report ({}):",
+                                    named.name,
+                                    named.provider.provider_name()
+                                );
+                                println!("  [FAIL] Service doctor: {}", err);
+                                println!();
+                            }
+                        }
+                    },
+                    Err(err) => {
+                        failed_checks = 1;
+                        if json_output {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&serde_json::json!({
+                                    "healthy": false,
+                                    "failed_checks": 1,
+                                    "strict": strict,
+                                    "error": err.to_string(),
+                                }))?
+                            );
+                        } else {
+                            println!("No service provider available: {}", err);
+                        }
+                    }
+                }
+            }
+
+            strict_doctor_result(strict, failed_checks)?;
         }
         super::ServiceCommands::Capabilities => {
             let has_multiple_services = config.resolve_services().len() > 1;
@@ -1816,7 +2004,7 @@ pub(super) async fn handle_top_level_status(
     Ok(())
 }
 
-/// Handle aggregation commands (List, Status, Doctor) across all services.
+/// Handle aggregation commands (List, Status, Capabilities) across all services.
 pub(super) async fn handle_multi_service_aggregation(
     aggregation: ServiceAggregation,
     config: &Config,
@@ -1840,20 +2028,6 @@ pub(super) async fn handle_multi_service_aggregation(
                         );
                     } else {
                         println!("Services: failed to initialize providers ({})", e);
-                    }
-                }
-                ServiceAggregation::Doctor => {
-                    if json_output {
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(&serde_json::json!({
-                                "error": format!("Failed to create service providers: {}", e),
-                                "services": null,
-                            }))?
-                        );
-                    } else {
-                        println!("Services:");
-                        println!("  [FAIL] Could not initialize providers: {}", e);
                     }
                 }
                 ServiceAggregation::Capabilities => {
@@ -1940,30 +2114,6 @@ pub(super) async fn handle_multi_service_aggregation(
                     );
                     if named.provider.supports_lifecycle() {
                         println!("  Lifecycle: supported (start/stop/reset)");
-                    }
-                    println!();
-                }
-            }
-        }
-        ServiceAggregation::Doctor => {
-            if json_output {
-                let mut map = serde_json::Map::new();
-                for named in &all_providers {
-                    let report = named.provider.doctor().await?;
-                    map.insert(named.name.clone(), serde_json::to_value(&report)?);
-                }
-                println!("{}", serde_json::to_string_pretty(&map)?);
-            } else {
-                for named in &all_providers {
-                    let report = named.provider.doctor().await?;
-                    println!(
-                        "[{}] Doctor report ({}):",
-                        named.name,
-                        named.provider.provider_name()
-                    );
-                    for check in &report.checks {
-                        let icon = if check.available { "OK" } else { "FAIL" };
-                        println!("  [{}] {}: {}", icon, check.name, check.detail);
                     }
                     println!();
                 }

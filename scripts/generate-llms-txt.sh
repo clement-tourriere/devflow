@@ -93,6 +93,7 @@ for near-instant, space-efficient workspace creation.
 - Always pass `--json --non-interactive` for machine-safe execution.
 - Use `--non-interactive` on `switch` to run lifecycle hooks without prompts; unapproved shell hooks are skipped unless pre-approved.
 - Use `devflow --json capabilities` to detect automation guarantees at runtime.
+- Use `devflow --json doctor --strict` as a CI/agent health gate when failures should stop automation.
 - Non-zero exit code means failure; partial multi-provider failures also return non-zero.
 - Note: `--no-verify` skips ALL hooks entirely — only use when hooks are genuinely unwanted.
 - Git uses linked worktrees for every additional workspace; jj uses native workspaces.
@@ -115,6 +116,7 @@ HEADER
 
 - [examples/agent-bootstrap.sh](examples/agent-bootstrap.sh): Idempotent repository setup for agents and CI.
 - [examples/agent-task.sh](examples/agent-task.sh): Create/switch to a task-scoped workspace environment, fetch connection info.
+- [scripts/release-check.sh](scripts/release-check.sh): Local release-candidate verification gate for formatting, tests, builds, and generated guidance.
 - [examples/simple.devflow.yml](examples/simple.devflow.yml): Minimal single-service configuration.
 - [examples/multi-service.devflow.yml](examples/multi-service.devflow.yml): Multi-service setup with hooks and worktrees.
 - [examples/django.devflow.yml](examples/django.devflow.yml): Django project config with migrations and Docker Compose.
@@ -242,6 +244,7 @@ INTRO
 | `devflow service logs <workspace> [--tail N]` | Show container logs |
 | `devflow service connection <workspace> [--format uri\|env\|json]` | Connection info |
 | `devflow service capabilities` | Service provider capability matrix |
+| `devflow service doctor [--strict]` | Service diagnostics; strict mode exits non-zero on failed checks |
 | `devflow service cleanup` | Clean up old workspaces for a service |
 
 ### VCS
@@ -258,7 +261,7 @@ INTRO
 | `devflow status` | Project and service status |
 | `devflow capabilities` | Machine-readable automation contract |
 | `devflow config [-v]` | Current configuration |
-| `devflow doctor` | System health check |
+| `devflow doctor [--strict]` | System health check; strict mode exits non-zero on failed checks |
 
 ### Setup
 

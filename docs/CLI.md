@@ -185,6 +185,16 @@ devflow service capabilities
 devflow --json service capabilities
 ```
 
+### `devflow service doctor`
+
+Run diagnostics for configured service providers. JSON output includes `healthy` and `failed_checks`; use `--strict` in CI/agent workflows to exit non-zero when a service check fails.
+
+```bash
+devflow service doctor
+devflow --json service doctor
+devflow --json service doctor --strict
+```
+
 ### `devflow service create <workspace>`
 
 Create service instance(s) for a workspace without switching your VCS context.
@@ -595,11 +605,12 @@ devflow config -v
 
 ### `devflow doctor`
 
-Run diagnostics for config, Docker, VCS, hooks, storage, and connectivity.
+Run diagnostics for config, VCS hooks, generated agent guides, worktree metadata, Docker, storage, and service connectivity. JSON output includes `healthy`, `failed_checks`, `general.checks`, and `general.summary` for automation. Use `--strict` in CI/agent workflows to exit non-zero when any check fails.
 
 ```bash
 devflow doctor
 devflow --json doctor
+devflow --json doctor --strict
 ```
 
 ### `devflow install-hooks`

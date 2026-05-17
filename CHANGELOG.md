@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Doctor UX** — Project-level doctor checks are shared across CLI, TUI, and GUI; `devflow --json doctor` now includes general checks and a summary for automation.
 - **Agent automation** — `devflow --json agent status` now returns workspace summary counts and per-workspace `agent_workdir` values.
 - **GUI setup** — Doctor/Setup shows a health summary, and local PostgreSQL doctor checks include data-root and port-range diagnostics.
+- **Release readiness** — Added `devflow doctor --strict`, `devflow service doctor --strict`, and `scripts/release-check.sh` for CI/agent health gates and local release-candidate verification.
 
 ### Removed
 

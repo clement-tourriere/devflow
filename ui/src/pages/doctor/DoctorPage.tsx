@@ -115,6 +115,9 @@ function DoctorPage() {
           <div style={{ color: "var(--text-secondary)", fontSize: 13 }}>
             {passed}/{total} checks passing · {general.failed} setup issue{general.failed === 1 ? "" : "s"} · {services.failed} service issue{services.failed === 1 ? "" : "s"}
           </div>
+          <div className="mono" style={{ color: "var(--text-muted)", fontSize: 12, marginTop: 4 }}>
+            Automation gate: devflow --json doctor --strict · service-only: devflow --json service doctor --strict
+          </div>
         </div>
         <span className={`badge ${failed === 0 ? "badge-success" : "badge-warning"}`} style={{ fontSize: 12 }}>
           {failed === 0 ? "All good" : `${failed} action${failed === 1 ? "" : "s"} needed`}
