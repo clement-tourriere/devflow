@@ -68,14 +68,18 @@ devflow update          # or: devflow update --check
 ## Quick start
 
 ```bash
-# 1. Initialize a project (interactive: pick services and Git hooks)
+# 1. Initialize a repository (prints guided next steps)
 cd ~/my-project
 devflow init
 
-# 2. Create and switch to an isolated workspace
+# 2. Validate setup and generate agent guidance
+devflow doctor
+devflow agent skill --target all
+
+# 3. Create a workspace with isolated services
 devflow switch -c feature/auth
 
-# 3. Inspect the current environment
+# 4. Inspect the environment
 devflow status
 
 # 4. Print connection details for scripts or .env files

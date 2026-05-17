@@ -19,7 +19,7 @@ WORKSPACE="agent/${TASK_ID}"
 OUTPUT=$(devflow --json --non-interactive switch -c "$WORKSPACE")
 
 # Capture the materialized path and use it as the workdir for subsequent agent tool calls.
-WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
+WORKTREE=$(echo "$OUTPUT" | jq -r '.agent_workdir // .worktree_path // empty')
 if [ -z "$WORKTREE" ] || [ ! -d "$WORKTREE" ]; then
   echo "devflow switch did not return a materialized worktree_path" >&2
   exit 1
@@ -29,7 +29,9 @@ CONNECTION=$(devflow --json service connection "$WORKSPACE")
 
 # Emit one machine-readable document containing everything the caller needs.
 jq -n \
+  --arg workspace "$WORKSPACE" \
+  --arg agent_workdir "$WORKTREE" \
   --arg worktree_path "$WORKTREE" \
   --argjson switch "$OUTPUT" \
   --argjson connection "$CONNECTION" \
-  '{worktree_path: $worktree_path, switch: $switch, connection: $connection}'
+  '{workspace: $workspace, agent_workdir: $agent_workdir, worktree_path: $worktree_path, switch: $switch, connection: $connection}'

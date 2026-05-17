@@ -114,8 +114,8 @@ HEADER
 
 ## Agent workflows
 
-- [examples/agent-bootstrap.sh](examples/agent-bootstrap.sh): Idempotent repository setup for agents and CI.
-- [examples/agent-task.sh](examples/agent-task.sh): Create/switch to a task-scoped workspace environment, fetch connection info.
+- [examples/agent-bootstrap.sh](examples/agent-bootstrap.sh): Idempotent repository setup for agents and CI; initializes config, hooks, and agent guide files.
+- [examples/agent-task.sh](examples/agent-task.sh): Create/switch to a task-scoped workspace and emit a JSON handoff object with agent_workdir and connection info.
 - [scripts/release-check.sh](scripts/release-check.sh): Local release-candidate verification gate for formatting, tests, builds, and generated guidance.
 - [examples/simple.devflow.yml](examples/simple.devflow.yml): Minimal single-service configuration.
 - [examples/multi-service.devflow.yml](examples/multi-service.devflow.yml): Multi-service setup with hooks and worktrees.
@@ -191,15 +191,13 @@ Seven service types: postgres, clickhouse, mysql, redis, rustfs/S3, generic
 TASK_ID="issue-123"
 WORKSPACE="agent/\$TASK_ID"
 
-OUTPUT=\$(devflow --json --non-interactive switch -c "\$WORKSPACE")
+HANDOFF=\$(./examples/agent-task.sh "\$TASK_ID")
 
-# Use the materialized path as the workdir for subsequent agent tool calls.
-WORKTREE=\$(echo "\$OUTPUT" | jq -r '.worktree_path // empty')
-test -d "\$WORKTREE"
+# Use this path as the workdir for subsequent agent tool calls
+AGENT_WORKDIR=\$(echo "\$HANDOFF" | jq -r '.agent_workdir')
+CONN=\$(echo "\$HANDOFF" | jq -r '.connection.connection_string')
 
-CONN=\$(devflow --json service connection "\$WORKSPACE" | jq -r '.connection_string')
-
-# run task against \$CONN ...
+# run task in \$AGENT_WORKDIR against \$CONN ...
 
 devflow --json --non-interactive service reset "\$WORKSPACE"    # optional retry
 PROJECT_ROOT=\$(devflow --json list | jq -r '.project.root')
@@ -268,7 +266,7 @@ INTRO
 
 | Command | Description |
 |---|---|
-| `devflow init [path] [--name <name>] [--force]` | Initialize the current directory or create and initialize `path` |
+| `devflow init [path] [--name <name>] [--force]` | Initialize the current directory or create and initialize `path`; JSON includes onboarding next_steps |
 | `devflow install-hooks` | Install Git hooks |
 | `devflow uninstall-hooks` | Remove Git hooks |
 | `devflow setup-zfs [--pool-name <n>] [--size <s>]` | Create file-backed ZFS pool |

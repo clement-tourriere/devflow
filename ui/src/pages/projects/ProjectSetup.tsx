@@ -6,6 +6,7 @@ import {
   listServices,
   installVcsHooks,
   getProjectDetail,
+  generateAgentGuides,
 } from "../../utils/invoke";
 import type { ServiceEntry, AddServiceRequest, ProjectDetail } from "../../types";
 
@@ -28,6 +29,9 @@ function ProjectSetup() {
   const [hooksInstalled, setHooksInstalled] = useState(false);
   const [hooksLoading, setHooksLoading] = useState(false);
   const [hooksError, setHooksError] = useState<string | null>(null);
+  const [guidesGenerated, setGuidesGenerated] = useState(false);
+  const [guidesLoading, setGuidesLoading] = useState(false);
+  const [guidesError, setGuidesError] = useState<string | null>(null);
   const [shellCommand, setShellCommand] = useState<string>("");
 
   const loadData = useCallback(async () => {
@@ -65,6 +69,19 @@ function ProjectSetup() {
       setHooksError(`${e}`);
     } finally {
       setHooksLoading(false);
+    }
+  };
+
+  const handleGenerateGuides = async () => {
+    setGuidesLoading(true);
+    setGuidesError(null);
+    try {
+      await generateAgentGuides(projectPath);
+      setGuidesGenerated(true);
+    } catch (e) {
+      setGuidesError(`${e}`);
+    } finally {
+      setGuidesLoading(false);
     }
   };
 
@@ -197,6 +214,43 @@ function ProjectSetup() {
             )}
           </div>
 
+          {/* Agent Guides */}
+          <div
+            style={{
+              padding: "12px 16px",
+              background: "var(--bg-primary)",
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              marginBottom: 12,
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 2 }}>Agent Guides</div>
+                <div style={{ color: "var(--text-secondary)", fontSize: 12 }}>
+                  Generate Claude, Cursor, OpenCode, and generic agent instructions
+                </div>
+              </div>
+              {guidesGenerated ? (
+                <span className="badge badge-success">Generated</span>
+              ) : (
+                <button
+                  className="btn btn-primary"
+                  style={{ padding: "4px 16px", fontSize: 13 }}
+                  onClick={handleGenerateGuides}
+                  disabled={guidesLoading}
+                >
+                  {guidesLoading ? "Generating..." : "Generate"}
+                </button>
+              )}
+            </div>
+            {guidesError && (
+              <div style={{ marginTop: 8, color: "var(--danger)", fontSize: 12 }}>
+                {guidesError}
+              </div>
+            )}
+          </div>
+
           {/* Shell Integration */}
           <div
             style={{
@@ -275,9 +329,24 @@ function ProjectSetup() {
                 {hooksInstalled ? "installed" : "not installed"}
               </span>
             </div>
+            <div style={{ marginBottom: 8 }}>
+              <strong>Agent guides:</strong>{" "}
+              <span style={{ color: "var(--text-secondary)" }}>
+                {guidesGenerated ? "generated" : "not generated"}
+              </span>
+            </div>
             <div>
               <strong>Workspace isolation:</strong>{" "}
               <span style={{ color: "var(--text-secondary)" }}>enabled</span>
+            </div>
+          </div>
+
+          <div style={{ textAlign: "left", marginBottom: 20 }}>
+            <div style={{ color: "var(--text-secondary)", fontSize: 13, marginBottom: 8 }}>
+              Suggested first workspace:
+            </div>
+            <div className="mono" style={{ padding: "8px 12px", background: "var(--bg-primary)", border: "1px solid var(--border)", borderRadius: 6, fontSize: 12, userSelect: "all" }}>
+              devflow --json --non-interactive switch -c agent/first-task
             </div>
           </div>
 

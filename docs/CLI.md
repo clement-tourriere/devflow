@@ -578,10 +578,11 @@ devflow proxy trust info
 
 ### `devflow init [path]`
 
-Initialize devflow in the current directory or create and initialize a new project directory.
+Initialize devflow in the current directory or create and initialize a new project directory. Human output prints guided next steps; JSON output includes a `next_steps` array with commands for services, hooks, agent guide generation, strict doctor validation, and first workspace creation.
 
 ```bash
 devflow init
+devflow --json --non-interactive init
 devflow init myapp
 devflow init myapp --name app
 devflow init myapp --force

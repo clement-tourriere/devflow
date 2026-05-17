@@ -348,6 +348,46 @@ fn init_creates_config() {
 
     assert!(out.status.success(), "init failed: {:?}", out);
     assert!(tmp.path().join(".devflow.yml").exists());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Next steps:"));
+    assert!(stdout.contains("devflow --json doctor --strict"));
+    assert!(stdout.contains("devflow --json --non-interactive switch -c agent/first-task"));
+}
+
+#[test]
+fn json_init_reports_onboarding_next_steps() {
+    let tmp = tempfile::tempdir().unwrap();
+    Command::new("git")
+        .args(["init"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("git init");
+
+    let out = Command::new(devflow_bin())
+        .args([
+            "--json",
+            "--non-interactive",
+            "init",
+            "--name",
+            "smoke-init",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .expect("devflow init");
+
+    assert!(out.status.success(), "init failed: {:?}", out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid init JSON");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["action"], "init");
+    let next_steps = json["next_steps"].as_array().expect("next_steps array");
+    assert!(next_steps
+        .iter()
+        .any(|step| step["command"] == "devflow --json doctor --strict"));
+    assert!(next_steps.iter().any(
+        |step| step["command"] == "devflow --json --non-interactive switch -c agent/first-task"
+    ));
+    assert!(next_steps.iter().any(|step| step["agent_safe"] == true));
 }
 
 #[test]

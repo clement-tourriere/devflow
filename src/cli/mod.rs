@@ -208,7 +208,7 @@ Examples:
     // ── Setup & Config ──
     #[command(
         about = "Initialize devflow configuration",
-        long_about = "Initialize devflow configuration.\n\nWith no arguments, initializes the current directory.\nWith a path argument, creates the directory and initializes it.\n\nExamples:\n  devflow init                              # Initialize current directory\n  devflow init myapp                        # Create ./myapp/ and initialize it\n  devflow init --name myapp                 # Initialize current dir with explicit name\n  devflow init myapp --force                # Overwrite existing config in ./myapp/"
+        long_about = "Initialize devflow configuration.\n\nWith no arguments, initializes the current directory.\nWith a path argument, creates the directory and initializes it. JSON output includes\nnext_steps for humans and coding agents to finish setup.\n\nExamples:\n  devflow init                              # Initialize current directory\n  devflow --json --non-interactive init     # Initialize and print onboarding next_steps\n  devflow init myapp                        # Create ./myapp/ and initialize it\n  devflow init --name myapp                 # Initialize current dir with explicit name\n  devflow init myapp --force                # Overwrite existing config in ./myapp/"
     )]
     Init {
         #[arg(help = "Directory to create and initialize (omit to use current directory)")]
@@ -1214,6 +1214,7 @@ pub async fn handle_command(
             };
 
             if json_output {
+                let next_steps = init::init_next_steps(true, false, false, false);
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
@@ -1226,6 +1227,7 @@ pub async fn handle_command(
                         "vcs_provider": vcs_provider_label,
                         "cow_capability": cow_label,
                         "vcs_initialized": vcs_init_label,
+                        "next_steps": next_steps,
                     }))?
                 );
             } else {
@@ -1517,22 +1519,16 @@ pub async fn handle_command(
                     );
                     println!("  Workspace:  {workspace_model}");
                     println!();
-                    println!("Next: devflow switch -c feature/my-feature");
+                    let next_steps = init::init_next_steps(
+                        true,
+                        !added_services.is_empty() || !init_config.resolve_services().is_empty(),
+                        hooks_installed,
+                        shell_configured,
+                    );
+                    init::print_init_next_steps(&next_steps);
                 } else {
-                    // Non-interactive: print legacy next steps
-                    println!("\nNext steps:");
-                    println!(
-                        "  eval \"$(devflow shell-init)\"  Add to your shell profile for auto-cd into worktrees"
-                    );
-                    println!(
-                        "  devflow service add          Add a service provider (interactive wizard)"
-                    );
-                    println!(
-                        "  devflow install-hooks        Install Git hooks for worktree adoption and lifecycle hooks"
-                    );
-                    println!(
-                        "  devflow doctor               Check system health and configuration"
-                    );
+                    let next_steps = init::init_next_steps(true, false, false, false);
+                    init::print_init_next_steps(&next_steps);
                 }
 
                 if let Some(target_dir) = init_target_dir.as_ref() {

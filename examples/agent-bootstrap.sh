@@ -34,6 +34,9 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   devflow --json --non-interactive install-hooks >/dev/null
 fi
 
+# Generate project-specific guide files for subsequent agents.
+devflow --json --non-interactive agent skill --target all >/dev/null
+
 CAPABILITIES=$(devflow --json capabilities)
 
 jq -n \

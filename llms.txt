@@ -29,8 +29,8 @@ for near-instant, space-efficient workspace creation.
 
 ## Agent workflows
 
-- [examples/agent-bootstrap.sh](examples/agent-bootstrap.sh): Idempotent repository setup for agents and CI.
-- [examples/agent-task.sh](examples/agent-task.sh): Create/switch to a task-scoped workspace environment, fetch connection info.
+- [examples/agent-bootstrap.sh](examples/agent-bootstrap.sh): Idempotent repository setup for agents and CI; initializes config, hooks, and agent guide files.
+- [examples/agent-task.sh](examples/agent-task.sh): Create/switch to a task-scoped workspace and emit a JSON handoff object with agent_workdir and connection info.
 - [scripts/release-check.sh](scripts/release-check.sh): Local release-candidate verification gate for formatting, tests, builds, and generated guidance.
 - [examples/simple.devflow.yml](examples/simple.devflow.yml): Minimal single-service configuration.
 - [examples/multi-service.devflow.yml](examples/multi-service.devflow.yml): Multi-service setup with hooks and worktrees.

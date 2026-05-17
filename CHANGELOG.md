@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **GUI setup** — Doctor/Setup shows a health summary, and local PostgreSQL doctor checks include data-root and port-range diagnostics.
 - **Release readiness** — Added `devflow doctor --strict`, `devflow service doctor --strict`, and `scripts/release-check.sh` for CI/agent health gates and local release-candidate verification.
 - **Actionable diagnostics** — Doctor JSON, GUI, and TUI surfaces now include aggregate summaries and suggested next steps for failed checks.
+- **First-run onboarding** — `devflow init` now reports structured onboarding next steps for services, hooks, agent guide generation, strict doctor validation, and first workspace creation.
 
 ### Removed
 

@@ -6,8 +6,91 @@ use devflow_core::processes::{
 };
 use devflow_core::services::{self};
 use indexmap::IndexMap;
+use serde::Serialize;
 use serde_yaml_ng::Value;
 use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(super) struct InitNextStep {
+    pub title: &'static str,
+    pub detail: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<&'static str>,
+    #[serde(default)]
+    pub agent_safe: bool,
+}
+
+pub(super) fn init_next_steps(
+    worktrees_enabled: bool,
+    services_configured: bool,
+    hooks_installed: bool,
+    shell_configured: bool,
+) -> Vec<InitNextStep> {
+    let mut steps = Vec::new();
+
+    if worktrees_enabled && !shell_configured {
+        steps.push(InitNextStep {
+            title: "Enable shell integration for humans",
+            detail: "Optional but recommended for interactive use; agents should use agent_workdir from JSON instead of relying on parent-shell cd.",
+            command: Some("eval \"$(devflow shell-init)\""),
+            agent_safe: false,
+        });
+    }
+
+    if !services_configured {
+        steps.push(InitNextStep {
+            title: "Add a service provider",
+            detail: "Configure PostgreSQL, ClickHouse, MySQL, generic Docker, cloud, or plugin services for per-workspace environments.",
+            command: Some("devflow service add db --provider local --service-type postgres"),
+            agent_safe: true,
+        });
+    }
+
+    if !hooks_installed {
+        steps.push(InitNextStep {
+            title: "Install VCS hooks",
+            detail: "Keeps service workspaces and hook-driven setup aligned when branches or worktrees change.",
+            command: Some("devflow --json --non-interactive install-hooks"),
+            agent_safe: true,
+        });
+    }
+
+    steps.push(InitNextStep {
+        title: "Generate agent guide files",
+        detail: "Writes project-specific guidance for Claude, Cursor, OpenCode, and generic coding agents.",
+        command: Some("devflow --json --non-interactive agent skill --target all"),
+        agent_safe: true,
+    });
+    steps.push(InitNextStep {
+        title: "Validate setup",
+        detail: "Strict doctor is the CI/agent gate; inspect summary and next_steps if it fails.",
+        command: Some("devflow --json doctor --strict"),
+        agent_safe: true,
+    });
+    steps.push(InitNextStep {
+        title: "Create a first workspace",
+        detail: "Use the JSON agent_workdir/worktree_path as the working directory for automation after switching.",
+        command: Some("devflow --json --non-interactive switch -c agent/first-task"),
+        agent_safe: true,
+    });
+
+    steps
+}
+
+pub(super) fn print_init_next_steps(steps: &[InitNextStep]) {
+    if steps.is_empty() {
+        return;
+    }
+
+    println!("\nNext steps:");
+    for (index, step) in steps.iter().enumerate() {
+        println!("  {}. {}", index + 1, step.title);
+        if let Some(command) = step.command {
+            println!("     {}", command);
+        }
+        println!("     {}", step.detail);
+    }
+}
 
 /// Check if ZFS auto-setup should be offered during init (Linux only).
 /// Returns `Some(data_root)` if a pool was created or already exists,

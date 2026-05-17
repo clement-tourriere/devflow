@@ -39,8 +39,10 @@ Check the per-phase `hooks` summary in the JSON output: `skipped > 0` usually me
 Equivalent manual flow:
 
 ```bash
-devflow --json --non-interactive init --name "$(basename "$PWD")"
-devflow --json install-hooks
+INIT=$(devflow --json --non-interactive init --name "$(basename "$PWD")")
+echo "$INIT" | jq '.next_steps'
+devflow --json --non-interactive install-hooks
+devflow --json --non-interactive agent skill --target all
 devflow --json capabilities
 ```
 
@@ -48,7 +50,7 @@ devflow --json capabilities
 
 ```bash
 TASK_ID="issue-123"
-./examples/agent-task.sh "$TASK_ID"
+./examples/agent-task.sh "$TASK_ID"  # emits {workspace, agent_workdir, switch, connection}
 ```
 
 Equivalent manual flow:
@@ -57,11 +59,13 @@ Equivalent manual flow:
 WORKSPACE="agent/$TASK_ID"
 OUTPUT=$(devflow --json --non-interactive switch -c "$WORKSPACE")
 
-# Keep the materialized workspace path and use it for subsequent agent tool calls
-WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
-test -d "$WORKTREE"
+# Use the materialized workspace path for subsequent agent tool calls
+AGENT_WORKDIR=$(echo "$OUTPUT" | jq -r '.agent_workdir // .worktree_path // empty')
+test -d "$AGENT_WORKDIR"
 
-devflow --json service connection "$WORKSPACE"
+jq -n --arg workspace "$WORKSPACE" --arg agent_workdir "$AGENT_WORKDIR" \
+  --argjson switch "$OUTPUT" --argjson connection "$CONNECTION" \
+  '{workspace: $workspace, agent_workdir: $agent_workdir, switch: $switch, connection: $connection}'
 ```
 
 ## Agent Commands
