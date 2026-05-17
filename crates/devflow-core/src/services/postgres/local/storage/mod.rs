@@ -30,6 +30,14 @@ pub struct StorageDoctorReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoragePreferenceCheck {
+    pub preference: Option<String>,
+    pub available: bool,
+    pub selected_driver: Option<String>,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZfsProjectConfig {
     pub root_dataset: String,
 }
@@ -150,6 +158,118 @@ impl StorageCoordinator {
         StorageSelection {
             driver: StorageDriver::Copy,
             config: None,
+        }
+    }
+
+    /// Return a diagnostic for an optional storage preference.
+    pub async fn check_preference(&self, preferred: Option<&str>) -> StoragePreferenceCheck {
+        let preference = preferred
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty());
+        match self.select_for_new_project_with(preferred).await {
+            Ok(selection) => StoragePreferenceCheck {
+                preference,
+                available: true,
+                selected_driver: Some(selection.driver.as_str().to_string()),
+                detail: format!(
+                    "storage preference resolves to '{}'",
+                    selection.driver.as_str()
+                ),
+            },
+            Err(err) => StoragePreferenceCheck {
+                preference,
+                available: false,
+                selected_driver: None,
+                detail: err.to_string(),
+            },
+        }
+    }
+
+    /// Select a storage driver for a new project.
+    ///
+    /// `preferred` accepts `auto`, `zfs`, `apfs_clone`/`apfs`, `reflink`, or `copy`.
+    /// Explicit CoW drivers fail with a clear error if the required filesystem/tooling
+    /// is unavailable; `copy` always works as a portable fallback.
+    pub async fn select_for_new_project_with(
+        &self,
+        preferred: Option<&str>,
+    ) -> anyhow::Result<StorageSelection> {
+        let preferred = preferred
+            .map(|s| s.trim().to_ascii_lowercase().replace('-', "_"))
+            .filter(|s| !s.is_empty() && s != "auto");
+
+        if let Some(preferred) = preferred.as_deref() {
+            let driver = match preferred {
+                "apfs" => StorageDriver::ApfsClone,
+                other => StorageDriver::from_str(other).ok_or_else(|| {
+                    anyhow!(
+                        "invalid local.storage value '{}'; expected auto, zfs, apfs_clone, reflink, or copy",
+                        other
+                    )
+                })?,
+            };
+
+            if driver == StorageDriver::Copy {
+                return Ok(StorageSelection {
+                    driver,
+                    config: None,
+                });
+            }
+
+            return self.select_explicit_driver(driver).await;
+        }
+
+        Ok(self.select_for_new_project().await)
+    }
+
+    async fn select_explicit_driver(
+        &self,
+        driver: StorageDriver,
+    ) -> anyhow::Result<StorageSelection> {
+        let report = self.doctor().await;
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.kind == driver.as_str())
+            .ok_or_else(|| anyhow!("storage driver '{}' is not known", driver.as_str()))?;
+
+        if !entry.available {
+            anyhow::bail!(
+                "local.storage is set to '{}' but it is unavailable: {}. Use 'auto' or 'copy' to fall back.",
+                driver.as_str(),
+                entry.detail
+            );
+        }
+
+        self.selection_for_driver(driver).await
+    }
+
+    async fn selection_for_driver(
+        &self,
+        driver: StorageDriver,
+    ) -> anyhow::Result<StorageSelection> {
+        match driver {
+            StorageDriver::Zfs => {
+                let zfs_report = self.zfs.detect(&self.projects_root).await;
+                if let Some(root_dataset) = zfs_report.root_dataset {
+                    let config = ZfsProjectConfig { root_dataset };
+                    Ok(StorageSelection {
+                        driver: StorageDriver::Zfs,
+                        config: Some(
+                            serde_json::to_string(&config).unwrap_or_else(|_| "{}".to_string()),
+                        ),
+                    })
+                } else {
+                    anyhow::bail!(
+                        "ZFS storage was selected but no devflow ZFS dataset was found: {}",
+                        zfs_report.detail
+                    )
+                }
+            }
+            other => Ok(StorageSelection {
+                driver: other,
+                config: None,
+            }),
         }
     }
 
@@ -324,4 +444,136 @@ fn parse_zfs_config(project: &Project) -> anyhow::Result<ZfsProjectConfig> {
             project.id
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::model::WorkspaceState;
+    use super::*;
+
+    #[tokio::test]
+    async fn explicit_copy_storage_is_always_selectable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = StorageCoordinator::new(tmp.path().to_path_buf());
+
+        let selection = coordinator
+            .select_for_new_project_with(Some("copy"))
+            .await
+            .expect("copy storage should not need platform support");
+
+        assert_eq!(selection.driver, StorageDriver::Copy);
+        assert!(selection.config.is_none());
+    }
+
+    #[tokio::test]
+    async fn invalid_storage_preference_has_clear_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = StorageCoordinator::new(tmp.path().to_path_buf());
+
+        let err = coordinator
+            .select_for_new_project_with(Some("mystery"))
+            .await
+            .expect_err("invalid storage should fail");
+
+        assert!(err.to_string().contains("invalid local.storage value"));
+    }
+
+    #[tokio::test]
+    async fn storage_preference_diagnostic_reports_copy_selection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = StorageCoordinator::new(tmp.path().to_path_buf());
+
+        let check = coordinator.check_preference(Some("copy")).await;
+
+        assert!(check.available);
+        assert_eq!(check.preference.as_deref(), Some("copy"));
+        assert_eq!(check.selected_driver.as_deref(), Some("copy"));
+        assert!(check.detail.contains("resolves to 'copy'"));
+    }
+
+    #[tokio::test]
+    async fn storage_preference_diagnostic_reports_invalid_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = StorageCoordinator::new(tmp.path().to_path_buf());
+
+        let check = coordinator.check_preference(Some("mystery")).await;
+
+        assert!(!check.available);
+        assert_eq!(check.preference.as_deref(), Some("mystery"));
+        assert!(check.detail.contains("invalid local.storage value"));
+    }
+
+    #[tokio::test]
+    async fn copy_storage_clones_postgres_data_independently() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = StorageCoordinator::new(tmp.path().join("projects"));
+
+        let parent_pgdata = tmp.path().join("parent").join("pgdata");
+        tokio::fs::create_dir_all(parent_pgdata.join("base"))
+            .await
+            .unwrap();
+        tokio::fs::write(parent_pgdata.join("PG_VERSION"), b"17\n")
+            .await
+            .unwrap();
+        tokio::fs::write(parent_pgdata.join("base").join("fixture"), b"parent-data")
+            .await
+            .unwrap();
+
+        let project = Project {
+            id: "project-1".to_string(),
+            name: "app-db".to_string(),
+            image: "postgres:17".to_string(),
+            storage_driver: StorageDriver::Copy,
+            storage_config: None,
+            project_path: None,
+            created_at: 0,
+        };
+        let parent = Workspace {
+            id: "main-id".to_string(),
+            project_id: project.id.clone(),
+            name: "main".to_string(),
+            parent_workspace_id: None,
+            state: WorkspaceState::Stopped,
+            data_dir: parent_pgdata.display().to_string(),
+            container_name: "devflow-test-parent".to_string(),
+            port: 55432,
+            storage_metadata: None,
+            created_at: 0,
+        };
+        let child_pgdata = tmp
+            .path()
+            .join("project-1")
+            .join("workspaces")
+            .join("child-id")
+            .join("pgdata");
+
+        let metadata = coordinator
+            .clone_branch_from_parent(&project, &parent, "child-id", &child_pgdata)
+            .await
+            .expect("copy storage should clone a PostgreSQL pgdata directory");
+
+        assert!(metadata.is_none());
+        assert_eq!(
+            tokio::fs::read_to_string(child_pgdata.join("PG_VERSION"))
+                .await
+                .unwrap(),
+            "17\n"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(child_pgdata.join("base").join("fixture"))
+                .await
+                .unwrap(),
+            "parent-data"
+        );
+
+        tokio::fs::write(child_pgdata.join("base").join("fixture"), b"child-data")
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(parent_pgdata.join("base").join("fixture"))
+                .await
+                .unwrap(),
+            "parent-data"
+        );
+    }
 }

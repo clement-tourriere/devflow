@@ -692,6 +692,14 @@ impl VcsProvider for JjRepository {
         Ok(content.contains("devflow"))
     }
 
+    fn hook_paths(&self) -> Vec<PathBuf> {
+        let hooks_dir = self.root.join(".git").join("hooks");
+        ["post-checkout", "post-merge"]
+            .iter()
+            .map(|hook| hooks_dir.join(hook))
+            .collect()
+    }
+
     // ── Meta ───────────────────────────────────────────────────────
 
     fn provider_name(&self) -> &'static str {

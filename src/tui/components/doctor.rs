@@ -102,7 +102,7 @@ impl Component for DoctorComponent {
             .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
             .split(area);
 
-        // Service list
+        // Doctor category list
         let entries = self.data.as_deref().unwrap_or(&[]);
         let items: Vec<ListItem> = entries
             .iter()
@@ -129,7 +129,7 @@ impl Component for DoctorComponent {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme::BORDER_ACTIVE))
-                    .title(" Services "),
+                    .title(" Checks "),
             )
             .highlight_style(theme::highlight_style())
             .highlight_symbol(">> ");
@@ -156,7 +156,7 @@ impl Component for DoctorComponent {
 
         if let Some(entry) = self.current_entry() {
             lines.push(Line::from(vec![
-                Span::styled("Service: ", Style::default().fg(theme::TEXT_SECONDARY)),
+                Span::styled("Category: ", Style::default().fg(theme::TEXT_SECONDARY)),
                 Span::styled(
                     &entry.service_name,
                     Style::default().fg(theme::TEXT_PRIMARY).bold(),
@@ -207,7 +207,7 @@ impl Component for DoctorComponent {
         ]));
         lines.push(Line::from(vec![
             Span::styled("  s", Style::default().fg(theme::KEY_HINT)),
-            Span::raw("    Install agent skills"),
+            Span::raw("    Generate agent guides"),
         ]));
 
         let detail = Paragraph::new(lines)

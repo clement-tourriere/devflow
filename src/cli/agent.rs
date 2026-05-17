@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+use devflow_core::agent::{self, AgentGuideTarget};
 use devflow_core::config::Config;
 use devflow_core::state::LocalStateManager;
 use devflow_core::vcs;
@@ -87,20 +88,57 @@ pub(super) async fn handle_agent_command(
             Ok(())
         }
 
-        super::AgentCommands::Skill => {
-            let project_dir = std::env::current_dir()?;
-            let installed = devflow_core::agent::install_agent_skills(config, &project_dir)?;
+        super::AgentCommands::Skill { target } => {
+            let project_dir = super::operation_project_dir(config_path);
+            let targets = parse_targets(Some(target.as_str()))?;
+            let written = agent::install_agent_guides(config, &project_dir, &targets)?;
             if json_output {
                 println!(
                     "{}",
-                    serde_json::to_string(&serde_json::json!({"installed": installed}))?
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "written": written,
+                        "targets": targets.iter().map(|t| t.label()).collect::<Vec<_>>(),
+                    }))?
                 );
             } else {
-                for path in &installed {
-                    println!("Installed: {}", path);
+                for path in &written {
+                    println!("Wrote: {}", path);
                 }
+                println!("Generated guide files only; devflow no longer installs bundled skills.");
             }
             Ok(())
         }
+
+        super::AgentCommands::Docs { force } => {
+            let project_dir = super::operation_project_dir(config_path);
+            let path = project_dir.join("AGENTS.md");
+            if path.exists() && !force {
+                anyhow::bail!(
+                    "AGENTS.md already exists. Re-run with `devflow agent docs --force` to replace it."
+                );
+            }
+            let written = agent::install_agents_md(config, &project_dir)?;
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "written": written.display().to_string(),
+                    }))?
+                );
+            } else {
+                println!("Wrote: {}", written.display());
+            }
+            Ok(())
+        }
+    }
+}
+
+fn parse_targets(target: Option<&str>) -> Result<Vec<AgentGuideTarget>> {
+    match target {
+        None => Ok(agent::default_agent_guide_targets()),
+        Some(value) if value.eq_ignore_ascii_case("all") => {
+            Ok(agent::default_agent_guide_targets())
+        }
+        Some(value) => Ok(vec![AgentGuideTarget::parse(value)?]),
     }
 }

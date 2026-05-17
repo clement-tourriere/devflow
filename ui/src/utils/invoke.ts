@@ -224,8 +224,9 @@ export const discoverDockerContainers = (
     projectPath: options?.projectPath,
     global: options?.global,
   });
-export const installAgentSkills = (projectPath: string) =>
-  invoke<string[]>("install_agent_skills", { projectPath });
+export const generateAgentGuides = (projectPath: string) =>
+  invoke<string[]>("generate_agent_guides", { projectPath });
+export const installAgentSkills = generateAgentGuides;
 
 // Hooks
 export const listHooks = (projectPath: string) =>

@@ -170,12 +170,13 @@ fn handle_hook_show(config: &Config, phase_filter: Option<&str>, json_output: bo
 
         shown = true;
         println!(
-            "{} ({}):",
+            "{} ({}; {}):",
             phase,
+            "runs synchronously by default",
             if phase.is_blocking() {
-                "blocking"
+                "failures fail the operation by default"
             } else {
-                "background"
+                "failures continue by default"
             }
         );
 
@@ -237,7 +238,7 @@ fn handle_hook_show(config: &Config, phase_filter: Option<&str>, json_output: bo
 
 /// `devflow hook explain [phase]` — show documentation about hook phases.
 fn handle_hook_explain(phase: Option<&str>, json_output: bool) -> Result<()> {
-    // Static phase documentation: (name, summary, blocking, category, detail)
+    // Static phase documentation: (name, summary, failures_fail_by_default, category, detail)
     let phases: Vec<(&str, &str, bool, &str, &str)> = vec![
         ("pre-switch",           "Before switching workspaces/worktrees",           true,  "VCS",     "Runs before any workspace/worktree switch. Use for saving state or running checks."),
         ("post-create",          "After creating a new workspace/worktree",          true,  "VCS",     "Runs after a new workspace is created (via `switch -c`). Use for one-time setup: install dependencies, run migrations, write .env files."),
@@ -256,15 +257,23 @@ fn handle_hook_explain(phase: Option<&str>, json_output: bool) -> Result<()> {
     if json_output {
         let items: Vec<serde_json::Value> = phases
             .iter()
-            .map(|(name, summary, blocking, category, detail)| {
-                serde_json::json!({
-                    "phase": name,
-                    "summary": summary,
-                    "blocking": blocking,
-                    "category": category,
-                    "detail": detail,
-                })
-            })
+            .map(
+                |(name, summary, failures_fail_by_default, category, detail)| {
+                    serde_json::json!({
+                        "phase": name,
+                        "summary": summary,
+                        "runs_synchronously_by_default": true,
+                        "background_by_default": false,
+                        "fails_operation_by_default": failures_fail_by_default,
+                        "continue_on_error_default": !failures_fail_by_default,
+                        // Legacy field: this now means the phase fails the lifecycle by default,
+                        // not that non-failing phases are spawned in the background.
+                        "blocking": failures_fail_by_default,
+                        "category": category,
+                        "detail": detail,
+                    })
+                },
+            )
             .collect();
         println!("{}", serde_json::to_string_pretty(&items)?);
         return Ok(());
@@ -272,19 +281,20 @@ fn handle_hook_explain(phase: Option<&str>, json_output: bool) -> Result<()> {
 
     if let Some(phase_name) = phase {
         // Show detailed info for one phase
-        if let Some((name, summary, blocking, category, detail)) =
+        if let Some((name, summary, failures_fail_by_default, category, detail)) =
             phases.iter().find(|(n, ..)| *n == phase_name)
         {
             println!("{}", name);
             println!("{}", "=".repeat(name.len()));
             println!();
             println!("Category:  {}", category);
+            println!("Execution: Synchronous by default (set `background: true` to spawn)");
             println!(
-                "Blocking:  {}",
-                if *blocking {
-                    "Yes (waits for completion)"
+                "Failures:  {}",
+                if *failures_fail_by_default {
+                    "Fail the operation by default"
                 } else {
-                    "No (runs in background)"
+                    "Continue by default (override with `continue_on_error: false`)"
                 }
             );
             println!("Summary:   {}", summary);
@@ -349,14 +359,14 @@ fn handle_hook_explain(phase: Option<&str>, json_output: bool) -> Result<()> {
             println!("Unknown phase: '{}'", phase_name);
             println!();
             println!("Built-in phases:");
-            for (name, summary, blocking, ..) in &phases {
+            for (name, summary, failures_fail_by_default, ..) in &phases {
                 println!(
                     "  {:<24} {} {}",
                     name,
-                    if *blocking {
-                        "[blocking]  "
+                    if *failures_fail_by_default {
+                        "[fail-fast]        "
                     } else {
-                        "[background]"
+                        "[continue-on-error]"
                     },
                     summary
                 );
@@ -375,7 +385,7 @@ fn handle_hook_explain(phase: Option<&str>, json_output: bool) -> Result<()> {
         println!();
 
         let mut current_category = "";
-        for (name, summary, blocking, category, _) in &phases {
+        for (name, summary, failures_fail_by_default, category, _) in &phases {
             if *category != current_category {
                 println!();
                 println!("{} Lifecycle:", category);
@@ -384,10 +394,10 @@ fn handle_hook_explain(phase: Option<&str>, json_output: bool) -> Result<()> {
             println!(
                 "  {:<24} {} {}",
                 name,
-                if *blocking {
-                    "[blocking]  "
+                if *failures_fail_by_default {
+                    "[fail-fast]        "
                 } else {
-                    "[background]"
+                    "[continue-on-error]"
                 },
                 summary
             );

@@ -315,10 +315,30 @@ impl DevflowContext {
         })
     }
 
-    /// Run doctor checks on all services.
+    /// Run project and service doctor checks.
     pub async fn fetch_doctor_bg(config: &Config) -> Result<Vec<DoctorEntry>> {
+        let config_path = Config::find_config_file().ok().flatten();
+        let project_dir = config_path
+            .as_ref()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+        let general_checks = devflow_core::doctor::project_doctor_checks(
+            config,
+            config_path.as_deref(),
+            &project_dir,
+        );
         let providers = factory::create_all_providers(config).await?;
-        let mut entries = Vec::new();
+        let mut entries = vec![DoctorEntry {
+            service_name: "General".to_string(),
+            checks: general_checks
+                .into_iter()
+                .map(|c| DoctorCheckEntry {
+                    name: c.name,
+                    available: c.available,
+                    detail: c.detail,
+                })
+                .collect(),
+        }];
 
         for named in &providers {
             if let Ok(report) = named.provider.doctor().await {

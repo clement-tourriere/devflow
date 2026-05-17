@@ -1030,7 +1030,7 @@ impl App {
                 });
             }
             Action::InstallAgentSkills => {
-                self.set_status("Installing agent skills...".to_string(), false);
+                self.set_status("Generating agent guide files...".to_string(), false);
                 let project_dir = self.context.project_dir.clone();
                 let config = self.context.config.clone();
                 let tx = self.bg_tx.clone();
@@ -1039,16 +1039,13 @@ impl App {
                         Ok(paths) => {
                             let _ = tx.send(Action::OperationComplete {
                                 success: true,
-                                message: format!(
-                                    "Installed {} workspace helper skills",
-                                    paths.len()
-                                ),
+                                message: format!("Generated {} guide files", paths.len()),
                             });
                             let _ = tx.send(Action::Refresh);
                         }
                         Err(e) => {
                             let _ = tx.send(Action::Error(format!(
-                                "Failed to install agent skills: {}",
+                                "Failed to generate agent guides: {}",
                                 e
                             )));
                         }

@@ -646,6 +646,14 @@ impl VcsProvider for GitRepository {
         Ok(content.contains("devflow auto-generated hook"))
     }
 
+    fn hook_paths(&self) -> Vec<PathBuf> {
+        let hooks_dir = self.repo.path().join("hooks");
+        ["post-checkout", "post-merge", "pre-commit", "post-rewrite"]
+            .iter()
+            .map(|hook| hooks_dir.join(hook))
+            .collect()
+    }
+
     fn provider_name(&self) -> &'static str {
         "git"
     }

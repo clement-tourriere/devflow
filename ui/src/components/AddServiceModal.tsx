@@ -56,6 +56,7 @@ function AddServiceModal({
   const [name, setName] = useState("app-db");
   const [image, setImage] = useState("postgres:17");
   const [seed, setSeed] = useState("");
+  const [storage, setStorage] = useState<NonNullable<AddServiceRequest["storage"]>>("auto");
   const [autoWorkspace, setAutoWorkspace] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -103,6 +104,7 @@ function AddServiceModal({
       setName("app-db");
       setImage("postgres:17");
       setSeed("");
+      setStorage("auto");
       setAutoWorkspace(true);
       setError(null);
       setSelectedDiscovery(null);
@@ -120,6 +122,7 @@ function AddServiceModal({
       setSelectedDiscovery(null);
       setImage(defaultImageForType(svcType));
       setSeed("");
+      setStorage("auto");
       setName(defaultNameForType(svcType));
       setDockerCommand("");
       setDockerEnv("");
@@ -147,6 +150,7 @@ function AddServiceModal({
     setSvcType(type);
     setName(defaultNameForType(type));
     setImage(defaultImageForType(type));
+    setStorage("auto");
     setSelectedDiscovery(null);
     setDockerCommand("");
     setDockerEnv("");
@@ -197,6 +201,7 @@ function AddServiceModal({
         auto_workspace: autoWorkspace,
         image: image.trim() || undefined,
         seed_from: seed.trim() || undefined,
+        storage: svcType === "postgres" && provider === "local" ? storage : undefined,
         docker_command: cmdParts,
         docker_environment: envMap,
         docker_restart_policy: restartPolicy,
@@ -375,6 +380,29 @@ function AddServiceModal({
             placeholder={svcType === "generic" ? "e.g. redis:7" : defaultImageForType(svcType)}
             style={{ width: "100%" }}
           />
+        </div>
+      )}
+
+      {/* Storage preference (local PostgreSQL only) */}
+      {svcType === "postgres" && provider === "local" && (
+        <div style={{ marginBottom: 12 }}>
+          <label style={{ display: "block", marginBottom: 4, fontSize: 13, color: "var(--text-secondary)", fontWeight: 500 }}>
+            Storage
+          </label>
+          <select
+            value={storage}
+            onChange={(e) => setStorage(e.target.value as NonNullable<AddServiceRequest["storage"]>)}
+            style={{ width: "100%" }}
+          >
+            <option value="auto">Auto-detect best available</option>
+            <option value="copy">Copy (portable fallback)</option>
+            <option value="apfs_clone">APFS clone</option>
+            <option value="reflink">Reflink</option>
+            <option value="zfs">ZFS</option>
+          </select>
+          <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+            Explicit CoW choices fail fast if unavailable; use auto or copy for the safest setup.
+          </div>
         </div>
       )}
 

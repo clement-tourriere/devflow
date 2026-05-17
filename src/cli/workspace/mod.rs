@@ -310,14 +310,53 @@ pub(super) async fn handle_workspace_command(
             .await;
         }
         super::Commands::Doctor => {
-            // Run pre-checks (VCS, config, hooks). Track failures so `doctor`
-            // can exit non-zero — usable as a CI/script health gate.
-            let mut healthy = true;
+            let general_checks = super::config::collect_doctor_pre_checks(config, config_path);
+            let general_summary = devflow_core::doctor::DoctorSummary::from_checks(&general_checks);
+            let general_json = serde_json::json!({
+                "checks": general_checks,
+                "summary": general_summary,
+            });
+
             if !json_output {
-                healthy = super::config::run_doctor_pre_checks(config, config_path);
+                super::config::run_doctor_pre_checks(config, config_path);
             }
+
             let has_multiple_services = config.resolve_services().len() > 1;
             if database_name.is_none() && has_multiple_services {
+                if json_output {
+                    let services_json = match services::factory::create_all_providers(config).await
+                    {
+                        Ok(providers) => {
+                            let mut map = serde_json::Map::new();
+                            for named in providers {
+                                let value = match named.provider.doctor().await {
+                                    Ok(report) => serde_json::to_value(report)?,
+                                    Err(err) => serde_json::json!({
+                                        "checks": [{
+                                            "name": "Service doctor",
+                                            "available": false,
+                                            "detail": err.to_string(),
+                                        }]
+                                    }),
+                                };
+                                map.insert(named.name, value);
+                            }
+                            serde_json::Value::Object(map)
+                        }
+                        Err(err) => serde_json::json!({
+                            "error": format!("Failed to create service providers: {}", err),
+                        }),
+                    };
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "general": general_json,
+                            "services": services_json,
+                        }))?
+                    );
+                    return Ok(());
+                }
+
                 return super::service::handle_multi_service_aggregation(
                     super::service::ServiceAggregation::Doctor,
                     config,
@@ -330,14 +369,11 @@ pub(super) async fn handle_workspace_command(
             match services::factory::resolve_provider(config, database_name).await {
                 Ok(named) => {
                     let report = named.provider.doctor().await?;
-                    let service_healthy = report.checks.iter().all(|c| c.available);
                     if json_output {
                         println!(
                             "{}",
                             serde_json::to_string_pretty(&serde_json::json!({
-                                "general": {
-                                    "config_path": config_path.as_ref().map(|p| p.display().to_string()),
-                                },
+                                "general": general_json,
                                 "service": report,
                             }))?
                         );
@@ -348,16 +384,13 @@ pub(super) async fn handle_workspace_command(
                             println!("  [{}] {}: {}", icon, check.name, check.detail);
                         }
                     }
-                    healthy = healthy && service_healthy;
                 }
                 Err(_) => {
                     if json_output {
                         println!(
                             "{}",
                             serde_json::to_string_pretty(&serde_json::json!({
-                                "general": {
-                                    "config_path": config_path.as_ref().map(|p| p.display().to_string()),
-                                },
+                                "general": general_json,
                                 "services": null,
                             }))?
                         );
@@ -366,9 +399,6 @@ pub(super) async fn handle_workspace_command(
                         println!("  [WARN] No service provider available (run 'devflow service add' to configure one)");
                     }
                 }
-            }
-            if !healthy {
-                anyhow::bail!("devflow doctor reported one or more failing checks");
             }
         }
         super::Commands::GitHook {
@@ -562,6 +592,8 @@ pub(super) async fn handle_switch_command(
             "service_key": result.service_key,
             "parent": result.parent,
             "worktree_path": result.worktree.as_ref().map(|w| w.path.display().to_string()),
+            "agent_workdir": result.worktree.as_ref().map(|w| w.path.display().to_string()).unwrap_or_else(|| project_dir.display().to_string()),
+            "cd_hint": result.worktree.as_ref().map(|w| format!("cd {}", w.path.display())).unwrap_or_else(|| format!("cd {}", project_dir.display())),
             "worktree_created": result.worktree.as_ref().map(|w| w.created).unwrap_or(false),
             "services_switched": success_count,
             "services_failed": fail_count,

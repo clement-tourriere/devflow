@@ -248,7 +248,7 @@ Examples:
     ConfigValidate,
     #[command(
         about = "Run diagnostics and check system health",
-        long_about = "Run diagnostics and check system health.\n\nVerifies that required tools (docker, git/jj) are available, configuration is valid,\nand services are reachable. Reports any issues with suggested fixes.\n\nExamples:\n  devflow doctor\n  devflow --json doctor"
+        long_about = "Run diagnostics and check system health.\n\nVerifies project setup, generated agent guides, hooks, worktree metadata, storage,\nrequired tools (docker, git/jj), and service reachability. JSON output includes\ngeneral checks with a pass/fail summary for automation.\n\nExamples:\n  devflow doctor\n  devflow --json doctor"
     )]
     Doctor,
     #[command(
@@ -513,8 +513,8 @@ pub enum ServiceCommands {
     #[command(about = "Show service capabilities")]
     Capabilities,
     #[command(
-        about = "Add a local/shared service provider",
-        long_about = "Add a local/shared service provider to the project.\n\nBuilds a complete service definition and stores it in local state. When run\nwithout flags, an interactive wizard guides you through service type, provider,\nand name selection. Credentialed cloud and custom/plugin providers must be\ndefined explicitly under `services:` in .devflow.yml.\n\nExamples:\n  devflow service add                              # Interactive wizard\n  devflow service add mydb --provider local        # Local PostgreSQL\n  devflow service add cache --provider shared --service-type redis\n  devflow service add analytics --provider local --service-type clickhouse"
+        about = "Add a new service provider",
+        long_about = "Add a new service provider to the project.\n\nConfigures a new service provider (local Docker, Neon, ClickHouse, etc.) and\nstores it in local state. When run without flags, an interactive wizard guides\nyou through service type, provider, and name selection.\n\nExamples:\n  devflow service add                              # Interactive wizard\n  devflow service add mydb                         # Interactive (name pre-filled)\n  devflow service add mydb --provider neon          # Add Neon cloud provider\n  devflow service add app-db --provider local --service-type postgres --storage copy\n  devflow service add analytics --provider local --service-type clickhouse"
     )]
     Add {
         #[arg(help = "Service name (prompted if omitted)")]
@@ -533,6 +533,11 @@ pub enum ServiceCommands {
             help = "Seed the default workspace from source (PostgreSQL URL, file path, or s3:// URL)"
         )]
         from: Option<String>,
+        #[arg(
+            long,
+            help = "Local PostgreSQL storage driver: auto, zfs, apfs_clone, reflink, or copy"
+        )]
+        storage: Option<String>,
     },
     #[command(
         about = "Remove a service provider configuration",
@@ -741,7 +746,7 @@ pub enum AgentCommands {
     Status,
     #[command(
         about = "Output project context for the current workspace",
-        long_about = "Output structured context for AI agents.\n\nIncludes workspace info, service connections, and project config.\n\nExamples:\n  devflow agent context\n  devflow agent context --format json\n  devflow agent context --workspace feature/auth"
+        long_about = "Output structured context for AI agents.\n\nIncludes workspace info, agent_workdir/cd_hint, service connections, and project config.\n\nExamples:\n  devflow agent context\n  devflow agent context --format json\n  devflow agent context --workspace feature/auth"
     )]
     Context {
         #[arg(
@@ -754,10 +759,25 @@ pub enum AgentCommands {
         workspace: Option<String>,
     },
     #[command(
-        about = "Install bundled workspace helper skills",
-        long_about = "Install devflow's bundled workspace helper skills into .claude/skills/.\n\nThese are the small built-in agent helpers for listing, creating, and switching devflow workspaces.\n\nExamples:\n  devflow agent skill          # Install bundled workspace helpers"
+        about = "Generate devflow guide files for AI tools",
+        long_about = "Generate project-specific devflow guide files for AI tools.\n\nThis replaces the old bundled-skills installer: no fixed skills are embedded in\ndevflow. The generated files are plain Markdown and can be installed for one\ntarget or all known targets.\n\nTargets: all, generic, claude, cursor, opencode.\n\nExamples:\n  devflow agent skill\n  devflow agent skill --target claude\n  devflow --json agent skill --target all"
     )]
-    Skill,
+    Skill {
+        #[arg(
+            long,
+            default_value = "all",
+            help = "Guide target: all, generic, claude, cursor, opencode"
+        )]
+        target: String,
+    },
+    #[command(
+        about = "Generate a root AGENTS.md guide",
+        long_about = "Generate a root AGENTS.md guide for harnesses that read repository instructions.\n\nBy default this refuses to overwrite an existing AGENTS.md. Use --force to replace it."
+    )]
+    Docs {
+        #[arg(long, help = "Replace AGENTS.md if it already exists")]
+        force: bool,
+    },
 }
 
 /// Subcommands for `devflow proxy`.
@@ -1682,6 +1702,10 @@ pub async fn handle_command(
                     "vcs_provider": vcs_provider,
                     "worktree_cow": cow_capability,
                 },
+                "sandbox": {
+                    "devflow_workspace_sandbox": "removed",
+                    "recommendation": "use the agent harness, containers, VMs, or a dedicated sandbox for hard isolation"
+                },
                 "service_capabilities": service_capabilities,
                 "service_capabilities_error": service_capabilities_error,
             });
@@ -1703,6 +1727,9 @@ pub async fn handle_command(
                         .as_str()
                         .unwrap_or("none"),
                     cow_capability
+                );
+                println!(
+                    "- Workspace sandbox: removed (use harness/container/VM isolation when needed)"
                 );
                 if !service_capabilities.is_empty() {
                     println!("- Service capabilities:");

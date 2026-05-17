@@ -87,7 +87,9 @@ pub fn run_shell_command(
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         anyhow::bail!(
-            "Hook command failed (exit {}): {}\nstdout: {}\nstderr: {}",
+            "Hook command failed (exit {}): {}
+stdout: {}
+stderr: {}",
             output.status.code().unwrap_or(-1),
             command,
             stdout.trim(),

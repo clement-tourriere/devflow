@@ -367,6 +367,7 @@ export interface AddServiceRequest {
   auto_workspace?: boolean;
   image?: string;
   seed_from?: string;
+  storage?: "auto" | "zfs" | "apfs_clone" | "reflink" | "copy";
   docker_command?: string[];
   docker_environment?: Record<string, string>;
   docker_restart_policy?: string;

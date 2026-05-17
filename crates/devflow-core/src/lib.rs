@@ -1,5 +1,6 @@
 pub mod config;
 pub mod docker;
+pub mod doctor;
 pub mod hooks;
 #[cfg(feature = "llm")]
 pub mod llm;

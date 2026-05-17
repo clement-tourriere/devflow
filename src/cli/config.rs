@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use devflow_core::config::{Config, EffectiveConfig};
-use devflow_core::state::LocalStateManager;
 use devflow_core::vcs;
 use std::path::PathBuf;
 
@@ -360,162 +359,32 @@ end
     Ok(())
 }
 
-/// Run doctor pre-checks (VCS, config, hooks). Returns `true` if every check
-/// passed (warnings don't count as failures), `false` if any `[FAIL]` occurred.
+pub(super) fn collect_doctor_pre_checks(
+    config: &Config,
+    config_path: &Option<std::path::PathBuf>,
+) -> Vec<devflow_core::services::DoctorCheck> {
+    let project_dir = super::operation_project_dir(config_path);
+    devflow_core::doctor::project_doctor_checks(config, config_path.as_deref(), &project_dir)
+}
+
 pub(super) fn run_doctor_pre_checks(
     config: &Config,
     config_path: &Option<std::path::PathBuf>,
 ) -> bool {
-    let mut healthy = true;
+    let checks = collect_doctor_pre_checks(config, config_path);
+    let summary = devflow_core::doctor::DoctorSummary::from_checks(&checks);
+
     println!("General:");
-
-    // Config file
-    match config_path {
-        Some(path) => println!("  [OK] Config file: {}", path.display()),
-        None => {
-            println!("  [WARN] Config file: not found (run 'devflow init' to create .devflow.yml)")
-        }
+    for check in &checks {
+        let icon = if check.available { "OK" } else { "WARN" };
+        println!("  [{}] {}: {}", icon, check.name, check.detail);
     }
-
-    // VCS repository
-    let vcs_repo = vcs::detect_vcs_provider(".");
-    match &vcs_repo {
-        Ok(vcs) => println!("  [OK] {} repository: detected", vcs.provider_name()),
-        Err(_) => {
-            println!("  [FAIL] VCS repository: not found");
-            healthy = false;
-        }
-    }
-
-    // VCS hooks
-    let hooks_dir = std::path::Path::new(".git/hooks");
-    let has_hooks = if hooks_dir.exists() {
-        let post_checkout = hooks_dir.join("post-checkout");
-        if let Ok(ref vcs) = vcs_repo {
-            post_checkout.exists() && vcs.is_devflow_hook(&post_checkout).unwrap_or(false)
-        } else {
-            post_checkout.exists()
-        }
-    } else {
-        false
-    };
-    if has_hooks {
-        println!("  [OK] VCS hooks: installed");
-    } else {
-        println!("  [WARN] VCS hooks: not installed (run 'devflow install-hooks')");
-    }
-
-    // Stale worktree metadata (present in VCS metadata but missing on disk)
-    if let Ok(ref vcs) = vcs_repo {
-        if vcs.supports_worktrees() {
-            match vcs.list_worktrees() {
-                Ok(worktrees) => {
-                    let stale: Vec<_> = worktrees
-                        .iter()
-                        .filter(|wt| !wt.is_main && !wt.path.exists())
-                        .collect();
-
-                    if stale.is_empty() {
-                        println!("  [OK] Worktree metadata: clean");
-                    } else {
-                        let suffix = if stale.len() == 1 { "y" } else { "ies" };
-                        println!(
-                            "  [WARN] Worktree metadata: {} stale entr{} (run 'git worktree prune')",
-                            stale.len(),
-                            suffix
-                        );
-                        for wt in stale.iter().take(5) {
-                            let workspace = wt.workspace.as_deref().unwrap_or("<unknown>");
-                            println!("         - {} -> {}", workspace, wt.path.display());
-                        }
-                    }
-                }
-                Err(e) => {
-                    println!("  [WARN] Worktree metadata: inspection failed ({})", e);
-                }
-            }
-        }
-    }
-
-    // Registry entries with missing worktree paths
-    if config_path.is_some() {
-        let project_dir = crate::cli::operation_project_dir(config_path);
-        match LocalStateManager::new() {
-            Ok(state) => {
-                let missing: Vec<_> = state
-                    .get_workspaces_by_dir(&project_dir)
-                    .into_iter()
-                    .filter_map(|b| b.worktree_path.map(|p| (b.name, p)))
-                    .filter(|(_, p)| !std::path::Path::new(p).exists())
-                    .collect();
-
-                if missing.is_empty() {
-                    println!("  [OK] Workspace registry paths: clean");
-                } else {
-                    let suffix = if missing.len() == 1 { "y" } else { "ies" };
-                    println!(
-                        "  [WARN] Workspace registry paths: {} stale entr{}",
-                        missing.len(),
-                        suffix
-                    );
-                    for (workspace, wt_path) in missing.iter().take(5) {
-                        println!("         - {} -> {}", workspace, wt_path);
-                    }
-                }
-            }
-            Err(e) => {
-                println!(
-                    "  [WARN] Workspace registry paths: inspection failed ({})",
-                    e
-                );
-            }
-        }
-    }
-
-    if let Some(path) = config_path {
-        match LocalStateManager::new() {
-            Ok(state) => {
-                let config_services = config.resolve_services();
-                let local_services = state.get_services(path).unwrap_or_default();
-                if local_services.is_empty() {
-                    println!(
-                        "  [OK] Service config sources: {} service(s) from config, none from local state",
-                        config_services.len()
-                    );
-                } else {
-                    let names = local_services
-                        .iter()
-                        .map(|service| service.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    println!(
-                        "  [OK] Service config sources: {} service(s) from config, {} from local state ({})",
-                        config_services
-                            .iter()
-                            .filter(|service| !local_services.iter().any(|local| local.name == service.name))
-                            .count(),
-                        local_services.len(),
-                        names
-                    );
-                }
-            }
-            Err(e) => println!("  [WARN] Service config sources: inspection failed ({})", e),
-        }
-    }
-
-    // Workspace filter regex
-    if let Some(ref regex_pattern) = config.git.workspace_filter_regex {
-        match regex::Regex::new(regex_pattern) {
-            Ok(_) => println!("  [OK] Workspace filter regex: valid"),
-            Err(e) => {
-                println!("  [FAIL] Workspace filter regex: {}", e);
-                healthy = false;
-            }
-        }
-    }
-
+    println!(
+        "  Summary: {}/{} checks passed",
+        summary.passed, summary.total
+    );
     println!();
-    healthy
+    summary.failed == 0
 }
 
 pub(super) fn show_effective_config(effective_config: &EffectiveConfig) -> Result<()> {

@@ -143,7 +143,7 @@ Rust Backend (src-tauri/src/)
     └─ devflow-terminal (PTY sessions)
 ```
 
-The desktop app uses Tauri 2 with a React frontend. IPC commands in `src-tauri/src/commands/` wrap `devflow-core` calls.
+The desktop app uses Tauri 2 with a React frontend. IPC commands in `src-tauri/src/commands/` wrap `devflow-core` calls. Project-level doctor diagnostics live in `crates/devflow-core/src/doctor.rs` so the CLI, TUI, and GUI report the same setup checks.
 
 ## Feature Flags
 
@@ -156,5 +156,5 @@ All optional backends and UI components are feature-gated:
 | `service-dblab` | DBLab provider | `reqwest` |
 | `service-xata` | Xata provider | `reqwest` |
 | `llm` | AI commit messages | `reqwest` |
-| `skills` | Skill management | `reqwest`, `sha2` |
+| `skills` | External skill management and generated agent guides (no bundled skills) | `reqwest`, `sha2` |
 | `tui` | Terminal UI | `ratatui`, `crossterm` |

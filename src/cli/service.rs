@@ -247,6 +247,33 @@ pub(super) enum ServiceAggregation {
     Capabilities,
 }
 
+fn normalize_storage_flag(
+    storage: Option<String>,
+    provider_type: &str,
+    service_type: &str,
+) -> Result<Option<String>> {
+    let Some(storage) = storage else {
+        return Ok(None);
+    };
+
+    if !services::factory::ProviderType::is_local(provider_type) || service_type != "postgres" {
+        anyhow::bail!("--storage is only supported for local PostgreSQL services");
+    }
+
+    let normalized = storage.trim().to_ascii_lowercase().replace('-', "_");
+    let normalized = match normalized.as_str() {
+        "" | "auto" => "auto".to_string(),
+        "apfs" | "apfs_clone" => "apfs_clone".to_string(),
+        "zfs" | "reflink" | "copy" => normalized,
+        other => anyhow::bail!(
+            "invalid --storage value '{}'; expected auto, zfs, apfs_clone, reflink, or copy",
+            other
+        ),
+    };
+
+    Ok(Some(normalized))
+}
+
 /// Reusable interactive service-add wizard.
 ///
 /// Walks the user through service type, provider, Docker discovery, and name selection.
@@ -632,6 +659,7 @@ pub(super) async fn handle_service_dispatch(
             service_type,
             force,
             from,
+            storage,
         } => {
             let config_path_buf = config_path.clone().unwrap_or_else(|| {
                 std::env::current_dir()
@@ -640,7 +668,7 @@ pub(super) async fn handle_service_dispatch(
             });
 
             // When explicit flags are provided, use them directly; otherwise delegate to wizard
-            if name.is_some() || provider.is_some() || service_type.is_some() {
+            if name.is_some() || provider.is_some() || service_type.is_some() || storage.is_some() {
                 // Direct mode with explicit flags — keep existing behavior for CLI power users
                 let service_type = service_type
                     .unwrap_or_else(devflow_core::config::default_service_type)
@@ -658,6 +686,7 @@ pub(super) async fn handle_service_dispatch(
                     })
                     .to_ascii_lowercase();
                 validate_scaffoldable_service(&service_type, &provider_type)?;
+                let storage = normalize_storage_flag(storage, &provider_type, &service_type)?;
                 let name = if let Some(n) = name {
                     n
                 } else if non_interactive || json_output {
@@ -689,7 +718,7 @@ pub(super) async fn handle_service_dispatch(
                         Some(devflow_core::config::LocalServiceConfig {
                             image: None,
                             data_root: None,
-                            storage: None,
+                            storage: storage.clone(),
                             port_range_start: None,
                             postgres_user: None,
                             postgres_password: None,
@@ -770,6 +799,7 @@ pub(super) async fn handle_service_dispatch(
                             "action": "add_service",
                             "name": name,
                             "provider_type": provider_type,
+                            "storage": storage,
                         }))?
                     );
                 }

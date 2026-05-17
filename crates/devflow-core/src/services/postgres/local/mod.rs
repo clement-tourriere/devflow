@@ -39,6 +39,7 @@ pub struct LocalProvider {
     store: Mutex<Store>,
     runtime: DockerRuntime,
     storage: StorageCoordinator,
+    storage_preference: Option<String>,
     data_root: PathBuf,
     /// Canonical filesystem path of the project directory (for orphan detection).
     project_path: Option<String>,
@@ -102,6 +103,7 @@ impl LocalProvider {
 
         let runtime = DockerRuntime::new().context("failed to initialize Docker runtime")?;
         let storage = StorageCoordinator::new(projects_root.clone());
+        let storage_preference = local_config.and_then(|c| c.storage.clone());
 
         let project_name = config.project_name();
         let service_name = service_name.to_string();
@@ -133,6 +135,7 @@ impl LocalProvider {
             store: Mutex::new(store),
             runtime,
             storage,
+            storage_preference,
             data_root,
             project_path,
             docker_settings: docker_settings.cloned().unwrap_or_default(),
@@ -176,16 +179,15 @@ impl LocalProvider {
             return Ok(project);
         }
 
-        // Auto-create project
-        let selection = self.storage.select_for_new_project().await;
-
-        let project = self.store().create_project(NewProject {
-            name: self.project_name.clone(),
-            image: self.image.clone(),
-            storage_driver: selection.driver,
-            storage_config: selection.config,
-            project_path: self.project_path.clone(),
-        })?;
+        let project = create_project_record(
+            &self.store,
+            &self.storage,
+            self.storage_preference.as_deref(),
+            &self.project_name,
+            &self.image,
+            self.project_path.clone(),
+        )
+        .await?;
 
         log::info!(
             "Auto-created project '{}' with {} storage",
@@ -219,6 +221,34 @@ impl LocalProvider {
             self.pg_user, self.pg_password, port, self.pg_db
         )
     }
+}
+
+async fn create_project_record(
+    store: &Mutex<Store>,
+    storage: &StorageCoordinator,
+    storage_preference: Option<&str>,
+    project_name: &str,
+    image: &str,
+    project_path: Option<String>,
+) -> Result<model::Project> {
+    // local.storage may force a specific CoW driver; otherwise devflow probes the
+    // best available option and falls back to copy.
+    let selection = storage
+        .select_for_new_project_with(storage_preference)
+        .await?;
+
+    let project = store
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .create_project(NewProject {
+            name: project_name.to_string(),
+            image: image.to_string(),
+            storage_driver: selection.driver,
+            storage_config: selection.config,
+            project_path,
+        })?;
+
+    Ok(project)
 }
 
 #[async_trait]
@@ -740,6 +770,18 @@ impl ServiceProvider for LocalProvider {
             ),
         });
 
+        if self.storage_preference.is_some() {
+            let preference = self
+                .storage
+                .check_preference(self.storage_preference.as_deref())
+                .await;
+            checks.push(DoctorCheck {
+                name: "Configured storage preference".to_string(),
+                available: preference.available,
+                detail: preference.detail,
+            });
+        }
+
         // State database
         checks.push(DoctorCheck {
             name: "State database".to_string(),
@@ -926,5 +968,41 @@ mod tests {
             Some(expected.to_string_lossy().as_ref()),
             "project_path must be resynced to the new root"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use model::StorageDriver;
+
+    #[tokio::test]
+    async fn create_project_record_honors_copy_storage_preference() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Mutex::new(Store::open(&tmp.path().join("state.db")).unwrap());
+        let storage = StorageCoordinator::new(tmp.path().join("projects"));
+
+        let project = create_project_record(
+            &store,
+            &storage,
+            Some("copy"),
+            "app-db",
+            DEFAULT_IMAGE,
+            Some("/tmp/devflow-test-project".to_string()),
+        )
+        .await
+        .expect("copy storage preference should create a local PostgreSQL project record");
+
+        assert_eq!(project.storage_driver, StorageDriver::Copy);
+        assert_eq!(project.storage_config, None);
+
+        let persisted = store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_project_by_name("app-db")
+            .unwrap()
+            .expect("project should be persisted");
+        assert_eq!(persisted.storage_driver, StorageDriver::Copy);
+        assert_eq!(persisted.image, DEFAULT_IMAGE);
     }
 }

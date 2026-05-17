@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
-import { runDoctor, installVcsHooks, uninstallVcsHooks, pruneWorktrees, installAgentSkills } from "../../utils/invoke";
+import { runDoctor, installVcsHooks, uninstallVcsHooks, pruneWorktrees, generateAgentGuides } from "../../utils/invoke";
 import type { DoctorReport, DoctorServiceReport } from "../../types";
 
 function DoctorPage() {
@@ -15,7 +15,7 @@ function DoctorPage() {
   >(null);
   const [hookActionError, setHookActionError] = useState<string | null>(null);
   const [pruneLoading, setPruneLoading] = useState(false);
-  const [skillsInstallLoading, setSkillsInstallLoading] = useState(false);
+  const [guidesGenerateLoading, setGuidesGenerateLoading] = useState(false);
 
   const reloadDoctor = useCallback(async () => {
     if (!projectPath) {
@@ -80,17 +80,17 @@ function DoctorPage() {
     }
   };
 
-  const handleInstallSkills = async () => {
-    if (!projectPath || skillsInstallLoading) return;
+  const handleGenerateGuides = async () => {
+    if (!projectPath || guidesGenerateLoading) return;
     setHookActionError(null);
-    setSkillsInstallLoading(true);
+    setGuidesGenerateLoading(true);
     try {
-      await installAgentSkills(projectPath);
+      await generateAgentGuides(projectPath);
       await reloadDoctor();
     } catch (e) {
-      setHookActionError(`Failed to install skills: ${e}`);
+      setHookActionError(`Failed to generate agent guides: ${e}`);
     } finally {
-      setSkillsInstallLoading(false);
+      setGuidesGenerateLoading(false);
     }
   };
 
@@ -114,7 +114,7 @@ function DoctorPage() {
           {entry.checks.map((check) => {
             const isHooksCheck = showHookActions && check.name === "VCS hooks";
             const isWorktreeCheck = showHookActions && check.name === "Worktree metadata";
-            const isSkillsCheck = showHookActions && check.name === "Agent skills";
+            const isGuidesCheck = showHookActions && check.name === "Agent guides";
             return (
               <tr key={check.name}>
                 <td>
@@ -169,19 +169,15 @@ function DoctorPage() {
                       >
                         {pruneLoading ? "Pruning..." : "Prune"}
                       </button>
-                    ) : isSkillsCheck ? (
-                      check.available ? (
-                        <span style={{ color: "var(--text-muted)", fontSize: 12 }}>Installed</span>
-                      ) : (
-                        <button
-                          className="btn btn-primary"
-                          onClick={handleInstallSkills}
-                          disabled={skillsInstallLoading}
-                          style={{ padding: "4px 12px", fontSize: 12 }}
-                        >
-                          {skillsInstallLoading ? "Installing..." : "Install"}
-                        </button>
-                      )
+                    ) : isGuidesCheck ? (
+                      <button
+                        className={check.available ? "btn" : "btn btn-primary"}
+                        onClick={handleGenerateGuides}
+                        disabled={guidesGenerateLoading}
+                        style={{ padding: "4px 12px", fontSize: 12 }}
+                      >
+                        {guidesGenerateLoading ? "Generating..." : check.available ? "Regenerate" : "Generate"}
+                      </button>
                     ) : (
                       <span style={{ color: "var(--text-muted)", fontSize: 12 }}>-</span>
                     )}

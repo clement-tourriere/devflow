@@ -61,7 +61,7 @@ fn env_auto_approve() -> bool {
 }
 
 /// Executes hooks for a given phase, handling template rendering,
-/// approval checks, conditions, and blocking/background dispatch.
+/// approval checks, conditions, failure policy, and explicit background dispatch.
 pub struct HookEngine {
     template_engine: TemplateEngine,
     hooks_config: HooksConfig,
@@ -280,7 +280,7 @@ impl HookEngine {
         command_template: &str,
         extended: Option<&super::ExtendedHookEntry>,
         context: &HookContext,
-        phase_blocking: bool,
+        _phase_blocking: bool,
     ) -> Result<HookOutcome> {
         // Check condition
         if let Some(ext) = &extended {
@@ -302,7 +302,7 @@ impl HookEngine {
         }
 
         // Determine if this should run in the background
-        let run_background = extended.map(|e| e.background).unwrap_or(false) || !phase_blocking;
+        let run_background = extended.map(|e| e.background).unwrap_or(false);
 
         // Resolve working_dir once — background hooks must honor it too.
         let working_dir = if let Some(ext) = &extended {
@@ -366,7 +366,7 @@ impl HookEngine {
         name: &str,
         act: &ActionHookEntry,
         context: &HookContext,
-        phase_blocking: bool,
+        _phase_blocking: bool,
     ) -> Result<HookOutcome> {
         // Check condition
         if let Some(outcome) = self.check_condition(name, &act.condition, context)? {
@@ -415,8 +415,10 @@ impl HookEngine {
             }
         }
 
-        // Determine if this should run in the background
-        let run_background = act.background || !phase_blocking;
+        // Determine if this should run in the background. Phase blocking controls
+        // failure policy only; hooks run synchronously unless explicitly marked
+        // `background: true`.
+        let run_background = act.background;
 
         let working_dir = act
             .working_dir
@@ -1164,5 +1166,30 @@ mod tests {
             .unwrap();
         assert_eq!(result.skipped, 1);
         assert!(!tmp.path().join("should-not-exist.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_post_switch_hook_runs_synchronously_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut hooks: HooksConfig = IndexMap::new();
+        let mut phase_hooks = IndexMap::new();
+        phase_hooks.insert(
+            "write-marker".to_string(),
+            HookEntry::Simple("printf ran > post-switch-marker.txt".to_string()),
+        );
+        hooks.insert(HookPhase::PostSwitch, phase_hooks);
+
+        let engine = HookEngine::new_no_approval(hooks, tmp.path().to_path_buf());
+        let result = engine
+            .run_phase(&HookPhase::PostSwitch, &basic_context())
+            .await
+            .unwrap();
+
+        assert_eq!(result.succeeded, 1);
+        assert_eq!(result.background, 0);
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("post-switch-marker.txt")).unwrap(),
+            "ran"
+        );
     }
 }

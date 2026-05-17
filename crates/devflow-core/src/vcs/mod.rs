@@ -84,6 +84,12 @@ pub trait VcsProvider: Send {
     /// Check if a hook file at the given path was written by devflow.
     fn is_devflow_hook(&self, hook_path: &Path) -> Result<bool>;
 
+    /// Hook files managed by devflow for this repository, when the VCS exposes
+    /// a hook directory. Pure jj repositories may return an empty list.
+    fn hook_paths(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
     // ── Meta ───────────────────────────────────────────────────────
     fn provider_name(&self) -> &'static str;
 

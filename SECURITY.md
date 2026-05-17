@@ -34,7 +34,7 @@ You should receive an acknowledgment within 48 hours. We aim to release a fix wi
 - Hooks execute shell commands defined in `.devflow.yml`
 - The approval system prevents unauthorized hook execution in `--non-interactive` mode
 - Review hook commands before approving: `devflow hook show`
-- Sandbox mode (`--sandboxed`) restricts filesystem and command access
+- devflow does not provide a general-purpose workspace sandbox; use your agent harness, containers, VMs, or a dedicated sandbox platform for hard isolation
 
 ### Proxy Certificates
 

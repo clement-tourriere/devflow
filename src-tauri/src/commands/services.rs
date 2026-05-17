@@ -26,6 +26,7 @@ pub struct AddServiceRequest {
     pub auto_workspace: Option<bool>,
     pub image: Option<String>,
     pub seed_from: Option<String>,
+    pub storage: Option<String>,
     pub docker_command: Option<Vec<String>>,
     pub docker_environment: Option<HashMap<String, String>>,
     pub docker_restart_policy: Option<String>,
@@ -115,6 +116,60 @@ pub async fn add_service(
     Ok(service_entry(&named, "local_state"))
 }
 
+fn normalize_storage_preference(
+    storage: Option<&str>,
+    provider_type: &str,
+    service_type: &str,
+) -> Result<Option<String>, String> {
+    let Some(storage) = storage.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+
+    if provider_type != "local" || service_type != "postgres" {
+        return Err(
+            "storage preference is only supported for local PostgreSQL services".to_string(),
+        );
+    }
+
+    let normalized = storage.to_ascii_lowercase().replace('-', "_");
+    let normalized = match normalized.as_str() {
+        "" | "auto" => "auto".to_string(),
+        "apfs" | "apfs_clone" => "apfs_clone".to_string(),
+        "zfs" | "reflink" | "copy" => normalized,
+        other => {
+            return Err(format!(
+                "invalid storage preference '{}'; expected auto, zfs, apfs_clone, reflink, or copy",
+                other
+            ));
+        }
+    };
+
+    Ok(Some(normalized))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_storage_preference;
+
+    #[test]
+    fn storage_preference_normalizes_gui_values() {
+        assert_eq!(
+            normalize_storage_preference(Some("APFS"), "local", "postgres").unwrap(),
+            Some("apfs_clone".to_string())
+        );
+        assert_eq!(
+            normalize_storage_preference(Some("copy"), "local", "postgres").unwrap(),
+            Some("copy".to_string())
+        );
+    }
+
+    #[test]
+    fn storage_preference_rejects_wrong_service_type() {
+        let err = normalize_storage_preference(Some("copy"), "local", "mysql").unwrap_err();
+        assert!(err.contains("only supported for local PostgreSQL"));
+    }
+}
+
 fn build_named_config(request: &AddServiceRequest) -> Result<NamedServiceConfig, String> {
     let provider_type = if request.provider_type.is_empty() {
         if request.service_type == "redis" {
@@ -127,6 +182,11 @@ fn build_named_config(request: &AddServiceRequest) -> Result<NamedServiceConfig,
     };
 
     let auto_workspace = request.auto_workspace.unwrap_or(true);
+    let storage = normalize_storage_preference(
+        request.storage.as_deref(),
+        &provider_type,
+        &request.service_type,
+    )?;
 
     let mut named = NamedServiceConfig {
         name: request.name.clone(),
@@ -180,7 +240,7 @@ fn build_named_config(request: &AddServiceRequest) -> Result<NamedServiceConfig,
                             .unwrap_or_else(|| "postgres:17".to_string()),
                     ),
                     data_root: None,
-                    storage: None,
+                    storage,
                     port_range_start: None,
                     postgres_user: None,
                     postgres_password: None,
@@ -313,222 +373,34 @@ pub async fn stop_service(
 
 #[tauri::command]
 pub async fn run_doctor(project_path: String) -> Result<serde_json::Value, String> {
-    fn check(name: &str, available: bool, detail: impl Into<String>) -> services::DoctorCheck {
-        services::DoctorCheck {
-            name: name.to_string(),
-            available,
-            detail: detail.into(),
-        }
-    }
-
     let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let project_dir = std::path::Path::new(&project_path);
 
-    let mut general_checks: Vec<services::DoctorCheck> = Vec::new();
-
-    // Config file + parsing
-    if config_path.exists() {
-        general_checks.push(check(
-            "Config file",
-            true,
-            format!("Found {}", config_path.display()),
-        ));
-    } else {
-        general_checks.push(check(
-            "Config file",
-            false,
-            "Missing .devflow.yml (run devflow init)",
-        ));
-    }
-
-    let _config = match devflow_core::config::Config::from_file(&config_path) {
-        Ok(cfg) => {
-            general_checks.push(check("Config syntax", true, "Configuration is valid"));
-            Some(cfg)
-        }
-        Err(e) => {
-            general_checks.push(check("Config syntax", false, format!("{}", e)));
-            None
-        }
-    };
-
-    // VCS repository detection
-    let vcs_repo = match devflow_core::vcs::detect_vcs_provider(&project_path) {
-        Ok(vcs) => {
-            general_checks.push(check(
-                "VCS repository",
-                true,
-                format!("Detected {} repository", vcs.provider_name()),
-            ));
-            Some(vcs)
-        }
-        Err(e) => {
-            general_checks.push(check("VCS repository", false, format!("{}", e)));
-            None
-        }
-    };
-
-    // Hooks installation (best effort)
-    let hooks_dir = project_dir.join(".git").join("hooks");
-    let has_hooks = if hooks_dir.exists() {
-        let post_checkout = hooks_dir.join("post-checkout");
-        if let Some(ref vcs) = vcs_repo {
-            post_checkout.exists() && vcs.is_devflow_hook(&post_checkout).unwrap_or(false)
-        } else {
-            post_checkout.exists()
-        }
-    } else {
-        false
-    };
-
-    general_checks.push(check(
-        "VCS hooks",
-        has_hooks,
-        if has_hooks {
-            "devflow hooks installed".to_string()
-        } else {
-            "Hooks not installed (use Install hooks below or run devflow install-hooks)".to_string()
-        },
-    ));
-
-    // Worktree metadata health
-    if let Some(ref vcs) = vcs_repo {
-        if vcs.supports_worktrees() {
-            match vcs.list_worktrees() {
-                Ok(worktrees) => {
-                    let stale: Vec<_> = worktrees
-                        .iter()
-                        .filter(|wt| !wt.is_main && !wt.path.exists())
-                        .collect();
-
-                    if stale.is_empty() {
-                        general_checks.push(check("Worktree metadata", true, "No stale entries"));
-                    } else {
-                        let examples = stale
-                            .iter()
-                            .take(3)
-                            .map(|wt| wt.path.display().to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        general_checks.push(check(
-                            "Worktree metadata",
-                            false,
-                            format!(
-                                "{} stale entr{} (run `git worktree prune`): {}",
-                                stale.len(),
-                                if stale.len() == 1 { "y" } else { "ies" },
-                                examples
-                            ),
-                        ));
-                    }
-                }
-                Err(e) => {
-                    general_checks.push(check(
-                        "Worktree metadata",
-                        false,
-                        format!("Inspection failed: {}", e),
-                    ));
-                }
-            }
-        }
-    }
-
-    // Workspace registry stale paths
-    match LocalStateManager::new() {
-        Ok(state) => {
-            let missing: Vec<_> = state
-                .get_workspaces_by_dir(project_dir)
-                .into_iter()
-                .filter_map(|b| b.worktree_path.map(|p| (b.name, p)))
-                .filter(|(_, p)| !std::path::Path::new(p).exists())
-                .collect();
-
-            if missing.is_empty() {
-                general_checks.push(check("Workspace registry paths", true, "No stale entries"));
+    let config = devflow_core::config::Config::from_file(&config_path).ok();
+    let config_for_checks = config.clone().unwrap_or_default();
+    let mut general_checks = devflow_core::doctor::project_doctor_checks(
+        &config_for_checks,
+        config_path.exists().then_some(config_path.as_path()),
+        project_dir,
+    );
+    let syntax_insert_at = usize::from(!general_checks.is_empty());
+    general_checks.insert(
+        syntax_insert_at,
+        services::DoctorCheck {
+            name: "Config syntax".to_string(),
+            available: config.is_some(),
+            detail: if config.is_some() {
+                "Configuration is valid".to_string()
+            } else if config_path.exists() {
+                devflow_core::config::Config::from_file(&config_path)
+                    .err()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "Configuration could not be parsed".to_string())
             } else {
-                let examples = missing
-                    .iter()
-                    .take(3)
-                    .map(|(workspace, p)| format!("{} -> {}", workspace, p))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                general_checks.push(check(
-                    "Workspace registry paths",
-                    false,
-                    format!(
-                        "{} stale entr{}: {}",
-                        missing.len(),
-                        if missing.len() == 1 { "y" } else { "ies" },
-                        examples
-                    ),
-                ));
-            }
-        }
-        Err(e) => {
-            general_checks.push(check(
-                "Workspace registry paths",
-                false,
-                format!("Inspection failed: {}", e),
-            ));
-        }
-    }
-
-    if let Ok((config_count, local_count, local_names)) =
-        crate::commands::project_config::service_source_counts(project_dir)
-    {
-        let detail = if local_count == 0 {
-            format!(
-                "{} service(s) from config, none from local state",
-                config_count
-            )
-        } else {
-            format!(
-                "{} service(s) from config, {} from local state{}",
-                config_count,
-                local_count,
-                if local_names.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", local_names.join(", "))
-                }
-            )
-        };
-        general_checks.push(check("Service config sources", true, detail));
-    }
-
-    // Agent skills check
-    let skill_status = devflow_core::agent::check_agent_skills_installed(project_dir);
-    general_checks.push(check(
-        "Agent skills",
-        skill_status.installed,
-        if skill_status.installed {
-            format!("{} skills installed", skill_status.installed_skills.len())
-        } else if !skill_status.installed_skills.is_empty() {
-            // Some skills installed but update needed
-            if !skill_status.stale_skills.is_empty() && !skill_status.missing_skills.is_empty() {
-                format!(
-                    "{} installed, {} outdated, {} new available",
-                    skill_status.installed_skills.len(),
-                    skill_status.stale_skills.len(),
-                    skill_status.missing_skills.len()
-                )
-            } else if !skill_status.stale_skills.is_empty() {
-                format!(
-                    "{} installed, {} need update",
-                    skill_status.installed_skills.len(),
-                    skill_status.stale_skills.len()
-                )
-            } else {
-                format!(
-                    "{} installed, {} new available",
-                    skill_status.installed_skills.len(),
-                    skill_status.missing_skills.len()
-                )
-            }
-        } else {
-            "Not installed".to_string()
+                "Skipped because .devflow.yml is missing".to_string()
+            },
         },
-    ));
+    );
 
     let service_config =
         crate::commands::project_config::load_project_config_with_local_state(project_dir).ok();
@@ -811,10 +683,38 @@ pub async fn discover_docker_containers(
 }
 
 #[tauri::command]
-pub async fn install_agent_skills(project_path: String) -> Result<Vec<String>, String> {
+pub async fn generate_agent_guides(project_path: String) -> Result<Vec<String>, String> {
     let project_dir = std::path::Path::new(&project_path);
     let config =
         crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
     devflow_core::agent::install_agent_skills(&config, project_dir)
         .map_err(crate::commands::format_error)
+}
+
+#[tauri::command]
+pub async fn install_agent_skills(project_path: String) -> Result<Vec<String>, String> {
+    generate_agent_guides(project_path).await
+}
+
+#[tauri::command]
+pub async fn uninstall_agent_skills(project_path: String) -> Result<(), String> {
+    let project_dir = std::path::Path::new(&project_path);
+    devflow_core::agent::uninstall_agent_skills(project_dir).map_err(crate::commands::format_error)
+}
+
+#[tauri::command]
+pub async fn check_agent_guides(
+    project_path: String,
+) -> Result<devflow_core::agent::SkillInstallStatus, String> {
+    let project_dir = std::path::Path::new(&project_path);
+    Ok(devflow_core::agent::check_agent_skills_installed(
+        project_dir,
+    ))
+}
+
+#[tauri::command]
+pub async fn check_agent_skills(
+    project_path: String,
+) -> Result<devflow_core::agent::SkillInstallStatus, String> {
+    check_agent_guides(project_path).await
 }

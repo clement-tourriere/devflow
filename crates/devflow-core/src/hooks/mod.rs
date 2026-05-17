@@ -66,7 +66,11 @@ impl fmt::Display for HookPhase {
 }
 
 impl HookPhase {
-    /// Whether this phase blocks the caller (true) or runs in the background (false).
+    /// Whether failures in this phase should block the lifecycle operation by default.
+    ///
+    /// Hooks themselves run synchronously unless the hook entry sets
+    /// `background: true`; non-blocking phases merely default to
+    /// `continue_on_error: true`.
     pub fn is_blocking(&self) -> bool {
         matches!(
             self,

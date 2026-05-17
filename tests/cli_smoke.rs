@@ -101,9 +101,38 @@ fn service_help() {
 }
 
 #[test]
+fn service_add_rejects_invalid_local_postgres_storage() {
+    let out = run_in_repo(&[
+        "--non-interactive",
+        "service",
+        "add",
+        "app-db",
+        "--provider",
+        "local",
+        "--service-type",
+        "postgres",
+        "--storage",
+        "mystery",
+    ]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("invalid --storage value"));
+}
+
+#[test]
 fn hook_help() {
     let out = run(&["hook", "--help"]);
     assert!(out.status.success());
+}
+
+#[test]
+fn hook_explain_post_switch_describes_synchronous_execution() {
+    let out = run(&["hook", "explain", "post-switch"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Execution: Synchronous by default"));
+    assert!(stdout.contains("Failures:  Continue by default"));
+    assert!(!stdout.contains("runs in background"));
 }
 
 #[test]
@@ -151,8 +180,13 @@ fn json_doctor_runs() {
     let out = run_in_repo(&["--json", "doctor"]);
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    // Should be valid JSON
-    assert!(serde_json::from_str::<serde_json::Value>(&stdout).is_ok());
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid doctor JSON");
+    let checks = json["general"]["checks"]
+        .as_array()
+        .expect("general checks array");
+    assert!(checks.iter().any(|check| check["name"] == "Config file"));
+    assert!(checks.iter().any(|check| check["name"] == "Agent guides"));
+    assert!(json["general"]["summary"]["total"].as_u64().unwrap_or(0) >= 2);
 }
 
 #[test]
@@ -279,4 +313,99 @@ fn init_creates_config() {
 
     assert!(out.status.success(), "init failed: {:?}", out);
     assert!(tmp.path().join(".devflow.yml").exists());
+}
+
+#[test]
+fn json_switch_create_reports_agent_workdir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+
+    let init = Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(&repo)
+        .output()
+        .expect("git init");
+    if !init.status.success() {
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&repo)
+            .output()
+            .expect("git init fallback");
+        Command::new("git")
+            .args(["checkout", "-b", "main"])
+            .current_dir(&repo)
+            .output()
+            .expect("git checkout main");
+    }
+    Command::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(&repo)
+        .output()
+        .expect("git config email");
+    Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(&repo)
+        .output()
+        .expect("git config name");
+    Command::new("git")
+        .args(["commit", "--allow-empty", "-m", "init"])
+        .current_dir(&repo)
+        .output()
+        .expect("git commit");
+
+    std::fs::write(
+        repo.join(".devflow.yml"),
+        r#"name: smoke-agent
+worktree:
+  enabled: true
+  path_template: "../{repo}-{workspace}"
+"#,
+    )
+    .unwrap();
+
+    let xdg = tmp.path().join("xdg");
+    let link = Command::new(devflow_bin())
+        .args(["link", "main"])
+        .env("XDG_DATA_HOME", &xdg)
+        .current_dir(&repo)
+        .output()
+        .expect("devflow link");
+    assert!(link.status.success(), "link failed: {:?}", link);
+
+    let out = Command::new(devflow_bin())
+        .args([
+            "--json",
+            "--non-interactive",
+            "switch",
+            "-c",
+            "agent/smoke",
+            "--no-services",
+            "--no-verify",
+        ])
+        .env("XDG_DATA_HOME", &xdg)
+        .current_dir(&repo)
+        .output()
+        .expect("devflow switch");
+    assert!(out.status.success(), "switch failed: {:?}", out);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let worktree_path = json["worktree_path"].as_str().expect("worktree_path");
+    assert_eq!(json["agent_workdir"].as_str(), Some(worktree_path));
+    let cd_hint = format!("cd {worktree_path}");
+    assert_eq!(json["cd_hint"].as_str(), Some(cd_hint.as_str()));
+    assert!(std::path::Path::new(worktree_path).is_dir());
+
+    let context = Command::new(devflow_bin())
+        .args(["--json", "agent", "context", "--workspace", "agent/smoke"])
+        .env("XDG_DATA_HOME", &xdg)
+        .current_dir(&repo)
+        .output()
+        .expect("devflow agent context");
+    assert!(context.status.success(), "context failed: {:?}", context);
+    let context_stdout = String::from_utf8_lossy(&context.stdout);
+    let context_json: serde_json::Value = serde_json::from_str(&context_stdout).unwrap();
+    assert_eq!(context_json["agent_workdir"].as_str(), Some(worktree_path));
+    assert_eq!(context_json["cd_hint"].as_str(), Some(cd_hint.as_str()));
 }
