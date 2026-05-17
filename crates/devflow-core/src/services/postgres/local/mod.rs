@@ -770,6 +770,9 @@ impl ServiceProvider for LocalProvider {
             ),
         });
 
+        checks.push(data_root_doctor_check(&self.data_root));
+        checks.push(port_range_doctor_check(self.port_range_start));
+
         if self.storage_preference.is_some() {
             let preference = self
                 .storage
@@ -904,8 +907,44 @@ impl ServiceProvider for LocalProvider {
     }
 }
 
+fn data_root_doctor_check(data_root: &std::path::Path) -> DoctorCheck {
+    match std::fs::metadata(data_root) {
+        Ok(metadata) if metadata.is_dir() => DoctorCheck {
+            name: "Data root".to_string(),
+            available: true,
+            detail: format!("Using {}", data_root.display()),
+        },
+        Ok(_) => DoctorCheck {
+            name: "Data root".to_string(),
+            available: false,
+            detail: format!("{} exists but is not a directory", data_root.display()),
+        },
+        Err(err) => DoctorCheck {
+            name: "Data root".to_string(),
+            available: false,
+            detail: format!("{} is not accessible: {}", data_root.display(), err),
+        },
+    }
+}
+
+fn port_range_doctor_check(port_range_start: u16) -> DoctorCheck {
+    let available = port_range_start >= 1024;
+    DoctorCheck {
+        name: "Port range".to_string(),
+        available,
+        detail: if available {
+            format!("Workspace ports start at {}", port_range_start)
+        } else {
+            format!(
+                "Workspace ports start at {}; choose an unprivileged port >= 1024",
+                port_range_start
+            )
+        },
+    }
+}
+
 #[cfg(test)]
-mod tests {
+mod regression_tests {
     use super::*;
 
     async fn provider_for(
@@ -975,6 +1014,19 @@ mod tests {
 mod tests {
     use super::*;
     use model::StorageDriver;
+
+    #[test]
+    fn doctor_reports_data_root_and_privileged_port_range() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root_check = data_root_doctor_check(tmp.path());
+        assert_eq!(root_check.name, "Data root");
+        assert!(root_check.available);
+
+        let port_check = port_range_doctor_check(80);
+        assert_eq!(port_check.name, "Port range");
+        assert!(!port_check.available);
+        assert!(port_check.detail.contains(">= 1024"));
+    }
 
     #[tokio::test]
     async fn create_project_record_honors_copy_storage_preference() {

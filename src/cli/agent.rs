@@ -20,41 +20,86 @@ pub(super) async fn handle_agent_command(
                 let project_dir = crate::cli::operation_project_dir(config_path);
                 let workspaces = state_manager.get_workspaces_by_dir(&project_dir);
 
-                let executed: Vec<_> = workspaces
+                let project_dir_string = project_dir.display().to_string();
+                let executed_count = workspaces
                     .iter()
                     .filter(|b| b.executed_command.is_some())
-                    .collect();
+                    .count();
+                let agent_workspace_count = workspaces
+                    .iter()
+                    .filter(|b| b.name.starts_with("agent/"))
+                    .count();
 
                 if json_output {
-                    let items: Vec<serde_json::Value> = executed
+                    let items: Vec<serde_json::Value> = workspaces
                         .iter()
                         .map(|b| {
+                            let agent_workdir = b
+                                .worktree_path
+                                .clone()
+                                .unwrap_or_else(|| project_dir_string.clone());
                             serde_json::json!({
                                 "workspace": b.name,
+                                "is_agent_workspace": b.name.starts_with("agent/"),
                                 "created_at": b.created_at.to_rfc3339(),
                                 "worktree_path": b.worktree_path,
+                                "agent_workdir": agent_workdir,
                                 "executed_command": b.executed_command,
                                 "execution_status": b.execution_status,
+                                "executed_at": b.executed_at.map(|t| t.to_rfc3339()),
                             })
                         })
                         .collect();
-                    println!("{}", serde_json::to_string_pretty(&items)?);
-                } else if executed.is_empty() {
-                    println!("No workspaces with executed commands.");
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "project_dir": project_dir_string,
+                            "total_workspaces": workspaces.len(),
+                            "agent_workspaces": agent_workspace_count,
+                            "executed_workspaces": executed_count,
+                            "workspaces": items,
+                        }))?
+                    );
                 } else {
-                    println!("Workspaces with commands:");
-                    for b in executed {
-                        let cmd = b.executed_command.as_deref().unwrap_or("unknown");
-                        let status = b.execution_status.as_deref().unwrap_or("unknown");
-                        println!(
-                            "  {} ({}, {}) — created {}",
-                            b.name,
-                            cmd,
-                            status,
-                            b.created_at.format("%Y-%m-%d %H:%M")
-                        );
+                    println!(
+                        "Registered workspaces: {} ({} agent, {} with executed commands)",
+                        workspaces.len(),
+                        agent_workspace_count,
+                        executed_count
+                    );
+                    let executed: Vec<_> = workspaces
+                        .iter()
+                        .filter(|b| b.executed_command.is_some())
+                        .collect();
+                    if executed.is_empty() {
+                        println!("No workspaces with executed commands.");
+                    } else {
+                        println!("Workspaces with commands:");
+                        for b in executed {
+                            let cmd = b.executed_command.as_deref().unwrap_or("unknown");
+                            let status = b.execution_status.as_deref().unwrap_or("unknown");
+                            println!(
+                                "  {} ({}, {}) — created {}",
+                                b.name,
+                                cmd,
+                                status,
+                                b.created_at.format("%Y-%m-%d %H:%M")
+                            );
+                        }
                     }
                 }
+            } else if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "project_dir": null,
+                        "total_workspaces": 0,
+                        "agent_workspaces": 0,
+                        "executed_workspaces": 0,
+                        "workspaces": [],
+                        "warning": "No project configuration found",
+                    }))?
+                );
             } else {
                 println!("No project configuration found.");
             }

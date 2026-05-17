@@ -77,7 +77,7 @@ devflow switch -c agent/fix-login -x claude --detach   # in a tmux/zellij sessio
 
 # Check agent workspaces
 devflow agent status
-devflow --json agent status
+devflow --json agent status        # summary counts + per-workspace agent_workdir
 
 # Get project context (workspace info, services, connections)
 devflow agent context

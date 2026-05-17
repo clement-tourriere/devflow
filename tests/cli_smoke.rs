@@ -408,4 +408,22 @@ worktree:
     let context_json: serde_json::Value = serde_json::from_str(&context_stdout).unwrap();
     assert_eq!(context_json["agent_workdir"].as_str(), Some(worktree_path));
     assert_eq!(context_json["cd_hint"].as_str(), Some(cd_hint.as_str()));
+
+    let status = Command::new(devflow_bin())
+        .args(["--json", "agent", "status"])
+        .env("XDG_DATA_HOME", &xdg)
+        .current_dir(&repo)
+        .output()
+        .expect("devflow agent status");
+    assert!(status.status.success(), "status failed: {:?}", status);
+    let status_stdout = String::from_utf8_lossy(&status.stdout);
+    let status_json: serde_json::Value = serde_json::from_str(&status_stdout).unwrap();
+    assert!(status_json["total_workspaces"].as_u64().unwrap_or(0) >= 1);
+    assert!(status_json["agent_workspaces"].is_number());
+    assert!(status_json["executed_workspaces"].is_number());
+    let workspaces = status_json["workspaces"].as_array().unwrap();
+    let first_entry = workspaces
+        .first()
+        .expect("at least one workspace status entry");
+    assert!(first_entry["agent_workdir"].as_str().is_some());
 }

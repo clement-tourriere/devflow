@@ -488,7 +488,7 @@ devflow commit --ai --dry-run
 
 ### `devflow agent status`
 
-Show workspaces that have executed commands tracked by devflow.
+Show agent/workspace status. JSON output returns a summary plus all registered workspaces with `agent_workdir` for automation.
 
 ```bash
 devflow agent status

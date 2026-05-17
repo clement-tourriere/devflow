@@ -183,6 +183,8 @@ devflow sync-ai-configs                                    # sync .claude/.curso
 
 AI tool configs (`.claude/`, `.cursor/`, `.opencode/`, `.agents/`) are copied into new worktrees automatically. In `--non-interactive` mode, unapproved hooks are skipped with a warning (set `DEVFLOW_APPROVE_HOOKS=1` to auto-approve in CI/agent runs). See `AGENTS.md` for the recommended coding-agent workflow.
 
+`devflow --json agent status` reports workspace counts and `agent_workdir` values. Generate project guides with `devflow agent skill --target all`, or a root guide with `devflow agent docs`.
+
 ## Configuration
 
 `devflow init` creates a `.devflow.yml` (a lightweight `devflow.toml` is also read). A minimal example:

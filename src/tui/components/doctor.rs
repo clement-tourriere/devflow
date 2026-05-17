@@ -193,6 +193,19 @@ impl Component for DoctorComponent {
                 format!("  {}/{} checks passed", passed, total),
                 Style::default().fg(summary_color),
             ));
+            if passed < total {
+                let failed = entry
+                    .checks
+                    .iter()
+                    .filter(|c| !c.available)
+                    .map(|c| c.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                lines.push(Line::styled(
+                    format!("  Needs attention: {}", failed),
+                    Style::default().fg(theme::LOG_WARN),
+                ));
+            }
         } else {
             lines.push(Line::styled(
                 "No doctor results available",

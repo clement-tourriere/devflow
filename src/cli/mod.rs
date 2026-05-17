@@ -347,8 +347,8 @@ Examples:
 
     // ── AI Agent ──
     #[command(
-        about = "AI agent integration (status, context, skill)",
-        long_about = "AI agent integration.\n\nManage AI coding agents that work in isolated workspace environments.\nTrack agent status, emit project context, and install project-specific skills.\n\nTo launch an agent inside an isolated workspace, use `devflow switch -c <workspace> -x <command>`.\n\nExamples:\n  devflow agent status\n  devflow agent context\n  devflow agent context --format json\n  devflow agent skill\n  devflow switch -c agent/fix-login -x claude -- 'Fix the login timeout bug'",
+        about = "AI agent integration (status, context, skill, docs)",
+        long_about = "AI agent integration.\n\nGenerate context and guide files for coding agents that work in devflow workspaces.\nAgent status JSON includes workspace counts and agent_workdir values for automation.\n\nExamples:\n  devflow agent status\n  devflow --json agent status\n  devflow agent context\n  devflow agent skill --target claude\n  devflow agent docs",
         hide = true
     )]
     Agent {

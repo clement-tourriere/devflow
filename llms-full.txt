@@ -142,9 +142,10 @@ PROJECT_ROOT=$(devflow --json list | jq -r '.project.root')
 | Command | Description |
 |---|---|
 | `devflow switch -c <ws> -x <cmd> [--detach] [-- <args>]` | Launch an agent/command inside an isolated workspace |
-| `devflow agent status` | Show agent status across all workspaces |
-| `devflow agent context [--format json] [--workspace <b>]` | Output project context for agents |
-| `devflow agent skill` | Install bundled workspace helper skills |
+| `devflow agent status` | Show agent/workspace status; JSON includes counts and `agent_workdir` values |
+| `devflow agent context [--format json] [--workspace <b>]` | Output project context for agents, including `agent_workdir` |
+| `devflow agent skill [--target generic\|claude\|cursor\|opencode\|all]` | Generate AI tool guide/rule files |
+| `devflow agent docs` | Generate AGENTS.md for this project |
 
 ### Plugins
 

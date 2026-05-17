@@ -1,7 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
 import { runDoctor, installVcsHooks, uninstallVcsHooks, pruneWorktrees, generateAgentGuides } from "../../utils/invoke";
-import type { DoctorReport, DoctorServiceReport } from "../../types";
+import type { DoctorCheck, DoctorReport, DoctorServiceReport } from "../../types";
+
+const summarizeChecks = (checks: DoctorCheck[]) => {
+  const total = checks.length;
+  const passed = checks.filter((check) => check.available).length;
+  return { total, passed, failed: total - passed };
+};
 
 function DoctorPage() {
   const { "*": splat } = useParams();
@@ -92,6 +98,29 @@ function DoctorPage() {
     } finally {
       setGuidesGenerateLoading(false);
     }
+  };
+
+  const renderSummary = (report: DoctorReport) => {
+    const general = summarizeChecks(report.general);
+    const serviceChecks = report.services.flatMap((service) => service.checks);
+    const services = summarizeChecks(serviceChecks);
+    const total = general.total + services.total;
+    const passed = general.passed + services.passed;
+    const failed = total - passed;
+
+    return (
+      <div className="card" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+        <div>
+          <div className="card-title" style={{ marginBottom: 4 }}>Health Summary</div>
+          <div style={{ color: "var(--text-secondary)", fontSize: 13 }}>
+            {passed}/{total} checks passing · {general.failed} setup issue{general.failed === 1 ? "" : "s"} · {services.failed} service issue{services.failed === 1 ? "" : "s"}
+          </div>
+        </div>
+        <span className={`badge ${failed === 0 ? "badge-success" : "badge-warning"}`} style={{ fontSize: 12 }}>
+          {failed === 0 ? "All good" : `${failed} action${failed === 1 ? "" : "s"} needed`}
+        </span>
+      </div>
+    );
   };
 
   const renderServiceReport = (
@@ -226,6 +255,8 @@ function DoctorPage() {
           <p style={{ color: "var(--danger)" }}>{hookActionError}</p>
         </div>
       )}
+
+      {!loading && !error && report && renderSummary(report)}
 
       {!loading && !error && report &&
         renderServiceReport(

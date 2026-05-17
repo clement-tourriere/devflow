@@ -85,7 +85,7 @@ Extensibility:
   plugin              Manage plugin services (list, check, init)
 
 AI Agents:
-  agent status        Show agent status across all workspaces
+  agent status        Show agent/workspace status for automation
   agent context       Output project context for current workspace
   agent skill         Install workspace helper skills for AI tools
 

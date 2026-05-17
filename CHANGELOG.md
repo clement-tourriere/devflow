@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- **Agent workflow** — `devflow agent skill` now generates harness-specific guide/rule files instead of installing embedded bundled skills; switch/context JSON expose `agent_workdir` for agent tool workdirs.
+- **Hooks** — Lifecycle hooks run synchronously by default unless `background: true`; non-blocking phases now describe failure policy rather than background execution.
+- **Local PostgreSQL storage** — `local.storage` / `--storage` support `auto`, `zfs`, `apfs_clone`, `reflink`, and `copy`, with clearer doctor diagnostics for configured preferences and a matching GUI Add Service selector.
+- **Doctor UX** — Project-level doctor checks are shared across CLI, TUI, and GUI; `devflow --json doctor` now includes general checks and a summary for automation.
+- **Agent automation** — `devflow --json agent status` now returns workspace summary counts and per-workspace `agent_workdir` values.
+- **GUI setup** — Doctor/Setup shows a health summary, and local PostgreSQL doctor checks include data-root and port-range diagnostics.
+
+### Removed
+
+- **Workspace sandbox** — Removed devflow's partial workspace sandbox implementation; use an agent harness, container, VM, or dedicated sandbox platform for hard isolation.
+
 ## v0.7.1 (2026-08-09)
 
 ### Fix
