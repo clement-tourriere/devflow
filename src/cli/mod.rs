@@ -793,7 +793,7 @@ pub enum ProxyCommands {
         api_port: Option<u16>,
         #[arg(
             long,
-            help = "Domain suffix for auto-discovered containers [default: localhost]"
+            help = "Domain suffix for auto-discovered containers [default: local on macOS, localhost elsewhere]"
         )]
         domain_suffix: Option<String>,
         #[arg(
@@ -801,6 +801,11 @@ pub enum ProxyCommands {
             help = "Disable auto-connecting containers to shared devflow network"
         )]
         no_auto_network: bool,
+        #[arg(
+            long,
+            help = "Disable mDNS advertising of friendly .local names (macOS)"
+        )]
+        no_mdns: bool,
     },
     #[command(about = "Stop the reverse proxy")]
     Stop,

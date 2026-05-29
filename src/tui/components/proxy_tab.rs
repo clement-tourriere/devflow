@@ -11,10 +11,10 @@ use super::Component;
 use crate::tui::action::*;
 use crate::tui::theme;
 
-/// Proxy tab — reverse proxy management.
+/// Proxy tab — proxy/discovery management.
 ///
 /// Top:    proxy status (running/stopped, ports, CA status).
-/// Bottom: container routing table (domain → container → upstream).
+/// Bottom: container endpoint table (domain → container → upstream).
 pub struct ProxyTabComponent {
     status: Option<ProxyStatusData>,
     targets: Vec<ProxyTargetEntry>,
@@ -226,7 +226,7 @@ impl ProxyTabComponent {
 
         if self.targets.is_empty() {
             let hint = Paragraph::new(if self.status.as_ref().is_some_and(|s| s.running) {
-                "No proxied containers"
+                "No discovered endpoints"
             } else {
                 "Start the proxy to see routing targets"
             })
@@ -238,7 +238,7 @@ impl ProxyTabComponent {
         // Header
         let header = Line::from(vec![
             Span::styled(
-                format!("{:<40}", "DOMAIN"),
+                format!("{:<40}", "ENDPOINT"),
                 Style::default().fg(theme::TEXT_SECONDARY).bold(),
             ),
             Span::styled(
@@ -255,7 +255,10 @@ impl ProxyTabComponent {
             .chain(self.targets.iter().enumerate().map(|(i, t)| {
                 let line = Line::from(vec![
                     Span::styled(
-                        format!("{:<40}", format!("https://{}", t.domain)),
+                        format!(
+                            "{:<40}",
+                            devflow_proxy::endpoint::display_endpoint(&t.domain, t.port)
+                        ),
                         Style::default().fg(theme::VALUE_PATH),
                     ),
                     Span::styled(

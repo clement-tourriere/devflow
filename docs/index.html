@@ -996,7 +996,7 @@ eval "$(mise activate bash)"   # or zsh/fish</code></pre>
        │              │  └───────┴───────┴──────────────┘    │
        ├──────────────┴──────────────┬───────────────────────┤
        │    Configuration Layer      │    Reverse Proxy      │
-       │  (.devflow.yml / env vars)  │  (HTTPS *.localhost)  │
+       │  (.devflow.yml / env vars)  │  (HTTPS+mDNS *.local) │
        ├─────────────────────────────┴───────────────────────┤
        │                  State Management                   │
        │           (~/.config/devflow/local_state.yml)       │
@@ -2116,11 +2116,11 @@ devflow service seed main -s app-db --from dump.sql</code></pre>
 <section class="section" id="reverse-proxy">
   <h2><span class="number">09</span> Reverse Proxy</h2>
   <p class="section-desc">
-    The devflow reverse proxy auto-discovers running Docker containers and serves them over HTTPS on <code>*.localhost</code> domains. It handles TLS termination with auto-generated certificates, HTTP-to-HTTPS redirection, and container-to-container DNS resolution via a shared Docker network.
+    The devflow proxy auto-discovers running Docker containers and assigns friendly <code>*.localhost</code> domains. Web services are served over HTTPS with TLS termination and HTTP-to-HTTPS redirection. Database endpoints keep the same generated names but are direct container-IP endpoints, so they work on platforms with routable container IPs and DNS for generated names (Linux, or macOS with OrbStack/similar) and must be used with the native port, not HTTPS/443. devflow does not edit <code>/etc/hosts</code>; if a friendly name does not resolve to the container IP, use the UPSTREAM IP from <code>devflow proxy list</code> or configure DNS in your Docker platform.
   </p>
 
   <h3>How It Works</h3>
-  <p>The proxy monitors Docker events in real time. When a container starts, devflow automatically maps it to a <code>*.localhost</code> domain, generates a TLS certificate signed by a local CA, and begins forwarding HTTPS traffic to the container.</p>
+  <p>The proxy monitors Docker events in real time. When a container starts, devflow automatically maps it to a <code>*.localhost</code> domain. For HTTP services it generates a TLS certificate signed by a local CA and forwards HTTPS traffic to the container. For TCP services such as PostgreSQL, the generated name is advertised as a direct endpoint (for example <code>postgresql://postgres.myapp.localhost:5432</code>) when the host can resolve that name to the container IP.</p>
 
   <div class="callout callout-info">
     <span class="callout-icon">&#9432;</span>
@@ -2208,7 +2208,7 @@ docker compose -p myapp up -d</code></pre>
     <li><strong>Explicit opt-out:</strong> Set the <code>devproxy.enabled=false</code> label to exclude a container.</li>
     <li><strong>Auto-skipped:</strong> Containers named <code>devproxy*</code> or <code>devflow-proxy*</code> are excluded automatically.</li>
   </ul>
-  <p>Containers with explicit domain labels (<code>devproxy.domains</code>, <code>devproxy.domain</code>) or the <code>VIRTUAL_HOST</code> env var are always included, even if they match an auto-skip pattern. Non-running containers are always skipped.</p>
+  <p>Containers with explicit domain labels (<code>devproxy.domains</code>, <code>devproxy.domain</code>) or the <code>VIRTUAL_HOST</code> env var are always included, even if they match an auto-skip pattern. Non-running containers are always skipped. Well-known non-HTTP ports such as PostgreSQL <code>5432</code>, MySQL <code>3306</code>, and Redis <code>6379</code> are shown as native direct endpoints; do not connect to them via HTTPS/443.</p>
 
   <!-- Container-to-Container DNS -->
   <h3 id="proxy-container-dns">Container-to-Container DNS</h3>
@@ -2216,25 +2216,29 @@ docker compose -p myapp up -d</code></pre>
 
   <h4>How it works</h4>
   <ul>
-    <li><strong>Host to container:</strong> <code>https://web.myapp.localhost</code> routes through the proxy with TLS termination.</li>
-    <li><strong>Container to container:</strong> <code>http://web.myapp</code> resolves via Docker&rsquo;s embedded DNS directly, bypassing the proxy.</li>
+    <li><strong>Host to web container:</strong> <code>https://web.myapp.localhost</code> routes through the proxy with TLS termination.</li>
+    <li><strong>Host to database container:</strong> <code>postgresql://postgres.myapp.localhost:5432</code> connects directly to the container IP when your platform supports routable container IPs and DNS for generated names (Linux, OrbStack/similar on macOS). devflow does not edit <code>/etc/hosts</code>.</li>
+    <li><strong>Container to container:</strong> <code>http://web.myapp.localhost</code> resolves via Docker&rsquo;s embedded DNS directly, bypassing the proxy. A suffix-stripped alias such as <code>web.myapp</code> is also registered as a fallback.</li>
   </ul>
-  <p>Each container gets two aliases: the full domain (e.g. <code>web.myapp.localhost</code>) and a suffix-stripped form (e.g. <code>web.myapp</code>). The short form exists because glibc resolves <code>.localhost</code> to <code>127.0.0.1</code> per RFC 6761 before consulting Docker DNS.</p>
+  <p>Each container gets two aliases: the full domain (e.g. <code>web.myapp.localhost</code>) and a suffix-stripped form (e.g. <code>web.myapp</code>). The full <code>.localhost</code> name is the primary devflow name; the short form is only a fallback for environments that special-case <code>.localhost</code> before consulting Docker DNS.</p>
 
   <h4>Testing container-to-container resolution</h4>
 <pre><code class="language-bash"># Start two containers
 docker run -d --name web1 nginx
 docker run -d --name web2 nginx
 
-# From web2, reach web1 by name
+# From web2, reach web1 by localhost name
 docker exec web2 curl -s http://web1.localhost
 
 # Verify DNS resolution
 docker exec web2 nslookup web1.localhost 127.0.0.11
 
+# Fallback for environments that special-case .localhost:
+docker exec web2 curl -s http://web1
+
 # With Compose services
 docker compose -p myapp up -d
-docker exec myapp-api-1 curl -s http://web.myapp</code></pre>
+docker exec myapp-api-1 curl -s http://web.myapp.localhost</code></pre>
 
   <h4>Verify network membership</h4>
 <pre><code class="language-bash">docker network inspect devflow --format '{{range .Containers}}{{.Name}} {{end}}'</code></pre>
@@ -2303,7 +2307,7 @@ Options:
   <h4>Other Commands</h4>
 <pre><code class="language-bash">devflow proxy stop     # Stop the daemon (sends SIGTERM)
 devflow proxy status   # Show running state, target count, CA status
-devflow proxy list     # List all proxied containers with domains and upstreams</code></pre>
+devflow proxy list     # List discovered endpoints with domains and upstreams</code></pre>
   <p>All commands support <code>--json</code> for machine-readable output.</p>
 
   <!-- API Endpoints -->
@@ -2404,7 +2408,7 @@ mise run gui:install</code></pre>
     </div>
     <div class="card">
       <h4>Proxy Dashboard</h4>
-      <p>Proxy status, container discovery table with HTTPS links, and one-click CA trust management. Filter containers by domain, name, or project.</p>
+      <p>Proxy status, container discovery table with HTTPS web links and native database endpoints, and one-click CA trust management. Filter containers by domain, name, or project.</p>
     </div>
     <div class="card">
       <h4>Configuration Editor</h4>
@@ -3130,7 +3134,7 @@ devflow --json agent skill</code></pre>
   <h3>Reverse Proxy</h3>
 
   <h4><code>devflow proxy start</code></h4>
-  <p>Start the native HTTPS reverse proxy.</p>
+  <p>Start the native HTTP(S) reverse proxy and friendly-name discovery.</p>
 <pre><code class="language-bash">devflow proxy start                      # Foreground
 devflow proxy start --daemon             # Background
 devflow proxy start --https-port 8443    # Custom HTTPS port</code></pre>
@@ -3142,7 +3146,7 @@ devflow proxy start --https-port 8443    # Custom HTTPS port</code></pre>
   <p>Show proxy status.</p>
 
   <h4><code>devflow proxy list</code></h4>
-  <p>List proxied containers with HTTPS URLs.</p>
+  <p>List discovered endpoints. Web services are shown as HTTPS URLs; database ports are shown as native direct endpoints.</p>
 
   <h4><code>devflow proxy trust</code></h4>
   <p>Manage CA certificate trust.</p>

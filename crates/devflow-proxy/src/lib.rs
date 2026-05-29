@@ -1,6 +1,8 @@
 pub mod api;
 pub mod ca;
 pub mod discovery;
+pub mod endpoint;
+pub mod mdns;
 pub mod monitor;
 pub mod network;
 pub mod nss;
@@ -11,7 +13,7 @@ pub mod tls;
 
 use anyhow::Result;
 use ca::CertificateCache;
-use discovery::extract_proxy_targets;
+use discovery::{extract_network_domains, extract_proxy_targets};
 use monitor::DockerMonitor;
 use router::Router;
 use serde::{Deserialize, Serialize};
@@ -32,6 +34,8 @@ pub struct ProxyConfig {
     pub domain_suffix: String,
     #[serde(default = "default_auto_network")]
     pub auto_network: bool,
+    #[serde(default = "default_mdns")]
+    pub mdns: bool,
 }
 
 fn default_https_port() -> u16 {
@@ -44,9 +48,24 @@ fn default_api_port() -> u16 {
     2019
 }
 fn default_domain_suffix() -> String {
-    "localhost".to_string()
+    // `.local` (mDNS) lets names resolve to container IPs from the host with no
+    // hosts/resolver edits — the proxy advertises them. `.localhost` is
+    // hard-coded to loopback by macOS, so it can only reach the HTTP proxy. The
+    // mDNS responder is wired up on macOS only, so other platforms keep the
+    // loopback-only `.localhost` default.
+    #[cfg(target_os = "macos")]
+    {
+        "local".to_string()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "localhost".to_string()
+    }
 }
 fn default_auto_network() -> bool {
+    true
+}
+fn default_mdns() -> bool {
     true
 }
 impl Default for ProxyConfig {
@@ -57,6 +76,7 @@ impl Default for ProxyConfig {
             api_port: default_api_port(),
             domain_suffix: default_domain_suffix(),
             auto_network: default_auto_network(),
+            mdns: default_mdns(),
         }
     }
 }
@@ -86,6 +106,14 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
     // Create router
     let router = Router::new();
 
+    // Create the mDNS responder so friendly `.local` names resolve from the host
+    // (HTTP services -> 127.0.0.1, database endpoints -> container IP).
+    let mdns = if config.mdns {
+        Some(Arc::new(mdns::MdnsResponder::new()))
+    } else {
+        None
+    };
+
     // Create shutdown signal
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -98,13 +126,14 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
     match docker_monitor.get_running_containers().await {
         Ok(containers) => {
             for container in &containers {
-                let targets = extract_proxy_targets(container, &config.domain_suffix);
-                if !targets.is_empty() {
-                    let container_id = targets[0].container_id.clone();
-                    let domains: Vec<String> = targets.iter().map(|t| t.domain.clone()).collect();
+                let domains = extract_network_domains(container, &config.domain_suffix);
+                if !domains.is_empty() {
+                    let container_id = container.id.clone().unwrap_or_default();
                     let aliases = network::strip_suffix_aliases(&domains, &config.domain_suffix);
                     initial_containers.push((container_id, aliases));
                 }
+
+                let targets = extract_proxy_targets(container, &config.domain_suffix);
                 for target in targets {
                     log::info!(
                         "  {} -> {}:{}",
@@ -120,6 +149,11 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
         Err(e) => {
             log::warn!("Failed to discover containers: {}", e);
         }
+    }
+
+    // Advertise `.local` records for everything discovered so far.
+    if let Some(mdns) = &mdns {
+        mdns.reconcile(&router.list().await);
     }
 
     // Set up shared Docker network for container-to-container resolution
@@ -157,6 +191,7 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
     let domain_suffix = config.domain_suffix.clone();
     let events_shutdown = shutdown_rx.clone();
     let docker_for_events = docker_client.clone();
+    let mdns_for_events = mdns.clone();
     tokio::spawn(async move {
         let mut shutdown = events_shutdown;
         loop {
@@ -168,11 +203,15 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
 
                             match event.action.as_str() {
                                 "start" => {
-                                    let targets = extract_proxy_targets(&event.container, &domain_suffix);
-                                    let domains: Vec<String> = targets.iter().map(|t| t.domain.clone()).collect();
+                                    let domains = extract_network_domains(&event.container, &domain_suffix);
                                     let aliases = network::strip_suffix_aliases(&domains, &domain_suffix);
+
+                                    let targets = extract_proxy_targets(&event.container, &domain_suffix);
                                     for target in targets {
                                         log::info!("+ {} -> {}:{}", target.domain, target.container_ip, target.port);
+                                        if let Some(mdns) = &mdns_for_events {
+                                            mdns.advertise(&target);
+                                        }
                                         router_for_events.upsert(target).await;
                                     }
                                     if auto_network && !aliases.is_empty() {
@@ -183,6 +222,9 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
                                 }
                                 "stop" | "die" => {
                                     router_for_events.remove_by_container(&container_id).await;
+                                    if let Some(mdns) = &mdns_for_events {
+                                        mdns.remove_by_container(&container_id);
+                                    }
                                     let name = event.container.name.as_deref().unwrap_or(&container_id);
                                     log::info!("- removed routes for {}", name);
                                 }
@@ -244,12 +286,17 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
     });
 
     log::info!(
-        "Proxy started — HTTPS:{} HTTP:{} API:{}{}",
+        "Proxy started — HTTPS:{} HTTP:{} API:{}{}{}",
         config.https_port,
         config.http_port,
         config.api_port,
         if auto_network {
             format!(" Network:{}", network::DEVFLOW_NETWORK)
+        } else {
+            String::new()
+        },
+        if mdns.is_some() {
+            format!(" mDNS:*.{}", config.domain_suffix)
         } else {
             String::new()
         },

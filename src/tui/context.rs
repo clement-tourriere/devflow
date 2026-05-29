@@ -750,12 +750,13 @@ impl DevflowContext {
 
     /// Start the proxy in daemon mode.
     pub async fn start_proxy_bg() -> Result<String> {
+        // Only the ports are forwarded to the spawned `proxy start`; the suffix
+        // and mDNS use the CLI's own defaults.
         let config = devflow_proxy::ProxyConfig {
             https_port: 443,
             http_port: 80,
             api_port: 2019,
-            domain_suffix: "localhost".to_string(),
-            auto_network: true,
+            ..Default::default()
         };
 
         let exe = std::env::current_exe()?;

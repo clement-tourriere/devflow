@@ -9,8 +9,10 @@
 //! # How it works
 //!
 //! - **Host → container**: `https://web.myapp.localhost` routes through the proxy.
-//! - **Container → container**: `http://web.myapp.localhost` resolves via Docker
-//!   DNS directly, bypassing the proxy entirely.
+//! - **Container → container**: `http://web.myapp.localhost` resolves via
+//!   Docker DNS directly, bypassing the proxy entirely. A suffix-stripped alias
+//!   (`web.myapp`) is also registered as a fallback for environments that
+//!   special-case `.localhost` before consulting Docker DNS.
 //!
 //! # Testing
 //!
@@ -51,7 +53,7 @@
 //! ## Test from inside a container (uses Docker DNS directly)
 //!
 //! ```sh
-//! # From web2, resolve web1 by its pretty domain name — no proxy involved
+//! # From web2, resolve web1 by its localhost alias — no proxy involved
 //! docker exec web2 curl -s http://web1.localhost
 //!
 //! # Verify DNS resolution explicitly
@@ -60,6 +62,9 @@
 //! # If the container doesn't have curl, use wget or a DNS lookup
 //! docker exec web2 wget -qO- http://web1.localhost
 //! docker exec web2 nslookup web1.localhost 127.0.0.11   # Docker's embedded DNS
+//!
+//! # Fallback for environments that special-case .localhost:
+//! docker exec web2 curl -s http://web1
 //! ```
 //!
 //! ## Test with Compose services
@@ -68,7 +73,7 @@
 //! # Given a compose project "myapp" with services "web" and "api":
 //! docker compose -p myapp up -d
 //!
-//! # From "api", reach "web" by its devflow domain
+//! # From "api", reach "web" by its full devflow localhost alias
 //! docker exec myapp-api-1 curl -s http://web.myapp.localhost
 //! ```
 //!
@@ -116,10 +121,10 @@ pub async fn ensure_network(docker: &Docker) -> Result<()> {
 
 /// Produce aliases with both the full domain and a suffix-stripped form.
 ///
-/// Inside containers, glibc resolves `.localhost` to `127.0.0.1` (RFC 6761)
-/// before Docker's embedded DNS is consulted. By also registering the domain
-/// without the suffix (e.g. `web.myapp` alongside `web.myapp.localhost`),
-/// container-to-container resolution works via Docker DNS on the short form.
+/// The full `.localhost` name is the primary devflow name. The suffix-stripped
+/// alias (e.g. `web.myapp` alongside `web.myapp.localhost`) is a compatibility
+/// fallback for environments that special-case `.localhost` before consulting
+/// Docker's embedded DNS.
 pub fn strip_suffix_aliases(domains: &[String], domain_suffix: &str) -> Vec<String> {
     let mut aliases = Vec::with_capacity(domains.len() * 2);
     let dot_suffix = format!(".{}", domain_suffix);

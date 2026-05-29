@@ -1,7 +1,7 @@
 use bollard::models::ContainerInspectResponse;
 use std::collections::HashMap;
 
-/// A resolved proxy target: one domain pointing to one container IP:port.
+/// A resolved discovered target: one domain pointing to one container IP:port.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProxyTarget {
     pub domain: String,
@@ -17,12 +17,16 @@ pub struct ProxyTarget {
     pub workspace: Option<String>,
 }
 
-/// Extract proxy targets from a container inspection result.
+/// Extract discovered targets from a container inspection result.
+///
+/// HTTP services are reachable through the HTTP(S) proxy. Non-HTTP services
+/// such as PostgreSQL are still listed so callers can expose the generated
+/// hostname as a direct container-IP endpoint on platforms that support it.
 pub fn extract_proxy_targets(
     container: &ContainerInspectResponse,
     domain_suffix: &str,
 ) -> Vec<ProxyTarget> {
-    if !should_proxy(container) {
+    if !should_discover(container) {
         return Vec::new();
     }
 
@@ -34,6 +38,31 @@ pub fn extract_proxy_targets(
         return Vec::new();
     }
 
+    build_proxy_targets(container, domains, container_ip, port)
+}
+
+/// Extract pretty domains for Docker-network DNS aliases.
+///
+/// This intentionally includes non-HTTP services so containers on the shared
+/// devflow Docker network can still reach databases by the full `.localhost`
+/// alias (for example `postgres.my-workspace.my-project.localhost:5432`).
+pub fn extract_network_domains(
+    container: &ContainerInspectResponse,
+    domain_suffix: &str,
+) -> Vec<String> {
+    if !should_discover(container) {
+        return Vec::new();
+    }
+
+    extract_domains(container, domain_suffix)
+}
+
+fn build_proxy_targets(
+    container: &ContainerInspectResponse,
+    domains: Vec<String>,
+    container_ip: String,
+    port: u16,
+) -> Vec<ProxyTarget> {
     let container_id = container.id.clone().unwrap_or_default();
     let container_name = container
         .name
@@ -83,7 +112,7 @@ fn get_env_vars(container: &ContainerInspectResponse) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn should_proxy(container: &ContainerInspectResponse) -> bool {
+fn should_discover(container: &ContainerInspectResponse) -> bool {
     // Skip if not running
     let running = container
         .state
@@ -280,6 +309,15 @@ mod tests {
     use super::*;
 
     fn make_container(name: &str, labels: HashMap<String, String>) -> ContainerInspectResponse {
+        make_container_with_env_and_ports(name, labels, Vec::new(), Vec::new())
+    }
+
+    fn make_container_with_env_and_ports(
+        name: &str,
+        labels: HashMap<String, String>,
+        env: Vec<String>,
+        exposed_ports: Vec<String>,
+    ) -> ContainerInspectResponse {
         let mut networks = HashMap::new();
         networks.insert(
             "bridge".to_string(),
@@ -297,6 +335,12 @@ mod tests {
             }),
             config: Some(bollard::models::ContainerConfig {
                 labels: Some(labels),
+                env: Some(env),
+                exposed_ports: if exposed_ports.is_empty() {
+                    None
+                } else {
+                    Some(exposed_ports)
+                },
                 ..Default::default()
             }),
             network_settings: Some(bollard::models::NetworkSettings {
@@ -351,37 +395,30 @@ mod tests {
         assert!(targets.is_empty());
     }
 
+    #[test]
+    fn test_postgres_port_is_discovered_for_direct_endpoint() {
+        let container = make_container_with_env_and_ports(
+            "postgres",
+            HashMap::new(),
+            Vec::new(),
+            vec!["5432/tcp".to_string()],
+        );
+
+        let targets = extract_proxy_targets(&container, "localhost");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].domain, "postgres.localhost");
+        assert_eq!(targets[0].port, 5432);
+
+        let domains = extract_network_domains(&container, "localhost");
+        assert_eq!(domains, vec!["postgres.localhost"]);
+    }
+
     fn make_container_with_env(
         name: &str,
         labels: HashMap<String, String>,
         env: Vec<String>,
     ) -> ContainerInspectResponse {
-        let mut networks = HashMap::new();
-        networks.insert(
-            "bridge".to_string(),
-            bollard::models::EndpointSettings {
-                ip_address: Some("172.17.0.2".to_string()),
-                ..Default::default()
-            },
-        );
-        ContainerInspectResponse {
-            id: Some("abc123".to_string()),
-            name: Some(format!("/{}", name)),
-            state: Some(bollard::models::ContainerState {
-                running: Some(true),
-                ..Default::default()
-            }),
-            config: Some(bollard::models::ContainerConfig {
-                labels: Some(labels),
-                env: Some(env),
-                ..Default::default()
-            }),
-            network_settings: Some(bollard::models::NetworkSettings {
-                networks: Some(networks),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
+        make_container_with_env_and_ports(name, labels, env, Vec::new())
     }
 
     #[test]

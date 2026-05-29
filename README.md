@@ -21,7 +21,7 @@ The result: no more shared local databases between branches, less stashing, fast
 - Automatic workspace sync through CLI commands or installed VCS hooks
 - Multiple interfaces: CLI, TUI dashboard, and desktop GUI
 - Hook system with MiniJinja templates, approvals, built-in actions, and reusable recipes
-- Native HTTPS reverse proxy for `*.localhost` Docker services
+- Friendly `*.local` Docker service discovery (mDNS) — HTTPS proxying for web, direct host access for databases
 - AI-friendly automation with `--json`, `--non-interactive`, `AGENTS.md`, `llms.txt`, and agent skills
 - Advanced workflow support including merge checks, rebase flows, merge train, and sandboxed workspaces
 
@@ -117,7 +117,7 @@ This uses the sandbox support in `devflow-core` to reduce filesystem and command
 
 ### Reverse proxy
 
-devflow ships with a native reverse proxy that auto-discovers Docker containers and maps them to HTTPS `*.localhost` domains.
+devflow ships with a native HTTP(S) reverse proxy that auto-discovers Docker containers and maps them to friendly `*.local` domains that resolve **from the host** — no `/etc/hosts` and no resolver edits.
 
 ```bash
 devflow proxy start
@@ -127,10 +127,17 @@ devflow proxy list
 
 | Container Type | Domain Pattern |
 |---|---|
-| Standalone | `container_name.localhost` |
-| Compose service | `service.project.localhost` |
-| devflow service | `service.workspace.project.localhost` |
+| Standalone | `container_name.local` |
+| Compose service | `service.project.local` |
+| devflow service | `service.workspace.project.local` |
 | Custom label | value of `devproxy.domain` |
+
+The proxy advertises each name over **mDNS/Bonjour** so it resolves on the host, then routes by service type:
+
+- **Web services → the proxy:** the name resolves to `127.0.0.1`, where the proxy terminates TLS with the trusted CA and forwards to the container — e.g. `https://web.my-project.local`.
+- **Database / TCP services → the container directly:** the name resolves straight to the container IP, so you connect at the native port with no proxy in the path — e.g. `postgresql://postgres.my-workspace.my-project.local:5432`.
+
+Direct database access requires container IPs to be routable from the host — true on **OrbStack**, **Colima**, and **Linux**, but not stock Docker Desktop. If a database name does not resolve, use the UPSTREAM IP from `devflow proxy list`. mDNS advertising is currently macOS-only; on other platforms the default suffix stays `.localhost` (loopback, web only). Disable advertising with `devflow proxy start --no-mdns`.
 
 ### AI agents and automation
 
@@ -179,7 +186,7 @@ The TUI has five tabs:
 
 - `Workspaces` — workspace tree, status, and open/create/switch actions
 - `Services` — service inventory and capabilities
-- `Proxy` — proxy status and proxied containers
+- `Proxy` — proxy status and discovered container endpoints
 - `System` — config, hooks, and diagnostics
 - `Logs` — service log viewer
 

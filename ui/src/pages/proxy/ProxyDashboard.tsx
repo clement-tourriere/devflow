@@ -174,8 +174,9 @@ function ProxyDashboard() {
                 <tr key={c.domain}>
                   <td>
                     <a
-                      href={c.https_url}
+                      href={c.endpoint_url}
                       target="_blank"
+                      title={c.endpoint_url}
                       style={{ color: "var(--accent)", textDecoration: "none" }}
                     >
                       {c.domain}

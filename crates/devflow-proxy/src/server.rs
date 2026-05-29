@@ -76,6 +76,7 @@ pub async fn run_https_server(
 
                             if let Err(e) = http1::Builder::new()
                                 .serve_connection(io, service)
+                                .with_upgrades()
                                 .await
                             {
                                 log::debug!("HTTPS connection error from {}: {}", peer_addr, e);
@@ -160,6 +161,7 @@ pub async fn run_http_server(
 
                     if let Err(e) = http1::Builder::new()
                         .serve_connection(io, service)
+                        .with_upgrades()
                         .await
                     {
                         log::debug!("HTTP connection error from {}: {}", peer_addr, e);
@@ -176,9 +178,51 @@ pub async fn run_http_server(
     Ok(())
 }
 
+fn header_has_token(headers: &hyper::HeaderMap, name: &'static str, token: &str) -> bool {
+    headers.get_all(name).iter().any(|value| {
+        value
+            .to_str()
+            .map(|value| {
+                value
+                    .split(',')
+                    .any(|part| part.trim().eq_ignore_ascii_case(token))
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn is_upgrade_request<B>(req: &Request<B>) -> bool {
+    req.headers().contains_key(hyper::header::UPGRADE)
+        && header_has_token(req.headers(), hyper::header::CONNECTION.as_str(), "upgrade")
+}
+
+async fn tunnel_upgraded_connections(
+    client_upgrade: hyper::upgrade::OnUpgrade,
+    upstream_upgrade: hyper::upgrade::OnUpgrade,
+    hostname: String,
+) {
+    match tokio::try_join!(client_upgrade, upstream_upgrade) {
+        Ok((client, upstream)) => {
+            let mut client = TokioIo::new(client);
+            let mut upstream = TokioIo::new(upstream);
+
+            match tokio::io::copy_bidirectional(&mut client, &mut upstream).await {
+                Ok((from_client, from_upstream)) => log::debug!(
+                    "Upgrade tunnel for {} closed (client→upstream {} bytes, upstream→client {} bytes)",
+                    hostname,
+                    from_client,
+                    from_upstream
+                ),
+                Err(e) => log::debug!("Upgrade tunnel for {} failed: {}", hostname, e),
+            }
+        }
+        Err(e) => log::debug!("Upgrade handshake for {} failed: {}", hostname, e),
+    }
+}
+
 /// Handle a single proxied request by forwarding to the upstream.
 async fn handle_request(
-    req: Request<Incoming>,
+    mut req: Request<Incoming>,
     router: &Router,
     sni_hostname: Option<&str>,
     peer_addr: SocketAddr,
@@ -213,6 +257,9 @@ async fn handle_request(
                 .unwrap());
         }
     };
+
+    let is_upgrade = is_upgrade_request(&req);
+    let client_upgrade = is_upgrade.then(|| hyper::upgrade::on(&mut req));
 
     // Use origin-form URI (path+query only) for the upstream request
     let upstream_path = req
@@ -255,14 +302,19 @@ async fn handle_request(
     };
 
     tokio::spawn(async move {
-        if let Err(e) = conn.await {
+        if let Err(e) = conn.with_upgrades().await {
             log::debug!("Upstream connection error: {}", e);
         }
     });
 
-    // Build the upstream request
+    // Build the upstream request. Upgrade requests switch protocols after the
+    // response headers, so there is no HTTP body to buffer.
     let (parts, body) = req.into_parts();
-    let body_bytes = body.collect().await?.to_bytes();
+    let body_bytes = if is_upgrade {
+        Bytes::new()
+    } else {
+        body.collect().await?.to_bytes()
+    };
 
     let mut upstream_req = Request::builder()
         .method(parts.method)
@@ -302,7 +354,22 @@ async fn handle_request(
     );
 
     match sender.send_request(upstream_req).await {
-        Ok(resp) => {
+        Ok(mut resp) => {
+            if is_upgrade && resp.status() == StatusCode::SWITCHING_PROTOCOLS {
+                let upstream_upgrade = hyper::upgrade::on(&mut resp);
+                let (parts, _body) = resp.into_parts();
+
+                if let Some(client_upgrade) = client_upgrade {
+                    tokio::spawn(tunnel_upgraded_connections(
+                        client_upgrade,
+                        upstream_upgrade,
+                        hostname,
+                    ));
+                }
+
+                return Ok(Response::from_parts(parts, Full::new(Bytes::new())));
+            }
+
             let (parts, body) = resp.into_parts();
             let body_bytes = body.collect().await?.to_bytes();
             Ok(Response::from_parts(parts, Full::new(body_bytes)))
@@ -317,5 +384,42 @@ async fn handle_request(
                 ))))
                 .unwrap())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request_with_headers(headers: &[(&'static str, &'static str)]) -> Request<Full<Bytes>> {
+        let mut req = Request::builder().body(Full::new(Bytes::new())).unwrap();
+        for (name, value) in headers {
+            req.headers_mut().append(*name, value.parse().unwrap());
+        }
+        req
+    }
+
+    #[test]
+    fn detects_websocket_upgrade_requests() {
+        let req = request_with_headers(&[
+            ("connection", "keep-alive, Upgrade"),
+            ("upgrade", "websocket"),
+        ]);
+
+        assert!(is_upgrade_request(&req));
+    }
+
+    #[test]
+    fn ignores_upgrade_header_without_connection_token() {
+        let req = request_with_headers(&[("upgrade", "websocket")]);
+
+        assert!(!is_upgrade_request(&req));
+    }
+
+    #[test]
+    fn ignores_plain_http_requests() {
+        let req = request_with_headers(&[]);
+
+        assert!(!is_upgrade_request(&req));
     }
 }

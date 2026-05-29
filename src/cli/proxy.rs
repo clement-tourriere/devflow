@@ -13,6 +13,7 @@ pub(super) async fn handle_proxy_command(
             api_port,
             domain_suffix,
             no_auto_network,
+            no_mdns,
         } => {
             // Load global config for proxy defaults
             let global = GlobalConfig::load()?.unwrap_or_default();
@@ -24,7 +25,9 @@ pub(super) async fn handle_proxy_command(
             let api_port = api_port.or(proxy_cfg.api_port).unwrap_or(2019);
             let domain_suffix = domain_suffix
                 .or(proxy_cfg.domain_suffix)
-                .unwrap_or_else(|| "localhost".to_string());
+                .unwrap_or_else(default_domain_suffix);
+            // mDNS on by default; --no-mdns or `proxy.mdns: false` disables it.
+            let mdns = !no_mdns && proxy_cfg.mdns.unwrap_or(true);
 
             // Conflict detection: check if proxy is already running
             if let Ok(status) =
@@ -56,6 +59,7 @@ pub(super) async fn handle_proxy_command(
                 api_port,
                 domain_suffix: domain_suffix.clone(),
                 auto_network: !no_auto_network,
+                mdns,
             };
 
             if daemon {
@@ -75,6 +79,9 @@ pub(super) async fn handle_proxy_command(
                 ];
                 if no_auto_network {
                     args.push("--no-auto-network".to_string());
+                }
+                if !mdns {
+                    args.push("--no-mdns".to_string());
                 }
 
                 let child = std::process::Command::new(exe)
@@ -201,9 +208,10 @@ pub(super) async fn handle_proxy_command(
                         println!("{}", targets);
                     } else if let Some(arr) = targets.as_array() {
                         if arr.is_empty() {
-                            println!("No proxied containers");
+                            println!("No discovered endpoints");
                         } else {
-                            println!("{:<40} {:<20} {:<10}", "DOMAIN", "CONTAINER", "UPSTREAM");
+                            println!("{:<40} {:<20} {:<10}", "ENDPOINT", "CONTAINER", "UPSTREAM");
+                            let mut unresolved_direct = Vec::new();
                             for t in arr {
                                 let domain = t["domain"].as_str().unwrap_or("-");
                                 let name = t["container_name"].as_str().unwrap_or("-");
@@ -211,11 +219,29 @@ pub(super) async fn handle_proxy_command(
                                 let port = t["port"].as_u64().unwrap_or(0);
                                 println!(
                                     "{:<40} {:<20} {}:{}",
-                                    format!("https://{}", domain),
+                                    devflow_proxy::endpoint::display_endpoint(domain, port as u16),
                                     name,
                                     ip,
                                     port,
                                 );
+
+                                if devflow_proxy::endpoint::is_direct_endpoint_port(port as u16)
+                                    && !hostname_resolves_to(domain, ip)
+                                {
+                                    unresolved_direct.push((domain.to_string(), ip.to_string()));
+                                }
+                            }
+
+                            if !unresolved_direct.is_empty() {
+                                eprintln!(
+                                    "\nWarning: some database endpoint names do not yet resolve to their container IP."
+                                );
+                                eprintln!(
+                                    "These are advertised via mDNS by the running proxy (macOS). If they don't resolve, check that the proxy is running with mDNS enabled, that you're on a platform that routes container IPs (OrbStack/Colima/Linux), or use the UPSTREAM IP shown above."
+                                );
+                                for (domain, ip) in unresolved_direct {
+                                    eprintln!("  {} should resolve to {}", domain, ip);
+                                }
                             }
                         }
                     }
@@ -256,6 +282,32 @@ pub(super) async fn handle_proxy_command(
     }
 
     Ok(())
+}
+
+/// Default domain suffix, matching `devflow_proxy::ProxyConfig`: `.local`
+/// (mDNS-resolvable) on macOS, `.localhost` (loopback-only) elsewhere.
+fn default_domain_suffix() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        "local".to_string()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "localhost".to_string()
+    }
+}
+
+fn hostname_resolves_to(domain: &str, expected_ip: &str) -> bool {
+    use std::net::{IpAddr, ToSocketAddrs};
+
+    let Ok(expected_ip) = expected_ip.parse::<IpAddr>() else {
+        return false;
+    };
+
+    (domain, 0)
+        .to_socket_addrs()
+        .map(|mut addrs| addrs.any(|addr| addr.ip() == expected_ip))
+        .unwrap_or(false)
 }
 
 async fn reqwest_get_json(url: &str) -> Result<serde_json::Value> {

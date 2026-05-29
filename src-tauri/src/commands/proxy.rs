@@ -21,7 +21,9 @@ pub struct ContainerEntry {
     pub project: Option<String>,
     pub service: Option<String>,
     pub workspace: Option<String>,
-    pub https_url: String,
+    /// Reachable endpoint URL: `https://<domain>` for web services, or a native
+    /// scheme such as `postgresql://<domain>:5432` for database/TCP endpoints.
+    pub endpoint_url: String,
 }
 
 #[tauri::command]
@@ -114,7 +116,7 @@ pub async fn get_proxy_status(state: State<'_, AppState>) -> Result<ProxyStatus,
 }
 
 #[tauri::command]
-pub async fn list_containers() -> Result<Vec<ContainerEntry>, String> {
+pub async fn list_containers(state: State<'_, AppState>) -> Result<Vec<ContainerEntry>, String> {
     let monitor =
         devflow_proxy::monitor::DockerMonitor::new().map_err(crate::commands::format_error)?;
 
@@ -123,12 +125,20 @@ pub async fn list_containers() -> Result<Vec<ContainerEntry>, String> {
         .await
         .map_err(crate::commands::format_error)?;
 
+    // Use the suffix the proxy is configured with (`.local` by default on macOS)
+    // so GUI links match the names the proxy actually advertises and routes.
+    let domain_suffix = state.proxy_config.read().await.domain_suffix.clone();
+
     let mut entries = Vec::new();
     for container in &containers {
-        let targets = devflow_proxy::discovery::extract_proxy_targets(container, "localhost");
+        let targets = devflow_proxy::discovery::extract_proxy_targets(container, &domain_suffix);
         for target in targets {
             entries.push(ContainerEntry {
-                https_url: format!("https://{}", target.domain),
+                // Web -> https://<domain>; databases -> postgresql://<domain>:5432, etc.
+                endpoint_url: devflow_proxy::endpoint::display_endpoint(
+                    &target.domain,
+                    target.port,
+                ),
                 domain: target.domain,
                 container_name: target.container_name,
                 container_ip: target.container_ip,

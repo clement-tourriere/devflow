@@ -524,7 +524,7 @@ For `.claude/settings.local.json`, permission arrays are union-merged. For other
 
 ### `devflow proxy start`
 
-Start the native HTTPS reverse proxy.
+Start the native HTTP(S) reverse proxy and friendly-name discovery. Discovered containers get `*.local` names advertised over mDNS/Bonjour so they resolve from the host with no `/etc/hosts` or resolver edits. Web names resolve to the proxy (HTTPS with the trusted CA); database names resolve directly to the container IP for native access at the standard port. Direct database access needs container IPs routable from the host (OrbStack/Colima/Linux). mDNS advertising is macOS-only today; elsewhere the default suffix is `.localhost` (loopback, web only).
 
 ```bash
 devflow proxy start
@@ -532,6 +532,7 @@ devflow proxy start --daemon
 devflow proxy start --https-port 8443
 devflow proxy start --http-port 8080
 devflow proxy start --api-port 2020
+devflow proxy start --no-mdns          # disable .local advertising
 ```
 
 ### `devflow proxy stop`
@@ -544,7 +545,7 @@ Show proxy status, ports, and CA info.
 
 ### `devflow proxy list`
 
-List proxied containers and their URLs.
+List discovered endpoints. Web services are shown as HTTPS URLs (`https://name.local`); well-known database ports are shown as native direct endpoints such as `postgresql://name.local:5432`. Database names resolve to the container IP via the proxy's mDNS advertising. If a database name does not resolve, check the proxy is running with mDNS enabled and that your platform routes container IPs, or use the UPSTREAM IP shown by this command.
 
 ### `devflow proxy trust`
 

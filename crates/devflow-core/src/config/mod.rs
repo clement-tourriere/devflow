@@ -601,6 +601,10 @@ pub struct ProxyGlobalConfig {
     pub http_port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_port: Option<u16>,
+    /// Advertise friendly `.local` names via mDNS so they resolve from the host
+    /// (macOS only). Default: `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mdns: Option<bool>,
 }
 
 impl GlobalConfig {

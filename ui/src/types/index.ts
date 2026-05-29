@@ -198,7 +198,8 @@ export interface ContainerEntry {
   project: string | null;
   service: string | null;
   workspace: string | null;
-  https_url: string;
+  /** Reachable endpoint: `https://<domain>` for web, `postgresql://<domain>:5432` etc. for databases. */
+  endpoint_url: string;
 }
 
 export interface CertificateStatus {
