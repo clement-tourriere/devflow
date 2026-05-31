@@ -33,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Three-tier configuration** — `.devflow.yml` (team) -> `.devflow.local.yml` (local) -> environment variables.
 - **JSON output + non-interactive mode** — For CI/CD and AI agent workflows.
 
+## v0.4.1 (2026-05-31)
+
+### Fix
+
+- update vulnerable dependencies
+
 ## v0.4.0 (2026-05-29)
 
 ### Feat
