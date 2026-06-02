@@ -1,6 +1,6 @@
 [package]
 name = "devflow-app"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2021"
 description = "devflow desktop application"
 authors = ["Clément Tourrière <clement.tourriere@gmail.com>"]

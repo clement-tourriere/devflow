@@ -1,6 +1,6 @@
 # devflow — Full Agent Context
 
-> Version: 0.4.3
+> Version: 0.4.4
 > Repository: https://github.com/clement-tourriere/devflow
 > License: MIT
 
