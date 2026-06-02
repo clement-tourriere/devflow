@@ -1157,15 +1157,24 @@ pub(super) async fn handle_top_level_status(
                     .iter()
                     .filter(|b| b.state.as_deref() == Some("stopped"))
                     .count();
-                services_map.insert(
-                    named.name.clone(),
-                    serde_json::json!({
-                        "provider": named.provider.provider_name(),
-                        "total_branches": workspaces.len(),
-                        "running": running,
-                        "stopped": stopped,
-                    }),
-                );
+                let project_info = named.provider.project_info();
+                let mut status = serde_json::json!({
+                    "provider": named.provider.provider_name(),
+                    "total_branches": workspaces.len(),
+                    "running": running,
+                    "stopped": stopped,
+                    "supports_lifecycle": named.provider.supports_lifecycle(),
+                });
+                if let Some(ref info) = project_info {
+                    status["project"] = serde_json::Value::String(info.name.clone());
+                    if let Some(ref storage) = info.storage_driver {
+                        status["storage"] = serde_json::Value::String(storage.clone());
+                    }
+                    if let Some(ref image) = info.image {
+                        status["image"] = serde_json::Value::String(image.clone());
+                    }
+                }
+                services_map.insert(named.name.clone(), status);
             }
             println!(
                 "{}",
@@ -1205,7 +1214,17 @@ pub(super) async fn handle_top_level_status(
                     .iter()
                     .filter(|b| b.state.as_deref() == Some("stopped"))
                     .count();
+                let project_info = named.provider.project_info();
                 println!("[{}] ({}):", named.name, named.provider.provider_name());
+                if let Some(ref info) = project_info {
+                    println!("  Project: {}", info.name);
+                    if let Some(ref storage) = info.storage_driver {
+                        println!("  Storage: {}", storage);
+                    }
+                    if let Some(ref image) = info.image {
+                        println!("  Image: {}", image);
+                    }
+                }
                 println!(
                     "  Branches: {} total ({} running, {} stopped)",
                     workspaces.len(),
@@ -1228,7 +1247,27 @@ pub(super) async fn handle_top_level_status(
                     .filter(|b| b.state.as_deref() == Some("stopped"))
                     .count();
 
+                let project_info = named.provider.project_info();
+
                 if json_output {
+                    let mut service_status = serde_json::json!({
+                        "name": named.name,
+                        "provider": named.provider.provider_name(),
+                        "total_branches": workspaces.len(),
+                        "running": running,
+                        "stopped": stopped,
+                        "supports_lifecycle": named.provider.supports_lifecycle(),
+                    });
+                    if let Some(ref info) = project_info {
+                        service_status["project"] = serde_json::Value::String(info.name.clone());
+                        if let Some(ref storage) = info.storage_driver {
+                            service_status["storage"] = serde_json::Value::String(storage.clone());
+                        }
+                        if let Some(ref image) = info.image {
+                            service_status["image"] = serde_json::Value::String(image.clone());
+                        }
+                    }
+
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&serde_json::json!({
@@ -1239,13 +1278,7 @@ pub(super) async fn handle_top_level_status(
                                 super::BranchContextSource::Cwd => "cwd",
                                 super::BranchContextSource::None => "none",
                             },
-                            "service": {
-                                "name": named.name,
-                                "provider": named.provider.provider_name(),
-                                "total_branches": workspaces.len(),
-                                "running": running,
-                                "stopped": stopped,
-                            },
+                            "service": service_status,
                         }))?
                     );
                 } else {
@@ -1273,6 +1306,15 @@ pub(super) async fn handle_top_level_status(
                         named.name,
                         named.provider.provider_name()
                     );
+                    if let Some(ref info) = project_info {
+                        println!("  Project: {}", info.name);
+                        if let Some(ref storage) = info.storage_driver {
+                            println!("  Storage: {}", storage);
+                        }
+                        if let Some(ref image) = info.image {
+                            println!("  Image: {}", image);
+                        }
+                    }
                     println!(
                         "  Branches: {} total ({} running, {} stopped)",
                         workspaces.len(),
