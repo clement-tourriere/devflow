@@ -4,195 +4,105 @@
 
 <h1 align="center">devflow</h1>
 
-<p align="center">Isolated dev environments for every workspace — automatically.</p>
+<p align="center">Create, switch, and clean up isolated development workspaces with matching local services.</p>
 
-> [Full Documentation](https://clement-tourriere.github.io/devflow/) | [CLI Reference](docs/CLI.md) | [AI Agent Guide](AGENTS.md) | [Changelog](CHANGELOG.md)
+<p align="center">
+  <a href="https://clement-tourriere.github.io/devflow/">Documentation</a> ·
+  <a href="docs/CLI.md">CLI reference</a> ·
+  <a href="AGENTS.md">Agent guide</a> ·
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
 
 ## What is devflow?
 
-devflow gives each Git or Jujutsu workspace its own development environment: databases, caches, worktrees, hooks, and other stateful services. When you switch workspaces, devflow can automatically create or switch the matching service instances, keep worktrees aligned, and surface the right connection info for your app and tools.
+devflow is a workspace orchestrator for local development. It connects your Git branch or worktree workflow with per-workspace state: service containers, connection strings, lifecycle hooks, generated env files, and optional worktree directories.
 
-The result: no more shared local databases between branches, less stashing, faster reviews, safer migrations, and cleaner parallel work.
+The goal is simple: work on multiple features, reviews, migrations, or agent tasks without sharing the same local database or constantly stashing and resetting state.
 
-## Why teams use it
+## Current focus
 
-- Isolated per-workspace services for PostgreSQL, MySQL, ClickHouse, Redis, and custom Docker images
-- Fast Copy-on-Write cloning for databases and worktrees on APFS, ZFS, Btrfs, and XFS
-- Automatic workspace sync through CLI commands or installed VCS hooks
-- Multiple interfaces: CLI, TUI dashboard, and desktop GUI
-- Hook system with MiniJinja templates, approvals, built-in actions, and reusable recipes
-- Friendly `*.local` Docker service discovery (mDNS) — HTTPS proxying for web, direct host access for databases
-- AI-friendly automation with `--json`, `--non-interactive`, `AGENTS.md`, `llms.txt`, and agent skills
-- Advanced workflow support including merge checks, rebase flows, merge train, and sandboxed workspaces
+- Branch/workspace switching with `devflow switch`
+- Optional Git worktree management
+- Per-workspace local services, especially Docker-backed databases and caches
+- Lifecycle hooks for setup, migrations, env files, and cleanup
+- JSON and non-interactive modes for scripts and coding agents
+- A terminal dashboard via `devflow tui`
 
-## Choose your interface
-
-- `CLI` for scripts, daily workspace switching, CI, and power users
-- `devflow tui` for keyboard-driven workspace, service, proxy, and log management in the terminal
-- Desktop app for project setup, services, hooks, config editing, embedded terminal, proxy controls, settings, and merge train
+Some advanced areas, such as merge train, sandboxing, proxy, plugin providers, and the desktop GUI, are still evolving. Check `devflow --help-all` and the changelog for what is available in your build.
 
 ## Quick start
 
 ```bash
-# 1. Initialize a repository
+# 1. Initialize a project
 cd ~/my-project
 devflow init
 
-# 2. Create a workspace with isolated services
+# 2. Create and switch to an isolated workspace
 devflow switch -c feature/auth
 
-# 3. Inspect the environment
+# 3. Inspect the current environment
 devflow status
+
+# 4. Print connection details for scripts or .env files
 devflow connection feature/auth --format env
 ```
 
-If worktrees are enabled, devflow can also move you into the matching worktree directory with shell integration:
+If worktrees are enabled, install shell integration so `devflow switch` can move your shell into the selected worktree:
 
 ```bash
 eval "$(devflow shell-init)"
 ```
 
-## Core concepts
+## Everyday commands
 
-| Concept | Description |
-|---|---|
-| **Workspace** | A devflow-managed isolated environment associated with a Git branch or JJ bookmark/change. It is the unit that gets services, hooks, and optional worktree directories. |
-| **Service** | A stateful backend managed per workspace: database, cache, queue, or generic Docker container. |
-| **Worktree** | An optional per-workspace checkout directory so you can work on multiple tasks without stashing. |
-| **Provider** | The system that creates service instances: local Docker, Neon, DBLab, Xata, or a plugin provider. |
-| **Hook** | A command or built-in action that runs during lifecycle events like create, switch, merge, rebase, or cleanup. |
+```bash
+devflow switch                  # Pick a workspace interactively
+devflow switch -c feature/api    # Create and switch to a workspace
+devflow list                    # List workspaces and service status
+devflow status                  # Show current workspace information
+devflow connection feature/api   # Show service connection info
+devflow remove feature/api       # Remove workspace resources
+devflow tui                     # Open the terminal dashboard
+```
 
-## Main capabilities
+Run `devflow --help-all` to see advanced service, hook, proxy, agent, and config commands.
 
-### Workspace isolation
+## Services
 
-- `devflow switch -c feature/x` creates a new workspace and its services
-- `devflow switch feature/x` returns to an existing workspace and updates the environment
-- `devflow switch feature/x --open` opens a tmux/zellij session in the workspace worktree
-- `devflow remove feature/x` cleans up the workspace, worktree, and service instances together
-
-### Services
-
-Supported service types include PostgreSQL, MySQL, ClickHouse, generic Docker containers, and plugin-backed services. Local mode supports fast cloning and common lifecycle operations such as start, stop, reset, logs, seed, and cleanup.
+devflow can manage named services per workspace. Local Docker services are the main path today, with support for common database/cache use cases and generic containers.
 
 ```bash
 devflow service add app-db --provider local --service-type postgres
-devflow service add analytics --provider local --service-type clickhouse
-devflow service discover
+devflow service create feature/auth
+devflow service connection feature/auth
+devflow service logs feature/auth
+devflow service reset feature/auth
 ```
 
-### Hooks
+Connection information can be emitted as URI, env, or JSON output for scripts and tooling.
 
-Hooks are MiniJinja-templated lifecycle actions that can update `.env` files, run migrations, call APIs, copy files, notify the desktop, or execute shell commands.
+## Hooks and automation
+
+Hooks run during workspace lifecycle phases such as creation and switching. They can write env files, run migrations, or execute project-specific commands.
 
 ```bash
 devflow hook show
 devflow hook explain post-switch
-devflow hook actions
-devflow hook recipes
+devflow hook vars
 ```
 
-Built-in phases cover switching, create/remove, commit, merge, rebase, merge cascade, and service lifecycle events. Custom phases are also supported.
-
-### Smart merge
-
-devflow includes advanced merge tooling for teams that want stronger branch hygiene:
-
-- merge readiness checks before landing work
-- `devflow merge` and `devflow rebase` helpers
-- merge train queue with pause, resume, and run support
-- optional cleanup after successful merge
-
-Smart merge is feature-gated in settings/config before `devflow train` commands are available.
-
-### Sandboxed workspaces
-
-For risky automation or agent tasks, you can create a restricted workspace:
-
-```bash
-devflow switch -c agent/fix-login --sandboxed
-```
-
-This uses the sandbox support in `devflow-core` to reduce filesystem and command access where supported by the platform.
-
-### Reverse proxy
-
-devflow ships with a native HTTP(S) reverse proxy that auto-discovers Docker containers and maps them to friendly `*.local` domains that resolve **from the host** — no `/etc/hosts` and no resolver edits.
-
-```bash
-devflow proxy start
-devflow proxy trust install
-devflow proxy list
-```
-
-| Container Type | Domain Pattern |
-|---|---|
-| Standalone | `container_name.local` |
-| Compose service | `service.project.local` |
-| devflow service | `service.workspace.project.local` |
-| Custom label | value of `devproxy.domain` |
-
-The proxy advertises each name over **mDNS/Bonjour** so it resolves on the host, then routes by service type:
-
-- **Web services → the proxy:** the name resolves to `127.0.0.1`, where the proxy terminates TLS with the trusted CA and forwards to the container — e.g. `https://web.my-project.local`.
-- **Database / TCP services → the container directly:** the name resolves straight to the container IP, so you connect at the native port with no proxy in the path — e.g. `postgresql://postgres.my-workspace.my-project.local:5432`.
-
-Direct database access requires container IPs to be routable from the host — true on **OrbStack**, **Colima**, and **Linux**, but not stock Docker Desktop. If a database name does not resolve, use the UPSTREAM IP from `devflow proxy list`. mDNS advertising is currently macOS-only; on other platforms the default suffix stays `.localhost` (loopback, web only). Disable advertising with `devflow proxy start --no-mdns`.
-
-### AI agents and automation
-
-devflow is designed to work well with coding agents and CI:
-
-- `--json` for structured output
-- `--non-interactive` for automation-safe execution
-- `devflow agent context` for machine-readable project and service context
-- `devflow agent skill` to install Agent Skills-compatible workspace skills
-- `AGENTS.md`, `llms.txt`, and example agent bootstrap scripts in `examples/`
+For automation, use:
 
 ```bash
 devflow --json --non-interactive switch -c agent/task-42
 devflow agent context --format json
-devflow agent skill
 ```
 
-See `AGENTS.md` for the recommended agent workflow.
-
-## Desktop app
-
-The desktop GUI is a substantial part of the product, not just a wrapper around the CLI. It includes:
-
-- Project list and setup flow
-- Workspace and service management
-- Hook manager and config editor
-- Proxy dashboard
-- Embedded terminal panel
-- Settings page with feature toggles such as Smart Merge
-- Merge Train page when Smart Merge is enabled
-
-```bash
-mise run gui
-mise run gui:build
-```
-
-Requires [bun](https://bun.sh) and the [Tauri CLI](https://v2.tauri.app/start/prerequisites/).
-
-## TUI dashboard
-
-```bash
-devflow tui
-```
-
-The TUI has five tabs:
-
-- `Workspaces` — workspace tree, status, and open/create/switch actions
-- `Services` — service inventory and capabilities
-- `Proxy` — proxy status and discovered container endpoints
-- `System` — config, hooks, and diagnostics
-- `Logs` — service log viewer
+See `AGENTS.md` for the recommended coding-agent workflow, including hook pre-approval in non-interactive mode.
 
 ## Configuration
 
-`devflow init` creates `.devflow.yml`. All sections are optional.
+`devflow init` creates a `.devflow.yml`. A minimal example:
 
 ```yaml
 services:
@@ -203,36 +113,18 @@ services:
     local:
       image: postgres:17
 
-git:
-  auto_create_on_workspace: true
-  auto_switch_on_workspace: true
-  main_workspace: main
-
 worktree:
   enabled: true
   path_template: "../{repo}.{workspace}"
-  copy_files: [".env.local", ".env"]
 
 hooks:
-  post-create:
+  post-switch:
     env:
       action:
         type: write-env
         path: .env.local
         vars:
           DATABASE_URL: "{{ service['app-db'].url }}"
-    migrate: "npm run migrate"
-  post-switch:
-    env:
-      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
-
-agent:
-  command: claude
-  workspace_prefix: "agent/"
-
-commit:
-  generation:
-    command: "claude -p --model haiku"
 ```
 
 Config precedence:
@@ -241,39 +133,7 @@ Config precedence:
 2. `.devflow.local.yml`
 3. `.devflow.yml`
 
-## Example workflows
-
-### Feature development
-
-```bash
-devflow switch -c feature/auth
-# make schema changes, seed data, run app
-devflow status
-```
-
-### Review an existing branch with isolated state
-
-```bash
-devflow switch feature/payment-refactor
-devflow service logs feature/payment-refactor
-```
-
-### Merge train
-
-```bash
-devflow train add
-devflow train status
-devflow train run --cleanup
-```
-
-### Agent or automation task
-
-```bash
-devflow --json --non-interactive switch -c agent/task-42
-devflow agent context --format json
-```
-
-## Install
+## Install from source
 
 ```bash
 git clone https://github.com/clement-tourriere/devflow.git
@@ -283,53 +143,17 @@ cargo install --path .
 
 Requirements:
 
-- Rust 1.70+
-- Docker for local services
-- `bun` + Tauri prerequisites if you want the desktop GUI
+- Rust toolchain
+- Docker or a compatible container runtime for local services
+- Optional: `bun` and Tauri prerequisites for desktop GUI development
 
-### macOS
+## More examples
 
-APFS cloning works automatically. Install Docker Desktop or OrbStack, install Rust, then run `cargo install --path .`.
-
-### Ubuntu
-
-```bash
-sudo apt-get update && sudo apt-get install -y docker.io
-sudo usermod -aG docker $USER && newgrp docker
-
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-
-git clone https://github.com/clement-tourriere/devflow.git
-cd devflow
-cargo install --path .
-```
-
-### Optional: ZFS on Linux
-
-```bash
-sudo apt-get install -y zfsutils-linux
-devflow setup-zfs
-```
-
-## Storage backends for fast cloning
-
-| Filesystem | Platform | Method | Setup |
-|---|---|---|---|
-| APFS | macOS | `cp -c` clone | Automatic |
-| ZFS | Linux | Snapshots + clones | `devflow setup-zfs` |
-| Btrfs | Linux | Reflink copy | Automatic |
-| XFS | Linux | Reflink copy | Automatic |
-| ext4 / other | Any | Full copy fallback | None |
-
-## Examples and further reading
-
-- `examples/simple.devflow.yml` — minimal single-service setup
-- `examples/multi-service.devflow.yml` — multi-service project with hooks and worktrees
-- `examples/django.devflow.yml` — framework-oriented example
-- `docs/CLI.md` — command reference
-- [Full documentation site](https://clement-tourriere.github.io/devflow/)
-- `AGENTS.md` — agent workflow guide
+- `examples/simple.devflow.yml`
+- `examples/multi-service.devflow.yml`
+- `examples/django.devflow.yml`
+- `docs/CLI.md`
+- `AGENTS.md`
 
 ## License
 
