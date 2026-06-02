@@ -89,5 +89,5 @@ run = "sh -c 'cz bump --dry-run --yes --allow-no-commit --increment PATCH || tes
 
 [tasks.release]
 description = "Create release commit, changelog, and tag via Commitizen"
-run = "cz bump --yes"
+run = "cz bump --yes --allow-no-commit --increment PATCH"
 
