@@ -42,13 +42,25 @@ $DEVFLOW_BIN doctor
 
 echo "--- init ---"
 $DEVFLOW_BIN --non-interactive init ci-test
+cd ci-test
+
+# Configure a local Postgres service. `devflow init` no longer creates a
+# service in non-interactive mode; services are stored in local state via
+# `devflow service add`.
+echo "--- service add app-db ---"
+$DEVFLOW_BIN --non-interactive service add app-db --provider local --service-type postgres
 
 # 2. Verify storage backend
+# `devflow status --json` returns a map keyed by service name for configured
+# services. Older builds exposed a top-level `.storage`; keep the fallback so
+# this script remains useful against both shapes.
 echo "--- verify storage ---"
-STORAGE=$($DEVFLOW_BIN --json status | jq -r '.storage')
+STATUS_JSON=$($DEVFLOW_BIN --json status)
+STORAGE=$(jq -r '.storage // (to_entries[0].value.storage // null)' <<<"$STATUS_JSON")
 echo "Detected storage: $STORAGE"
 if [ "$STORAGE" != "$EXPECTED_STORAGE" ]; then
   echo "ERROR: Expected storage '$EXPECTED_STORAGE' but got '$STORAGE'"
+  echo "$STATUS_JSON" | jq .
   exit 1
 fi
 
