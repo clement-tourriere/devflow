@@ -56,7 +56,15 @@ $DEVFLOW_BIN --non-interactive service add app-db --provider local --service-typ
 # this script remains useful against both shapes.
 echo "--- verify storage ---"
 STATUS_JSON=$($DEVFLOW_BIN --json status)
-STORAGE=$(jq -r '.storage // (to_entries[0].value.storage // null)' <<<"$STATUS_JSON")
+STORAGE=$(jq -r '
+  if type == "object" and (.storage? != null) then
+    .storage
+  elif type == "object" then
+    ([to_entries[] | select(.value | type == "object") | .value.storage? | select(. != null)] | first) // "null"
+  else
+    "null"
+  end
+' <<<"$STATUS_JSON")
 echo "Detected storage: $STORAGE"
 if [ "$STORAGE" != "$EXPECTED_STORAGE" ]; then
   echo "ERROR: Expected storage '$EXPECTED_STORAGE' but got '$STORAGE'"
