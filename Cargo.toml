@@ -32,7 +32,7 @@ devflow-proxy = { path = "crates/devflow-proxy" }
 
 # CLI and argument parsing
 clap = { version = "4.5", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
-clap_complete = "4.5"
+clap_complete = "4.6"
 
 # Serialization
 serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
