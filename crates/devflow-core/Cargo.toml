@@ -80,7 +80,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"], 
 tar = { version = "0.4", default-features = false, optional = true }
 
 # Content hashing for skill versioning
-sha2 = { version = "0.10", optional = true }
+sha2 = { version = "0.11", optional = true }
 
 which = "8.0.0"
 
