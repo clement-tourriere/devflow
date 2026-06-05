@@ -85,7 +85,7 @@ sha2 = { version = "0.10", optional = true }
 which = "8.0.0"
 
 # Password input
-rpassword = { version = "7.4", default-features = false }
+rpassword = { version = "7.5", default-features = false }
 
 # Terminal UI for interactive selection
 inquire = { version = "0.9", default-features = false, features = ["crossterm"] }
