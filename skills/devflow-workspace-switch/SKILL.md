@@ -1,41 +1,14 @@
 ---
 name: devflow-workspace-switch
-description: Switch to an existing devflow workspace and its isolated services.
+description: Switch to an existing devflow workspace.
 ---
 
 ## When to use
 
 - You need to change the active workspace to work on a different task
-- You want to switch services (databases, caches) to match a specific workspace
-- After listing workspaces, you want to activate one of them
 
 ## Instructions
 
-1. The workspace name is provided in `$ARGUMENTS`
-2. Run `devflow --json --non-interactive switch $ARGUMENTS` to switch
-3. Parse the JSON output and check for `worktree_path`
-   - In agent tools, do not rely on `cd` inside a shell command to retarget the session
-   - Instead, use `worktree_path` as the working directory/workdir for subsequent tool calls
-4. Verify the switch succeeded with `devflow status`
-5. If the workspace has services, retrieve connection info with `devflow --json connection $ARGUMENTS`
-   - If this returns `"services": "none_configured"`, the project uses workspaces without database services — skip this step
-6. Report the new workspace state and any connection strings to the user
-
-Always use `--json --non-interactive` when running as an agent. Do NOT use `--no-verify` — it skips all lifecycle hooks (e.g. migrations, env setup) which are usually needed.
-
-## Examples
-
-Switch to an existing workspace:
-
-```bash
-OUTPUT=$(devflow --json --non-interactive switch my-feature)
-WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
-# For agents, use WORKTREE as the workdir for later tool calls
-```
-
-Verify the switch and get connection info:
-
-```bash
-devflow status
-devflow --json connection my-feature
-```
+1. Run `devflow --json --non-interactive switch $ARGUMENTS`
+2. If the JSON output has `worktree_path`, use it as the working directory for subsequent tool calls
+3. Run `devflow --json connection $ARGUMENTS` to get service connection strings
