@@ -488,6 +488,11 @@ pub enum ServiceCommands {
     List,
     #[command(about = "Show service status")]
     Status,
+    #[command(
+        about = "Start all shared global engines",
+        long_about = "Ensure every configured shared global engine (type: shared, or service_type rustfs/redis) is running.\n\nStarts the single global container per engine if it isn't up yet — a pre-warm / reconcile step. Per-workspace (CoW) and cloud services are skipped.\n\nExamples:\n  devflow service up"
+    )]
+    Up,
     #[command(about = "Show service capabilities")]
     Capabilities,
     #[command(

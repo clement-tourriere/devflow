@@ -488,6 +488,35 @@ pub(super) async fn handle_service_dispatch(
                 print_enriched_branch_list(&workspaces, config, config_path);
             }
         }
+        super::ServiceCommands::Up => {
+            let statuses = services::factory::reconcile_shared_engines(config).await?;
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "ok",
+                        "action": "service_up",
+                        "engines": statuses,
+                    }))?
+                );
+            } else if statuses.is_empty() {
+                println!("No shared global engines configured (type: shared, or service_type rustfs/redis).");
+            } else {
+                println!("Shared global engines:");
+                for s in &statuses {
+                    let mark = if s.running { "✓" } else { "✗" };
+                    println!(
+                        "  {} {} ({}) — {}",
+                        mark, s.service_name, s.provider, s.detail
+                    );
+                }
+                let failed = statuses.iter().filter(|s| !s.running).count();
+                if failed > 0 {
+                    anyhow::bail!("{} engine(s) failed to start", failed);
+                }
+            }
+            return Ok(());
+        }
         super::ServiceCommands::Status => {
             let has_multiple_services = config.resolve_services().len() > 1;
             if database_name.is_none() && has_multiple_services {

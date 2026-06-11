@@ -313,6 +313,52 @@ async fn create_postgres_provider(
     }
 }
 
+/// Whether a service uses a shared global engine (one container, logical
+/// isolation) rather than a per-workspace CoW container or a cloud provider.
+pub fn is_shared_service(named: &NamedServiceConfig) -> bool {
+    let svc = named.service_type.to_lowercase();
+    let provider = named.provider_type.to_lowercase();
+    matches!(svc.as_str(), "rustfs" | "s3" | "objectstorage" | "redis")
+        || matches!(provider.as_str(), "shared" | "global")
+}
+
+/// Status of a single shared engine after a reconcile attempt.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SharedEngineStatus {
+    pub service_name: String,
+    pub provider: String,
+    pub running: bool,
+    pub detail: String,
+}
+
+/// Ensure every configured **shared** global engine is running (the reconcile
+/// primitive a controller daemon would loop). Constructs each shared provider
+/// and calls `test_connection`, which starts the global container if needed.
+/// Non-shared services (per-workspace CoW, cloud) are skipped.
+pub async fn reconcile_shared_engines(config: &Config) -> Result<Vec<SharedEngineStatus>> {
+    config.validate_services()?;
+    let mut statuses = Vec::new();
+    for named in config.resolve_services() {
+        if !is_shared_service(&named) {
+            continue;
+        }
+        let (running, detail) = match create_provider_from_named_config(config, &named).await {
+            Ok(provider) => match provider.test_connection().await {
+                Ok(()) => (true, "running".to_string()),
+                Err(e) => (false, format!("{e:#}")),
+            },
+            Err(e) => (false, format!("{e:#}")),
+        };
+        statuses.push(SharedEngineStatus {
+            service_name: named.name.clone(),
+            provider: named.service_type.clone(),
+            running,
+            detail,
+        });
+    }
+    Ok(statuses)
+}
+
 /// Resolve a single service provider by name (or the default).
 pub async fn resolve_provider(config: &Config, service_name: Option<&str>) -> Result<NamedService> {
     config.validate_services()?;
@@ -632,5 +678,55 @@ fn resolve_env_var(value: &str) -> Result<String> {
             .with_context(|| format!("Environment variable {} not found", env_var))
     } else {
         Ok(value.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::NamedServiceConfig;
+
+    fn svc(name: &str, provider_type: &str, service_type: &str) -> NamedServiceConfig {
+        NamedServiceConfig {
+            name: name.to_string(),
+            provider_type: provider_type.to_string(),
+            service_type: service_type.to_string(),
+            auto_workspace: true,
+            default: false,
+            local: None,
+            shared: None,
+            neon: None,
+            dblab: None,
+            xata: None,
+            clickhouse: None,
+            mysql: None,
+            generic: None,
+            plugin: None,
+            docker: None,
+        }
+    }
+
+    #[test]
+    fn test_is_shared_service() {
+        // Provider-type based
+        assert!(is_shared_service(&svc("db", "shared", "postgres")));
+        assert!(is_shared_service(&svc("db", "global", "clickhouse")));
+        // Service-type based (always shared)
+        assert!(is_shared_service(&svc("storage", "local", "rustfs")));
+        assert!(is_shared_service(&svc("cache", "local", "redis")));
+        // Not shared
+        assert!(!is_shared_service(&svc("db", "local", "postgres")));
+        assert!(!is_shared_service(&svc("db", "neon", "postgres")));
+        assert!(!is_shared_service(&svc("ch", "local", "clickhouse")));
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_skips_non_shared_without_docker() {
+        // A config with only a local CoW postgres has no shared engines, so
+        // reconcile returns empty without ever touching Docker.
+        let mut config = Config::default();
+        config.services = Some(vec![svc("db", "local", "postgres")]);
+        let statuses = reconcile_shared_engines(&config).await.unwrap();
+        assert!(statuses.is_empty());
     }
 }
