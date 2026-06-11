@@ -69,6 +69,9 @@ inquire = { version = "0.9", default-features = false, features = ["crossterm"] 
 # Date/time handling
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 
+# User directories (daemon pidfile/status under the config dir)
+dirs = { version = "6.0", default-features = false }
+
 # HTTP client (for proxy status queries)
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 

@@ -359,6 +359,62 @@ pub async fn reconcile_shared_engines(config: &Config) -> Result<Vec<SharedEngin
     Ok(statuses)
 }
 
+/// Per-project reconcile result for the controller daemon.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProjectReconcile {
+    pub project: String,
+    pub engines: Vec<SharedEngineStatus>,
+}
+
+/// Load a project's committed config from its directory (YAML or TOML).
+fn load_project_config(dir: &std::path::Path) -> Option<Config> {
+    for name in [
+        ".devflow.yml",
+        ".devflow.yaml",
+        ".devflow.toml",
+        "devflow.toml",
+    ] {
+        let p = dir.join(name);
+        if p.exists() {
+            return Config::from_file(&p).ok();
+        }
+    }
+    None
+}
+
+/// Reconcile shared global engines for **every registered project** on the
+/// machine — the controller daemon's loop body. Loads each project's config
+/// and ensures its shared engines' containers are running. Projects whose
+/// directory is gone, or that configure no shared engines, are skipped.
+///
+/// (test_connection — and thus this reconcile — depends only on each engine's
+/// fixed global container name, not on per-project identity, so it is correct
+/// regardless of the daemon's working directory.)
+pub async fn reconcile_all_projects() -> Vec<ProjectReconcile> {
+    let mut out = Vec::new();
+    let Ok(mgr) = crate::state::LocalStateManager::new() else {
+        return out;
+    };
+    for (key, _) in mgr.list_all_projects() {
+        let dir = std::path::Path::new(&key);
+        if !dir.exists() {
+            continue;
+        }
+        let Some(config) = load_project_config(dir) else {
+            continue;
+        };
+        if let Ok(engines) = reconcile_shared_engines(&config).await {
+            if !engines.is_empty() {
+                out.push(ProjectReconcile {
+                    project: key.clone(),
+                    engines,
+                });
+            }
+        }
+    }
+    out
+}
+
 /// Resolve a single service provider by name (or the default).
 pub async fn resolve_provider(config: &Config, service_name: Option<&str>) -> Result<NamedService> {
     config.validate_services()?;

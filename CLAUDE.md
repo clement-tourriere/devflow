@@ -23,6 +23,7 @@ devflow is a Rust-based tool that provides per-workspace isolation for developme
 - **AI commit messages**: `devflow commit --ai` generates commit messages via LLM (CLI-first, API fallback)
 - **AI agent integration**: `devflow agent start/status/context/skill/docs` for managing AI coding agents in isolated workspaces
 - **Native reverse proxy**: Auto-discovers Docker containers and serves them via HTTPS `*.localhost` domains with auto-generated certificates
+- **Controller daemon**: `devflow daemon start` keeps every registered project's shared global engines (`type: shared`, or `service_type: rustfs`/`redis`) running, restarting any that go down; `devflow service up` reconciles them once
 - **Desktop GUI**: Tauri 2 desktop app with React frontend for managing projects, workspaces, services, hooks, proxy, and configuration
 
 ## Configuration

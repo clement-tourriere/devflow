@@ -1046,6 +1046,7 @@ dependencies = [
  "crossterm 0.28.1",
  "devflow-core",
  "devflow-proxy",
+ "dirs",
  "env_logger",
  "indexmap 2.13.0",
  "inquire",

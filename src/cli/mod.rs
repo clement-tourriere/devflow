@@ -1,6 +1,7 @@
 mod agent;
 mod commit;
 mod config;
+mod daemon;
 mod gc;
 mod git_hook;
 mod hook;
@@ -378,6 +379,15 @@ Examples:
     Proxy {
         #[command(subcommand)]
         action: ProxyCommands,
+    },
+
+    #[command(
+        about = "Controller daemon: keep shared global engines running",
+        long_about = "Run a background controller that keeps every registered project's shared global engines (type: shared, or service_type rustfs/redis) running, restarting any that go down.\n\nExamples:\n  devflow daemon start           # background, reconcile every 30s\n  devflow daemon start --once    # reconcile once and exit\n  devflow daemon status\n  devflow daemon stop"
+    )]
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonCommands,
     },
 
     // ── Hidden ──
@@ -825,6 +835,24 @@ pub enum ProxyCommands {
     },
 }
 
+/// Subcommands for `devflow daemon`.
+#[derive(Subcommand)]
+pub enum DaemonCommands {
+    #[command(about = "Start the controller daemon")]
+    Start {
+        #[arg(long, help = "Seconds between reconcile passes [default: 30]")]
+        interval: Option<u64>,
+        #[arg(long, help = "Run in the foreground instead of detaching")]
+        foreground: bool,
+        #[arg(long, help = "Reconcile once and exit (no background process)")]
+        once: bool,
+    },
+    #[command(about = "Stop the controller daemon")]
+    Stop,
+    #[command(about = "Show controller daemon status")]
+    Status,
+}
+
 /// Subcommands for `devflow proxy trust`.
 #[derive(Subcommand)]
 pub enum TrustCommands {
@@ -853,6 +881,11 @@ pub async fn handle_command(
     // Proxy commands — no config needed
     if let Commands::Proxy { action } = cmd {
         return proxy::handle_proxy_command(action, json_output).await;
+    }
+
+    // Daemon commands — operate on global state, no project config needed
+    if let Commands::Daemon { action } = cmd {
+        return daemon::handle_daemon_command(action, json_output).await;
     }
 
     // Gc command — no config needed, operates on global state
