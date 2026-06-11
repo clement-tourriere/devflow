@@ -618,14 +618,18 @@ pub async fn destroy_project(project_path: String) -> Result<DestroyResult, Stri
         }
     }
 
-    // 2. Remove worktrees
+    // 2. Remove worktrees — skip (never rm -rf) any with uncommitted work,
+    // including non-devflow worktrees the user created by hand.
     if let Some(ref repo) = vcs_repo {
         if let Ok(worktrees) = repo.list_worktrees() {
             for wt in worktrees.iter().filter(|wt| !wt.is_main) {
-                if repo.remove_worktree(&wt.path).is_ok()
-                    || (wt.path.exists() && std::fs::remove_dir_all(&wt.path).is_ok())
-                {
-                    worktrees_removed += 1;
+                match repo.remove_worktree(&wt.path, false) {
+                    Ok(()) => worktrees_removed += 1,
+                    Err(e) => log::warn!(
+                        "Skipping worktree '{}' during project destroy: {}",
+                        wt.path.display(),
+                        e
+                    ),
                 }
             }
         }

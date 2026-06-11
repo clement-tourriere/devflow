@@ -310,7 +310,7 @@ impl VcsProvider for JjRepository {
         Ok(WorktreeCreateResult::new())
     }
 
-    fn remove_worktree(&self, path: &Path) -> Result<()> {
+    fn remove_worktree(&self, path: &Path, force: bool) -> Result<()> {
         // Find workspace name by path
         let worktrees = self.list_worktrees()?;
         let workspace = worktrees.iter().find(|w| w.path == path);
@@ -322,17 +322,25 @@ impl VcsProvider for JjRepository {
             let path_str = path.to_str().context("Worktree path is not valid UTF-8")?;
 
             // Try to forget the workspace using the path
-            self.jj(&["workspace", "forget", "--repository", path_str])
-                .or_else(|_| -> Result<String> {
-                    // Fallback: remove the directory directly
+            let forget_result = self.jj(&["workspace", "forget", "--repository", path_str]);
+            match forget_result {
+                Ok(_) => {}
+                Err(_) if force => {
+                    // Forced: fall back to removing the directory directly
                     log::debug!(
                         "jj workspace forget failed, removing directory: {}",
                         path_str
                     );
                     std::fs::remove_dir_all(path)
                         .context("Failed to remove workspace directory")?;
-                    Ok(String::new())
-                })?;
+                }
+                Err(e) => {
+                    return Err(e.context(format!(
+                        "Failed to forget jj workspace at '{}' (use --force to remove the directory anyway)",
+                        path.display()
+                    )));
+                }
+            }
         } else {
             log::debug!(
                 "No jj workspace found at {}; skipping removal",

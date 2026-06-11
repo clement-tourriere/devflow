@@ -15,8 +15,8 @@ function ProjectSetup() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  // Extract project path from URL — mirrors ProjectDetail pattern
-  const pathSegments = location.pathname.replace("/projects/", "").replace("/setup", "");
+  // Extract project path from URL. Route is `/onboard/<encoded-path>`.
+  const pathSegments = location.pathname.replace(/^\/onboard\//, "");
   const projectPath = decodeURIComponent(pathSegments);
 
   const [step, setStep] = useState<SetupStep>("services");

@@ -365,6 +365,46 @@ fi
 
 // ─── VcsProvider implementation ────────────────────────────────────────────
 
+/// Refuse to touch a worktree that still holds uncommitted work.
+///
+/// Counts tracked modifications, staged changes, and untracked non-ignored
+/// files — the same set `git worktree remove` refuses on.  Gitignored files
+/// (e.g. `.env.local` copied in by devflow) never block removal.
+fn ensure_worktree_clean(path: &Path) -> Result<()> {
+    let wt_repo = Repository::open(path)
+        .with_context(|| format!("Failed to open worktree at '{}'", path.display()))?;
+    let mut opts = git2::StatusOptions::new();
+    opts.include_untracked(true)
+        .include_ignored(false)
+        .exclude_submodules(true);
+    let statuses = wt_repo
+        .statuses(Some(&mut opts))
+        .with_context(|| format!("Failed to read status of worktree '{}'", path.display()))?;
+
+    let dirty: Vec<String> = statuses
+        .iter()
+        .filter_map(|e| e.path().map(String::from))
+        .collect();
+
+    if !dirty.is_empty() {
+        let preview = dirty
+            .iter()
+            .take(3)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let suffix = if dirty.len() > 3 { ", …" } else { "" };
+        anyhow::bail!(
+            "Worktree at '{}' has {} uncommitted change(s) ({}{}). Commit or stash them, or use --force to discard.",
+            path.display(),
+            dirty.len(),
+            preview,
+            suffix
+        );
+    }
+    Ok(())
+}
+
 impl VcsProvider for GitRepository {
     fn current_workspace(&self) -> Result<Option<String>> {
         self.get_current_workspace()
@@ -595,7 +635,7 @@ impl VcsProvider for GitRepository {
         Ok(WorktreeCreateResult::new())
     }
 
-    fn remove_worktree(&self, path: &Path) -> Result<()> {
+    fn remove_worktree(&self, path: &Path, force: bool) -> Result<()> {
         // Find the worktree by path
         let worktree_names = self.repo.worktrees().context("Failed to list worktrees")?;
 
@@ -604,10 +644,16 @@ impl VcsProvider for GitRepository {
 
             if let Ok(wt) = self.repo.find_worktree(name) {
                 if wt.path() == path {
+                    if !force {
+                        ensure_worktree_clean(path)?;
+                    }
                     // Prune the worktree (removes git metadata + working tree)
                     let mut prune_opts = WorktreePruneOptions::new();
                     prune_opts.valid(true);
                     prune_opts.working_tree(true);
+                    if force {
+                        prune_opts.locked(true);
+                    }
                     wt.prune(Some(&mut prune_opts)).with_context(|| {
                         format!("Failed to prune worktree at '{}'", path.display())
                     })?;
@@ -937,7 +983,37 @@ impl VcsProvider for GitRepository {
         }
 
         if analysis.is_fast_forward() {
-            // Fast-forward: just move HEAD to the target commit
+            // Refuse to clobber local changes — `git merge --ff` does the same.
+            let mut status_opts = git2::StatusOptions::new();
+            status_opts.include_untracked(false).include_ignored(false);
+            let statuses = self
+                .repo
+                .statuses(Some(&mut status_opts))
+                .context("Failed to read repository status before fast-forward")?;
+            if !statuses.is_empty() {
+                anyhow::bail!(
+                    "Cannot fast-forward to '{}': {} local change(s) would be overwritten. Commit or stash them first.",
+                    source,
+                    statuses.len()
+                );
+            }
+
+            // Update the working tree first with a safe (non-destructive)
+            // checkout, then move the branch ref — so a checkout failure
+            // (e.g. an untracked file collision) leaves the branch untouched.
+            let target_tree = annotated.tree().context("Source commit has no tree")?;
+            self.repo
+                .checkout_tree(
+                    target_tree.as_object(),
+                    Some(git2::build::CheckoutBuilder::new().safe()),
+                )
+                .with_context(|| {
+                    format!(
+                        "Fast-forward to '{}' aborted: local files would be overwritten. Commit or stash them first.",
+                        source
+                    )
+                })?;
+
             let refname = format!(
                 "refs/heads/{}",
                 self.current_workspace()?.unwrap_or_default()
@@ -946,9 +1022,6 @@ impl VcsProvider for GitRepository {
                 .find_reference(&refname)
                 .and_then(|mut r| r.set_target(annotated.id(), "devflow: fast-forward merge"))
                 .with_context(|| format!("Failed to fast-forward to '{}'", source))?;
-            self.repo
-                .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
-                .context("Failed to checkout after fast-forward")?;
             return Ok(());
         }
 
@@ -1196,5 +1269,111 @@ mod tests {
             GitRepository::worktree_name_for_branch("fix/bug/123"),
             "fix-bug-123"
         );
+    }
+
+    /// Build a repo with one commit so worktrees can be created.
+    /// Returns the canonicalized root (macOS tempdirs are symlinked) so
+    /// paths compare equal with what git2 reports.
+    fn repo_with_commit() -> (tempfile::TempDir, PathBuf, GitRepository) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let repo = GitRepository::init(&root).unwrap();
+        repo.ensure_initial_commit().unwrap();
+        (tmp, root, repo)
+    }
+
+    #[test]
+    fn test_remove_worktree_refuses_dirty_without_force() {
+        let (_tmp, root, repo) = repo_with_commit();
+        let wt_path = root.join("wt-dirty");
+        repo.create_worktree("feature/dirty", &wt_path).unwrap();
+
+        // An untracked (non-ignored) file must block removal
+        std::fs::write(wt_path.join("work-in-progress.txt"), "precious").unwrap();
+
+        let err = repo.remove_worktree(&wt_path, false).unwrap_err();
+        assert!(
+            err.to_string().contains("uncommitted change"),
+            "unexpected error: {err}"
+        );
+        assert!(wt_path.exists(), "worktree must not be deleted");
+
+        // Force discards it
+        repo.remove_worktree(&wt_path, true).unwrap();
+        assert!(!wt_path.exists());
+    }
+
+    #[test]
+    fn test_remove_worktree_allows_clean_and_ignored() {
+        let (_tmp, root, repo) = repo_with_commit();
+
+        // Commit a .gitignore so ignored files exist in the worktree
+        std::fs::write(root.join(".gitignore"), ".env.local\n").unwrap();
+        let r = git2::Repository::open(&root).unwrap();
+        let mut index = r.index().unwrap();
+        index.add_path(Path::new(".gitignore")).unwrap();
+        index.write().unwrap();
+        let tree = r.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("t", "t@t").unwrap();
+        let parent = r.head().unwrap().peel_to_commit().unwrap();
+        r.commit(Some("HEAD"), &sig, &sig, "ignore", &tree, &[&parent])
+            .unwrap();
+
+        let wt_path = root.join("wt-clean");
+        repo.create_worktree("feature/clean", &wt_path).unwrap();
+
+        // A gitignored file (e.g. devflow-copied .env.local) must NOT block
+        std::fs::write(wt_path.join(".env.local"), "DATABASE_URL=x").unwrap();
+
+        repo.remove_worktree(&wt_path, false).unwrap();
+        assert!(!wt_path.exists());
+    }
+
+    #[test]
+    fn test_ff_merge_refuses_dirty_working_tree() {
+        let (_tmp, root, repo) = repo_with_commit();
+
+        // Commit a file on main so it can be dirtied
+        std::fs::write(root.join("a.txt"), "v1").unwrap();
+        let r = git2::Repository::open(&root).unwrap();
+        let mut index = r.index().unwrap();
+        index.add_path(Path::new("a.txt")).unwrap();
+        index.write().unwrap();
+        let tree = r.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("t", "t@t").unwrap();
+        let parent = r.head().unwrap().peel_to_commit().unwrap();
+        r.commit(Some("HEAD"), &sig, &sig, "add a", &tree, &[&parent])
+            .unwrap();
+
+        // Branch ahead of main: modify a.txt and commit on 'feature'
+        let head = r.head().unwrap().peel_to_commit().unwrap();
+        r.branch("feature", &head, false).unwrap();
+        r.set_head("refs/heads/feature").unwrap();
+        std::fs::write(root.join("a.txt"), "v2").unwrap();
+        let mut index = r.index().unwrap();
+        index.add_path(Path::new("a.txt")).unwrap();
+        index.write().unwrap();
+        let tree = r.find_tree(index.write_tree().unwrap()).unwrap();
+        let parent = r.head().unwrap().peel_to_commit().unwrap();
+        r.commit(Some("HEAD"), &sig, &sig, "edit a", &tree, &[&parent])
+            .unwrap();
+
+        // Back on main with a dirty tracked file
+        let main_name = repo.default_workspace().unwrap().unwrap();
+        r.set_head(&format!("refs/heads/{main_name}")).unwrap();
+        r.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+            .unwrap();
+        std::fs::write(root.join("a.txt"), "local edit").unwrap();
+
+        // Re-open through devflow's provider and attempt the ff merge
+        let repo = GitRepository::new(&root).unwrap();
+        let err = repo.merge_branch("feature").unwrap_err();
+        assert!(
+            err.to_string().contains("local change"),
+            "unexpected error: {err}"
+        );
+        // Local edit survived
+        let content = std::fs::read_to_string(root.join("a.txt")).unwrap();
+        assert_eq!(content, "local edit");
     }
 }

@@ -285,18 +285,38 @@ fn extract_port(container: &ContainerInspectResponse) -> u16 {
         }
     }
 
-    // Exposed ports from container config (Vec<String>, e.g. ["80/tcp", "443/tcp"])
+    // Exposed ports from container config (Vec<String>, e.g. ["80/tcp", "443/tcp"]).
+    // bollard deserializes these from a JSON map, so the order is RANDOM per
+    // process — pick deterministically: well-known HTTP ports first, then the
+    // lowest port, and warn when the choice is ambiguous.
     if let Some(exposed) = container
         .config
         .as_ref()
         .and_then(|c| c.exposed_ports.as_ref())
     {
-        for port_str in exposed {
-            if let Some(port_num) = port_str.split('/').next() {
-                if let Ok(port) = port_num.parse::<u16>() {
-                    return port;
-                }
+        let mut ports: Vec<u16> = exposed
+            .iter()
+            .filter_map(|p| p.split('/').next().and_then(|n| n.parse::<u16>().ok()))
+            .collect();
+        ports.sort_unstable();
+        ports.dedup();
+        if !ports.is_empty() {
+            const PREFERRED_HTTP_PORTS: [u16; 10] =
+                [80, 8080, 3000, 8000, 5173, 4200, 8123, 5000, 9000, 443];
+            let chosen = PREFERRED_HTTP_PORTS
+                .iter()
+                .find(|p| ports.contains(p))
+                .copied()
+                .unwrap_or(ports[0]);
+            if ports.len() > 1 {
+                log::warn!(
+                    "Container {} exposes multiple ports {:?}; routing to {}. Set the devproxy.port label or VIRTUAL_PORT to override.",
+                    container.name.as_deref().unwrap_or("?"),
+                    ports,
+                    chosen
+                );
             }
+            return chosen;
         }
     }
 
@@ -349,6 +369,40 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_extract_port_multi_port_is_deterministic_and_http_biased() {
+        // nginx exposing 80 + 443: must always pick 80, never the TLS port
+        let c = make_container_with_env_and_ports(
+            "nginx",
+            HashMap::new(),
+            Vec::new(),
+            vec!["443/tcp".to_string(), "80/tcp".to_string()],
+        );
+        assert_eq!(extract_port(&c), 80);
+
+        // ClickHouse exposing 8123 + 9000 + 9009: HTTP port 8123 wins
+        let c = make_container_with_env_and_ports(
+            "clickhouse",
+            HashMap::new(),
+            Vec::new(),
+            vec![
+                "9009/tcp".to_string(),
+                "9000/tcp".to_string(),
+                "8123/tcp".to_string(),
+            ],
+        );
+        assert_eq!(extract_port(&c), 8123);
+
+        // No preferred port: lowest wins (stable across restarts)
+        let c = make_container_with_env_and_ports(
+            "custom",
+            HashMap::new(),
+            Vec::new(),
+            vec!["7100/tcp".to_string(), "7002/tcp".to_string()],
+        );
+        assert_eq!(extract_port(&c), 7002);
     }
 
     #[test]

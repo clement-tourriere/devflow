@@ -281,7 +281,11 @@ fn local_dev_setup_recipe() -> HookRecipe {
             command: "mise trust".to_string(),
             working_dir: None,
             continue_on_error: None,
-            condition: Some("file_exists:.mise.toml".to_string()),
+            // mise's modern default config name is mise.toml; .mise.toml and
+            // .config/mise/config.toml are still-supported alternatives.
+            condition: Some(
+                "file_exists:mise.toml,.mise.toml,.config/mise/config.toml".to_string(),
+            ),
             environment: None,
             background: false,
         }),

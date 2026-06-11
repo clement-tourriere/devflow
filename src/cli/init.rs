@@ -403,9 +403,16 @@ pub(super) async fn handle_destroy_project(
             if !json_output {
                 println!("Removing worktree: {}", wt.path.display());
             }
-            if let Err(e) = repo.remove_worktree(&wt.path) {
+            if let Err(e) = repo.remove_worktree(&wt.path, force) {
+                if !force {
+                    log::warn!("Skipping worktree: {}", e);
+                    if !json_output {
+                        println!("  Skipping {}: {}", wt.path.display(), e);
+                    }
+                    continue;
+                }
                 log::warn!("Failed to remove worktree via VCS: {}", e);
-                // Fallback to filesystem removal
+                // Forced: fall back to filesystem removal
                 if wt.path.exists() {
                     if let Err(e2) = std::fs::remove_dir_all(&wt.path) {
                         log::warn!("Failed to remove worktree directory: {}", e2);

@@ -7,14 +7,9 @@ use crate::services;
 use crate::state::{DevflowWorkspace, LocalStateManager};
 use crate::vcs;
 
-use super::hooks::{
-    run_lifecycle_hooks, run_lifecycle_hooks_best_effort, run_lifecycle_hooks_with_result,
-};
+use super::hooks::{run_lifecycle_hooks, run_lifecycle_hooks_best_effort};
 use super::worktree::create_worktree_with_files;
-use super::{
-    LifecycleHookResult, LifecycleOptions, ServiceResult, SwitchWorkspaceResult,
-    WorktreeSetupResult,
-};
+use super::{LifecycleOptions, ServiceResult, SwitchWorkspaceResult, WorktreeSetupResult};
 
 /// Options specific to workspace switching.
 #[derive(Debug, Clone, Default)]
@@ -62,7 +57,7 @@ pub async fn switch_workspace(
         run_lifecycle_hooks(
             config,
             project_dir,
-            &normalized_name,
+            workspace_name,
             HookPhase::PreSwitch,
             opts,
         )
@@ -161,15 +156,25 @@ pub async fn switch_workspace(
                     .and_then(|b| b.parent)
             };
 
-            let results = services::factory::orchestrate_switch(
+            let service_results: Vec<ServiceResult> = match services::factory::orchestrate_switch(
                 config,
                 &normalized_name,
                 service_parent.as_deref(),
             )
-            .await?;
-
-            let service_results: Vec<ServiceResult> =
-                results.into_iter().map(ServiceResult::from).collect();
+            .await
+            {
+                Ok(results) => results.into_iter().map(ServiceResult::from).collect(),
+                Err(e) => {
+                    // Branch/worktree already exist — record the failure and
+                    // finish the switch instead of aborting half-way.
+                    log::warn!("Service orchestration failed: {:#}", e);
+                    vec![ServiceResult {
+                        service_name: "(orchestration)".to_string(),
+                        success: false,
+                        message: format!("{:#}", e),
+                    }]
+                }
+            };
 
             // Post-service-switch hooks (only if any service succeeded)
             let any_success = service_results.iter().any(|r| r.success);
@@ -177,7 +182,7 @@ pub async fn switch_workspace(
                 if let Some(summary) = run_lifecycle_hooks_best_effort(
                     config,
                     project_dir,
-                    &normalized_name,
+                    workspace_name,
                     HookPhase::PostServiceSwitch,
                     opts,
                 )
@@ -196,18 +201,17 @@ pub async fn switch_workspace(
 
     // 5. Post-create hooks (branch or worktree newly created)
     if (branch_created || worktree_created) && !opts.skip_hooks {
-        let post_create = run_lifecycle_hooks_with_result(
+        if let Some(summary) = run_lifecycle_hooks_best_effort(
             config,
             project_dir,
-            &normalized_name,
+            workspace_name,
             HookPhase::PostCreate,
             opts,
         )
-        .await?;
-        hook_results.push(LifecycleHookResult::from_run_result(
-            &HookPhase::PostCreate,
-            post_create,
-        ));
+        .await
+        {
+            hook_results.push(summary);
+        }
     }
 
     // 6. Post-switch hooks (always)
@@ -215,7 +219,7 @@ pub async fn switch_workspace(
         if let Some(summary) = run_lifecycle_hooks_best_effort(
             config,
             project_dir,
-            &normalized_name,
+            workspace_name,
             HookPhase::PostSwitch,
             opts,
         )
@@ -349,7 +353,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn switch_workspace_fails_when_post_create_hook_requires_approval() {
+    async fn switch_workspace_skips_unapproved_hooks_non_interactive() {
         let _env = TestEnv::new();
         let (project, mut config) = setup_repo();
 
@@ -375,14 +379,22 @@ mod tests {
                 ..Default::default()
             },
         )
-        .await;
+        .await
+        .expect("switch must succeed; the unapproved hook is skipped, not fatal");
 
-        let err = result.expect_err("post-create approval failure should fail switch");
-        let message = err.to_string();
-        assert!(
-            message.contains("Hook 'needs-approval' failed")
-                || message.contains("requires approval")
-        );
+        // The worktree was created and reported (agents need worktree_path)
+        let wt = result.worktree.as_ref().expect("worktree result present");
+        assert!(wt.created);
+
+        // The unapproved hook was skipped — visibly counted, never executed
+        let post_create_summary = result
+            .hooks
+            .iter()
+            .find(|h| h.phase == "post-create")
+            .expect("post-create summary present");
+        assert_eq!(post_create_summary.skipped, 1);
+        assert_eq!(post_create_summary.succeeded, 0);
+        assert!(!wt.path.join("post-create-marker.txt").exists());
     }
 
     #[tokio::test]

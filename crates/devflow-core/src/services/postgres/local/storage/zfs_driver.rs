@@ -180,11 +180,21 @@ impl ZfsDriver {
         let child_branch_root = branch_root_from_data_dir(child_data_dir)?;
 
         let child_dataset = branch_dataset_name(config, &project.id, child_branch_id);
-        ensure_dataset_absent(&child_dataset).await?;
 
-        let snapshot_name = format!("devflow_{}", short_id(child_branch_id));
+        // Snapshot name must be unique per clone OPERATION, not per child id:
+        // reset re-clones with the same child id, and a deterministic name
+        // collides with the snapshot from the original clone (and used to
+        // fail after the child dataset was already destroyed).
+        let snapshot_name = format!(
+            "devflow_{}_{}",
+            short_id(child_branch_id),
+            short_id(&Uuid::new_v4().to_string())
+        );
         let snapshot_full = format!("{}@{}", parent_metadata.dataset, snapshot_name);
 
+        // Order matters: create the new snapshot FIRST so a failure leaves
+        // any existing child dataset untouched; only then drop the previous
+        // incarnation of the child (reset path) and clone.
         zfs_output_os(vec![
             OsString::from("snapshot"),
             OsString::from(snapshot_full.clone()),
@@ -193,7 +203,19 @@ impl ZfsDriver {
         .with_context(|| format!("failed to create ZFS snapshot '{snapshot_full}'"))?
         .success_or_stderr()?;
 
-        zfs_output_os(vec![
+        // Note: on reset, the replaced child's old origin snapshot stays on
+        // the parent dataset until the parent is destroyed (small leak,
+        // cleaned up by `zfs destroy -r`).
+        if let Err(e) = ensure_dataset_absent(&child_dataset).await {
+            let _ = zfs_output_os(vec![
+                OsString::from("destroy"),
+                OsString::from(snapshot_full.clone()),
+            ])
+            .await;
+            return Err(e);
+        }
+
+        let clone_result = zfs_output_os(vec![
             OsString::from("clone"),
             OsString::from("-o"),
             OsString::from(format!("mountpoint={}", child_branch_root.display())),
@@ -201,8 +223,16 @@ impl ZfsDriver {
             OsString::from(child_dataset.clone()),
         ])
         .await
-        .with_context(|| format!("failed to create ZFS clone '{child_dataset}'"))?
-        .success_or_stderr()?;
+        .with_context(|| format!("failed to create ZFS clone '{child_dataset}'"))
+        .and_then(|out| out.success_or_stderr());
+        if let Err(e) = clone_result {
+            let _ = zfs_output_os(vec![
+                OsString::from("destroy"),
+                OsString::from(snapshot_full.clone()),
+            ])
+            .await;
+            return Err(e);
+        }
 
         tokio::fs::create_dir_all(child_data_dir)
             .await
@@ -232,12 +262,24 @@ impl ZfsDriver {
     ) -> anyhow::Result<()> {
         let metadata = parse_zfs_branch_metadata(workspace)?;
 
-        let _ = zfs_output_os(vec![
+        let destroy_result = zfs_output_os(vec![
             OsString::from("destroy"),
             OsString::from("-r"),
             OsString::from(metadata.dataset.clone()),
         ])
-        .await;
+        .await
+        .and_then(|out| out.success_or_stderr());
+
+        if let Err(e) = destroy_result {
+            if dataset_exists(&metadata.dataset).await.unwrap_or(false) {
+                // rm -rf on a still-mounted dataset would delete the data
+                // while leaving the dataset and its origin snapshot behind.
+                return Err(e.context(format!(
+                    "failed to destroy ZFS dataset '{}'; refusing to remove files from a mounted dataset",
+                    metadata.dataset
+                )));
+            }
+        }
 
         if let Some(snapshot) = metadata.origin_snapshot {
             let _ = zfs_output_os(vec![OsString::from("destroy"), OsString::from(snapshot)]).await;

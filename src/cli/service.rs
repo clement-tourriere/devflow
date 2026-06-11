@@ -66,7 +66,8 @@ pub(crate) async fn run_add_service_wizard(
         use inquire::Select;
         let provider_options: Vec<&str> = match service_type.as_str() {
             "postgres" => vec![
-                "local               — Docker container on this machine",
+                "local               — Docker container per workspace (CoW)",
+                "shared              — One global container, a database per workspace",
                 "neon                 — Neon serverless Postgres (cloud)",
                 "dblab               — Database Lab Engine (clone-based branching)",
                 "xata                — Xata serverless database (cloud)",
@@ -176,6 +177,7 @@ pub(crate) async fn run_add_service_wizard(
         } else {
             None
         },
+        shared: None,
         neon: None,
         dblab: None,
         xata: None,
@@ -351,6 +353,7 @@ pub(super) async fn handle_service_dispatch(
                     } else {
                         None
                     },
+                    shared: None,
                     neon: None,
                     dblab: None,
                     xata: None,

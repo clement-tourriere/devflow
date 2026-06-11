@@ -1,12 +1,65 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+use std::sync::Mutex as StdMutex;
+use std::time::Duration;
+use tokio::task::JoinHandle;
 
 use super::actions;
-use super::actions::shell::run_shell_command;
+use super::actions::shell::{run_shell_command, run_shell_command_sandboxed};
 use super::approval::ApprovalStore;
 use super::template::TemplateEngine;
 use super::{ActionHookEntry, HookContext, HookEntry, HookPhase, HooksConfig};
 use crate::sandbox;
+
+/// Background hook tasks spawned by any engine in this process.
+///
+/// Hooks on non-blocking phases are fire-and-forget tokio tasks; in the
+/// short-lived CLI they used to race process exit and silently never run.
+/// CLI entry points now await them via [`wait_for_background_hooks`].
+static BACKGROUND_HOOKS: StdMutex<Vec<(String, JoinHandle<()>)>> = StdMutex::new(Vec::new());
+
+fn track_background_hook(name: &str, handle: JoinHandle<()>) {
+    if let Ok(mut tasks) = BACKGROUND_HOOKS.lock() {
+        tasks.retain(|(_, h)| !h.is_finished());
+        tasks.push((name.to_string(), handle));
+    }
+}
+
+/// Await completion of all background hooks spawned so far in this process.
+///
+/// Returns `(completed, total)`. Tasks still running after `timeout` are
+/// left detached (the pre-existing behavior for all background hooks).
+pub async fn wait_for_background_hooks(timeout: Duration) -> (usize, usize) {
+    let tasks: Vec<(String, JoinHandle<()>)> = match BACKGROUND_HOOKS.lock() {
+        Ok(mut t) => t.drain(..).collect(),
+        Err(_) => return (0, 0),
+    };
+    let total = tasks.len();
+    if total == 0 {
+        return (0, 0);
+    }
+    let mut completed = 0;
+    let deadline = tokio::time::Instant::now() + timeout;
+    for (name, handle) in tasks {
+        match tokio::time::timeout_at(deadline, handle).await {
+            Ok(_) => completed += 1,
+            Err(_) => log::warn!(
+                "Background hook '{}' did not finish within {:?}; leaving it detached",
+                name,
+                timeout
+            ),
+        }
+    }
+    (completed, total)
+}
+
+/// `DEVFLOW_APPROVE_HOOKS=1` auto-approves config hooks — the escape hatch
+/// for agents and CI where interactive approval is impossible.
+fn env_auto_approve() -> bool {
+    std::env::var("DEVFLOW_APPROVE_HOOKS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+        .unwrap_or(false)
+}
 
 /// Executes hooks for a given phase, handling template rendering,
 /// approval checks, conditions, and blocking/background dispatch.
@@ -20,6 +73,8 @@ pub struct HookEngine {
     require_approval: bool,
     /// Whether interactive prompts are allowed.
     non_interactive: bool,
+    /// Auto-approve hooks without prompting (DEVFLOW_APPROVE_HOOKS=1).
+    auto_approve: bool,
     /// Whether to suppress hook stdout-friendly output.
     quiet_output: bool,
     /// Optional sandbox configuration for sandboxed workspaces.
@@ -59,6 +114,7 @@ impl HookEngine {
             project_key,
             require_approval: true,
             non_interactive: false,
+            auto_approve: env_auto_approve(),
             quiet_output: false,
             sandbox_config: None,
         }
@@ -77,6 +133,7 @@ impl HookEngine {
             project_key,
             require_approval: true,
             non_interactive: true,
+            auto_approve: env_auto_approve(),
             quiet_output: false,
             sandbox_config: None,
         }
@@ -91,6 +148,7 @@ impl HookEngine {
             project_key: None,
             require_approval: false,
             non_interactive: false,
+            auto_approve: env_auto_approve(),
             quiet_output: false,
             sandbox_config: None,
         }
@@ -246,15 +304,27 @@ impl HookEngine {
         // Render the command template
         let rendered_command = self.template_engine.render(command_template, context)?;
 
-        // Check approval (shell commands always require approval)
+        // Check approval (shell commands always require approval).
+        // Keyed on the command TEMPLATE so an approval survives across
+        // workspaces; the rendered form is what the user sees in the prompt.
         if self.require_approval {
-            if let Some(outcome) = self.check_approval(name, &rendered_command)? {
+            if let Some(outcome) = self.check_approval(name, command_template, &rendered_command)? {
                 return Ok(outcome);
             }
         }
 
         // Determine if this should run in the background
         let run_background = extended.map(|e| e.background).unwrap_or(false) || !phase_blocking;
+
+        // Resolve working_dir once — background hooks must honor it too.
+        let working_dir = if let Some(ext) = &extended {
+            ext.working_dir
+                .as_ref()
+                .map(|wd| self.working_dir.join(wd))
+                .unwrap_or_else(|| self.working_dir.clone())
+        } else {
+            self.working_dir.clone()
+        };
 
         // Validate command against sandbox policy (applies to both background and blocking)
         if let Some(ref sandbox_cfg) = self.sandbox_config {
@@ -275,26 +345,32 @@ impl HookEngine {
 
         if run_background {
             let cmd = rendered_command.clone();
-            let wd = self.working_dir.clone();
+            let wd = working_dir.clone();
             let hook_name = name.to_string();
             let env_vars = extended.and_then(|e| e.environment.clone());
             let ctx_clone = context.clone();
             let te = TemplateEngine::new();
             let quiet_output = self.quiet_output;
+            let sandbox_cfg = self.sandbox_config.clone();
 
-            tokio::spawn(async move {
-                match run_shell_command(
+            let handle = tokio::spawn(async move {
+                let policy = sandbox_cfg
+                    .as_ref()
+                    .map(|cfg| sandbox::SandboxPolicy::from_config(cfg, &wd));
+                match run_shell_command_sandboxed(
                     &cmd,
                     &wd,
                     env_vars.as_ref(),
                     &ctx_clone,
                     &te,
                     !quiet_output,
+                    policy.as_ref(),
                 ) {
                     Ok(_) => log::debug!("Background hook '{}' completed", hook_name),
                     Err(e) => log::warn!("Background hook '{}' failed: {}", hook_name, e),
                 }
             });
+            track_background_hook(name, handle);
 
             return Ok(HookOutcome::Background);
         }
@@ -303,15 +379,6 @@ impl HookEngine {
         if !self.quiet_output {
             println!("  Running: {} ({})", name, rendered_command);
         }
-
-        let working_dir = if let Some(ext) = &extended {
-            ext.working_dir
-                .as_ref()
-                .map(|wd| self.working_dir.join(wd))
-                .unwrap_or_else(|| self.working_dir.clone())
-        } else {
-            self.working_dir.clone()
-        };
 
         let env_vars = extended.and_then(|e| e.environment.clone());
 
@@ -354,22 +421,25 @@ impl HookEngine {
             return Ok(outcome);
         }
 
-        // Check approval only for actions that require it (shell, docker-exec)
+        // Check approval only for actions that require it (shell, docker-exec).
+        // Keyed on the templates so an approval survives across workspaces.
         if self.require_approval && act.action.requires_approval() {
-            let description = match &act.action {
-                super::HookAction::Shell { command } => {
-                    self.template_engine.render(command, context)?
-                }
+            let (approval_key, display) = match &act.action {
+                super::HookAction::Shell { command } => (
+                    command.clone(),
+                    self.template_engine.render(command, context)?,
+                ),
                 super::HookAction::DockerExec {
                     container, command, ..
                 } => {
+                    let key = format!("docker exec {} sh -c '{}'", container, command);
                     let c = self.template_engine.render(container, context)?;
                     let cmd = self.template_engine.render(command, context)?;
-                    format!("docker exec {} sh -c '{}'", c, cmd)
+                    (key, format!("docker exec {} sh -c '{}'", c, cmd))
                 }
                 _ => unreachable!(),
             };
-            if let Some(outcome) = self.check_approval(name, &description)? {
+            if let Some(outcome) = self.check_approval(name, &approval_key, &display)? {
                 return Ok(outcome);
             }
         }
@@ -391,7 +461,7 @@ impl HookEngine {
             let wd = working_dir.clone();
             let quiet_output = self.quiet_output;
 
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 match actions::execute_action(&action, &ctx_clone, &te, &wd, !quiet_output).await {
                     Ok(r) => {
                         log::debug!("Background hook '{}' completed: {}", hook_name, r.summary)
@@ -399,6 +469,7 @@ impl HookEngine {
                     Err(e) => log::warn!("Background hook '{}' failed: {}", hook_name, e),
                 }
             });
+            track_background_hook(name, handle);
 
             return Ok(HookOutcome::Background);
         }
@@ -441,40 +512,41 @@ impl HookEngine {
 
         // Shell-based conditions are executable code too, so they must be
         // approved before evaluation when approvals are enabled.
-        if self.require_approval && Self::condition_uses_shell(&rendered_condition, context) {
-            if self.non_interactive && self.project_key.is_none() {
-                anyhow::bail!(
-                    "Cannot evaluate hook condition '{}' in non-interactive mode without a project key",
-                    rendered_condition
+        // Keyed on the raw condition template so approval survives across
+        // workspaces (rendered conditions differ per workspace).
+        if self.require_approval
+            && !self.auto_approve
+            && Self::condition_uses_shell(&rendered_condition, context)
+        {
+            let cond_name = format!("{} (condition)", name);
+            let Some(ref project_key) = self.project_key else {
+                if self.non_interactive {
+                    return Ok(Some(self.skip_unapproved(&cond_name, &rendered_condition)));
+                }
+                log::warn!(
+                    "No project key available; skipping approval prompt for condition of hook '{}'",
+                    name
                 );
-            }
+                return Ok(None);
+            };
 
-            if let Some(ref project_key) = self.project_key {
-                let approval_command = format!("condition: {}", rendered_condition);
-                let mut store = ApprovalStore::load().unwrap_or_default();
-                if !store.is_approved(project_key, &approval_command) {
-                    if self.non_interactive {
-                        anyhow::bail!(
-                            "Hook condition for '{}' requires approval in non-interactive mode: {}",
-                            name,
-                            rendered_condition
-                        );
+            let approval_key = format!("condition: {}", condition);
+            let mut store = ApprovalStore::load().unwrap_or_default();
+            if !store.is_approved(project_key, &approval_key) {
+                if self.non_interactive {
+                    return Ok(Some(self.skip_unapproved(&cond_name, &rendered_condition)));
+                }
+                match Self::prompt_hook_approval(&cond_name, &rendered_condition) {
+                    HookApprovalChoice::ApproveAlways => {
+                        if let Err(e) = store.approve(project_key, &approval_key) {
+                            log::warn!("Failed to persist hook condition approval: {}", e);
+                        }
                     }
-                    match Self::prompt_hook_approval(
-                        &format!("{} (condition)", name),
-                        &rendered_condition,
-                    ) {
-                        HookApprovalChoice::ApproveAlways => {
-                            if let Err(e) = store.approve(project_key, &approval_command) {
-                                log::warn!("Failed to persist hook condition approval: {}", e);
-                            }
-                        }
-                        HookApprovalChoice::ApproveOnce => {}
-                        HookApprovalChoice::Deny => {
-                            return Ok(Some(HookOutcome::Skipped(
-                                "condition command not approved by user".to_string(),
-                            )));
-                        }
+                    HookApprovalChoice::ApproveOnce => {}
+                    HookApprovalChoice::Deny => {
+                        return Ok(Some(HookOutcome::Skipped(
+                            "condition command not approved by user".to_string(),
+                        )));
                     }
                 }
             }
@@ -490,38 +562,50 @@ impl HookEngine {
         Ok(None)
     }
 
-    /// Check approval for a command/action description.
+    /// Check approval for a hook command/action.
+    ///
+    /// `approval_key` is the stable identity stored in the approval store
+    /// (the un-rendered template from the config file); `display` is the
+    /// rendered command shown to the user.
     /// Returns `Some(HookOutcome::Skipped(..))` if denied, `None` if approved.
-    fn check_approval(&self, name: &str, description: &str) -> Result<Option<HookOutcome>> {
-        if self.non_interactive && self.project_key.is_none() {
-            anyhow::bail!(
-                "Cannot evaluate hook '{}' in non-interactive mode without a project key",
-                name
-            );
+    fn check_approval(
+        &self,
+        name: &str,
+        approval_key: &str,
+        display: &str,
+    ) -> Result<Option<HookOutcome>> {
+        if self.auto_approve {
+            log::info!("Hook '{}' auto-approved via DEVFLOW_APPROVE_HOOKS", name);
+            return Ok(None);
         }
 
-        if let Some(ref project_key) = self.project_key {
-            let mut store = ApprovalStore::load().unwrap_or_default();
-            if !store.is_approved(project_key, description) {
-                if self.non_interactive {
-                    anyhow::bail!(
-                        "Hook '{}' requires approval in non-interactive mode: {}",
-                        name,
-                        description
-                    );
+        let Some(ref project_key) = self.project_key else {
+            if self.non_interactive {
+                return Ok(Some(self.skip_unapproved(name, display)));
+            }
+            log::warn!(
+                "No project key available; skipping approval prompt for hook '{}'",
+                name
+            );
+            return Ok(None);
+        };
+
+        let mut store = ApprovalStore::load().unwrap_or_default();
+        if !store.is_approved(project_key, approval_key) {
+            if self.non_interactive {
+                return Ok(Some(self.skip_unapproved(name, display)));
+            }
+            match Self::prompt_hook_approval(name, display) {
+                HookApprovalChoice::ApproveAlways => {
+                    if let Err(e) = store.approve(project_key, approval_key) {
+                        log::warn!("Failed to persist hook approval: {}", e);
+                    }
                 }
-                match Self::prompt_hook_approval(name, description) {
-                    HookApprovalChoice::ApproveAlways => {
-                        if let Err(e) = store.approve(project_key, description) {
-                            log::warn!("Failed to persist hook approval: {}", e);
-                        }
-                    }
-                    HookApprovalChoice::ApproveOnce => {}
-                    HookApprovalChoice::Deny => {
-                        return Ok(Some(HookOutcome::Skipped(
-                            "not approved by user".to_string(),
-                        )));
-                    }
+                HookApprovalChoice::ApproveOnce => {}
+                HookApprovalChoice::Deny => {
+                    return Ok(Some(HookOutcome::Skipped(
+                        "not approved by user".to_string(),
+                    )));
                 }
             }
         }
@@ -529,15 +613,37 @@ impl HookEngine {
         Ok(None)
     }
 
+    /// Skip an unapproved hook in non-interactive mode — visibly, instead of
+    /// aborting the whole command after the workspace already exists.
+    fn skip_unapproved(&self, name: &str, display: &str) -> HookOutcome {
+        eprintln!(
+            "  Warning: hook '{}' skipped — not approved for non-interactive mode.",
+            name
+        );
+        eprintln!("    command: {}", display);
+        eprintln!(
+            "    Approve it once interactively, or set DEVFLOW_APPROVE_HOOKS=1 for automated runs."
+        );
+        HookOutcome::Skipped("requires approval (non-interactive mode)".to_string())
+    }
+
     fn evaluate_condition(&self, rendered: &str, context: &HookContext) -> Result<bool> {
         // ── Path conditions ──
-        if let Some(file_path) = rendered.strip_prefix("file_exists:") {
-            let full_path = self.working_dir.join(file_path.trim());
-            return Ok(full_path.exists());
+        // Comma-separated alternatives: true when ANY of them exists
+        // (e.g. "file_exists:mise.toml,.mise.toml").
+        if let Some(file_paths) = rendered.strip_prefix("file_exists:") {
+            return Ok(file_paths
+                .split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .any(|p| self.working_dir.join(p).exists()));
         }
-        if let Some(dir_path) = rendered.strip_prefix("dir_exists:") {
-            let full_path = self.working_dir.join(dir_path.trim());
-            return Ok(full_path.is_dir());
+        if let Some(dir_paths) = rendered.strip_prefix("dir_exists:") {
+            return Ok(dir_paths
+                .split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .any(|p| self.working_dir.join(p).is_dir()));
         }
 
         // ── Boolean literals ──
@@ -920,6 +1026,86 @@ mod tests {
         assert!(!engine
             .evaluate_condition("env_set:DEVFLOW_TEST_COND_VAR", &ctx)
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_non_interactive_unapproved_hook_skips_instead_of_failing() {
+        let mut hooks: HooksConfig = IndexMap::new();
+        let mut phase_hooks = IndexMap::new();
+        phase_hooks.insert(
+            "needs-approval".to_string(),
+            HookEntry::Simple("echo should not run".to_string()),
+        );
+        hooks.insert(HookPhase::PostCreate, phase_hooks);
+
+        // A project key that cannot have stored approvals
+        let engine = HookEngine::new_non_interactive(
+            hooks,
+            std::env::current_dir().unwrap(),
+            Some("/nonexistent/devflow-test-project-approval-key".to_string()),
+        );
+
+        let result = engine
+            .run_phase(&HookPhase::PostCreate, &basic_context())
+            .await
+            .expect("unapproved hook must skip, not abort the phase");
+        assert_eq!(result.skipped, 1);
+        assert_eq!(result.succeeded, 0);
+        assert_eq!(result.failed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_file_exists_condition_alternatives() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = HookEngine::new_no_approval(IndexMap::new(), tmp.path().to_path_buf());
+        let ctx = basic_context();
+
+        assert!(!engine
+            .evaluate_condition("file_exists:mise.toml,.mise.toml", &ctx)
+            .unwrap());
+
+        std::fs::write(tmp.path().join("mise.toml"), "[tools]").unwrap();
+        assert!(engine
+            .evaluate_condition("file_exists:mise.toml,.mise.toml", &ctx)
+            .unwrap());
+        // Single-path form still works
+        assert!(engine
+            .evaluate_condition("file_exists:mise.toml", &ctx)
+            .unwrap());
+        assert!(!engine
+            .evaluate_condition("file_exists:.mise.toml", &ctx)
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_background_hooks_complete_via_wait() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut hooks: HooksConfig = IndexMap::new();
+        let mut phase_hooks = IndexMap::new();
+        phase_hooks.insert(
+            "bg-marker".to_string(),
+            HookEntry::Simple("sleep 0.2 && touch bg-done.txt".to_string()),
+        );
+        // post-switch is a non-blocking phase → hook runs in the background
+        hooks.insert(HookPhase::PostSwitch, phase_hooks);
+
+        let engine = HookEngine::new_no_approval(hooks, tmp.path().to_path_buf());
+        let result = engine
+            .run_phase(&HookPhase::PostSwitch, &basic_context())
+            .await
+            .unwrap();
+        assert_eq!(result.background, 1);
+        assert!(
+            !tmp.path().join("bg-done.txt").exists(),
+            "hook should still be running"
+        );
+
+        let (_, total) = wait_for_background_hooks(Duration::from_secs(10)).await;
+        assert!(total >= 1);
+        assert!(
+            tmp.path().join("bg-done.txt").exists(),
+            "background hook must have completed after wait"
+        );
     }
 
     #[test]

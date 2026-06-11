@@ -97,7 +97,10 @@ function App() {
       <Route path="/" element={<Layout />}>
         <Route index element={<Home />} />
         <Route path="projects" element={<ProjectList />} />
-        <Route path="projects/*/setup" element={<ProjectSetup />} />
+        {/* Onboarding wizard on its own prefix: a splat must be the terminal
+            segment in React Router v6, so the old nested-splat setup route
+            never matched and the wizard was unreachable. */}
+        <Route path="onboard/*" element={<ProjectSetup />} />
         <Route path="projects/*" element={<ProjectDetail />} />
         <Route path="proxy" element={<ProxyDashboard />} />
         <Route path="hooks/*" element={<HookManager />} />

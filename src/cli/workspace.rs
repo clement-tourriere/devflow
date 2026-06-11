@@ -2444,6 +2444,7 @@ async fn handle_remove_command(
             ..Default::default()
         },
         keep_services,
+        force,
     };
 
     let result = devflow_core::workspace::delete::delete_workspace(
@@ -2889,6 +2890,9 @@ async fn handle_merge_command(
                 ..Default::default()
             },
             keep_services: false,
+            // Never discard uncommitted work as a side effect of merge;
+            // a dirty source worktree must be removed explicitly.
+            force: false,
         };
 
         let delete_result = devflow_core::workspace::delete::delete_workspace(

@@ -106,11 +106,14 @@ impl LocalProvider {
         let project_name = config.project_name();
         let service_name = service_name.to_string();
 
-        // Capture canonical project directory path for orphan detection
-        let project_path = std::env::current_dir()
-            .ok()
-            .and_then(|p| p.canonicalize().ok())
-            .map(|p| p.to_string_lossy().to_string());
+        // Capture the canonical MAIN-repo root for orphan detection, so a
+        // worktree and its main repo resolve to the same project_path (and
+        // don't ping-pong the stored value or trigger false orphan GC).
+        let project_path = std::env::current_dir().ok().map(|p| {
+            crate::vcs::resolve_project_root(&p)
+                .to_string_lossy()
+                .to_string()
+        });
 
         Ok(Self {
             project_name,
@@ -134,16 +137,19 @@ impl LocalProvider {
     }
 
     async fn ensure_project(&self) -> Result<model::Project> {
-        if let Some(project) = self.store().get_project_by_name(&self.project_name)? {
-            // Backfill project_path for existing projects created before this column existed
-            if project.project_path.is_none() {
-                if let Some(ref path) = self.project_path {
+        if let Some(mut project) = self.store().get_project_by_name(&self.project_name)? {
+            // Keep project_path in sync with where the project actually lives;
+            // a stale path (after `mv`/rename) would make orphan detection
+            // declare a live project orphaned and GC its data.
+            if let Some(ref path) = self.project_path {
+                if project.project_path.as_deref() != Some(path.as_str()) {
                     self.store().update_project_path(&project.id, path)?;
                     log::debug!(
-                        "Backfilled project_path for project '{}': {}",
+                        "Updated project_path for project '{}': {}",
                         self.project_name,
                         path
                     );
+                    project.project_path = Some(path.clone());
                 }
             }
             return Ok(project);
@@ -254,7 +260,10 @@ impl ServiceProvider for LocalProvider {
         };
 
         let storage_metadata = if let Some(ref parent_workspace) = parent {
-            // Pause parent if running
+            // Quiesce the source with a graceful STOP (shutdown checkpoint),
+            // not a pause: a paused postgres still has dirty buffers and
+            // unflushed WAL, and the per-file copy is not atomic — only a
+            // cleanly stopped server guarantees a consistent PGDATA.
             let parent_running = self
                 .runtime
                 .container_status(&parent_workspace.container_name)
@@ -263,7 +272,7 @@ impl ServiceProvider for LocalProvider {
 
             if parent_running {
                 self.runtime
-                    .pause_branch(&parent_workspace.container_name)
+                    .stop_branch_for_clone(&parent_workspace.container_name)
                     .await?;
             }
 
@@ -273,9 +282,19 @@ impl ServiceProvider for LocalProvider {
                 .await;
 
             if parent_running {
-                self.runtime
-                    .unpause_branch(&parent_workspace.container_name)
-                    .await?;
+                // Restart even when the clone failed — never leave the
+                // parent down as a side effect.
+                if let Err(e) = self
+                    .runtime
+                    .start_existing(&parent_workspace.container_name)
+                    .await
+                {
+                    log::warn!(
+                        "Failed to restart parent container '{}' after clone: {}",
+                        parent_workspace.container_name,
+                        e
+                    );
+                }
             }
 
             result?
@@ -551,7 +570,7 @@ impl ServiceProvider for LocalProvider {
 
                 if parent_running {
                     self.runtime
-                        .pause_branch(&parent_workspace.container_name)
+                        .stop_branch_for_clone(&parent_workspace.container_name)
                         .await?;
                 }
 
@@ -562,10 +581,17 @@ impl ServiceProvider for LocalProvider {
                     .await;
 
                 if parent_running {
-                    self.runtime
-                        .unpause_branch(&parent_workspace.container_name)
+                    if let Err(e) = self
+                        .runtime
+                        .start_existing(&parent_workspace.container_name)
                         .await
-                        .context("failed to unpause parent workspace after reset clone attempt")?;
+                    {
+                        log::warn!(
+                            "Failed to restart parent container '{}' after reset clone: {}",
+                            parent_workspace.container_name,
+                            e
+                        );
+                    }
                 }
 
                 let new_metadata = clone_result?;

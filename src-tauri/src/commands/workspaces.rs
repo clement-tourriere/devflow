@@ -331,6 +331,7 @@ pub async fn delete_workspace(
     let options = workspace::delete::DeleteOptions {
         lifecycle: gui_lifecycle_options(),
         keep_services: false,
+        force: false,
     };
 
     let result = workspace::delete::delete_workspace(&cfg, project_dir, &workspace_name, &options)

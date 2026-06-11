@@ -291,6 +291,10 @@ pub async fn cleanup_orphan(orphan: &OrphanInfo) -> CleanupResult {
     // 1. Remove Docker containers ─────────────────────────────────────
     #[cfg(feature = "service-local")]
     {
+        // Only remove containers that detection actually attributed to this
+        // orphan.  Re-discovering by bare project name here would bypass the
+        // live-project exclusion applied during detection and could delete a
+        // live project's containers that happen to share the name.
         for container_name in &orphan.container_names {
             match remove_docker_container(container_name).await {
                 Ok(_) => result.containers_removed += 1,
@@ -298,23 +302,6 @@ pub async fn cleanup_orphan(orphan: &OrphanInfo) -> CleanupResult {
                     "Failed to remove container '{}': {}",
                     container_name, e
                 )),
-            }
-        }
-
-        // Also discover and remove containers by project name pattern
-        if let Ok(containers) = list_devflow_containers().await {
-            for (proj_name, container_name) in &containers {
-                if proj_name == &orphan.project_name
-                    && !orphan.container_names.contains(container_name)
-                {
-                    match remove_docker_container(container_name).await {
-                        Ok(_) => result.containers_removed += 1,
-                        Err(e) => result.errors.push(format!(
-                            "Failed to remove container '{}': {}",
-                            container_name, e
-                        )),
-                    }
-                }
             }
         }
     }

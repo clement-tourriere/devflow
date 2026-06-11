@@ -11,6 +11,8 @@ pub mod generic;
 pub mod local_docker;
 #[cfg(feature = "service-local")]
 pub mod mysql;
+#[cfg(feature = "service-local")]
+pub mod shared;
 
 use anyhow::Result;
 use async_trait::async_trait;

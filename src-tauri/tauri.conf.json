@@ -20,13 +20,18 @@
     "windows": [
       {
         "title": "devflow",
-        "width": 1200,
-        "height": 800,
+        "width": 1280,
+        "height": 832,
+        "minWidth": 940,
+        "minHeight": 600,
         "resizable": true,
         "fullscreen": false,
         "center": true,
         "visible": false,
-        "skipTaskbar": true
+        "skipTaskbar": true,
+        "theme": "Dark",
+        "titleBarStyle": "Overlay",
+        "backgroundColor": "#0d1117"
       }
     ],
     "security": {

@@ -73,7 +73,13 @@ pub trait VcsProvider: Send {
     fn is_worktree(&self) -> bool;
     fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>>;
     fn create_worktree(&self, workspace: &str, path: &Path) -> Result<WorktreeCreateResult>;
-    fn remove_worktree(&self, path: &Path) -> Result<()>;
+    /// Remove the worktree at `path`.
+    ///
+    /// Without `force`, implementations must refuse when the worktree has
+    /// uncommitted work (tracked modifications, staged changes, or untracked
+    /// non-ignored files) — mirroring `git worktree remove`.  With `force`,
+    /// the worktree is removed regardless.
+    fn remove_worktree(&self, path: &Path, force: bool) -> Result<()>;
     fn worktree_path(&self, workspace: &str) -> Result<Option<PathBuf>>;
     fn main_worktree_dir(&self) -> Option<PathBuf>;
 
@@ -238,6 +244,46 @@ pub fn detect_vcs_provider<P: AsRef<Path>>(path: P) -> Result<Box<dyn VcsProvide
             anyhow::bail!("No VCS repository found. Initialize with 'git init' or 'jj init'.");
         }
     }
+}
+
+/// Resolve a path inside a repository to its **canonical main-repo root**.
+///
+/// This is the single source of project identity. When devflow runs from a
+/// git worktree (the agent scenario), the naive "directory containing
+/// `.devflow.yml`" is the *worktree* directory, which differs from the main
+/// repo — fragmenting local state, hook approvals, and container identity
+/// into per-worktree silos. Resolving every identity derivation through this
+/// function unifies them: a worktree and its main repo share one identity.
+///
+/// For a normal repo this is the work tree root; for a worktree it is the
+/// main work tree root (the parent of the shared `.git` common dir). Falls
+/// back to the canonicalized input when `start` is not in a git repository
+/// (e.g. a plain directory or a jj-only repo).
+pub fn resolve_project_root(start: &Path) -> PathBuf {
+    let canonical = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+
+    // `discover` walks up from `start` to the nearest `.git`, so it works
+    // from the repo root, a subdirectory, or a worktree root alike.
+    if let Ok(repo) = git2::Repository::discover(&canonical) {
+        // `commondir()` is the shared git dir: `<root>/.git` for a normal
+        // repo and `<main-root>/.git` for a worktree. Its parent is the
+        // main work tree root in both cases.
+        let common = repo.commondir();
+        let common = common
+            .canonicalize()
+            .unwrap_or_else(|_| common.to_path_buf());
+        if let Some(parent) = common.parent() {
+            // Guard against bare repos (no work tree): only trust the result
+            // when it actually contains a work tree / our config could live.
+            if parent.is_dir() {
+                return parent
+                    .canonicalize()
+                    .unwrap_or_else(|_| parent.to_path_buf());
+            }
+        }
+    }
+
+    canonical
 }
 
 /// Detect which VCS kind is present without constructing a provider.
@@ -448,6 +494,39 @@ mod tests {
         let (has_jj, has_git) = find_vcs_markers(&subdir);
         assert!(!has_jj);
         assert!(has_git);
+    }
+
+    #[test]
+    fn test_resolve_project_root_plain_dir_falls_back() {
+        // A non-git directory resolves to itself (canonicalized).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        assert_eq!(resolve_project_root(&root), root);
+    }
+
+    #[test]
+    fn test_resolve_project_root_unifies_worktree_and_main() {
+        use crate::vcs::git::GitRepository;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let main_root = tmp.path().canonicalize().unwrap();
+        let repo = GitRepository::init(&main_root).unwrap();
+        repo.ensure_initial_commit().unwrap();
+
+        // The main repo resolves to itself.
+        assert_eq!(resolve_project_root(&main_root), main_root);
+
+        // A worktree resolves to the SAME main-repo root — this is what
+        // unifies project identity across worktrees.
+        let wt_path = main_root.join("wt-feature");
+        repo.create_worktree("feature/x", &wt_path).unwrap();
+        let wt_canonical = wt_path.canonicalize().unwrap();
+        assert_ne!(wt_canonical, main_root, "worktree dir differs from main");
+        assert_eq!(
+            resolve_project_root(&wt_canonical),
+            main_root,
+            "worktree must resolve to the main repo root"
+        );
     }
 
     #[test]

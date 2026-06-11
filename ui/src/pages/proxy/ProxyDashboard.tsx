@@ -1,4 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { toast } from "../../utils/notify";
 import {
   getProxyStatus,
   startProxy,
@@ -9,6 +11,7 @@ import {
   removeCertificate,
 } from "../../utils/invoke";
 import type { ProxyStatus, ContainerEntry, CertificateStatus } from "../../types";
+import { IconProxy, IconRefresh, IconCopy, IconExternal } from "../../components/icons";
 
 function ProxyDashboard() {
   const [status, setStatus] = useState<ProxyStatus | null>(null);
@@ -17,25 +20,41 @@ function ProxyDashboard() {
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState("");
 
-  const refresh = () => {
+  const refresh = useCallback(() => {
     getProxyStatus().then(setStatus).catch(() => setStatus(null));
     listContainers().then(setContainers).catch(() => setContainers([]));
     getCertificateStatus().then(setCertStatus).catch(() => {});
-  };
+  }, []);
 
-  useEffect(refresh, []);
+  // Initial load + live updates: poll while mounted and react to backend
+  // status events, so the dashboard reflects containers coming and going
+  // without a manual refresh.
+  useEffect(() => {
+    refresh();
+    const interval = setInterval(refresh, 4000);
+    const unlisten = listen<ProxyStatus>("proxy-status-changed", (e) => {
+      setStatus(e.payload);
+      listContainers().then(setContainers).catch(() => {});
+    });
+    return () => {
+      clearInterval(interval);
+      unlisten.then((fn) => fn());
+    };
+  }, [refresh]);
 
   const handleToggleProxy = async () => {
     setLoading(true);
     try {
       if (status?.running) {
         await stopProxy();
+        toast.success("Proxy stopped");
       } else {
         await startProxy();
+        toast.success("Proxy started");
       }
       refresh();
     } catch (e) {
-      alert(`Proxy error: ${e}`);
+      toast.error(`Proxy error: ${e}`);
     } finally {
       setLoading(false);
     }
@@ -44,67 +63,97 @@ function ProxyDashboard() {
   const handleInstallCert = async () => {
     try {
       await installCertificate();
+      toast.success("Certificate installed to system trust store");
       refresh();
     } catch (e) {
-      alert(`Certificate error: ${e}`);
+      toast.error(`Certificate error: ${e}`);
     }
   };
 
   const handleRemoveCert = async () => {
     try {
       await removeCertificate();
+      toast.success("Certificate trust removed");
       refresh();
     } catch (e) {
-      alert(`Certificate error: ${e}`);
+      toast.error(`Certificate error: ${e}`);
     }
   };
 
-  const filtered = containers.filter(
-    (c) =>
-      !filter ||
-      c.domain.includes(filter) ||
-      c.container_name.includes(filter) ||
-      (c.project && c.project.includes(filter))
-  );
+  const copy = (text: string, label: string) => {
+    navigator.clipboard?.writeText(text).then(
+      () => toast.success(`Copied ${label}`),
+      () => toast.error("Copy failed"),
+    );
+  };
+
+  const filtered = containers.filter((c) => {
+    if (!filter) return true;
+    const q = filter.toLowerCase();
+    return (
+      c.domain.toLowerCase().includes(q) ||
+      c.container_name.toLowerCase().includes(q) ||
+      (c.project && c.project.toLowerCase().includes(q))
+    );
+  });
+
+  const isHttp = (c: ContainerEntry) =>
+    c.endpoint_url?.startsWith("http://") || c.endpoint_url?.startsWith("https://");
 
   return (
     <div>
-      <h1 className="page-title">Proxy</h1>
-
-      <div className="grid grid-2">
-        <div className="card">
-          <div className="card-title">Status</div>
-          <div className="flex items-center gap-2 mb-4">
-            <span
-              className={`proxy-dot ${status?.running ? "running" : "stopped"}`}
-            />
-            <span>{status?.running ? "Running" : "Stopped"}</span>
+      <div className="page-header">
+        <div className="page-header-titles">
+          <h1>
+            <IconProxy size={22} />
+            Proxy
+          </h1>
+          <div className="page-header-sub">
+            Auto-discovered containers served over HTTPS via *.localhost
           </div>
-          {status?.running && (
-            <div style={{ marginBottom: 12, color: "var(--text-secondary)", fontSize: 13 }}>
-              HTTPS port: {status.https_port} &middot; HTTP port: {status.http_port}
-            </div>
-          )}
+        </div>
+        <div className="page-header-actions">
+          <button className="btn" onClick={refresh} title="Refresh">
+            <IconRefresh size={15} />
+            Refresh
+          </button>
           <button
             className={`btn ${status?.running ? "btn-danger" : "btn-primary"}`}
             onClick={handleToggleProxy}
             disabled={loading}
           >
-            {loading ? "..." : status?.running ? "Stop Proxy" : "Start Proxy"}
+            {loading ? "…" : status?.running ? "Stop proxy" : "Start proxy"}
           </button>
+        </div>
+      </div>
+
+      <div className="grid grid-2">
+        <div className="card">
+          <div className="card-title">Status</div>
+          <div className="status-line" style={{ marginBottom: 10 }}>
+            <span className={`status-dot ${status?.running ? "running" : "stopped"}`} />
+            <span style={{ fontWeight: 600 }}>
+              {status?.running ? "Running" : "Stopped"}
+            </span>
+          </div>
+          {status?.running && (
+            <div style={{ color: "var(--text-secondary)", fontSize: 13 }}>
+              HTTPS {status.https_port} · HTTP {status.http_port}
+            </div>
+          )}
         </div>
 
         <div className="card">
           <div className="card-title">Certificate Authority</div>
           {certStatus ? (
             <>
-              <div className="flex items-center gap-2 mb-4">
+              <div className="status-line" style={{ marginBottom: 10 }}>
                 {certStatus.installed ? (
                   <span className="badge badge-success">Trusted</span>
                 ) : certStatus.exists ? (
-                  <span className="badge badge-warning">Not Trusted</span>
+                  <span className="badge badge-warning">Not trusted</span>
                 ) : (
-                  <span className="badge badge-danger">Not Generated</span>
+                  <span className="badge badge-danger">Not generated</span>
                 )}
               </div>
               {certStatus.exists && (
@@ -117,13 +166,13 @@ function ProxyDashboard() {
               )}
               <div className="flex gap-2">
                 {certStatus.exists && !certStatus.installed && (
-                  <button className="btn btn-primary" onClick={handleInstallCert}>
-                    Install to System
+                  <button className="btn btn-primary btn-sm" onClick={handleInstallCert}>
+                    Install to system
                   </button>
                 )}
                 {certStatus.installed && (
-                  <button className="btn btn-danger" onClick={handleRemoveCert}>
-                    Remove Trust
+                  <button className="btn btn-danger btn-sm" onClick={handleRemoveCert}>
+                    Remove trust
                   </button>
                 )}
               </div>
@@ -134,7 +183,7 @@ function ProxyDashboard() {
               )}
             </>
           ) : (
-            <p style={{ color: "var(--text-secondary)" }}>Loading...</p>
+            <div className="skeleton skeleton-text" style={{ width: "60%" }} />
           )}
         </div>
       </div>
@@ -145,53 +194,95 @@ function ProxyDashboard() {
             Containers ({filtered.length})
           </span>
           <input
-            type="text"
+            type="search"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            placeholder="Filter containers..."
-            style={{ width: 240 }}
+            placeholder="Filter containers…"
+            className="search-input"
           />
         </div>
         {filtered.length === 0 ? (
-          <p style={{ color: "var(--text-secondary)" }}>
-            {containers.length === 0
-              ? "No containers detected."
-              : "No containers match the filter."}
-          </p>
+          <div className="empty-state">
+            <div className="empty-state-icon">
+              <IconProxy size={24} />
+            </div>
+            <div className="empty-state-title">
+              {containers.length === 0 ? "No containers detected" : "No matches"}
+            </div>
+            <div className="empty-state-desc">
+              {containers.length === 0
+                ? status?.running
+                  ? "Start a Docker container with a devproxy.* or VIRTUAL_HOST label to see it routed here."
+                  : "Start the proxy to begin auto-discovering Docker containers."
+                : `Nothing matches “${filter}”.`}
+            </div>
+          </div>
         ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Domain</th>
-                <th>Container</th>
-                <th>Upstream</th>
-                <th>Project</th>
-                <th>Workspace</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((c) => (
-                <tr key={c.domain}>
-                  <td>
-                    <a
-                      href={c.endpoint_url}
-                      target="_blank"
-                      title={c.endpoint_url}
-                      style={{ color: "var(--accent)", textDecoration: "none" }}
-                    >
-                      {c.domain}
-                    </a>
-                  </td>
-                  <td>{c.container_name}</td>
-                  <td className="mono" style={{ color: "var(--text-muted)", fontSize: 12 }}>
-                    {c.container_ip}:{c.port}
-                  </td>
-                  <td>{c.project || "-"}</td>
-                  <td>{c.workspace || "-"}</td>
+          <div className="table-card">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Domain</th>
+                  <th>Container</th>
+                  <th>Upstream</th>
+                  <th>Project</th>
+                  <th>Workspace</th>
+                  <th style={{ textAlign: "right" }}>Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {filtered.map((c) => (
+                  <tr key={c.domain}>
+                    <td>
+                      {isHttp(c) ? (
+                        <a
+                          href={c.endpoint_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          title={c.endpoint_url}
+                          style={{ color: "var(--accent)", textDecoration: "none" }}
+                        >
+                          {c.domain}
+                        </a>
+                      ) : (
+                        <span title="Non-HTTP service (TCP)">{c.domain}</span>
+                      )}
+                    </td>
+                    <td style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {c.container_name}
+                    </td>
+                    <td className="mono" style={{ color: "var(--text-muted)", fontSize: 12 }}>
+                      {c.container_ip}:{c.port}
+                    </td>
+                    <td>{c.project || "-"}</td>
+                    <td>{c.workspace || "-"}</td>
+                    <td>
+                      <div className="row-actions">
+                        <button
+                          className="icon-btn"
+                          title="Copy domain"
+                          onClick={() => copy(c.domain, "domain")}
+                        >
+                          <IconCopy size={15} />
+                        </button>
+                        {isHttp(c) && (
+                          <a
+                            className="icon-btn"
+                            href={c.endpoint_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            title="Open in browser"
+                          >
+                            <IconExternal size={15} />
+                          </a>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>

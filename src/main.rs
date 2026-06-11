@@ -146,9 +146,9 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    match cli.command {
+    let run_result = match cli.command {
         Some(cmd) => {
-            cli::handle_command(cmd, cli.json, cli.non_interactive, cli.service.as_deref()).await?
+            cli::handle_command(cmd, cli.json, cli.non_interactive, cli.service.as_deref()).await
         }
         None => {
             if cli.help_all {
@@ -169,8 +169,24 @@ async fn main() -> Result<()> {
                 let mut cmd = Cli::command();
                 cmd.print_help()?;
             }
+            Ok(())
         }
+    };
+
+    // Hooks on non-blocking phases (post-switch, post-merge, …) run as
+    // background tasks; give them a bounded window to finish before this
+    // short-lived process exits, or they are killed mid-flight.
+    let timeout_secs = std::env::var("DEVFLOW_BACKGROUND_HOOK_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(30);
+    let (done, total) = devflow_core::hooks::wait_for_background_hooks(
+        std::time::Duration::from_secs(timeout_secs),
+    )
+    .await;
+    if total > 0 {
+        log::debug!("Background hooks completed before exit: {}/{}", done, total);
     }
 
-    Ok(())
+    run_result
 }

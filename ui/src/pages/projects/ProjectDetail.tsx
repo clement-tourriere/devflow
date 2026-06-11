@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
+import { toast } from "../../utils/notify";
+import { reportWorkspaceResult } from "../../utils/results";
 import { useParams, Link, useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -41,6 +43,7 @@ import AddServiceModal from "../../components/AddServiceModal";
 import { useTerminal } from "../../context/TerminalContext";
 import { recordProjectAccess } from "../../utils/recentProjects";
 import ProjectSkillsTab from "./ProjectSkillsTab";
+import { IconTerminal } from "../../components/icons";
 
 interface WorkspaceSwitchedEvent {
   project_path: string;
@@ -232,7 +235,7 @@ function ProjectDetail() {
     if (!newWorkspaceName.trim() || isCreatingWorkspace) return;
     setActionLoading("create");
     try {
-      await createWorkspace(
+      const result = await createWorkspace(
         projectPath,
         newWorkspaceName.trim(),
         fromWorkspace || undefined,
@@ -241,6 +244,7 @@ function ProjectDetail() {
         creationMode === "worktree" ? copyIgnored : undefined,
         sandboxed || undefined
       );
+      reportWorkspaceResult(`Workspace "${newWorkspaceName.trim()}"`, result);
       setShowCreateWorkspace(false);
       setNewWorkspaceName("");
       setFromWorkspace("");
@@ -250,7 +254,7 @@ function ProjectDetail() {
       setSandboxed(false);
       await reload();
     } catch (e) {
-      alert(`${e}`);
+      toast.error(`${e}`);
     } finally {
       setActionLoading(null);
     }
@@ -259,10 +263,11 @@ function ProjectDetail() {
   const handleSwitchWorkspace = async (workspaceName: string) => {
     setActionLoading(`switch:${workspaceName}`);
     try {
-      await switchWorkspace(projectPath, workspaceName);
+      const result = await switchWorkspace(projectPath, workspaceName);
+      reportWorkspaceResult(`Switched to "${workspaceName}"`, result);
       await reload();
     } catch (e) {
-      alert(`${e}`);
+      toast.error(`${e}`);
     } finally {
       setActionLoading(null);
     }
@@ -271,12 +276,14 @@ function ProjectDetail() {
   const handleDeleteWorkspace = async () => {
     if (!deletingWorkspace) return;
     setActionLoading("delete");
+    const target = deletingWorkspace;
     try {
-      await deleteWorkspace(projectPath, deletingWorkspace);
+      const services = await deleteWorkspace(projectPath, target);
+      reportWorkspaceResult(`Workspace "${target}" deleted`, { services });
       setDeletingWorkspace(null);
       await reload();
     } catch (e) {
-      alert(`${e}`);
+      toast.error(`${e}`);
     } finally {
       setActionLoading(null);
     }
@@ -347,7 +354,7 @@ function ProjectDetail() {
         // ignore
       }
     } catch (e) {
-      alert(`${e}`);
+      toast.error(`${e}`);
     } finally {
       setActionLoading(null);
     }
@@ -365,7 +372,7 @@ function ProjectDetail() {
         // ignore
       }
     } catch (e) {
-      alert(`${e}`);
+      toast.error(`${e}`);
     } finally {
       setActionLoading(null);
     }
@@ -391,7 +398,7 @@ function ProjectDetail() {
       }
       setResetTarget(null);
     } catch (e) {
-      alert(`${e}`);
+      toast.error(`${e}`);
     } finally {
       setActionLoading(null);
     }
@@ -432,7 +439,7 @@ function ProjectDetail() {
       }
       setDeleteServiceWsTarget(null);
     } catch (e) {
-      alert(`${e}`);
+      toast.error(`${e}`);
     } finally {
       setActionLoading(null);
     }
@@ -446,7 +453,7 @@ function ProjectDetail() {
       setDestroyServiceTarget(null);
       await reload();
     } catch (e) {
-      alert(`${e}`);
+      toast.error(`${e}`);
     } finally {
       setActionLoading(null);
     }
@@ -471,7 +478,7 @@ function ProjectDetail() {
       window.dispatchEvent(new CustomEvent("devflow:projects-changed"));
       navigate("/projects");
     } catch (e) {
-      alert(`${e}`);
+      toast.error(`${e}`);
     } finally {
       setActionLoading(null);
       setShowRemoveConfirm(false);
@@ -486,7 +493,7 @@ function ProjectDetail() {
       window.dispatchEvent(new CustomEvent("devflow:projects-changed"));
       navigate("/projects");
     } catch (e) {
-      alert(`Destroy failed: ${e}`);
+      toast.error(`Destroy failed: ${e}`);
     } finally {
       setActionLoading(null);
       setShowDestroyConfirm(false);
@@ -510,12 +517,55 @@ function ProjectDetail() {
     );
   }
 
-  if (!detail) return <div>Loading...</div>;
+  if (!detail) {
+    return (
+      <div>
+        <div className="skeleton" style={{ height: 28, width: 220, marginBottom: 20 }} />
+        <div className="stat-grid">
+          <div className="skeleton" style={{ height: 70 }} />
+          <div className="skeleton" style={{ height: 70 }} />
+          <div className="skeleton" style={{ height: 70 }} />
+        </div>
+        <div className="skeleton" style={{ height: 200 }} />
+      </div>
+    );
+  }
 
   const currentWorkspaceEntry = workspaces.find((w) => w.is_current);
   const showActiveWorkspaceBadge = Boolean(
     currentWorkspace && currentWorkspaceEntry && !currentWorkspaceEntry.worktree_path
   );
+
+  // Map a service-workspace state string to a status-dot class.
+  const stateDotClass = (state: string | null): string => {
+    switch ((state || "").toLowerCase()) {
+      case "running":
+        return "running";
+      case "provisioning":
+        return "provisioning";
+      case "failed":
+      case "error":
+        return "error";
+      default:
+        return "stopped";
+    }
+  };
+
+  // Join per-workspace service status so the workspaces table shows, at a
+  // glance, which services are provisioned/running for each workspace —
+  // instead of forcing the user to expand the per-service accordions below.
+  const normalizeWs = (s: string) =>
+    s.toLowerCase().replace(/[^a-z0-9]/g, "-").replace(/-{2,}/g, "-");
+  const serviceChipsFor = (workspaceName: string) => {
+    const wsKey = normalizeWs(workspaceName);
+    return services.map((svc) => {
+      const infos = serviceWorkspaces[svc.name] || [];
+      const match = infos.find(
+        (i) => i.name === workspaceName || normalizeWs(i.name) === wsKey
+      );
+      return { service: svc.name, state: match?.state ?? null, provisioned: !!match };
+    });
+  };
 
   return (
     <div>
@@ -576,21 +626,29 @@ function ProjectDetail() {
             Config
           </Link>
           {detail.has_config && (
-            <Link
-              to={`/setup/${encodeURIComponent(projectPath)}`}
-              className="btn"
-              style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
-            >
-              Setup
-              {setupIssueCount > 0 && (
-                <span
-                  className="badge badge-warning"
-                  style={{ fontSize: 10, minWidth: 18, textAlign: "center", padding: "1px 5px" }}
-                >
-                  {setupIssueCount}
-                </span>
-              )}
-            </Link>
+            <>
+              <Link
+                to={`/onboard/${encodeURIComponent(projectPath)}`}
+                className="btn"
+              >
+                Setup wizard
+              </Link>
+              <Link
+                to={`/setup/${encodeURIComponent(projectPath)}`}
+                className="btn"
+                style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+              >
+                Doctor
+                {setupIssueCount > 0 && (
+                  <span
+                    className="badge badge-warning"
+                    style={{ fontSize: 10, minWidth: 18, textAlign: "center", padding: "1px 5px" }}
+                  >
+                    {setupIssueCount}
+                  </span>
+                )}
+              </Link>
+            </>
           )}
         </div>
       </div>
@@ -625,7 +683,7 @@ function ProjectDetail() {
                     await addOrInitProject(projectPath, detail.name);
                     await reload();
                   } catch (e) {
-                    alert(`Failed to initialize: ${e}`);
+                    toast.error(`Failed to initialize: ${e}`);
                   } finally {
                     setActionLoading(null);
                   }
@@ -643,7 +701,7 @@ function ProjectDetail() {
                     window.dispatchEvent(new CustomEvent("devflow:projects-changed"));
                     navigate("/projects");
                   } catch (e) {
-                    alert(`Failed to remove: ${e}`);
+                    toast.error(`Failed to remove: ${e}`);
                   } finally {
                     setActionLoading(null);
                   }
@@ -739,11 +797,12 @@ function ProjectDetail() {
           <table className="table" style={{ tableLayout: "fixed", width: "100%" }}>
             <thead>
               <tr>
-                <th style={{ width: "25%" }}>Workspace</th>
-                <th style={{ width: "26%" }}>Tags</th>
-                <th style={{ width: "12%" }}>Parent</th>
-                <th style={{ width: "12%" }}>Created</th>
-                <th style={{ textAlign: "right", width: "25%" }}>Actions</th>
+                <th style={{ width: "22%" }}>Workspace</th>
+                <th style={{ width: "16%" }}>Tags</th>
+                <th style={{ width: "22%" }}>Services</th>
+                <th style={{ width: "11%" }}>Parent</th>
+                <th style={{ width: "10%" }}>Created</th>
+                <th style={{ textAlign: "right", width: "19%" }}>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -799,6 +858,34 @@ function ProjectDetail() {
                       )}
                     </div>
                   </td>
+                  <td>
+                    {services.length === 0 ? (
+                      <span style={{ color: "var(--text-muted)", fontSize: 12 }}>
+                        —
+                      </span>
+                    ) : (
+                      <div className="svc-chips">
+                        {serviceChipsFor(b.name).map((chip) => (
+                          <span
+                            key={chip.service}
+                            className={`svc-chip${chip.state === "running" ? " running" : ""}`}
+                            title={
+                              chip.provisioned
+                                ? `${chip.service}: ${chip.state ?? "unknown"}`
+                                : `${chip.service}: not provisioned for this workspace`
+                            }
+                          >
+                            <span
+                              className={`status-dot ${
+                                chip.provisioned ? stateDotClass(chip.state) : "stopped"
+                              }`}
+                            />
+                            {chip.service}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </td>
                   <td style={{ color: "var(--text-muted)", fontSize: 13 }}>
                     {b.parent || "-"}
                   </td>
@@ -829,7 +916,7 @@ function ProjectDetail() {
                         }
                         title="Open terminal"
                       >
-                        &gt;_
+                        <IconTerminal size={14} />
                       </button>
                       <button
                         className="btn"

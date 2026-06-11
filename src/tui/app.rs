@@ -1460,6 +1460,7 @@ impl App {
                             } else {
                                 None
                             },
+                            shared: None,
                             neon: None,
                             dblab: None,
                             xata: None,

@@ -6,7 +6,7 @@ pub mod template;
 pub mod triggers;
 
 // Re-export hook engine types
-pub use executor::HookEngine;
+pub use executor::{wait_for_background_hooks, HookEngine};
 #[allow(unused_imports)] // Public API — used by consumers for advanced template rendering
 pub use template::TemplateEngine;
 
@@ -350,8 +350,10 @@ pub type HooksConfig = IndexMap<HookPhase, IndexMap<String, HookEntry>>;
 /// Context variables available to hook templates.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct HookContext {
-    /// Current workspace name
+    /// Current workspace name (raw VCS branch name, e.g. "feature/auth")
     pub workspace: String,
+    /// Sanitized workspace name (safe for file/db/container names)
+    pub workspace_sanitized: String,
     /// Project name from config (`name`) or project directory fallback.
     pub name: String,
     /// Repository directory name
@@ -502,6 +504,7 @@ pub async fn build_hook_context(
 
     HookContext {
         workspace: workspace_name.to_string(),
+        workspace_sanitized: config.get_normalized_workspace_name(workspace_name),
         name,
         repo,
         worktree_path,

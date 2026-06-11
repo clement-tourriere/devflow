@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, KeyUsagePurpose,
-    SanType,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+    KeyPair, KeyUsagePurpose, SanType,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -156,6 +156,9 @@ impl CertificateAuthority {
             KeyUsagePurpose::DigitalSignature,
             KeyUsagePurpose::KeyEncipherment,
         ];
+        // Apple's trust evaluator (Safari, URLSession) rejects leaf certs
+        // without an EKU asserting serverAuth.
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
 
         params.not_before = OffsetDateTime::now_utc();
         params.not_after = params.not_before + Duration::days(365);

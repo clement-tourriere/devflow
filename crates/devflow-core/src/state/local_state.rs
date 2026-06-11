@@ -113,10 +113,59 @@ impl LocalStateManager {
         let state_file_path = Self::get_state_file_path()?;
         let state = Self::load_state(&state_file_path)?;
 
-        Ok(Self {
+        let mut mgr = Self {
             state_file_path,
             state,
-        })
+        };
+
+        // One-time migration: older versions keyed state by the worktree
+        // directory, so the same project fragmented across worktrees. Merge
+        // those silos into the canonical main-repo key.
+        if mgr.migrate_worktree_project_keys() {
+            if let Err(e) = mgr.save_state() {
+                log::warn!("Failed to persist worktree state migration: {}", e);
+            }
+        }
+
+        Ok(mgr)
+    }
+
+    /// Merge per-worktree project-state silos into their canonical main-repo
+    /// key. Returns true if anything changed.
+    fn migrate_worktree_project_keys(&mut self) -> bool {
+        // Find keys that are git worktrees (a `.git` *file*, not dir) whose
+        // canonical root differs from the key itself.
+        let mut moves: Vec<(String, String)> = Vec::new();
+        for key in self.state.projects.keys() {
+            let dir = Path::new(key);
+            if dir.join(".git").is_file() {
+                let root = crate::vcs::resolve_project_root(dir)
+                    .to_string_lossy()
+                    .to_string();
+                if root != *key {
+                    moves.push((key.clone(), root));
+                }
+            }
+        }
+        if moves.is_empty() {
+            return false;
+        }
+
+        for (from, to) in moves {
+            let Some(src) = self.state.projects.remove(&from) else {
+                continue;
+            };
+            match self.state.projects.get_mut(&to) {
+                // Destination (main repo) wins on conflicts; the source only
+                // contributes entries the main repo doesn't already have.
+                Some(dst) => merge_project_state(dst, src),
+                None => {
+                    self.state.projects.insert(to, src);
+                }
+            }
+        }
+        log::info!("Migrated per-worktree devflow state into canonical project keys");
+        true
     }
 
     fn refresh_state(&mut self) -> Result<()> {
@@ -541,11 +590,15 @@ impl LocalStateManager {
     }
 
     fn get_project_key(&self, project_path: &Path) -> Option<String> {
-        // Use the canonical path of the directory containing .devflow.yml as the project key
-        project_path
-            .parent()
-            .and_then(|dir| dir.canonicalize().ok())
-            .map(|canonical_path| canonical_path.to_string_lossy().to_string())
+        // The project key is the canonical MAIN-repo root of the directory
+        // containing `.devflow.yml`. Resolving worktrees to their main repo
+        // (instead of using the worktree dir directly) keeps state unified
+        // across the main repo and all of its worktrees.
+        project_path.parent().map(|dir| {
+            crate::vcs::resolve_project_root(dir)
+                .to_string_lossy()
+                .to_string()
+        })
     }
 
     /// Public accessor for the project key, used by `devflow destroy` to clear hook approvals.
@@ -625,10 +678,77 @@ impl LocalStateManager {
     }
 }
 
+/// Merge `src` project state into `dst`, preferring `dst` on conflicts.
+///
+/// Used by the worktree-key migration: the main repo's state is authoritative;
+/// the worktree silo only contributes workspaces/services the main repo lacks.
+fn merge_project_state(dst: &mut ProjectState, src: ProjectState) {
+    // Workspaces: union by name, keeping the destination's entry on conflict.
+    if let Some(src_ws) = src.workspaces {
+        let dst_ws = dst.workspaces.get_or_insert_with(Vec::new);
+        for ws in src_ws {
+            if !dst_ws.iter().any(|b| b.name == ws.name) {
+                dst_ws.push(ws);
+            }
+        }
+    }
+    // Services / merge trains: fill in only if the destination has none.
+    if dst.services.is_none() {
+        dst.services = src.services;
+    }
+    if dst.merge_trains.is_none() {
+        dst.merge_trains = src.merge_trains;
+    }
+    dst.last_updated = dst.last_updated.max(src.last_updated);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn ws(name: &str) -> DevflowWorkspace {
+        DevflowWorkspace {
+            name: name.to_string(),
+            parent: None,
+            worktree_path: None,
+            created_at: chrono::Utc::now(),
+            executed_command: None,
+            execution_status: None,
+            executed_at: None,
+            sandboxed: false,
+        }
+    }
+
+    #[test]
+    fn test_merge_project_state_dst_wins_src_fills_gaps() {
+        // Destination (main repo) has workspace "main"; source (worktree silo)
+        // has "main" (duplicate) and "feature" (unique).
+        let mut dst = ProjectState {
+            last_updated: chrono::Utc::now() - chrono::Duration::hours(1),
+            services: None,
+            workspaces: Some(vec![ws("main")]),
+            merge_trains: None,
+        };
+        let src = ProjectState {
+            last_updated: chrono::Utc::now(),
+            services: None,
+            workspaces: Some(vec![ws("main"), ws("feature")]),
+            merge_trains: None,
+        };
+
+        merge_project_state(&mut dst, src);
+
+        let names: Vec<String> = dst
+            .workspaces
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|w| w.name.clone())
+            .collect();
+        // "main" not duplicated; "feature" merged in.
+        assert_eq!(names, vec!["main".to_string(), "feature".to_string()]);
+    }
 
     #[test]
     fn test_project_key_generation() {

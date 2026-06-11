@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { confirmDialog } from "../../utils/notify";
 import { useParams, Link } from "react-router-dom";
 import {
   listHooks,
@@ -338,8 +339,15 @@ function HookManager() {
                               variant="danger"
                               disabled={deletingHook !== null}
                               loading={isDeleting}
-                              onClick={() => {
-                                if (confirm(`Delete hook "${hook.name}"?`)) {
+                              onClick={async () => {
+                                if (
+                                  await confirmDialog({
+                                    title: "Delete hook",
+                                    message: `Delete hook "${hook.name}"?`,
+                                    confirmLabel: "Delete",
+                                    danger: true,
+                                  })
+                                ) {
                                   handleDeleteHook(selectedPhase, hook.name);
                                 }
                               }}

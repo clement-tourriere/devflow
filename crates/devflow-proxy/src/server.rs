@@ -1,7 +1,7 @@
 use crate::ca::CertificateAuthority;
 use crate::router::Router;
 use crate::tls::SnsCertResolver;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
@@ -16,9 +16,9 @@ use tokio_rustls::TlsAcceptor;
 
 type BoxBody = http_body_util::Full<Bytes>;
 
-/// Run the HTTPS reverse proxy server.
+/// Run the HTTPS reverse proxy server on an already-bound listener.
 pub async fn run_https_server(
-    addr: SocketAddr,
+    listener: TcpListener,
     router: Arc<Router>,
     ca: Arc<CertificateAuthority>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
@@ -38,16 +38,23 @@ pub async fn run_https_server(
 
     let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
-    let listener = TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("Failed to bind HTTPS on {}", addr))?;
-
-    log::info!("HTTPS proxy listening on {}", addr);
+    if let Ok(addr) = listener.local_addr() {
+        log::info!("HTTPS proxy listening on {}", addr);
+    }
 
     loop {
         tokio::select! {
             result = listener.accept() => {
-                let (stream, peer_addr) = result?;
+                // Transient accept errors (EMFILE, ECONNABORTED) must not
+                // kill the listener while the process keeps running.
+                let (stream, peer_addr) = match result {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        log::warn!("HTTPS accept error: {}", e);
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
                 let tls_acceptor = tls_acceptor.clone();
                 let router = router.clone();
                 let resolver = resolver.clone();
@@ -98,23 +105,29 @@ pub async fn run_https_server(
     Ok(())
 }
 
-/// Run the HTTP server (redirects to HTTPS or serves plain).
+/// Run the HTTP server (redirects to HTTPS or serves plain) on an
+/// already-bound listener.
 pub async fn run_http_server(
-    addr: SocketAddr,
+    listener: TcpListener,
     https_port: u16,
     router: Arc<Router>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
-    let listener = TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("Failed to bind HTTP on {}", addr))?;
-
-    log::info!("HTTP proxy listening on {}", addr);
+    if let Ok(addr) = listener.local_addr() {
+        log::info!("HTTP proxy listening on {}", addr);
+    }
 
     loop {
         tokio::select! {
             result = listener.accept() => {
-                let (stream, peer_addr) = result?;
+                let (stream, peer_addr) = match result {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        log::warn!("HTTP accept error: {}", e);
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
                 let router = router.clone();
 
                 tokio::spawn(async move {

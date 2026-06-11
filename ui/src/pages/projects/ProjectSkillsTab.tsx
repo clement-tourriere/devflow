@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { toast } from "../../utils/notify";
 import Markdown from "react-markdown";
 import ConfirmDialog from "../../components/ConfirmDialog";
 import {
@@ -153,7 +154,7 @@ export default function ProjectSkillsTab({ projectPath }: ProjectSkillsTabProps)
       setSearchQuery("");
       setSearchResults([]);
     } catch (e) {
-      alert(`Install failed: ${e}`);
+      toast.error(`Install failed: ${e}`);
     } finally {
       setActionLoading(null);
     }
@@ -172,7 +173,7 @@ export default function ProjectSkillsTab({ projectPath }: ProjectSkillsTabProps)
       setConfirmRemove(null);
       await reload();
     } catch (e) {
-      alert(`Remove failed: ${e}`);
+      toast.error(`Remove failed: ${e}`);
     } finally {
       setRemoveLoading(false);
     }
@@ -184,7 +185,7 @@ export default function ProjectSkillsTab({ projectPath }: ProjectSkillsTabProps)
       await skillUpdate(projectPath, name);
       await reload();
     } catch (e) {
-      alert(`Update failed: ${e}`);
+      toast.error(`Update failed: ${e}`);
     } finally {
       setActionLoading(null);
     }

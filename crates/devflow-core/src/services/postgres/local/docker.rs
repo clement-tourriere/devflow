@@ -230,6 +230,10 @@ impl DockerRuntime {
                 format!("POSTGRES_USER={}", spec.pg_user),
                 format!("POSTGRES_PASSWORD={}", spec.pg_password),
                 format!("POSTGRES_DB={}", spec.pg_db),
+                // postgres:18+ moved the default PGDATA to a version-scoped
+                // directory; pin it explicitly so the server always uses the
+                // bind-mounted path regardless of image version.
+                format!("PGDATA={PGDATA_CONTAINER_PATH}"),
             ]),
             labels: Some(labels),
             ..Default::default()
@@ -288,6 +292,54 @@ impl DockerRuntime {
             .with_context(|| format!("failed to stop container '{container_name}'"))?;
 
         Ok(())
+    }
+
+    /// Gracefully stop a container before cloning its data dir.
+    ///
+    /// Uses a generous timeout so postgres can complete its shutdown
+    /// checkpoint — a SIGKILL here would make the clone a crash-state copy,
+    /// which is exactly what stopping (instead of pausing) is meant to avoid.
+    pub async fn stop_branch_for_clone(&self, container_name: &str) -> anyhow::Result<()> {
+        match self.container_status(container_name).await? {
+            ContainerStatus::NotFound | ContainerStatus::Exited | ContainerStatus::Other(_) => {
+                return Ok(())
+            }
+            ContainerStatus::Paused => {
+                self.unpause_branch(container_name).await?;
+            }
+            ContainerStatus::Running => {}
+        }
+
+        let options = StopContainerOptions {
+            t: Some(120),
+            ..Default::default()
+        };
+
+        self.client
+            .stop_container(container_name, Some(options))
+            .await
+            .with_context(|| format!("failed to stop container '{container_name}' before clone"))?;
+
+        Ok(())
+    }
+
+    /// Start an existing (stopped or paused) container without re-creating it.
+    pub async fn start_existing(&self, container_name: &str) -> anyhow::Result<()> {
+        match self.container_status(container_name).await? {
+            ContainerStatus::Running => Ok(()),
+            ContainerStatus::Paused => self.unpause_branch(container_name).await,
+            ContainerStatus::NotFound => {
+                anyhow::bail!("container '{container_name}' not found")
+            }
+            ContainerStatus::Exited | ContainerStatus::Other(_) => self
+                .client
+                .start_container(
+                    container_name,
+                    None::<bollard::query_parameters::StartContainerOptions>,
+                )
+                .await
+                .with_context(|| format!("failed to start container '{container_name}'")),
+        }
     }
 
     pub async fn pause_branch(&self, container_name: &str) -> anyhow::Result<()> {
@@ -386,8 +438,25 @@ impl DockerRuntime {
                     return Err(anyhow!("container '{container_name}' does not exist"));
                 }
                 ContainerStatus::Running => {
+                    // Probe over TCP: during initdb the image's entrypoint runs
+                    // a temporary server that only listens on the unix socket,
+                    // so a socket-based pg_isready false-positives before the
+                    // real server is up.
                     if self
-                        .exec_check(container_name, &["pg_isready", "-U", pg_user, "-d", pg_db])
+                        .exec_check(
+                            container_name,
+                            &[
+                                "pg_isready",
+                                "-h",
+                                "127.0.0.1",
+                                "-p",
+                                "5432",
+                                "-U",
+                                pg_user,
+                                "-d",
+                                pg_db,
+                            ],
+                        )
                         .await
                     {
                         return Ok(());

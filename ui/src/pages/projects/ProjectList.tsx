@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { toast } from "../../utils/notify";
 import { Link, useNavigate } from "react-router-dom";
 import {
   listProjects,
@@ -9,6 +10,7 @@ import type { ProjectEntry, ProjectDetail } from "../../types";
 import ConfirmDialog from "../../components/ConfirmDialog";
 import AddProjectModal, { type AddProjectModalHandle } from "../../components/AddProjectModal";
 import { sortByRecent } from "../../utils/recentProjects";
+import { IconProjects, IconPlus, IconTrash } from "../../components/icons";
 
 interface ProjectRow extends ProjectEntry {
   detail?: ProjectDetail;
@@ -18,6 +20,7 @@ interface ProjectRow extends ProjectEntry {
 function ProjectList() {
   const navigate = useNavigate();
   const [projects, setProjects] = useState<ProjectRow[]>([]);
+  const [loading, setLoading] = useState(true);
   const [removeTarget, setRemoveTarget] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const addModalRef = useRef<AddProjectModalHandle>(null);
@@ -38,6 +41,8 @@ function ProjectList() {
       setProjects(rows);
     } catch (e) {
       console.error(e);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -53,7 +58,7 @@ function ProjectList() {
       window.dispatchEvent(new CustomEvent("devflow:projects-changed"));
       await loadProjects();
     } catch (e) {
-      alert(`Failed to remove: ${e}`);
+      toast.error(`Failed to remove: ${e}`);
     }
   };
 
@@ -86,25 +91,38 @@ function ProjectList() {
             className="btn btn-primary"
             onClick={() => addModalRef.current?.open()}
           >
+            <IconPlus size={15} />
             Add Project
           </button>
         </div>
       </div>
 
-      {projects.length === 0 ? (
-        <div className="card" style={{ textAlign: "center", padding: 32 }}>
-          <p
-            style={{
-              color: "var(--text-secondary)",
-              marginBottom: 8,
-              fontSize: 16,
-            }}
-          >
-            No projects registered yet.
-          </p>
-          <p style={{ color: "var(--text-muted)", fontSize: 13 }}>
-            Select a directory to add a new or existing devflow project.
-          </p>
+      {loading ? (
+        <div>
+          <div className="skeleton skeleton-row" />
+          <div className="skeleton skeleton-row" />
+          <div className="skeleton skeleton-row" />
+        </div>
+      ) : projects.length === 0 ? (
+        <div className="card">
+          <div className="empty-state">
+            <div className="empty-state-icon">
+              <IconProjects size={24} />
+            </div>
+            <div className="empty-state-title">No projects yet</div>
+            <div className="empty-state-desc">
+              Add a new or existing devflow project to manage its workspaces,
+              services, hooks, and proxy from here.
+            </div>
+            <button
+              className="btn btn-primary"
+              style={{ marginTop: 6 }}
+              onClick={() => addModalRef.current?.open()}
+            >
+              <IconPlus size={15} />
+              Add your first project
+            </button>
+          </div>
         </div>
       ) : filtered.length === 0 ? (
         <div className="card" style={{ textAlign: "center", padding: 32 }}>
@@ -148,15 +166,15 @@ function ProjectList() {
                     </span>
                   )}
                   <button
-                    className="btn btn-danger"
+                    className="icon-btn danger"
+                    title="Remove from devflow"
                     onClick={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
                       setRemoveTarget(p.path);
                     }}
-                    style={{ padding: "2px 8px", fontSize: 11 }}
                   >
-                    Remove
+                    <IconTrash size={15} />
                   </button>
                 </div>
               </div>

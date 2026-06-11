@@ -29,73 +29,132 @@ impl DockerMonitor {
     }
 
     /// Start monitoring Docker events. Sends ContainerEvents to the channel.
+    ///
+    /// The subscription is re-established with backoff whenever the stream
+    /// errors or ends (Docker Desktop restart, daemon update, sleep/wake);
+    /// after each reconnect a synthetic "reconnected" event tells the
+    /// consumer to reconcile its routing state.
     pub async fn start(
         &self,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
         events_tx: mpsc::Sender<ContainerEvent>,
     ) -> Result<()> {
-        let mut filters = HashMap::new();
-        filters.insert("type".to_string(), vec!["container".to_string()]);
-        filters.insert(
-            "event".to_string(),
-            vec!["start".to_string(), "stop".to_string(), "die".to_string()],
-        );
-
-        let options = EventsOptions {
-            filters: Some(filters),
-            ..Default::default()
-        };
-
-        let mut events = self.docker.events(Some(options));
-        let docker = self.docker.clone();
+        let mut backoff_secs = 1u64;
+        let mut first_subscription = true;
 
         loop {
-            tokio::select! {
-                event = events.next() => {
-                    match event {
-                        Some(Ok(event)) => {
-                            let action = event.action.unwrap_or_default().to_string();
-                            let container_id = event
-                                .actor
-                                .and_then(|a| a.id)
-                                .unwrap_or_default();
+            let mut filters = HashMap::new();
+            filters.insert("type".to_string(), vec!["container".to_string()]);
+            filters.insert(
+                "event".to_string(),
+                vec![
+                    "start".to_string(),
+                    "stop".to_string(),
+                    "die".to_string(),
+                    "destroy".to_string(),
+                ],
+            );
+            let options = EventsOptions {
+                filters: Some(filters),
+                ..Default::default()
+            };
 
-                            if container_id.is_empty() {
-                                continue;
+            let mut events = self.docker.events(Some(options));
+            let docker = self.docker.clone();
+
+            // Subscribe first, then reconcile — so no event can slip into
+            // the gap between reconciliation and re-subscription.
+            if !first_subscription {
+                let _ = events_tx
+                    .send(ContainerEvent {
+                        action: "reconnected".to_string(),
+                        container: ContainerInspectResponse::default(),
+                    })
+                    .await;
+            }
+            first_subscription = false;
+
+            loop {
+                tokio::select! {
+                    event = events.next() => {
+                        match event {
+                            Some(Ok(event)) => {
+                                backoff_secs = 1;
+                                let action = event.action.unwrap_or_default().to_string();
+                                let container_id = event
+                                    .actor
+                                    .and_then(|a| a.id)
+                                    .unwrap_or_default();
+
+                                if container_id.is_empty() {
+                                    continue;
+                                }
+
+                                match docker.inspect_container(&container_id, None).await {
+                                    Ok(info) => {
+                                        log::info!(
+                                            "Container event: {} {}",
+                                            action,
+                                            info.name.as_deref().unwrap_or(&container_id[..12])
+                                        );
+                                        let _ = events_tx.send(ContainerEvent {
+                                            action,
+                                            container: info,
+                                        }).await;
+                                    }
+                                    Err(e) if matches!(action.as_str(), "stop" | "die" | "destroy") => {
+                                        // `docker run --rm` containers are often gone
+                                        // before the inspect lands; the consumer only
+                                        // needs the id to drop the routes.
+                                        log::info!(
+                                            "Container event: {} {} (inspect failed: {})",
+                                            action,
+                                            &container_id[..12.min(container_id.len())],
+                                            e
+                                        );
+                                        let _ = events_tx.send(ContainerEvent {
+                                            action,
+                                            container: ContainerInspectResponse {
+                                                id: Some(container_id),
+                                                ..Default::default()
+                                            },
+                                        }).await;
+                                    }
+                                    Err(e) => {
+                                        log::debug!("Failed to inspect container {}: {}", &container_id[..12.min(container_id.len())], e);
+                                    }
+                                }
                             }
-
-                            match docker.inspect_container(&container_id, None).await {
-                                Ok(info) => {
-                                    log::info!(
-                                        "Container event: {} {}",
-                                        action,
-                                        info.name.as_deref().unwrap_or(&container_id[..12])
-                                    );
-                                    let _ = events_tx.send(ContainerEvent {
-                                        action,
-                                        container: info,
-                                    }).await;
-                                }
-                                Err(e) => {
-                                    log::debug!("Failed to inspect container {}: {}", &container_id[..12.min(container_id.len())], e);
-                                }
+                            Some(Err(e)) => {
+                                log::warn!("Docker events error: {}", e);
+                                break;
+                            }
+                            None => {
+                                log::warn!("Docker event stream ended");
+                                break;
                             }
                         }
-                        Some(Err(e)) => {
-                            log::error!("Docker events error: {}", e);
-                            break;
-                        }
-                        None => break,
+                    }
+                    _ = shutdown.changed() => {
+                        log::info!("Docker monitor shutting down");
+                        return Ok(());
                     }
                 }
+            }
+
+            log::warn!(
+                "Docker event stream lost; reconnecting in {}s",
+                backoff_secs
+            );
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)) => {}
                 _ = shutdown.changed() => {
                     log::info!("Docker monitor shutting down");
-                    break;
+                    return Ok(());
                 }
             }
+            backoff_secs = (backoff_secs * 2).min(30);
         }
-
-        Ok(())
     }
 
     /// Clone the inner Docker client for use by other components.
@@ -105,28 +164,7 @@ impl DockerMonitor {
 
     /// Get all currently running containers.
     pub async fn get_running_containers(&self) -> Result<Vec<ContainerInspectResponse>> {
-        let options = ListContainersOptions {
-            all: false,
-            ..Default::default()
-        };
-
-        let containers = self
-            .docker
-            .list_containers(Some(options))
-            .await
-            .context("Failed to list containers")?;
-
-        let mut results = Vec::new();
-        for container in containers {
-            if let Some(id) = container.id {
-                match self.docker.inspect_container(&id, None).await {
-                    Ok(info) => results.push(info),
-                    Err(e) => log::debug!("Failed to inspect container: {}", e),
-                }
-            }
-        }
-
-        Ok(results)
+        list_running_containers(&self.docker).await
     }
 
     /// Inspect a single container by ID.
@@ -136,4 +174,30 @@ impl DockerMonitor {
             .await
             .context("Failed to inspect container")
     }
+}
+
+/// List and inspect all running containers — shared by initial discovery
+/// and post-reconnect reconciliation.
+pub async fn list_running_containers(docker: &Docker) -> Result<Vec<ContainerInspectResponse>> {
+    let options = ListContainersOptions {
+        all: false,
+        ..Default::default()
+    };
+
+    let containers = docker
+        .list_containers(Some(options))
+        .await
+        .context("Failed to list containers")?;
+
+    let mut results = Vec::new();
+    for container in containers {
+        if let Some(id) = container.id {
+            match docker.inspect_container(&id, None).await {
+                Ok(info) => results.push(info),
+                Err(e) => log::debug!("Failed to inspect container: {}", e),
+            }
+        }
+    }
+
+    Ok(results)
 }

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { toast } from "../../utils/notify";
 import {
   getSettings,
   saveSettings,
@@ -71,7 +72,7 @@ function Settings() {
       setOrphans(result);
       setOrphanScanned(true);
     } catch (e) {
-      alert(`Scan failed: ${e}`);
+      toast.error(`Scan failed: ${e}`);
     } finally {
       setOrphanScanning(false);
     }
@@ -84,7 +85,7 @@ function Settings() {
       setOrphanResults((prev) => [...prev, result]);
       setOrphans((prev) => prev.filter((o) => o.project_name !== projectName));
     } catch (e) {
-      alert(`Cleanup failed: ${e}`);
+      toast.error(`Cleanup failed: ${e}`);
     } finally {
       setOrphanCleaning(null);
     }

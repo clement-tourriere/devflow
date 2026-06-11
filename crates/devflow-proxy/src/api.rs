@@ -9,7 +9,6 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde::Serialize;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
@@ -31,22 +30,30 @@ struct CaResponse {
     info: String,
 }
 
-/// Run the API server for proxy management.
+/// Run the API server for proxy management on an already-bound listener.
 pub async fn run_api_server(
-    addr: SocketAddr,
+    listener: TcpListener,
     router: Arc<Router>,
     cert_cache: Arc<CertificateCache>,
     https_port: u16,
     http_port: u16,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(addr).await?;
-    log::info!("API server listening on {}", addr);
+    if let Ok(addr) = listener.local_addr() {
+        log::info!("API server listening on {}", addr);
+    }
 
     loop {
         tokio::select! {
             result = listener.accept() => {
-                let (stream, _) = result?;
+                let (stream, _) = match result {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        log::warn!("API accept error: {}", e);
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
                 let router = router.clone();
                 let cert_cache = cert_cache.clone();
 

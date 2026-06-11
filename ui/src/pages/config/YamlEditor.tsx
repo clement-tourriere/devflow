@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { toast } from "../../utils/notify";
 import {
   getConfigYaml,
   saveConfigYaml,
@@ -37,7 +38,7 @@ function YamlEditor({ projectPath, onSaved }: Props) {
       const result = await validateConfigYaml(content);
       if (result.valid) {
         setValidationError(null);
-        alert("Configuration is valid.");
+        toast.success("Configuration is valid.");
       } else {
         setValidationError(result.error || "Unknown validation error");
       }
@@ -60,7 +61,7 @@ function YamlEditor({ projectPath, onSaved }: Props) {
       setTimeout(() => setSaved(false), 2000);
       onSaved?.();
     } catch (e) {
-      alert(`Save failed: ${e}`);
+      toast.error(`Save failed: ${e}`);
     }
   };
 

@@ -36,7 +36,9 @@ async-trait = "0.1"
 git2 = { version = "0.20", default-features = false }
 
 # Text matching
-regex = { version = "1.12", default-features = false, features = ["std", "perf-cache"] }
+# Full default features: CommandGuard and workspace_matches patterns use
+# \b/\s, which require the unicode feature to compile.
+regex = "1.12"
 
 # Template engine for hooks
 minijinja = { version = "2", default-features = false, features = ["builtins", "serde"] }

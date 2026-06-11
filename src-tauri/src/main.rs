@@ -56,9 +56,68 @@ mod state;
 
 use state::AppState;
 
+/// When launched from the macOS Dock/Finder (or a Linux desktop entry), the
+/// process inherits launchd's minimal PATH — missing Homebrew, mise shims,
+/// docker, npm, etc. Every hook, doctor check, and docker-exec spawned from
+/// the GUI then fails with "command not found", while the same operation
+/// works from a terminal. Capture the user's real login-shell PATH once at
+/// startup and adopt it so spawned subprocesses behave like the CLI.
+#[cfg(unix)]
+fn bootstrap_login_path() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let current = std::env::var("PATH").unwrap_or_default();
+    // If a Homebrew bin dir is already present we were almost certainly
+    // launched from a shell — skip the (slowish) interactive-shell probe.
+    if current.contains("/opt/homebrew/bin") || current.contains("/usr/local/bin") {
+        return;
+    }
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        // -l -i so login + interactive rc files (where mise/direnv/PATH live) run.
+        let out = std::process::Command::new(&shell)
+            .args(["-l", "-i", "-c", "printf %s \"$PATH\""])
+            .output();
+        let _ = tx.send(out);
+    });
+
+    let login_path = match rx.recv_timeout(Duration::from_secs(4)) {
+        Ok(Ok(out)) if out.status.success() => {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+        _ => {
+            log::warn!("Could not capture login-shell PATH; GUI subprocesses may lack tools");
+            return;
+        }
+    };
+    if login_path.is_empty() {
+        return;
+    }
+
+    // Merge: login PATH first, then anything already present, de-duplicated.
+    let mut seen = std::collections::HashSet::new();
+    let merged: Vec<&str> = login_path
+        .split(':')
+        .chain(current.split(':'))
+        .filter(|p| !p.is_empty() && seen.insert(*p))
+        .collect();
+    let merged = merged.join(":");
+    log::info!(
+        "Adopted login-shell PATH ({} entries)",
+        merged.matches(':').count() + 1
+    );
+    std::env::set_var("PATH", merged);
+}
+
 fn main() {
     env_logger::init();
     log::info!("Starting devflow application");
+
+    #[cfg(unix)]
+    bootstrap_login_path();
 
     let app_state = AppState::new();
 

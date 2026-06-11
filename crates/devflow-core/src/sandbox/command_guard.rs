@@ -19,7 +19,7 @@ const DEFAULT_BLOCKED_PATTERNS: &[&str] = &[
     r"\bglab\s+mr\s+merge\b",
     r"\bglab\s+mr\s+close\b",
     // Destructive filesystem operations
-    r"\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f|--recursive)\s+(/|~)",
+    r"\brm\s+(-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\s+(/|~)",
     r"\bsudo\b",
     r"\bsu\s+-\b",
     // Package publish operations
@@ -38,7 +38,19 @@ impl CommandGuard {
     pub fn default_blocked() -> Self {
         let blocked_patterns = DEFAULT_BLOCKED_PATTERNS
             .iter()
-            .filter_map(|p| Regex::new(p).ok())
+            .filter_map(|p| match Regex::new(p) {
+                Ok(re) => Some(re),
+                Err(e) => {
+                    // A silently dropped pattern means a security check
+                    // silently stops applying — make it loud.
+                    log::error!(
+                        "CommandGuard: failed to compile block pattern '{}': {}",
+                        p,
+                        e
+                    );
+                    None
+                }
+            })
             .collect();
         Self { blocked_patterns }
     }
@@ -150,6 +162,13 @@ mod tests {
         let guard = CommandGuard::default_blocked();
         assert!(guard.check("gh pr create --title 'test'").is_ok());
         assert!(guard.check("gh pr list").is_ok());
+    }
+
+    #[test]
+    fn test_blocks_rm_fr_flag_order() {
+        let guard = CommandGuard::default_blocked();
+        assert!(guard.check("rm -fr /tmp-important").is_err());
+        assert!(guard.check("rm -fR ~/things").is_err());
     }
 
     #[test]

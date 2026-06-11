@@ -66,10 +66,14 @@ pub async fn run_lifecycle_hooks_with_result(
         .filter(|p| p.is_dir())
         .unwrap_or_else(|| project_dir.to_path_buf());
 
-    let project_key = project_dir
-        .canonicalize()
-        .ok()
-        .map(|p| p.to_string_lossy().to_string());
+    // Key hook approvals by the canonical main-repo root so an approval given
+    // once (from the main repo or any worktree) applies everywhere — without
+    // this, hooks could never be pre-approved for an agent-created worktree.
+    let project_key = Some(
+        crate::vcs::resolve_project_root(project_dir)
+            .to_string_lossy()
+            .to_string(),
+    );
 
     let engine = match opts.hook_approval {
         HookApprovalMode::Interactive => {

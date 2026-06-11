@@ -17,6 +17,9 @@ pub struct DeleteOptions {
     pub lifecycle: LifecycleOptions,
     /// Whether to keep service workspaces (don't delete databases, etc.).
     pub keep_services: bool,
+    /// Remove the worktree even if it has uncommitted changes (and fall
+    /// back to plain directory removal when VCS removal fails).
+    pub force: bool,
 }
 
 /// Delete a workspace with the full lifecycle: pre-remove hooks,
@@ -62,17 +65,29 @@ pub async fn delete_workspace(
     if let Some(ref repo) = vcs_provider {
         if let Ok(Some(wt_path)) = repo.worktree_path(workspace_name) {
             worktree_path_str = Some(wt_path.display().to_string());
-            if let Err(e) = repo.remove_worktree(&wt_path) {
-                log::warn!(
-                    "Failed to remove worktree via VCS, falling back to fs removal: {}",
-                    e
-                );
-                if wt_path.exists() {
-                    std::fs::remove_dir_all(&wt_path)
-                        .context("Failed to remove worktree directory")?;
+            match repo.remove_worktree(&wt_path, options.force) {
+                Ok(()) => worktree_removed = true,
+                Err(e) if options.force => {
+                    // Forced: VCS removal failed (e.g. stale metadata) — fall
+                    // back to plain directory removal.
+                    log::warn!(
+                        "Failed to remove worktree via VCS, falling back to fs removal: {}",
+                        e
+                    );
+                    if wt_path.exists() {
+                        std::fs::remove_dir_all(&wt_path)
+                            .context("Failed to remove worktree directory")?;
+                    }
+                    worktree_removed = true;
+                }
+                Err(e) => {
+                    // Abort before deleting services/branch — nothing has been
+                    // destroyed yet and the user can retry with force.
+                    return Err(
+                        e.context(format!("Refusing to delete workspace '{}'", workspace_name))
+                    );
                 }
             }
-            worktree_removed = true;
         }
     }
 

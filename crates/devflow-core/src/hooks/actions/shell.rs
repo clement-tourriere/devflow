@@ -83,6 +83,22 @@ pub fn run_shell_command_sandboxed(
 
     cmd.current_dir(working_dir);
 
+    // Hooks run via plain `sh -c`, so `mise activate` (a shell hook) never
+    // applies. Prepending the mise shims dir makes mise-managed tools
+    // resolve anyway. An explicit PATH in the hook's `environment:` still
+    // wins (applied below).
+    if let Some(home) = dirs::home_dir() {
+        let shims = home.join(".local/share/mise/shims");
+        if shims.is_dir() {
+            let current = std::env::var_os("PATH").unwrap_or_default();
+            let mut paths = vec![shims];
+            paths.extend(std::env::split_paths(&current));
+            if let Ok(joined) = std::env::join_paths(paths) {
+                cmd.env("PATH", joined);
+            }
+        }
+    }
+
     if let Some(env_vars) = environment {
         for (key, value_template) in env_vars {
             let rendered_value = template_engine

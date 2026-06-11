@@ -6,7 +6,7 @@ devflow is a Rust-based tool that provides per-workspace isolation for developme
 ## Core Concepts
 - **Workspace isolation**: Each workspace gets its own isolated set of services (databases, caches, etc.)
 - **Git worktree integration**: Optionally creates worktree directories per workspace for true parallel development
-- **Multi-provider**: Local Docker containers, PostgreSQL TEMPLATE, Neon, DBLab, Xata, or custom plugins
+- **Multi-provider**: Per-workspace CoW containers (`type: local`), shared global containers with logical isolation (`type: shared` — one container, a database per workspace), Neon, DBLab, Xata, or custom plugins
 - **Multi-service**: A single project can manage multiple services (e.g., PostgreSQL + ClickHouse + Redis)
 - **Lifecycle hooks**: MiniJinja-templated commands that run at specific phases (post-create, pre-merge, etc.)
 - **Copy-on-Write storage**: Uses APFS clones (macOS), ZFS snapshots, Btrfs/XFS reflinks for near-instant workspace creation
@@ -65,7 +65,7 @@ behavior:
 # Multi-provider setup
 services:
   - name: app-db
-    type: local
+    type: local                # physical isolation: one CoW container per workspace
     service_type: postgres
     auto_workspace: true
     default: true
@@ -77,6 +77,18 @@ services:
     auto_workspace: true
     clickhouse:
       image: clickhouse/clickhouse-server:latest
+
+# Shared-engine setup (logical isolation): ONE global container, a database
+# per workspace created on the fly via CREATE DATABASE [TEMPLATE parent].
+# Coexists with `type: local` per service.
+#   - name: app-db
+#     type: shared
+#     service_type: postgres
+#     auto_workspace: true
+#     shared:
+#       image: postgres:17       # default
+#       port: 5432               # fixed well-known port
+#       template_branching: true # branch-from-parent via TEMPLATE (default true)
 
 # Worktree configuration
 worktree:

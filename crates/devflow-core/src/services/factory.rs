@@ -23,6 +23,10 @@ use anyhow::{Context, Result};
 pub enum ProviderType {
     #[cfg(feature = "service-local")]
     Local,
+    /// Logical isolation inside one global container (CREATE DATABASE per
+    /// workspace) instead of one container per workspace.
+    #[cfg(feature = "service-local")]
+    Shared,
     #[cfg(feature = "service-neon")]
     Neon,
     #[cfg(feature = "service-dblab")]
@@ -40,6 +44,13 @@ impl ProviderType {
             #[cfg(not(feature = "service-local"))]
             "local" | "docker" => {
                 anyhow::bail!("Local provider not compiled. Rebuild with --features service-local")
+            }
+
+            #[cfg(feature = "service-local")]
+            "shared" | "global" => Ok(ProviderType::Shared),
+            #[cfg(not(feature = "service-local"))]
+            "shared" | "global" => {
+                anyhow::bail!("Shared provider not compiled. Rebuild with --features service-local")
             }
 
             #[cfg(feature = "service-neon")]
@@ -64,7 +75,7 @@ impl ProviderType {
             }
 
             _ => anyhow::bail!(
-                "Unknown provider type: {}. Valid types: local, neon, dblab, xata",
+                "Unknown provider type: {}. Valid types: local, shared, neon, dblab, xata",
                 s
             ),
         }
@@ -200,6 +211,16 @@ async fn create_postgres_provider(
                 LocalProvider::new(&named.name, config, local_config, named.docker.as_ref())
                     .await
                     .context("Failed to create local provider")?;
+            Ok(Box::new(provider))
+        }
+        #[cfg(feature = "service-local")]
+        ProviderType::Shared => {
+            let provider = crate::services::shared::SharedPostgresProvider::new(
+                &config.project_name(),
+                &named.name,
+                named.shared.as_ref(),
+            )
+            .context("Failed to create shared postgres provider")?;
             Ok(Box::new(provider))
         }
         #[cfg(feature = "service-neon")]

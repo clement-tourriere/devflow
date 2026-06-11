@@ -6,8 +6,18 @@ import type { ProjectEntry, ProxyStatus, AppSettings } from "../types";
 import TerminalPanel from "./TerminalPanel";
 import { useTerminal } from "../context/TerminalContext";
 import { sortByRecent } from "../utils/recentProjects";
+import {
+  IconDashboard,
+  IconProjects,
+  IconProxy,
+  IconTerminal,
+  IconSkills,
+  IconMerge,
+  IconSettings,
+  IconFolder,
+} from "./icons";
 
-const MAX_SIDEBAR_PROJECTS = 5;
+const MAX_SIDEBAR_PROJECTS = 8;
 
 function Layout() {
   const [proxyStatus, setProxyStatus] = useState<ProxyStatus | null>(null);
@@ -97,71 +107,52 @@ function Layout() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [toggle]);
 
+  const navClass = ({ isActive }: { isActive: boolean }) =>
+    `nav-item${isActive ? " active" : ""}`;
+
   return (
     <div className="app">
       <aside className="sidebar">
-        <div className="sidebar-header">devflow</div>
+        <div className="sidebar-header titlebar-drag">
+          <span className="sidebar-brand-dot" />
+          devflow
+        </div>
 
         <nav className="sidebar-nav">
-          <div className="nav-section">Overview</div>
-          <NavLink
-            to="/"
-            end
-            className={({ isActive }) =>
-              `nav-item${isActive ? " active" : ""}`
-            }
-          >
+          <NavLink to="/" end className={navClass}>
+            <IconDashboard size={16} />
             Dashboard
           </NavLink>
 
           <div className="nav-section">Projects</div>
-          {sidebarOrder
-            .slice(0, MAX_SIDEBAR_PROJECTS)
-            .map((p) => (
-              <NavLink
-                key={p.path}
-                to={`/projects/${encodeURIComponent(p.path)}`}
-                className={({ isActive }) =>
-                  `nav-item${isActive ? " active" : ""}`
-                }
-              >
-                {p.name}
-              </NavLink>
-            ))}
-          {projects.length > 0 && (
+          {sidebarOrder.slice(0, MAX_SIDEBAR_PROJECTS).map((p) => (
             <NavLink
-              to="/projects"
-              end
-              className={({ isActive }) =>
-                `nav-item${isActive ? " active" : ""}`
-              }
-              style={{ color: "var(--text-muted)", fontSize: 12 }}
+              key={p.path}
+              to={`/projects/${encodeURIComponent(p.path)}`}
+              className={navClass}
             >
-              All projects ({projects.length})
+              <IconFolder size={16} />
+              <span className="nav-item-label">{p.name}</span>
             </NavLink>
-          )}
+          ))}
+          <NavLink to="/projects" end className={navClass}>
+            <IconProjects size={16} />
+            {projects.length > 0 ? `All projects (${projects.length})` : "Add project"}
+          </NavLink>
 
           {smartMerge && (
             <>
               <div className="nav-section">Merge</div>
-              <NavLink
-                to="/merge-train"
-                className={({ isActive }) =>
-                  `nav-item${isActive ? " active" : ""}`
-                }
-              >
+              <NavLink to="/merge-train" className={navClass}>
+                <IconMerge size={16} />
                 Merge Train
               </NavLink>
             </>
           )}
 
           <div className="nav-section">Infrastructure</div>
-          <NavLink
-            to="/proxy"
-            className={({ isActive }) =>
-              `nav-item${isActive ? " active" : ""}`
-            }
-          >
+          <NavLink to="/proxy" className={navClass}>
+            <IconProxy size={16} />
             Proxy
           </NavLink>
           <a
@@ -172,36 +163,32 @@ function Layout() {
             }}
             style={{ cursor: "pointer" }}
           >
+            <IconTerminal size={16} />
             Terminal
           </a>
 
           <div className="nav-section">Tools</div>
-          <NavLink
-            to="/skills"
-            className={({ isActive }) =>
-              `nav-item${isActive ? " active" : ""}`
-            }
-          >
+          <NavLink to="/skills" className={navClass}>
+            <IconSkills size={16} />
             Skills
           </NavLink>
-
-          <div className="nav-section">App</div>
-          <NavLink
-            to="/settings"
-            className={({ isActive }) =>
-              `nav-item${isActive ? " active" : ""}`
-            }
-          >
+          <NavLink to="/settings" className={navClass}>
+            <IconSettings size={16} />
             Settings
           </NavLink>
         </nav>
 
-        <div className="proxy-indicator">
+        <NavLink
+          to="/proxy"
+          className="proxy-indicator"
+          style={{ textDecoration: "none" }}
+          title={proxyStatus?.running ? "Proxy is running" : "Proxy is stopped"}
+        >
           <span
             className={`proxy-dot ${proxyStatus?.running ? "running" : "stopped"}`}
           />
-          Proxy: {proxyStatus?.running ? "Running" : "Stopped"}
-        </div>
+          Proxy {proxyStatus?.running ? "running" : "stopped"}
+        </NavLink>
       </aside>
 
       <div className="main-area">

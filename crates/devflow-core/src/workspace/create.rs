@@ -7,11 +7,11 @@ use crate::services;
 use crate::state::{DevflowWorkspace, LocalStateManager};
 use crate::vcs;
 
-use super::hooks::{run_lifecycle_hooks_best_effort, run_lifecycle_hooks_with_result};
+use super::hooks::run_lifecycle_hooks_best_effort;
 use super::worktree::create_worktree_with_files;
 use super::{
-    CreateWorkspaceResult, LifecycleHookResult, LifecycleOptions, ServiceResult,
-    WorkspaceCreationMode, WorktreeSetupResult,
+    CreateWorkspaceResult, LifecycleOptions, ServiceResult, WorkspaceCreationMode,
+    WorktreeSetupResult,
 };
 
 /// Options specific to workspace creation.
@@ -117,13 +117,25 @@ pub async fn create_workspace(
 
     // 4. Service orchestration
     let service_results: Vec<ServiceResult> = if !opts.skip_services {
-        let results = services::factory::orchestrate_create(
+        match services::factory::orchestrate_create(
             config,
             workspace_name,
             options.from_workspace.as_deref(),
         )
-        .await?;
-        results.into_iter().map(ServiceResult::from).collect()
+        .await
+        {
+            Ok(results) => results.into_iter().map(ServiceResult::from).collect(),
+            Err(e) => {
+                // Branch/worktree already exist — record the failure and
+                // finish creation instead of aborting half-way.
+                log::warn!("Service orchestration failed: {:#}", e);
+                vec![ServiceResult {
+                    service_name: "(orchestration)".to_string(),
+                    success: false,
+                    message: format!("{:#}", e),
+                }]
+            }
+        }
     } else {
         vec![]
     };
@@ -155,18 +167,17 @@ pub async fn create_workspace(
 
     // 7. Post-create + post-switch hooks
     if !opts.skip_hooks {
-        let post_create = run_lifecycle_hooks_with_result(
+        if let Some(summary) = run_lifecycle_hooks_best_effort(
             config,
             project_dir,
             workspace_name,
             HookPhase::PostCreate,
             opts,
         )
-        .await?;
-        hook_results.push(LifecycleHookResult::from_run_result(
-            &HookPhase::PostCreate,
-            post_create,
-        ));
+        .await
+        {
+            hook_results.push(summary);
+        }
 
         if let Some(summary) = run_lifecycle_hooks_best_effort(
             config,

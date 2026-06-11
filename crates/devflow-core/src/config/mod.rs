@@ -71,6 +71,11 @@ pub struct NamedServiceConfig {
     pub default: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local: Option<LocalServiceConfig>,
+    /// Configuration for `type: shared` — logical isolation inside one global
+    /// container (e.g. CREATE DATABASE per workspace) instead of one container
+    /// per workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared: Option<SharedServiceConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub neon: Option<NeonConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -125,6 +130,34 @@ pub struct LocalServiceConfig {
     pub postgres_password: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub postgres_db: Option<String>,
+}
+
+/// Configuration for a shared (global-container, logically-isolated) service.
+///
+/// One container is kept running per engine and each workspace gets a logical
+/// boundary inside it (a database for postgres, a bucket for object storage,
+/// a DB index for redis) provisioned on the fly.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SharedServiceConfig {
+    /// Container image. Defaults per engine (e.g. `postgres:17`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// Fixed host port for the global container (e.g. 5432 for postgres).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// Override the global container name (default: `devflow-shared-<engine>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_name: Option<String>,
+    /// Admin user (postgres). Default: `postgres`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// Admin password (postgres). Default: `postgres`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// Use `CREATE DATABASE ... TEMPLATE parent` for branch-from-parent
+    /// semantics (postgres). Default: true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_branching: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -702,8 +735,13 @@ impl Config {
         if let Some(ref name) = self.name {
             return name.clone();
         }
+        // Derive the name from the canonical MAIN-repo root, not the raw cwd:
+        // a worktree's directory basename (e.g. `repo.feature-x`) would
+        // otherwise become a different project identity than the main repo,
+        // spawning a parallel empty project and cross-cloning data.
         std::env::current_dir()
             .ok()
+            .map(|d| crate::vcs::resolve_project_root(&d))
             .and_then(|d| d.file_name().map(|n| n.to_string_lossy().to_string()))
             .unwrap_or_else(|| "default".to_string())
     }
@@ -1499,6 +1537,29 @@ services:
         let services = config.resolve_services();
         assert_eq!(services[0].service_type, "postgres");
         assert!(services[0].auto_workspace); // default is true
+    }
+
+    #[test]
+    fn test_shared_provider_parses() {
+        let yaml = r#"
+services:
+  - name: app-db
+    type: shared
+    service_type: postgres
+    auto_workspace: true
+    shared:
+      image: postgres:17
+      port: 5440
+      template_branching: true
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+        let services = config.resolve_services();
+        assert_eq!(services[0].provider_type, "shared");
+        assert_eq!(services[0].service_type, "postgres");
+        let shared = services[0].shared.as_ref().expect("shared section present");
+        assert_eq!(shared.image.as_deref(), Some("postgres:17"));
+        assert_eq!(shared.port, Some(5440));
+        assert_eq!(shared.template_branching, Some(true));
     }
 
     #[test]

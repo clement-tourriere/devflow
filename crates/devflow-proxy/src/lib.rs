@@ -11,7 +11,7 @@ pub mod router;
 pub mod server;
 pub mod tls;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ca::CertificateCache;
 use discovery::{extract_network_domains, extract_proxy_targets};
 use monitor::DockerMonitor;
@@ -220,13 +220,35 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
                                         }
                                     }
                                 }
-                                "stop" | "die" => {
+                                "stop" | "die" | "destroy" => {
                                     router_for_events.remove_by_container(&container_id).await;
                                     if let Some(mdns) = &mdns_for_events {
                                         mdns.remove_by_container(&container_id);
                                     }
                                     let name = event.container.name.as_deref().unwrap_or(&container_id);
                                     log::info!("- removed routes for {}", name);
+                                }
+                                "reconnected" => {
+                                    // The Docker event stream was lost and re-established:
+                                    // rebuild the routing table from what is actually running.
+                                    log::info!("Docker reconnected — reconciling routes");
+                                    match monitor::list_running_containers(&docker_for_events).await {
+                                        Ok(containers) => {
+                                            let mut targets = Vec::new();
+                                            for c in &containers {
+                                                targets.extend(extract_proxy_targets(c, &domain_suffix));
+                                            }
+                                            router_for_events.replace_all(targets).await;
+                                            if let Some(mdns) = &mdns_for_events {
+                                                mdns.reconcile(&router_for_events.list().await);
+                                            }
+                                            log::info!(
+                                                "Reconciled {} route(s) after reconnect",
+                                                router_for_events.len().await
+                                            );
+                                        }
+                                        Err(e) => log::warn!("Route reconcile after reconnect failed: {}", e),
+                                    }
                                 }
                                 _ => {}
                             }
@@ -239,40 +261,53 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
         }
     });
 
-    // Start HTTPS server
+    // Bind all listeners eagerly so callers get a real error (port already
+    // in use, permission denied on 443) instead of a successful-looking
+    // handle with nothing listening behind it.
     let https_addr: SocketAddr = format!("0.0.0.0:{}", config.https_port).parse()?;
+    let https_listener = tokio::net::TcpListener::bind(https_addr)
+        .await
+        .with_context(|| format!("Failed to bind HTTPS on {}", https_addr))?;
+    let http_addr: SocketAddr = format!("0.0.0.0:{}", config.http_port).parse()?;
+    let http_listener = tokio::net::TcpListener::bind(http_addr)
+        .await
+        .with_context(|| format!("Failed to bind HTTP on {}", http_addr))?;
+    let api_addr: SocketAddr = format!("127.0.0.1:{}", config.api_port).parse()?;
+    let api_listener = tokio::net::TcpListener::bind(api_addr)
+        .await
+        .with_context(|| format!("Failed to bind API on {}", api_addr))?;
+
+    // Start HTTPS server
     let https_router = router.clone();
     let https_ca = ca.clone();
     let https_shutdown = shutdown_rx.clone();
     tokio::spawn(async move {
         if let Err(e) =
-            server::run_https_server(https_addr, https_router, https_ca, https_shutdown).await
+            server::run_https_server(https_listener, https_router, https_ca, https_shutdown).await
         {
             log::error!("HTTPS server error: {}", e);
         }
     });
 
     // Start HTTP server
-    let http_addr: SocketAddr = format!("0.0.0.0:{}", config.http_port).parse()?;
     let http_router = router.clone();
     let http_shutdown = shutdown_rx.clone();
     let https_port = config.https_port;
     tokio::spawn(async move {
         if let Err(e) =
-            server::run_http_server(http_addr, https_port, http_router, http_shutdown).await
+            server::run_http_server(http_listener, https_port, http_router, http_shutdown).await
         {
             log::error!("HTTP server error: {}", e);
         }
     });
 
     // Start API server
-    let api_addr: SocketAddr = format!("127.0.0.1:{}", config.api_port).parse()?;
     let api_router = router.clone();
     let api_cache = cert_cache.clone();
     let api_shutdown = shutdown_rx.clone();
     tokio::spawn(async move {
         if let Err(e) = api::run_api_server(
-            api_addr,
+            api_listener,
             api_router,
             api_cache,
             https_port,

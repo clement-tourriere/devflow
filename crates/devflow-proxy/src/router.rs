@@ -40,6 +40,21 @@ impl Router {
         routes.insert(target.domain.clone(), upstream);
     }
 
+    /// Replace the entire routing table (used after Docker reconnects to
+    /// drop routes for containers that died while the event stream was down).
+    pub async fn replace_all(&self, targets: Vec<ProxyTarget>) {
+        let mut routes = self.routes.write().await;
+        routes.clear();
+        for target in targets {
+            let upstream = Upstream {
+                ip: target.container_ip.clone(),
+                port: target.port,
+                target: target.clone(),
+            };
+            routes.insert(target.domain.clone(), upstream);
+        }
+    }
+
     /// Remove routes for a given container ID.
     pub async fn remove_by_container(&self, container_id: &str) {
         let mut routes = self.routes.write().await;
