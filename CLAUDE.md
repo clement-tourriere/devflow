@@ -14,7 +14,7 @@ devflow is a Rust-based tool that provides per-workspace isolation for developme
 ## Key Features
 - **Automatic Git integration**: Creates/switches service workspaces on `git checkout` via Git hooks
 - **Git worktree management**: Creates worktree directories with configurable path templates and file copying
-- **Multi-service support**: PostgreSQL, ClickHouse, MySQL, generic Docker, and plugin providers
+- **Multi-service support**: PostgreSQL, ClickHouse, MySQL, generic Docker, RustFS object storage, and plugin providers
 - **Hook engine**: MiniJinja templates with custom filters (`sanitize`, `sanitize_db`, `hash_port`) + installable hook recipes
 - **AI tool config sync**: Auto-copies `.claude/`, `.cursor/`, `.opencode/`, `.agents/` into worktrees; `devflow sync-ai-configs` merges settings back to main
 - **Seed support**: Seed databases from PostgreSQL URLs, local dump files, or S3
@@ -89,6 +89,17 @@ services:
 #       image: postgres:17       # default
 #       port: 5432               # fixed well-known port
 #       template_branching: true # branch-from-parent via TEMPLATE (default true)
+
+# Shared object storage (RustFS — Rust-native, S3-compatible): ONE global
+# container, a bucket per workspace ({project}-{workspace}) on the fly.
+#   - name: storage
+#     service_type: rustfs       # also accepts: s3, objectstorage
+#     auto_workspace: true
+#     shared:
+#       image: rustfs/rustfs:latest   # default; S3 on :9000, console on :9001
+#       port: 9000
+#       user: rustfsadmin             # access key (default)
+#       password: rustfsadmin         # secret key (default)
 
 # Worktree configuration
 worktree:

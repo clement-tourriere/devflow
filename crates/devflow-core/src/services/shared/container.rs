@@ -25,6 +25,10 @@ pub struct GlobalContainerSpec {
     pub host_port: u16,
     /// Container port to publish from.
     pub container_port: u16,
+    /// Optional extra port to publish (e.g. a web console). `(host, container)`.
+    pub extra_port: Option<(u16, u16)>,
+    /// Override the image's default command (e.g. RustFS needs the data path).
+    pub cmd: Vec<String>,
     /// Environment variables (`KEY=value`).
     pub env: Vec<String>,
     /// Docker bind/volume mounts (`source:/container/path`). A named volume
@@ -102,6 +106,15 @@ pub async fn ensure_running_container(docker: &Docker, spec: &GlobalContainerSpe
             host_port: Some(spec.host_port.to_string()),
         }]),
     );
+    if let Some((host, container)) = spec.extra_port {
+        port_bindings.insert(
+            format!("{container}/tcp"),
+            Some(vec![PortBinding {
+                host_ip: Some("0.0.0.0".to_string()),
+                host_port: Some(host.to_string()),
+            }]),
+        );
+    }
 
     let mut labels = HashMap::new();
     labels.insert("devflow.managed".to_string(), "true".to_string());
@@ -126,6 +139,11 @@ pub async fn ensure_running_container(docker: &Docker, spec: &GlobalContainerSpe
 
     let config = ContainerCreateBody {
         image: Some(spec.image.clone()),
+        cmd: if spec.cmd.is_empty() {
+            None
+        } else {
+            Some(spec.cmd.clone())
+        },
         env: Some(spec.env.clone()),
         labels: Some(labels),
         host_config: Some(host_config),

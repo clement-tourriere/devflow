@@ -174,6 +174,23 @@ pub async fn create_provider_from_named_config(
             anyhow::bail!("Generic Docker provider requires the 'service-local' feature. Rebuild with --features service-local")
         }
 
+        #[cfg(feature = "service-local")]
+        "rustfs" | "s3" | "objectstorage" => {
+            // Object storage is inherently a shared global engine — there is
+            // no per-workspace-container variant, so provider_type is ignored.
+            let provider = crate::services::shared::RustFsProvider::new(
+                &project_name,
+                &named.name,
+                named.shared.as_ref(),
+            )
+            .context("Failed to create RustFS provider")?;
+            Ok(Box::new(provider))
+        }
+        #[cfg(not(feature = "service-local"))]
+        "rustfs" | "s3" | "objectstorage" => {
+            anyhow::bail!("RustFS provider requires the 'service-local' feature. Rebuild with --features service-local")
+        }
+
         "plugin" => {
             let plugin_config = named.plugin.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -188,7 +205,7 @@ pub async fn create_provider_from_named_config(
 
         other => {
             anyhow::bail!(
-                "Unknown service type '{}' for service '{}'. Valid types: postgres, clickhouse, mysql, mariadb, generic, plugin",
+                "Unknown service type '{}' for service '{}'. Valid types: postgres, clickhouse, mysql, mariadb, generic, rustfs, plugin",
                 other,
                 named.name
             )

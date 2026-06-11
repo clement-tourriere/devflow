@@ -55,7 +55,7 @@ services:
 | Step | Status |
 |------|--------|
 | G1 SharedPostgresProvider | ✅ done (2026-06-11) — `services/shared/{mod,container,naming}.rs`, `SharedServiceConfig` + `ProviderType::Shared` + factory dispatch, CLI `service add` menu entry, CLAUDE.md docs, 11 unit tests. `type: shared` postgres now keeps one `devflow-shared-postgres` container (named volume, unless-stopped) and provisions `CREATE DATABASE project_ws [TEMPLATE parent]` per workspace; delete = terminate+DROP; destroy = drop project's DBs only (container stays). 224 tests + clippy green. |
-| G2 RustFS | planned (reuse `rust-s3` already in-tree; verify `rustfs/rustfs` image env/ports) |
+| G2 RustFS | ✅ done (2026-06-11) — `services/shared/rustfs.rs`, `RustFsProvider` for `service_type: rustfs` (also `s3`/`objectstorage`). One global `rustfs/rustfs:latest` container (S3 :9000 + console :9001, named volume, default creds rustfsadmin), bucket-per-workspace `{project}-{ws}` via in-tree `rust-s3` 0.37 (create/exists/list_buckets/delete + empty-on-delete). Verified image env/ports against RustFS docs (RUSTFS_ACCESS_KEY/SECRET_KEY, /data command arg). Container spec gained `cmd` + `extra_port`. S3-safe bucket naming + tests. 228 tests + clippy green. **Untested against a live RustFS daemon** — pure naming logic is unit-tested; the S3/container paths need an integration run. |
 | G3 shared Redis | planned |
 | G4 devflow.toml | planned |
 | G5 daemon | planned |

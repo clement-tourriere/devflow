@@ -116,9 +116,93 @@ pub fn list_databases_sql(prefix: &str) -> String {
     )
 }
 
+// ── S3 / object-storage bucket naming ───────────────────────────────────
+
+/// Min/max length of an S3 bucket name.
+const S3_BUCKET_MIN: usize = 3;
+const S3_BUCKET_MAX: usize = 63;
+
+/// Build the per-workspace bucket name for a (project, workspace) pair.
+///
+/// S3 bucket names are stricter than postgres identifiers: 3–63 chars,
+/// lowercase letters/digits/hyphens only, must start and end with a letter or
+/// digit, and no underscores or consecutive dots. We use `-` as the separator
+/// (not `_` like databases).
+pub fn logical_bucket_name(project: &str, workspace: &str) -> String {
+    let project = sanitize_bucket_fragment(project);
+    let workspace = sanitize_bucket_fragment(workspace);
+
+    let mut name = match (project.is_empty(), workspace.is_empty()) {
+        (true, true) => "devflow-bucket".to_string(),
+        (true, false) => workspace,
+        (false, true) => project,
+        (false, false) => format!("{project}-{workspace}"),
+    };
+
+    if name.len() > S3_BUCKET_MAX {
+        name.truncate(S3_BUCKET_MAX);
+    }
+    name = name.trim_matches('-').to_string();
+    // Pad if the trimmed name fell below the minimum length.
+    while name.len() < S3_BUCKET_MIN {
+        name.push('0');
+    }
+    name
+}
+
+/// The shared prefix of every bucket for a project: `<project>-`.
+pub fn project_bucket_prefix(project: &str) -> String {
+    format!("{}-", sanitize_bucket_fragment(project))
+}
+
+/// Sanitize a fragment for an S3 bucket name: lowercase alphanumerics and
+/// hyphens, collapsing runs of other characters to a single `-`.
+fn sanitize_bucket_fragment(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut last_dash = false;
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_logical_bucket_name_basic() {
+        assert_eq!(logical_bucket_name("myapp", "main"), "myapp-main");
+        // Workspace slashes/underscores become hyphens (S3 forbids underscores).
+        assert_eq!(
+            logical_bucket_name("My_App", "feature/auth"),
+            "my-app-feature-auth"
+        );
+    }
+
+    #[test]
+    fn test_logical_bucket_name_constraints() {
+        // 3..=63 chars, lowercase, no leading/trailing hyphen.
+        let n = logical_bucket_name("x", "");
+        assert!(n.len() >= 3, "min length: {n}");
+        let long = logical_bucket_name(&"a".repeat(80), &"b".repeat(80));
+        assert!(long.len() <= 63);
+        assert!(!long.starts_with('-') && !long.ends_with('-'));
+        assert!(long
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
+    }
+
+    #[test]
+    fn test_project_bucket_prefix() {
+        assert_eq!(project_bucket_prefix("My_App"), "my-app-");
+    }
 
     #[test]
     fn test_logical_db_name_basic() {

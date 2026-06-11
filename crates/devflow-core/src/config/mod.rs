@@ -1563,6 +1563,27 @@ services:
     }
 
     #[test]
+    fn test_rustfs_service_parses() {
+        let yaml = r#"
+services:
+  - name: storage
+    service_type: rustfs
+    auto_workspace: true
+    shared:
+      image: rustfs/rustfs:latest
+      port: 9000
+      user: rustfsadmin
+      password: rustfsadmin
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+        let services = config.resolve_services();
+        assert_eq!(services[0].service_type, "rustfs");
+        let shared = services[0].shared.as_ref().expect("shared section present");
+        assert_eq!(shared.port, Some(9000));
+        assert_eq!(shared.user.as_deref(), Some("rustfsadmin"));
+    }
+
+    #[test]
     fn test_auto_branch_filtering() {
         let yaml = r#"
 git:

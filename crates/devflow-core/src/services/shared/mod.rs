@@ -7,6 +7,9 @@
 
 pub mod container;
 pub mod naming;
+pub mod rustfs;
+
+pub use rustfs::RustFsProvider;
 
 use std::time::Duration;
 
@@ -71,6 +74,8 @@ impl SharedPostgresProvider {
             image: self.image.clone(),
             host_port: self.host_port,
             container_port: DEFAULT_PORT,
+            extra_port: None,
+            cmd: vec![],
             env: vec![
                 format!("POSTGRES_USER={}", self.user),
                 format!("POSTGRES_PASSWORD={}", self.password),
