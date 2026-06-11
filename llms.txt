@@ -4,8 +4,16 @@
 
 devflow gives each Git workspace its own isolated development environment. When you
 `git checkout feature-auth`, devflow automatically creates (or switches to)
-a dedicated worktree and service instances that belong to that workspace. Data is
-cloned using Copy-on-Write for near-instant, space-efficient branching.
+a dedicated worktree and service instances that belong to that workspace.
+
+Two isolation models, chosen per service:
+- Physical (`type: local`): one Copy-on-Write container per workspace; data is cloned
+  for near-instant, space-efficient branching.
+- Logical (`type: shared`, or `service_type: rustfs`/`redis`): one global container per
+  engine; each workspace gets a database / bucket / DB-index provisioned on the fly
+  (Postgres `CREATE DATABASE … TEMPLATE`, a RustFS bucket, a Redis DB, a ClickHouse db).
+  `devflow daemon start` keeps the global engines running; `devflow service up` reconciles
+  them once. Config can be `.devflow.yml` or a lightweight `devflow.toml`.
 
 ## Automation defaults
 

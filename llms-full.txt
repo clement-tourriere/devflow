@@ -89,6 +89,15 @@ devflow --json --non-interactive service delete "$BRANCH"   # cleanup
 | `devflow service connection <workspace> [--format uri\|env\|json]` | Connection info |
 | `devflow service capabilities` | Service provider capability matrix |
 | `devflow service cleanup` | Clean up old workspaces for a service |
+| `devflow service up` | Ensure all shared global engines are running (one-shot reconcile) |
+
+### Shared engines & controller daemon
+
+| Command | Description |
+|---|---|
+| `devflow daemon start [--interval N] [--once] [--foreground]` | Background controller: keeps shared global engines running, restarts dead ones |
+| `devflow daemon status` | Daemon state + last reconcile + per-engine health |
+| `devflow daemon stop` | Stop the controller daemon |
 
 ### VCS
 
@@ -167,8 +176,8 @@ behavior:
 
 services:
   - name: app-db                      # Service identifier
-    type: local                       # local, neon, dblab, xata
-    service_type: postgres            # postgres, clickhouse, mysql, generic, plugin
+    type: local                       # local (CoW), shared (global engine), neon, dblab, xata
+    service_type: postgres            # postgres, clickhouse, mysql, generic, rustfs, redis, plugin
     auto_workspace: true                 # Workspace this service with git (default: true)
     default: true                     # Default target for -s flag
     local:                            # Local Docker provider config
@@ -212,6 +221,21 @@ services:
       volumes: []
       command: null
       healthcheck: null
+
+  # Shared global engines (logical isolation: one container, a namespace per workspace)
+  - name: shared-db
+    type: shared                      # one global postgres; CREATE DATABASE project_ws [TEMPLATE parent]
+    service_type: postgres
+    shared:
+      image: postgres:17              # default
+      port: 5432                      # fixed well-known port
+      template_branching: true        # branch-from-parent via TEMPLATE (default)
+  - name: cache
+    service_type: redis               # always shared; a numbered DB (1-15) per workspace
+    shared: { image: redis:7 }
+  - name: storage
+    service_type: rustfs              # S3-compatible (also: s3, objectstorage); a bucket per workspace
+    shared: { image: rustfs/rustfs:latest }   # S3 :9000, console :9001
 
   - name: my-plugin
     type: local

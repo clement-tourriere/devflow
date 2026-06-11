@@ -264,6 +264,15 @@ List configured services.
 
 Show service status across providers.
 
+### `devflow service up`
+
+Ensure every configured **shared global engine** (`type: shared`, or `service_type: rustfs`/`redis`) is running — a one-shot reconcile / pre-warm. Per-workspace (CoW) and cloud services are skipped.
+
+```bash
+devflow service up
+devflow --json service up
+```
+
 ### `devflow service capabilities`
 
 Show the capability matrix for configured services.
@@ -358,6 +367,27 @@ devflow service discover
 devflow service discover --service-type postgres
 devflow service discover --global
 ```
+
+## Controller Daemon
+
+A background controller that keeps every registered project's **shared global engines** running, restarting any that go down. Provisioning happens on `switch`; the daemon just keeps the engines alive.
+
+### `devflow daemon start`
+
+```bash
+devflow daemon start                 # background, reconcile every 30s
+devflow daemon start --interval 10   # custom reconcile interval (seconds)
+devflow daemon start --once          # reconcile once and exit (no background process)
+devflow daemon start --foreground    # run attached (Ctrl+C to stop)
+```
+
+### `devflow daemon status`
+
+Show whether the daemon is running, plus the last reconcile and per-engine health.
+
+### `devflow daemon stop`
+
+Stop the running daemon.
 
 ## Hooks
 

@@ -603,12 +603,11 @@ hr {
 
     <div class="nav-group">Providers</div>
     <a href="#providers">Providers</a>
-    <a href="#provider-local" class="nav-sub">Local Docker</a>
-    <a href="#provider-template" class="nav-sub">PostgreSQL Template</a>
-    <a href="#provider-neon" class="nav-sub">Neon</a>
-    <a href="#provider-dblab" class="nav-sub">DBLab</a>
-    <a href="#provider-xata" class="nav-sub">Xata</a>
+    <a href="#provider-local" class="nav-sub">Local Docker (CoW)</a>
+    <a href="#provider-shared" class="nav-sub">Shared Engines</a>
+    <a href="#controller-daemon" class="nav-sub">Controller Daemon</a>
     <a href="#provider-plugin" class="nav-sub">Plugin</a>
+    <a href="#provider-cloud" class="nav-sub">Cloud (experimental)</a>
 
     <div class="nav-group">Features</div>
     <a href="#services">Services</a>
@@ -659,7 +658,7 @@ hr {
     </div>
     <div class="hero-feature">
       <div class="icon purple"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></div>
-      <div><strong>Multi-Service</strong><br>Postgres, ClickHouse, MySQL, Redis &mdash; local, cloud, or plugin</div>
+      <div><strong>Two isolation models</strong><br>A Copy-on-Write container per branch, or one global engine with a database/bucket per branch</div>
     </div>
     <div class="hero-feature">
       <div class="icon purple"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></div>
@@ -1098,8 +1097,13 @@ devflow/myapp/feature   # clone from snapshot (instant, zero-copy)</code></pre>
 <section class="section" id="configuration">
   <h2><span class="number">03</span> Configuration</h2>
   <p class="section-desc">
-    devflow is configured via YAML files and environment variables. From a minimal single-line setup to a complex multi-service orchestration, the config system scales with your needs.
+    devflow is configured via a committed config file plus environment variables. From a minimal single-line setup to a complex multi-service orchestration, the config system scales with your needs.
   </p>
+
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div><strong>YAML or TOML.</strong> The committed config can be <code>.devflow.yml</code>/<code>.devflow.yaml</code> (full-featured) or a lightweight <code>devflow.toml</code>/<code>.devflow.toml</code> &mdash; both parse into the same schema. <code>devflow init</code> and the GUI currently write YAML.</div>
+  </div>
 
   <h3 id="config-hierarchy">Config Hierarchy</h3>
   <p>Configuration is merged from three sources (highest precedence first):</p>
@@ -1370,23 +1374,19 @@ agent:
   <div class="card-grid">
     <div class="card">
       <h4><span class="badge badge-green">local</span> Local Docker</h4>
-      <p>Docker containers with Copy-on-Write storage. Supports PostgreSQL, ClickHouse, MySQL, and any Docker image.</p>
+      <p><strong>Physical isolation.</strong> One Copy-on-Write container per workspace. PostgreSQL, ClickHouse, MySQL, or any image.</p>
     </div>
     <div class="card">
-      <h4><span class="badge badge-purple">neon</span> Neon</h4>
-      <p>Neon's serverless Postgres with instant branching via their API.</p>
-    </div>
-    <div class="card">
-      <h4><span class="badge badge-purple">dblab</span> DBLab</h4>
-      <p>Database Lab Engine for thin-clone development databases.</p>
-    </div>
-    <div class="card">
-      <h4><span class="badge badge-purple">xata</span> Xata</h4>
-      <p>Xata's managed Postgres with workspace support.</p>
+      <h4><span class="badge badge-blue">shared</span> Shared Engines</h4>
+      <p><strong>Logical isolation.</strong> One global container per engine; a database / bucket / DB-index per workspace, provisioned on the fly. Postgres, Redis, RustFS, ClickHouse.</p>
     </div>
     <div class="card">
       <h4><span class="badge badge-orange">plugin</span> Plugin</h4>
       <p>Custom providers via JSON-over-stdio protocol. Build your own in any language.</p>
+    </div>
+    <div class="card">
+      <h4><span class="badge badge-purple">cloud</span> Neon · DBLab · Xata <span class="badge badge-orange">experimental</span></h4>
+      <p>Cloud Postgres branching providers. Currently unverified against the providers' live APIs &mdash; see the note below.</p>
     </div>
   </div>
 
@@ -1460,6 +1460,104 @@ agent:
   <div class="callout callout-info">
     <span class="callout-icon">&#9432;</span>
     <div>If <code>port_mapping</code> is omitted, devflow auto-assigns ports starting from <code>port_range_start</code> (default: 56000).</div>
+  </div>
+
+  <!-- Shared Engines -->
+  <h3 id="provider-shared">Shared Engines <span class="badge badge-blue">logical isolation</span></h3>
+  <p>
+    Instead of one container per workspace, the <strong><code>shared</code></strong> providers keep a
+    <strong>single global container per engine</strong> running and carve out a lightweight logical
+    boundary for each workspace on the fly &mdash; a database for Postgres/ClickHouse, a bucket for
+    object storage, a numbered DB for Redis. The engine itself is the source of truth (no extra state
+    to keep in sync), and there are no per-workspace ports or containers to manage.
+  </p>
+
+  <table class="comparison-table">
+    <thead>
+      <tr><th>&nbsp;</th><th><span class="badge badge-green">local</span> Physical (CoW)</th><th><span class="badge badge-blue">shared</span> Logical</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Per workspace</td><td>Its own container + cloned data dir</td><td>A database / bucket / DB-index inside one global container</td></tr>
+      <tr><td>Isolation</td><td>Full process isolation</td><td>Logical (shared process, separate namespace)</td></tr>
+      <tr><td>Branch from parent</td><td>CoW clone of the data dir</td><td>Postgres <code>CREATE DATABASE … TEMPLATE</code>; others start empty</td></tr>
+      <tr><td>Ports</td><td>One per workspace (auto-assigned)</td><td>One fixed well-known port per engine</td></tr>
+      <tr><td>Footprint</td><td>Heavier (N containers)</td><td>Light (1 container, many namespaces)</td></tr>
+      <tr><td>Best for</td><td>Strong isolation, big datasets, true branching</td><td>Many small workspaces, a shared dev engine, low overhead</td></tr>
+    </tbody>
+  </table>
+
+  <p>Both models coexist &mdash; choose per service. The two providers below are configured with <code>type: shared</code>; object storage and Redis are always shared and selected by <code>service_type</code>.</p>
+
+  <h4>Shared PostgreSQL</h4>
+  <p>One global <code>devflow-shared-postgres</code> container; each workspace gets a <code>{project}_{workspace}</code> database, optionally cloned from its parent with PostgreSQL's built-in <code>TEMPLATE</code> (so branch-from-parent semantics are preserved in-engine).</p>
+<pre><code class="language-yaml">services:
+  - name: app-db
+    type: shared
+    service_type: postgres
+    auto_workspace: true
+    shared:
+      image: postgres:17          # default
+      port: 5432                  # fixed, well-known
+      template_branching: true    # CREATE DATABASE … TEMPLATE parent (default)</code></pre>
+
+  <h4>Shared Redis</h4>
+  <p>One global <code>redis:7</code> container; each workspace is allocated a numbered Redis database (1&ndash;15), assigned atomically via a Lua script and recorded inside Redis itself. <em>Note:</em> Redis has only 16 databases globally, so at most 15 workspaces can share one instance.</p>
+<pre><code class="language-yaml">services:
+  - name: cache
+    service_type: redis           # always shared/global
+    auto_workspace: true
+    shared:
+      image: redis:7              # default; port :6379</code></pre>
+
+  <h4>Object Storage &mdash; RustFS</h4>
+  <p>A global <a href="https://rustfs.com">RustFS</a> container (Rust-native, S3-compatible, Apache-2.0); each workspace gets its own bucket <code>{project}-{workspace}</code>, created on the fly. Connection info exposes the S3 endpoint, bucket, and access keys to hooks and <code>.env</code> files.</p>
+<pre><code class="language-yaml">services:
+  - name: storage
+    service_type: rustfs          # also: s3, objectstorage
+    auto_workspace: true
+    shared:
+      image: rustfs/rustfs:latest # S3 on :9000, console on :9001
+      user: rustfsadmin           # access key (default)
+      password: rustfsadmin       # secret key (default)</code></pre>
+
+  <h4>Shared ClickHouse</h4>
+  <p>One global ClickHouse container; a database per workspace via <code>CREATE DATABASE</code>. Logical isolation sidesteps per-workspace data cloning entirely.</p>
+<pre><code class="language-yaml">services:
+  - name: analytics
+    type: shared
+    service_type: clickhouse
+    auto_workspace: true
+    shared:
+      image: clickhouse/clickhouse-server:latest  # HTTP on :8123</code></pre>
+
+  <h3 id="controller-daemon">Controller Daemon</h3>
+  <p>
+    devflow can run as a lightweight <strong>local controller</strong> that keeps every registered
+    project's shared global engines running &mdash; restarting any that go down. Provision happens
+    automatically on <code>switch</code>; the daemon just keeps the engines alive.
+  </p>
+<pre><code class="language-bash"># Bring every configured shared engine up, once
+devflow service up
+
+# Or run the always-on controller (reconciles every 30s, restarts dead engines)
+devflow daemon start
+devflow daemon status
+devflow daemon stop</code></pre>
+  <div class="callout callout-success">
+    <span class="callout-icon">&#9432;</span>
+    <div>The controller reconcile is event-safe and idempotent: many projects sharing the same engine all map to the same global container, so starting it repeatedly is a no-op. Stopping a container (or a crash) is healed within one reconcile interval.</div>
+  </div>
+
+  <!-- Cloud providers (experimental) -->
+  <h3 id="provider-cloud">Cloud Providers <span class="badge badge-orange">experimental</span></h3>
+  <div class="callout callout-warning">
+    <span class="callout-icon">&#9888;</span>
+    <div>
+      <strong>The Neon, DBLab, and Xata providers are currently experimental and unverified against the
+      providers' live APIs.</strong> They are feature-gated and have no automated contract tests; treat the
+      examples below as a starting point and expect to adjust the API shapes. For reliable local branching,
+      prefer the <a href="#provider-local">local</a> or <a href="#provider-shared">shared</a> providers.
+    </div>
   </div>
 
   <!-- Neon -->
@@ -3010,6 +3108,25 @@ devflow service seed main --from s3://bucket/path/to/dump.sql</code></pre>
   <p>Show Docker container logs.</p>
 <pre><code class="language-bash">devflow service logs feature/auth                # Last 100 lines (default)
 devflow service logs feature/auth --tail 50      # Last 50 lines</code></pre>
+
+  <hr>
+
+  <h3>Shared Engines &amp; Controller</h3>
+
+  <h4><code>devflow service up</code></h4>
+  <p>Ensure every configured <a href="#provider-shared">shared global engine</a> is running (a one-shot reconcile / pre-warm). Per-workspace and cloud services are skipped.</p>
+<pre><code class="language-bash">devflow service up
+devflow --json service up</code></pre>
+
+  <h4><code>devflow daemon start</code></h4>
+  <p>Run the <a href="#controller-daemon">controller daemon</a> in the background: keeps every registered project's shared engines running, restarting any that die.</p>
+<pre><code class="language-bash">devflow daemon start                 # background, reconcile every 30s
+devflow daemon start --interval 10   # custom interval
+devflow daemon start --once          # reconcile once and exit
+devflow daemon start --foreground    # run attached (Ctrl+C to stop)</code></pre>
+
+  <h4><code>devflow daemon status</code> · <code>devflow daemon stop</code></h4>
+  <p>Show the daemon's state (and last reconcile), or stop it.</p>
 
   <hr>
 
