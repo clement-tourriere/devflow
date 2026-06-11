@@ -9,25 +9,26 @@ Use devflow to create an isolated development workspace environment per task, wi
 ## Recommended Flags
 
 - `--json`: structured output on stdout
-- `--non-interactive`: disable prompts in automation (hooks still run but require pre-approval)
+- `--non-interactive`: disable prompts in automation (unapproved shell hooks are **skipped with a warning**, never block the command)
 
 > **Note**: `--no-verify` on `switch` skips **all** lifecycle hooks entirely. This is usually not what agents want — hooks run migrations, set up `.env` files, and configure tools. Use `--non-interactive` instead, which runs hooks but skips interactive prompts.
 
-## Hook Pre-Approval
+## Hook Approval
 
-In `--non-interactive` mode, hooks with shell commands require pre-approval to run. Approve them once per project:
+Shell hooks from `.devflow.yml` require approval before they run. In `--non-interactive` mode an unapproved hook is **skipped** (visibly, and counted in the JSON result) rather than aborting — so `switch` always completes and reports `worktree_path`. To make hooks actually run in automation, either:
 
 ```bash
-# List configured hooks to see what needs approval
-devflow hook show
-
-# Approve specific hook commands
+# Option A — approve once per project (keyed on the command TEMPLATE, so one
+# approval covers every workspace, including agent-created worktrees):
 devflow hook approvals add "mise trust"
 devflow hook approvals add "npm run migrate"
-
-# List current approvals
 devflow hook approvals list
+
+# Option B — auto-approve all config-file hooks for this run (CI/agents):
+DEVFLOW_APPROVE_HOOKS=1 devflow --json --non-interactive switch -c agent/task-42
 ```
+
+Check the per-phase `hooks` summary in the JSON output: `skipped > 0` usually means an approval is missing.
 
 ## Bootstrap a Repository
 
@@ -67,10 +68,11 @@ devflow --json service connection "$WORKSPACE"
 devflow includes built-in agent management commands:
 
 ```bash
-# Start an AI agent in an isolated workspace (launches in tmux if available)
-devflow agent start fix-login -- 'Fix the login timeout bug'
-devflow agent start fix-login --command codex
-devflow agent start fix-login --dry-run          # Preview without executing
+# Launch an agent (or any command) inside an isolated workspace:
+# -x runs the command after switching, in the workspace's worktree.
+devflow switch -c agent/fix-login -x claude -- -p 'Fix the login timeout bug'
+devflow switch -c agent/fix-login -x codex
+devflow switch -c agent/fix-login -x claude --detach   # in a tmux/zellij session
 
 # Check agent workspaces
 devflow agent status
@@ -81,14 +83,9 @@ devflow agent context
 devflow agent context --format json
 devflow agent context --workspace feature/auth
 
-# Generate AI tool skills/rules
-devflow agent skill                               # All tools
-devflow agent skill --target claude               # .claude/skills/devflow/SKILL.md
-devflow agent skill --target cursor               # .cursor/rules/devflow.md
-devflow agent skill --target opencode             # AGENTS.md
-
-# Generate AGENTS.md
-devflow agent docs
+# Install bundled workspace skills (.claude/skills/) — see `devflow skill`
+# for full management (search, install, remove, update)
+devflow agent skill
 ```
 
 ## Hook Inspection
@@ -148,5 +145,5 @@ devflow commit --ai
 
 - Multi-provider `service create`, `service delete`, and `switch` return non-zero exit code when any provider fails.
 - `destroy` and `remove` require `--force` in `--non-interactive` or `--json` mode.
-- Unapproved hooks fail in non-interactive mode.
+- Unapproved hooks are skipped with a warning in non-interactive mode (the command completes; the JSON `hooks` summary reports them as `skipped`). Set `DEVFLOW_APPROVE_HOOKS=1` to auto-approve.
 - Use `devflow --json capabilities` for a machine-readable summary of guarantees.

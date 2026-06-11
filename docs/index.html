@@ -776,7 +776,7 @@ devflow list</code></pre>
 
   <div class="callout">
     <strong>What is a workspace?</strong>
-    <p>A workspace is a named environment (usually matching a Git branch) that bundles its own isolated copies of every service you've configured &mdash; databases, caches, queues, or any Docker container. When you <code>git checkout feature/auth</code>, devflow pauses the current services and starts the ones for <code>feature/auth</code>, so your data never leaks between branches. Workspaces are created instantly via Copy-on-Write &mdash; even a 50 GB database is cloned in under a second.</p>
+    <p>A workspace is a named environment (usually matching a Git branch) that bundles its own isolated copies of every service you've configured &mdash; databases, caches, queues, or any Docker container. When you <code>git checkout feature/auth</code>, devflow brings up the services for <code>feature/auth</code> &mdash; each workspace&rsquo;s services are fully isolated (own container/database, own data), so nothing leaks between branches. Workspaces are created instantly via Copy-on-Write &mdash; even a 50 GB database is cloned in under a second.</p>
   </div>
 
   <h3 id="installation">Installation</h3>
@@ -1130,7 +1130,7 @@ devflow/myapp/feature   # clone from snapshot (instant, zero-copy)</code></pre>
     <tbody>
       <tr><td><span class="badge badge-blue">Provisioning</span></td><td>Container being created, data being cloned</td><td><code>create</code></td></tr>
       <tr><td><span class="badge badge-green">Running</span></td><td>Container active and accepting connections</td><td><code>start</code>, <code>switch</code></td></tr>
-      <tr><td><span class="badge badge-orange">Stopped</span></td><td>Container paused, data preserved</td><td><code>stop</code></td></tr>
+      <tr><td><span class="badge badge-orange">Stopped</span></td><td>Container stopped, data preserved</td><td><code>stop</code></td></tr>
       <tr><td><span class="badge badge-red">Failed</span></td><td>Container crashed or failed to start</td><td><code>logs</code>, <code>reset</code></td></tr>
     </tbody>
   </table>
@@ -2864,7 +2864,7 @@ devflow --json status
   <p>Skip all prompts and use sensible defaults. Essential for CI/CD, scripts, and AI agents:</p>
 <pre><code class="language-bash"># All commands in non-interactive mode
 devflow --non-interactive switch -c feature/auth
-devflow --non-interactive switch feature/auth        # Hooks run (require pre-approval)
+devflow --non-interactive switch feature/auth        # Approved hooks run; unapproved are skipped with a warning
 devflow --non-interactive switch feature/auth --no-verify  # Skip ALL hooks entirely
 devflow --non-interactive destroy --force</code></pre>
 
@@ -2872,7 +2872,7 @@ devflow --non-interactive destroy --force</code></pre>
   <ul>
     <li>Multi-provider <code>service create</code>, <code>service delete</code>, and <code>switch</code> exit non-zero if any provider fails</li>
     <li><code>destroy</code> and <code>remove</code> require <code>--force</code> in <code>--json</code> or <code>--non-interactive</code> mode</li>
-    <li>Unapproved hooks fail in non-interactive mode (no approval prompts)</li>
+    <li>Unapproved hooks are <strong>skipped with a visible warning</strong> in non-interactive mode (the command still completes and the per-phase JSON reports <code>skipped</code>); set <code>DEVFLOW_APPROVE_HOOKS=1</code> to auto-approve</li>
     <li>Use <code>devflow --json capabilities</code> to detect guarantees at runtime</li>
   </ul>
 

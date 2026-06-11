@@ -21,7 +21,7 @@ devflow is a Rust-based tool that provides per-workspace isolation for developme
 - **Shell integration**: `eval "$(devflow shell-init)"` for automatic `cd` into worktrees
 - **JSON output + non-interactive mode**: For CI/CD and AI agent workflows
 - **AI commit messages**: `devflow commit --ai` generates commit messages via LLM (CLI-first, API fallback)
-- **AI agent integration**: `devflow agent start/status/context/skill/docs` for managing AI coding agents in isolated workspaces
+- **AI agent integration**: `devflow agent status/context/skill` plus `devflow switch -c <ws> -x <agent>` to launch agents in isolated workspaces
 - **Native reverse proxy**: Auto-discovers Docker containers and serves them via HTTPS `*.localhost` domains with auto-generated certificates
 - **Controller daemon**: `devflow daemon start` keeps every registered project's shared global engines (`type: shared`, or `service_type: rustfs`/`redis`) running, restarting any that go down; `devflow service up` reconciles them once
 - **Desktop GUI**: Tauri 2 desktop app with React frontend for managing projects, workspaces, services, hooks, proxy, and configuration
@@ -50,7 +50,8 @@ A lightweight `devflow.toml` / `.devflow.toml` is also supported and parsed by e
 - `DEVFLOW_LLM_API_URL=...` — LLM endpoint URL
 - `DEVFLOW_LLM_MODEL=...` — LLM model name
 - `DEVFLOW_COMMIT_COMMAND=...` — External CLI for commit messages (e.g., "claude -p")
-- `DEVFLOW_AGENT_COMMAND=...` — Default agent command (e.g., "claude", "codex")
+- `DEVFLOW_APPROVE_HOOKS=true` — Auto-approve config-file hooks (CI/agent runs)
+- `DEVFLOW_BACKGROUND_HOOK_TIMEOUT=30` — Seconds to await background hooks before CLI exit
 
 ### Config File Schema (`.devflow.yml`):
 ```yaml
@@ -148,9 +149,7 @@ hooks:
 
 # AI agent configuration
 agent:
-  command: claude                    # Default agent command
-  workspace_prefix: "agent/"           # Prefix for agent workspaces
-  auto_context: true                # Provide context on launch
+  auto_context: true                # Provide context to agents on launch
 
 # AI commit message generation
 commit:

@@ -29,7 +29,7 @@ Five service types: postgres, clickhouse, mysql, generic (any Docker image), plu
 - Use `--no-verify` only when hooks are genuinely unwanted — it skips ALL hooks entirely.
 - Non-zero exit code on any failure; partial multi-provider failures also return non-zero.
 - `destroy` and `remove` require `--force` in `--json` or `--non-interactive` mode.
-- Hook approvals are required; unapproved hooks fail in non-interactive mode.
+- Unapproved shell hooks are skipped with a warning in non-interactive mode (commands still complete; JSON `hooks` summary shows `skipped`). Pre-approve with `devflow hook approvals add <template>` or set `DEVFLOW_APPROVE_HOOKS=1`.
 - `devflow --json capabilities` returns a machine-readable contract summary.
 
 ## Minimal agent loop
@@ -145,11 +145,11 @@ devflow --json --non-interactive service delete "$BRANCH"   # cleanup
 
 | Command | Description |
 |---|---|
-| `devflow agent start <task> [--command <cmd>] [--dry-run] [-- <prompt>]` | Start AI agent in isolated workspace |
+| `devflow switch -c <ws> -x <cmd> [--detach] [-- <args>]` | Launch an agent/command inside an isolated workspace |
 | `devflow agent status` | Show agent status across all workspaces |
 | `devflow agent context [--format json] [--workspace <b>]` | Output project context for agents |
 | `devflow agent skill [--target claude\|cursor\|opencode\|all]` | Generate AI tool skills/rules |
-| `devflow agent docs` | Generate AGENTS.md for this project |
+| `devflow agent skill` | Install bundled workspace skills (see `devflow skill` for full management) |
 
 ### Plugins
 

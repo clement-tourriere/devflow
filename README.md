@@ -15,20 +15,24 @@
 
 ## What is devflow?
 
-devflow is a workspace orchestrator for local development. It connects your Git branch or worktree workflow with per-workspace state: service containers, connection strings, lifecycle hooks, generated env files, and optional worktree directories.
+devflow is a workspace orchestrator for local development. It connects your Git branch or worktree workflow with per-workspace state: service containers, connection strings, lifecycle hooks, generated env files, optional worktree directories, and stable HTTPS URLs.
 
 The goal is simple: work on multiple features, reviews, migrations, or agent tasks without sharing the same local database or constantly stashing and resetting state.
+
+Services can be isolated two ways, chosen per service: **physically** (a Copy-on-Write Docker container per workspace) or **logically** (one shared global engine — Postgres, Redis, RustFS object storage, ClickHouse — with a database, bucket, or DB index provisioned per workspace on the fly).
 
 ## Current focus
 
 - Branch/workspace switching with `devflow switch`
 - Optional Git worktree management
-- Per-workspace local services, especially Docker-backed databases and caches
+- Per-workspace local services: Copy-on-Write Docker containers, or shared global engines with logical isolation (`type: shared`)
+- An HTTPS reverse proxy: every container gets a trusted `https://name.local` URL that resolves the same from the host and from inside containers
+- A controller daemon (`devflow daemon`) that keeps shared engines running
 - Lifecycle hooks for setup, migrations, env files, and cleanup
 - JSON and non-interactive modes for scripts and coding agents
 - A terminal dashboard via `devflow tui`
 
-Some advanced areas, such as merge train, sandboxing, proxy, plugin providers, and the desktop GUI, are still evolving. Check `devflow --help-all` and the changelog for what is available in your build.
+Some advanced areas, such as merge train, sandboxing, plugin providers, the cloud branching providers (Neon/DBLab/Xata — currently experimental), and the desktop GUI, are still evolving. Check `devflow --help-all` and the changelog for what is available in your build.
 
 ## Quick start
 
@@ -69,7 +73,10 @@ Run `devflow --help-all` to see advanced service, hook, proxy, agent, and config
 
 ## Services
 
-devflow can manage named services per workspace. Local Docker services are the main path today, with support for common database/cache use cases and generic containers.
+devflow can manage named services per workspace. Two models are available, per service:
+
+- `type: local` — one Copy-on-Write Docker container per workspace (Postgres, ClickHouse, MySQL, or any image). Strong isolation, instant clones.
+- `type: shared` — one global container per engine; each workspace gets a logical boundary created on the fly: a Postgres database (`CREATE DATABASE … TEMPLATE parent` keeps branch-from-parent semantics), a Redis DB index, a RustFS (S3-compatible) bucket, or a ClickHouse database.
 
 ```bash
 devflow service add app-db --provider local --service-type postgres
@@ -77,6 +84,9 @@ devflow service create feature/auth
 devflow service connection feature/auth
 devflow service logs feature/auth
 devflow service reset feature/auth
+
+devflow service up                 # ensure all shared global engines are running
+devflow daemon start               # keep them running in the background (restarts dead engines)
 ```
 
 Connection information can be emitted as URI, env, or JSON output for scripts and tooling.
@@ -98,11 +108,11 @@ devflow --json --non-interactive switch -c agent/task-42
 devflow agent context --format json
 ```
 
-See `AGENTS.md` for the recommended coding-agent workflow, including hook pre-approval in non-interactive mode.
+See `AGENTS.md` for the recommended coding-agent workflow. In `--non-interactive` mode, unapproved hooks are skipped with a warning (set `DEVFLOW_APPROVE_HOOKS=1` to auto-approve in CI/agent runs).
 
 ## Configuration
 
-`devflow init` creates a `.devflow.yml`. A minimal example:
+`devflow init` creates a `.devflow.yml` (a lightweight `devflow.toml` is also read). A minimal example:
 
 ```yaml
 services:
@@ -127,11 +137,21 @@ hooks:
           DATABASE_URL: "{{ service['app-db'].url }}"
 ```
 
+A shared-engine service is one stanza — no per-workspace containers, ports, or volumes:
+
+```yaml
+services:
+  - name: cache
+    service_type: redis        # one global redis; a DB index per workspace
+  - name: storage
+    service_type: rustfs       # one global RustFS; a bucket per workspace
+```
+
 Config precedence:
 
 1. Environment variables
 2. `.devflow.local.yml`
-3. `.devflow.yml`
+3. `.devflow.yml` (or `devflow.toml`)
 
 ## Install from source
 
