@@ -581,6 +581,7 @@ hr {
   </div>
   <nav>
     <a href="#hero">Home</a>
+    <a href="#how-it-works">How it fits together</a>
 
     <div class="nav-group">Getting Started</div>
     <a href="#getting-started">Quick Start</a>
@@ -643,14 +644,16 @@ hr {
   <img src="banner.jpg" alt="devflow" style="max-width: 420px; width: 100%; margin-bottom: 24px; border-radius: 12px;" />
   <h1>Branch your code.<br><span>Branch everything else too.</span></h1>
   <p class="tagline">
-    devflow gives every branch its own databases, caches, and services &mdash; cloned instantly via Copy-on-Write.
-    Switch branches and your entire stack switches with you, automatically.
+    devflow gives every branch its own databases, caches, and services &mdash; cloned instantly via Copy-on-Write,
+    or carved out of a shared engine. Lifecycle hooks template the fresh connection strings into your <code>.env</code>,
+    and a built-in proxy serves each branch over trusted <strong>HTTPS</strong>. Switch branches and your whole stack
+    &mdash; data, config, and URLs &mdash; switches with you, automatically.
   </p>
 
   <div class="hero-features">
     <div class="hero-feature">
       <div class="icon blue"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div>
-      <div><strong>Automatic</strong><br>Git hooks sync your entire stack on checkout</div>
+      <div><strong>Automatic</strong><br>Git hooks template <code>.env</code> and sync your whole stack on checkout</div>
     </div>
     <div class="hero-feature">
       <div class="icon green"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
@@ -669,8 +672,8 @@ hr {
       <div><strong>AI-Ready</strong><br>Agent <a href="#agent-skills" style="color: var(--green); text-decoration: underline;">skills</a> for Claude Code, Cursor &amp; OpenCode</div>
     </div>
     <div class="hero-feature">
-      <div class="icon orange"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></div>
-      <div><strong>Hooks &amp; Plugins</strong><br>MiniJinja lifecycle hooks, custom providers, reverse proxy</div>
+      <div class="icon orange"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
+      <div><strong>HTTPS, automatically</strong><br>Every container gets a trusted <a href="#reverse-proxy" style="color: var(--orange); text-decoration: underline;"><code>https://name.localhost</code></a> &mdash; no nginx, no certs, no port juggling</div>
     </div>
   </div>
 
@@ -680,6 +683,48 @@ hr {
     <span class="cmd">cd</span> ~/my-project<br>
     <span class="cmd">devflow init</span><br>
     <span class="cmd">devflow switch</span> -c feature/my-feature
+  </div>
+</section>
+
+<!-- ================================================================== -->
+<!-- HOW IT FITS TOGETHER                                                -->
+<!-- ================================================================== -->
+<section class="section" id="how-it-works">
+  <h2>How it fits together</h2>
+  <p class="section-desc">
+    The pieces compose into one automatic loop: <strong>branch &rarr; isolated services &rarr; hooks template your config &rarr; the proxy serves it over HTTPS</strong>. You never touch a connection string, a port, or a certificate.
+  </p>
+
+  <div class="steps">
+    <div class="step">
+      <h4>1 &middot; You branch</h4>
+      <p>A plain <code>git checkout -b feature/checkout</code> fires devflow's Git hook &mdash; no special commands to remember.</p>
+    </div>
+    <div class="step">
+      <h4>2 &middot; Services appear for that branch</h4>
+      <p>devflow clones each service via Copy-on-Write, or provisions a logical database / bucket inside a <a href="#provider-shared">shared engine</a> &mdash; isolated from every other branch.</p>
+    </div>
+    <div class="step">
+      <h4>3 &middot; A hook templates the fresh config into <code>.env</code></h4>
+      <p>Lifecycle hooks are <a href="#hooks">MiniJinja templates</a> with the new connection details in scope, so your app just reads <code>.env.local</code> and connects to <em>this branch's</em> database:</p>
+<pre><code class="language-yaml">hooks:
+  post-switch:
+    write-env:
+      command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"</code></pre>
+    </div>
+    <div class="step">
+      <h4>4 &middot; The proxy serves it over trusted HTTPS &mdash; automatically</h4>
+      <p>The built-in <a href="#reverse-proxy">reverse proxy</a> auto-discovers your running containers and serves each at a stable <code>https://&lt;name&gt;.localhost</code> with a locally-trusted certificate. No nginx, no port-forwarding, no manual certs &mdash; just open the URL.</p>
+<pre><code class="language-bash">devflow proxy start                 # one-time; runs in the background
+# your app container is now live at:
+#   https://app.localhost
+# webhooks, OAuth callbacks, and cross-service calls all work over HTTPS</code></pre>
+    </div>
+  </div>
+
+  <div class="callout callout-success">
+    <span class="callout-icon">&#9432;</span>
+    <div><strong>Why it matters:</strong> branches that touch databases, queues, or object storage normally mean hand-editing <code>.env</code>, juggling ports, and fighting self-signed certs. devflow makes the whole chain &mdash; data, config, and a real HTTPS URL &mdash; follow your Git branch on its own. Switch back to <code>main</code> and it all switches back.</div>
   </div>
 </section>
 
@@ -2219,11 +2264,16 @@ devflow service seed main -s app-db --from dump.sql</code></pre>
 <section class="section" id="reverse-proxy">
   <h2><span class="number">09</span> Reverse Proxy</h2>
   <p class="section-desc">
-    The devflow proxy auto-discovers running Docker containers and assigns friendly <code>*.localhost</code> domains. Web services are served over HTTPS with TLS termination and HTTP-to-HTTPS redirection. Database endpoints keep the same generated names but are direct container-IP endpoints, so they work on platforms with routable container IPs and DNS for generated names (Linux, or macOS with OrbStack/similar) and must be used with the native port, not HTTPS/443. devflow does not edit <code>/etc/hosts</code>; if a friendly name does not resolve to the container IP, use the UPSTREAM IP from <code>devflow proxy list</code> or configure DNS in your Docker platform.
+    Stop hand-editing <code>/etc/hosts</code>, juggling ports, and clicking through self-signed-cert warnings. The built-in proxy watches Docker and gives every container a stable <strong>HTTPS</strong> <code>*.localhost</code> URL the moment it starts &mdash; with a locally-trusted certificate. Paired with per-branch services and <a href="#how-it-works">hook-templated config</a>, each branch's app is reachable at a predictable HTTPS URL with zero manual setup &mdash; so webhooks, OAuth callbacks, and cross-service calls just work.
   </p>
 
   <h3>How It Works</h3>
   <p>The proxy monitors Docker events in real time. When a container starts, devflow automatically maps it to a <code>*.localhost</code> domain. For HTTP services it generates a TLS certificate signed by a local CA and forwards HTTPS traffic to the container. For TCP services such as PostgreSQL, the generated name is advertised as a direct endpoint (for example <code>postgresql://postgres.myapp.localhost:5432</code>) when the host can resolve that name to the container IP.</p>
+
+  <div class="callout callout-warning">
+    <span class="callout-icon">&#9888;</span>
+    <div><strong>Platform note.</strong> HTTP services work over HTTPS everywhere. <em>Database / TCP</em> endpoints use the generated name at the <strong>native port</strong> (not 443) and need routable container IPs + name resolution &mdash; native on Linux, and on macOS via OrbStack (or similar). devflow never edits <code>/etc/hosts</code>; if a name doesn't resolve, use the UPSTREAM IP from <code>devflow proxy list</code>.</div>
+  </div>
 
   <div class="callout callout-info">
     <span class="callout-icon">&#9432;</span>
