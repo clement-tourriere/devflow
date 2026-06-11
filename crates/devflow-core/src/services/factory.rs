@@ -109,6 +109,20 @@ pub async fn create_provider_from_named_config(
 
         #[cfg(feature = "service-local")]
         "clickhouse" => {
+            // `type: shared` selects logical isolation (one global container,
+            // a database per workspace); otherwise the per-workspace CoW backend.
+            if matches!(
+                named.provider_type.to_lowercase().as_str(),
+                "shared" | "global"
+            ) {
+                let provider = crate::services::shared::SharedClickHouseProvider::new(
+                    &project_name,
+                    &named.name,
+                    named.shared.as_ref(),
+                )
+                .context("Failed to create shared ClickHouse provider")?;
+                return Ok(Box::new(provider));
+            }
             let ch_config = named.clickhouse.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
                     "Service '{}' has type 'clickhouse' but no clickhouse config section",

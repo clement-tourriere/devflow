@@ -59,6 +59,6 @@ services:
 | G3 shared Redis | planned |
 | G4 devflow.toml | ✅ done (2026-06-11) — `Config::from_file` parses by extension (TOML vs YAML); `find_config_file` discovers `.devflow.toml`/`devflow.toml`; added `toml` 0.8 dep; from_file round-trip test. **Read-only**: `devflow init` and the GUI still write YAML (TOML serialization of the untagged hook enums is the follow-up). |
 | G5 daemon | planned |
-| G6 ClickHouse logical | planned |
+| G6 ClickHouse logical | ✅ done (2026-06-11) — `services/shared/clickhouse.rs`, `SharedClickHouseProvider` selected by `service_type: clickhouse` + `type: shared`. One global `clickhouse/clickhouse-server` container (HTTP :8123 only — native :9000 omitted to avoid clashing with shared RustFS), `CREATE DATABASE` per workspace via `clickhouse-client` exec; list via `system.databases`; HTTP connection string. No TEMPLATE branching (ClickHouse lacks it). 230 tests + clippy green. **Untested against a live ClickHouse daemon.** |
 
 **G1 follow-ups not done:** non-interactive `service add` hardcodes `provider_type="local"` (only the interactive menu offers `shared`); two `shared` postgres services in one project would collide on DB names (single global container, `service_name` retained but unused for now); no Docker integration test (pure logic is unit-tested; the exec/container paths need a live daemon).

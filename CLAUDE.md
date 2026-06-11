@@ -103,6 +103,16 @@ services:
 #       user: rustfsadmin             # access key (default)
 #       password: rustfsadmin         # secret key (default)
 
+# Shared ClickHouse (logical isolation): ONE global container, a database per
+# workspace via CREATE DATABASE (no TEMPLATE branching). Sidesteps the
+# per-workspace CoW ClickHouse path.
+#   - name: analytics
+#     type: shared
+#     service_type: clickhouse
+#     auto_workspace: true
+#     shared:
+#       image: clickhouse/clickhouse-server:latest   # default; HTTP on :8123
+
 # Worktree configuration
 worktree:
   enabled: true

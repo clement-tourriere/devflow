@@ -1613,6 +1613,25 @@ template_branching = true
     }
 
     #[test]
+    fn test_shared_clickhouse_parses() {
+        let yaml = r#"
+services:
+  - name: analytics
+    type: shared
+    service_type: clickhouse
+    auto_workspace: true
+    shared:
+      image: clickhouse/clickhouse-server:latest
+      port: 8123
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+        let services = config.resolve_services();
+        assert_eq!(services[0].provider_type, "shared");
+        assert_eq!(services[0].service_type, "clickhouse");
+        assert_eq!(services[0].shared.as_ref().unwrap().port, Some(8123));
+    }
+
+    #[test]
     fn test_rustfs_service_parses() {
         let yaml = r#"
 services:

@@ -5,10 +5,12 @@
 //! boundary per workspace inside it — a `CREATE DATABASE` for postgres. This
 //! is the "global container + on-the-fly provisioning" model.
 
+pub mod clickhouse;
 pub mod container;
 pub mod naming;
 pub mod rustfs;
 
+pub use clickhouse::SharedClickHouseProvider;
 pub use rustfs::RustFsProvider;
 
 use std::time::Duration;
