@@ -760,8 +760,20 @@ impl Config {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
 
-        let config: Config = serde_yaml_ng::from_str(&content)
-            .with_context(|| format!("Failed to parse YAML config file: {}", path.display()))?;
+        // Parse by extension: TOML for the lightweight `devflow.toml` form,
+        // YAML otherwise. Both deserialize into the same Config via serde.
+        let is_toml = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("toml"));
+
+        let config: Config = if is_toml {
+            toml::from_str(&content)
+                .with_context(|| format!("Failed to parse TOML config file: {}", path.display()))?
+        } else {
+            serde_yaml_ng::from_str(&content)
+                .with_context(|| format!("Failed to parse YAML config file: {}", path.display()))?
+        };
 
         Ok(config)
     }
@@ -780,8 +792,14 @@ impl Config {
         let mut current_dir = std::env::current_dir().context("Failed to get current directory")?;
 
         loop {
-            // Check for YAML format only
-            for filename in [".devflow.yml", ".devflow.yaml"] {
+            // YAML first (the full-featured form), then the lightweight TOML
+            // form (`devflow.toml` or `.devflow.toml`).
+            for filename in [
+                ".devflow.yml",
+                ".devflow.yaml",
+                ".devflow.toml",
+                "devflow.toml",
+            ] {
                 let config_path = current_dir.join(filename);
                 if config_path.exists() {
                     return Ok(Some(config_path));
@@ -1559,6 +1577,38 @@ services:
         let shared = services[0].shared.as_ref().expect("shared section present");
         assert_eq!(shared.image.as_deref(), Some("postgres:17"));
         assert_eq!(shared.port, Some(5440));
+        assert_eq!(shared.template_branching, Some(true));
+    }
+
+    #[test]
+    fn test_devflow_toml_parses_via_from_file() {
+        let toml = r#"
+[git]
+main_workspace = "main"
+
+[[services]]
+name = "app-db"
+type = "shared"
+service_type = "postgres"
+auto_workspace = true
+
+[services.shared]
+image = "postgres:17"
+port = 5432
+template_branching = true
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devflow.toml");
+        std::fs::write(&path, toml).unwrap();
+
+        let config = Config::from_file(&path).expect("devflow.toml should parse");
+        assert_eq!(config.git.main_workspace, "main");
+        let services = config.resolve_services();
+        assert_eq!(services[0].name, "app-db");
+        assert_eq!(services[0].provider_type, "shared");
+        assert_eq!(services[0].service_type, "postgres");
+        let shared = services[0].shared.as_ref().expect("shared section");
+        assert_eq!(shared.port, Some(5432));
         assert_eq!(shared.template_branching, Some(true));
     }
 

@@ -57,7 +57,7 @@ services:
 | G1 SharedPostgresProvider | ✅ done (2026-06-11) — `services/shared/{mod,container,naming}.rs`, `SharedServiceConfig` + `ProviderType::Shared` + factory dispatch, CLI `service add` menu entry, CLAUDE.md docs, 11 unit tests. `type: shared` postgres now keeps one `devflow-shared-postgres` container (named volume, unless-stopped) and provisions `CREATE DATABASE project_ws [TEMPLATE parent]` per workspace; delete = terminate+DROP; destroy = drop project's DBs only (container stays). 224 tests + clippy green. |
 | G2 RustFS | ✅ done (2026-06-11) — `services/shared/rustfs.rs`, `RustFsProvider` for `service_type: rustfs` (also `s3`/`objectstorage`). One global `rustfs/rustfs:latest` container (S3 :9000 + console :9001, named volume, default creds rustfsadmin), bucket-per-workspace `{project}-{ws}` via in-tree `rust-s3` 0.37 (create/exists/list_buckets/delete + empty-on-delete). Verified image env/ports against RustFS docs (RUSTFS_ACCESS_KEY/SECRET_KEY, /data command arg). Container spec gained `cmd` + `extra_port`. S3-safe bucket naming + tests. 228 tests + clippy green. **Untested against a live RustFS daemon** — pure naming logic is unit-tested; the S3/container paths need an integration run. |
 | G3 shared Redis | planned |
-| G4 devflow.toml | planned |
+| G4 devflow.toml | ✅ done (2026-06-11) — `Config::from_file` parses by extension (TOML vs YAML); `find_config_file` discovers `.devflow.toml`/`devflow.toml`; added `toml` 0.8 dep; from_file round-trip test. **Read-only**: `devflow init` and the GUI still write YAML (TOML serialization of the untagged hook enums is the follow-up). |
 | G5 daemon | planned |
 | G6 ClickHouse logical | planned |
 

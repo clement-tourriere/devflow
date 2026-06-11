@@ -28,11 +28,13 @@ devflow is a Rust-based tool that provides per-workspace isolation for developme
 ## Configuration
 
 The tool is configured via `.devflow.yml` in your Git repository root (created by `devflow init`).
+A lightweight `devflow.toml` / `.devflow.toml` is also supported and parsed by extension
+(read-only for now — `devflow init` and the GUI still write YAML).
 
 ### Configuration Hierarchy (highest to lowest):
 1. **Environment Variables** — Quick toggles and overrides
 2. **Local Config File** (`.devflow.local.yml`) — Project-specific local overrides (gitignored)
-3. **Committed Config** (`.devflow.yml`) — Team shared configuration
+3. **Committed Config** (`.devflow.yml`, `.devflow.yaml`, `.devflow.toml`, or `devflow.toml`) — Team shared configuration
 
 ### Environment Variables:
 - `DEVFLOW_DISABLED=true` — Completely disable devflow
