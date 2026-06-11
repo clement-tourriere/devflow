@@ -69,4 +69,19 @@ The reconcile primitive (`reconcile_shared_engines`) is the synchronous loop bod
 - This needs live-Docker integration testing, so it belongs in a dedicated session.
 | G6 ClickHouse logical | ✅ done (2026-06-11) — `services/shared/clickhouse.rs`, `SharedClickHouseProvider` selected by `service_type: clickhouse` + `type: shared`. One global `clickhouse/clickhouse-server` container (HTTP :8123 only — native :9000 omitted to avoid clashing with shared RustFS), `CREATE DATABASE` per workspace via `clickhouse-client` exec; list via `system.databases`; HTTP connection string. No TEMPLATE branching (ClickHouse lacks it). 230 tests + clippy green. **Untested against a live ClickHouse daemon.** |
 
-**G1 follow-ups not done:** non-interactive `service add` hardcodes `provider_type="local"` (only the interactive menu offers `shared`); two `shared` postgres services in one project would collide on DB names (single global container, `service_name` retained but unused for now); no Docker integration test (pure logic is unit-tested; the exec/container paths need a live daemon).
+## ✅ Integration-validated against real Docker (2026-06-11)
+
+All four shared providers were exercised end-to-end against a live Docker daemon (29.4.0) and **passed** — `crates/devflow-core/tests/shared_integration.rs`, marked `#[ignore]` so normal `cargo test` skips them. Run with:
+
+```
+cargo test -p devflow-core --test shared_integration -- --ignored
+```
+
+- **Postgres** ✅ create + `TEMPLATE` branch-from-parent + list + connection info + delete + destroy.
+- **Redis** ✅ atomic Lua DB-index allocation (idempotent re-alloc, distinct indices, project-scoped list) + release on delete.
+- **ClickHouse** ✅ `CREATE DATABASE` + list via `system.databases` + delete.
+- **RustFS** ✅ bucket create (path-style) + exists + `list_buckets` + delete, via in-tree `rust-s3`.
+
+Each test uses a dedicated container/port and cleans up its container+volume. This eliminates the "untested against a live daemon" caveat that previously applied to every shared provider.
+
+**Remaining follow-ups (minor):** non-interactive `service add` hardcodes `provider_type="local"` (only the interactive menu offers `shared`); two `shared` postgres services in one project would collide on DB names (single global container; `service_name` retained but unused); the RustFS console port (9001) isn't configurable.
