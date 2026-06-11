@@ -673,7 +673,7 @@ hr {
     </div>
     <div class="hero-feature">
       <div class="icon orange"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
-      <div><strong>HTTPS, automatically</strong><br>Every container gets a trusted <a href="#reverse-proxy" style="color: var(--orange); text-decoration: underline;"><code>https://name.localhost</code></a> &mdash; no nginx, no certs, no port juggling</div>
+      <div><strong>HTTPS, automatically</strong><br>Every container gets a trusted <a href="#reverse-proxy" style="color: var(--orange); text-decoration: underline;"><code>https://name.local</code></a> URL (mDNS on macOS; <code>.localhost</code> on Linux) &mdash; no nginx, no certs, no port juggling</div>
     </div>
   </div>
 
@@ -714,10 +714,10 @@ hr {
     </div>
     <div class="step">
       <h4>4 &middot; The proxy serves it over trusted HTTPS &mdash; automatically</h4>
-      <p>The built-in <a href="#reverse-proxy">reverse proxy</a> auto-discovers your running containers and serves each at a stable <code>https://&lt;name&gt;.localhost</code> with a locally-trusted certificate. No nginx, no port-forwarding, no manual certs &mdash; just open the URL.</p>
+      <p>The built-in <a href="#reverse-proxy">reverse proxy</a> auto-discovers your running containers and serves each at a stable <code>https://&lt;name&gt;.local</code> (macOS, via mDNS &mdash; no <code>/etc/hosts</code> edits; <code>.localhost</code> on Linux) with a locally-trusted certificate. No nginx, no port-forwarding, no manual certs &mdash; just open the URL.</p>
 <pre><code class="language-bash">devflow proxy start                 # one-time; runs in the background
 # your app container is now live at:
-#   https://app.localhost
+#   https://app.local          (macOS — or app.localhost on Linux)
 # webhooks, OAuth callbacks, and cross-service calls all work over HTTPS</code></pre>
     </div>
   </div>
@@ -2264,34 +2264,39 @@ devflow service seed main -s app-db --from dump.sql</code></pre>
 <section class="section" id="reverse-proxy">
   <h2><span class="number">09</span> Reverse Proxy</h2>
   <p class="section-desc">
-    Stop hand-editing <code>/etc/hosts</code>, juggling ports, and clicking through self-signed-cert warnings. The built-in proxy watches Docker and gives every container a stable <strong>HTTPS</strong> <code>*.localhost</code> URL the moment it starts &mdash; with a locally-trusted certificate. Paired with per-branch services and <a href="#how-it-works">hook-templated config</a>, each branch's app is reachable at a predictable HTTPS URL with zero manual setup &mdash; so webhooks, OAuth callbacks, and cross-service calls just work.
+    Stop hand-editing <code>/etc/hosts</code>, juggling ports, and clicking through self-signed-cert warnings. The built-in proxy watches Docker and gives every container a stable <strong>HTTPS</strong> URL the moment it starts &mdash; with a locally-trusted certificate. Paired with per-branch services and <a href="#how-it-works">hook-templated config</a>, each branch's app is reachable at a predictable HTTPS URL with zero manual setup &mdash; so webhooks, OAuth callbacks, and cross-service calls just work.
   </p>
 
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div><strong>Default domain suffix.</strong> On <strong>macOS</strong> the suffix is <code>.local</code> &mdash; devflow runs an mDNS responder so <code>name.local</code> resolves with no <code>/etc/hosts</code> edits. On <strong>Linux/other</strong> it is <code>.localhost</code> (hard-coded to loopback by the OS). Override per-run with <code>devflow proxy start --domain-suffix &lt;suffix&gt;</code> or in config (<code>proxy.domain_suffix</code>). Examples below use <code>.local</code>; substitute <code>.localhost</code> on Linux.</div>
+  </div>
+
   <h3>How It Works</h3>
-  <p>The proxy monitors Docker events in real time. When a container starts, devflow automatically maps it to a <code>*.localhost</code> domain. For HTTP services it generates a TLS certificate signed by a local CA and forwards HTTPS traffic to the container. For TCP services such as PostgreSQL, the generated name is advertised as a direct endpoint (for example <code>postgresql://postgres.myapp.localhost:5432</code>) when the host can resolve that name to the container IP.</p>
+  <p>The proxy monitors Docker events in real time. When a container starts, devflow maps it to a <code>{name}.{suffix}</code> domain. For HTTP services it terminates TLS with a certificate signed by a local CA and forwards to the container (the name resolves to the proxy on <code>127.0.0.1</code>). For TCP services such as PostgreSQL, the generated name is advertised as a <strong>direct</strong> endpoint at the native port (for example <code>postgresql://postgres.myapp.local:5432</code>) &mdash; the name resolves to the container&rsquo;s own IP.</p>
 
   <div class="callout callout-warning">
     <span class="callout-icon">&#9888;</span>
-    <div><strong>Platform note.</strong> HTTP services work over HTTPS everywhere. <em>Database / TCP</em> endpoints use the generated name at the <strong>native port</strong> (not 443) and need routable container IPs + name resolution &mdash; native on Linux, and on macOS via OrbStack (or similar). devflow never edits <code>/etc/hosts</code>; if a name doesn't resolve, use the UPSTREAM IP from <code>devflow proxy list</code>.</div>
+    <div><strong>Database / TCP endpoints.</strong> Reaching them by name needs the container IP to be routable from the host: native on <strong>Linux</strong>, and on <strong>macOS</strong> via OrbStack (Docker Desktop&rsquo;s container IPs aren&rsquo;t host-routable). HTTP services work everywhere over HTTPS regardless. devflow never edits <code>/etc/hosts</code>; if a name doesn&rsquo;t resolve, use the UPSTREAM IP from <code>devflow proxy list</code>.</div>
   </div>
 
   <div class="callout callout-info">
     <span class="callout-icon">&#9432;</span>
-    <div>Run <code>devflow proxy trust install</code> once to trust the local CA system-wide. After that, all <code>*.localhost</code> domains work with HTTPS &mdash; no browser warnings or <code>-k</code> flags needed.</div>
+    <div>Run <code>devflow proxy trust install</code> once to trust the local CA system-wide. After that, your <code>*.local</code> / <code>*.localhost</code> HTTPS URLs work with no browser warnings or <code>-k</code> flags.</div>
   </div>
 
   <h3>Quick Start</h3>
 <pre><code class="language-bash"># Start the proxy (needs root for ports 80/443, or use custom ports)
 devflow proxy start --daemon
 
-# Install the CA certificate so browsers trust *.localhost
+# Install the CA certificate so browsers trust the generated HTTPS names
 devflow proxy trust install
 
 # Start any container — it's automatically proxied
 docker run -d --name myapp nginx
 
-# Access it over HTTPS
-curl https://myapp.localhost</code></pre>
+# Access it over HTTPS  (macOS — use myapp.localhost on Linux)
+curl https://myapp.local</code></pre>
 
   <!-- Domain Resolution -->
   <h3 id="proxy-domain-resolution">Domain Resolution</h3>
@@ -2304,12 +2309,12 @@ curl https://myapp.localhost</code></pre>
       <tr><td>1</td><td><code>devproxy.domains</code> label</td><td>Comma-separated, fully qualified</td><td><code>app.localhost, api.localhost</code></td></tr>
       <tr><td>2</td><td><code>devproxy.domain</code> label</td><td>Comma-separated, fully qualified</td><td><code>myapp.test</code></td></tr>
       <tr><td>3</td><td><code>VIRTUAL_HOST</code> env var</td><td>Comma-separated (nginx-proxy compatible)</td><td><code>myapp.localhost</code></td></tr>
-      <tr><td>4</td><td>devflow labels</td><td><code>{service}.{workspace}.{project}.{suffix}</code></td><td><code>postgres.feat-1.myapp.localhost</code></td></tr>
-      <tr><td>5</td><td>Compose labels</td><td><code>{service}.{project}.{suffix}</code></td><td><code>web.myapp.localhost</code></td></tr>
-      <tr><td>6</td><td>Container name</td><td><code>{name}.{suffix}</code></td><td><code>myapp.localhost</code></td></tr>
+      <tr><td>4</td><td>devflow labels</td><td><code>{service}.{workspace}.{project}.{suffix}</code></td><td><code>postgres.feat-1.myapp.local</code></td></tr>
+      <tr><td>5</td><td>Compose labels</td><td><code>{service}.{project}.{suffix}</code></td><td><code>web.myapp.local</code></td></tr>
+      <tr><td>6</td><td>Container name</td><td><code>{name}.{suffix}</code></td><td><code>myapp.local</code></td></tr>
     </tbody>
   </table>
-  <p>Levels 4&ndash;6 are auto-generated from container metadata. Level 4 uses <code>devflow.service</code>, <code>devflow.workspace</code>, and <code>devflow.project</code> labels. Level 5 uses <code>com.docker.compose.service</code> and <code>com.docker.compose.project</code> labels. Level 6 is the fallback for standalone containers. All domains are lowercased.</p>
+  <p>Levels 4&ndash;6 are auto-generated from container metadata, where <code>{suffix}</code> is the <a href="#reverse-proxy">default domain suffix</a> (<code>local</code> on macOS, <code>localhost</code> on Linux). Level 4 uses <code>devflow.service</code>, <code>devflow.workspace</code>, and <code>devflow.project</code> labels. Level 5 uses <code>com.docker.compose.service</code> and <code>com.docker.compose.project</code> labels. Level 6 is the fallback for standalone containers. All domains are lowercased.</p>
 
   <h4>Custom domain via label</h4>
 <pre><code class="language-yaml"># docker-compose.yml
@@ -2328,7 +2333,7 @@ services:
 
   <h4>Automatic Compose domain (no config needed)</h4>
 <pre><code class="language-bash"># docker-compose.yml with project "myapp" and service "web"
-# → automatically available at https://web.myapp.localhost
+# → automatically available at https://web.myapp.local   (.localhost on Linux)
 docker compose -p myapp up -d</code></pre>
 
   <!-- Port Detection -->
@@ -2372,30 +2377,31 @@ docker compose -p myapp up -d</code></pre>
   <p>When <code>auto_network</code> is enabled (the default), the proxy creates a <code>devflow</code> bridge network and connects every discovered container to it with DNS aliases matching their domain names.</p>
 
   <h4>How it works</h4>
+  <p>Names below use the macOS <code>.local</code> suffix; on Linux the suffix is <code>.localhost</code>.</p>
   <ul>
-    <li><strong>Host to web container:</strong> <code>https://web.myapp.localhost</code> routes through the proxy with TLS termination.</li>
-    <li><strong>Host to database container:</strong> <code>postgresql://postgres.myapp.localhost:5432</code> connects directly to the container IP when your platform supports routable container IPs and DNS for generated names (Linux, OrbStack/similar on macOS). devflow does not edit <code>/etc/hosts</code>.</li>
-    <li><strong>Container to container:</strong> <code>http://web.myapp.localhost</code> resolves via Docker&rsquo;s embedded DNS directly, bypassing the proxy. A suffix-stripped alias such as <code>web.myapp</code> is also registered as a fallback.</li>
+    <li><strong>Host to web container:</strong> <code>https://web.myapp.local</code> routes through the proxy with TLS termination.</li>
+    <li><strong>Host to database container:</strong> <code>postgresql://postgres.myapp.local:5432</code> connects directly to the container IP when your platform supports routable container IPs and DNS for generated names (Linux, OrbStack/similar on macOS). devflow does not edit <code>/etc/hosts</code>.</li>
+    <li><strong>Container to container:</strong> <code>http://web.myapp.local</code> resolves via Docker&rsquo;s embedded DNS directly, bypassing the proxy. A suffix-stripped alias such as <code>web.myapp</code> is also registered as a fallback.</li>
   </ul>
-  <p>Each container gets two aliases: the full domain (e.g. <code>web.myapp.localhost</code>) and a suffix-stripped form (e.g. <code>web.myapp</code>). The full <code>.localhost</code> name is the primary devflow name; the short form is only a fallback for environments that special-case <code>.localhost</code> before consulting Docker DNS.</p>
+  <p>Each container gets two aliases: the full domain (e.g. <code>web.myapp.local</code>) and a suffix-stripped form (e.g. <code>web.myapp</code>). The suffix-stripped form is a fallback for environments that special-case the suffix &mdash; notably <code>.localhost</code>, which the OS resolves to loopback &mdash; before consulting Docker&rsquo;s DNS.</p>
 
   <h4>Testing container-to-container resolution</h4>
 <pre><code class="language-bash"># Start two containers
 docker run -d --name web1 nginx
 docker run -d --name web2 nginx
 
-# From web2, reach web1 by localhost name
-docker exec web2 curl -s http://web1.localhost
+# From web2, reach web1 by its generated name  (.localhost on Linux)
+docker exec web2 curl -s http://web1.local
 
 # Verify DNS resolution
-docker exec web2 nslookup web1.localhost 127.0.0.11
+docker exec web2 nslookup web1.local 127.0.0.11
 
-# Fallback for environments that special-case .localhost:
+# Suffix-stripped fallback (works regardless of suffix special-casing):
 docker exec web2 curl -s http://web1
 
 # With Compose services
 docker compose -p myapp up -d
-docker exec myapp-api-1 curl -s http://web.myapp.localhost</code></pre>
+docker exec myapp-api-1 curl -s http://web.myapp.local</code></pre>
 
   <h4>Verify network membership</h4>
 <pre><code class="language-bash">docker network inspect devflow --format '{{range .Containers}}{{.Name}} {{end}}'</code></pre>
@@ -2485,7 +2491,7 @@ devflow proxy list     # List discovered endpoints with domains and upstreams</c
   <p>Returns all currently proxied targets.</p>
 <pre><code class="language-json">[
   {
-    "domain": "web.myapp.localhost",
+    "domain": "web.myapp.local",
     "container_ip": "172.18.0.2",
     "port": 80,
     "container_id": "abc123...",
