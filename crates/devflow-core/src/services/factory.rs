@@ -780,8 +780,10 @@ mod tests {
     async fn test_reconcile_skips_non_shared_without_docker() {
         // A config with only a local CoW postgres has no shared engines, so
         // reconcile returns empty without ever touching Docker.
-        let mut config = Config::default();
-        config.services = Some(vec![svc("db", "local", "postgres")]);
+        let config = Config {
+            services: Some(vec![svc("db", "local", "postgres")]),
+            ..Default::default()
+        };
         let statuses = reconcile_shared_engines(&config).await.unwrap();
         assert!(statuses.is_empty());
     }
