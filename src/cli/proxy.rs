@@ -287,14 +287,10 @@ pub(super) async fn handle_proxy_command(
 /// Default domain suffix, matching `devflow_proxy::ProxyConfig`: `.local`
 /// (mDNS-resolvable) on macOS, `.localhost` (loopback-only) elsewhere.
 fn default_domain_suffix() -> String {
-    #[cfg(target_os = "macos")]
-    {
-        "local".to_string()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        "localhost".to_string()
-    }
+    // `.local` everywhere — same name inside and outside containers (mDNS on
+    // the host, Docker DNS aliases inside). See devflow_proxy's
+    // default_domain_suffix for the full rationale.
+    "local".to_string()
 }
 
 fn hostname_resolves_to(domain: &str, expected_ip: &str) -> bool {

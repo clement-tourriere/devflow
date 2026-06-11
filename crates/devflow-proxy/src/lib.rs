@@ -48,19 +48,18 @@ fn default_api_port() -> u16 {
     2019
 }
 fn default_domain_suffix() -> String {
-    // `.local` (mDNS) lets names resolve to container IPs from the host with no
-    // hosts/resolver edits — the proxy advertises them. `.localhost` is
-    // hard-coded to loopback by macOS, so it can only reach the HTTP proxy. The
-    // mDNS responder is wired up on macOS only, so other platforms keep the
-    // loopback-only `.localhost` default.
-    #[cfg(target_os = "macos")]
-    {
-        "local".to_string()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        "localhost".to_string()
-    }
+    // `.local` on every platform, so the SAME name works inside and outside
+    // containers:
+    // - From the host, the mDNS responder (Bonjour on macOS, Avahi on Linux)
+    //   resolves it with no hosts/resolver edits.
+    // - Inside containers, Docker's embedded DNS resolves it via the network
+    //   aliases devflow registers.
+    // `.localhost` cannot satisfy "same name everywhere": RFC 6761 lets client
+    // runtimes (musl, Node, browsers, …) resolve `*.localhost` to loopback
+    // WITHOUT consulting DNS, so inside a container the name short-circuits to
+    // the container itself instead of the target. Use
+    // `--domain-suffix localhost` to opt into the loopback-only behavior.
+    "local".to_string()
 }
 fn default_auto_network() -> bool {
     true

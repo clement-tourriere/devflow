@@ -554,7 +554,7 @@ For `.claude/settings.local.json`, permission arrays are union-merged. For other
 
 ### `devflow proxy start`
 
-Start the native HTTP(S) reverse proxy and friendly-name discovery. Discovered containers get `*.local` names advertised over mDNS/Bonjour so they resolve from the host with no `/etc/hosts` or resolver edits. Web names resolve to the proxy (HTTPS with the trusted CA); database names resolve directly to the container IP for native access at the standard port. Direct database access needs container IPs routable from the host (OrbStack/Colima/Linux). mDNS advertising is macOS-only today; elsewhere the default suffix is `.localhost` (loopback, web only).
+Start the native HTTP(S) reverse proxy and friendly-name discovery. Discovered containers get `*.local` names (the default suffix on all platforms) advertised over mDNS so the **same name resolves from the host and from inside containers**: on the host via Bonjour (macOS) or Avahi (Linux — needs avahi-daemon + avahi-utils), and inside containers via Docker DNS aliases. Web names resolve to the proxy (HTTPS with the trusted CA); database names resolve directly to the container IP for native access at the standard port (needs routable container IPs: OrbStack/Colima/Linux). `--domain-suffix localhost` opts into loopback-only names, but beware: many runtimes hard-resolve `*.localhost` to loopback inside containers (RFC 6761), so those names don't work container-to-container.
 
 ```bash
 devflow proxy start
@@ -562,7 +562,7 @@ devflow proxy start --daemon
 devflow proxy start --https-port 8443
 devflow proxy start --http-port 8080
 devflow proxy start --api-port 2020
-devflow proxy start --no-mdns          # disable .local advertising
+devflow proxy start --no-mdns          # disable mDNS advertising
 ```
 
 ### `devflow proxy stop`

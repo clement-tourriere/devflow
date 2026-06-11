@@ -808,7 +808,7 @@ pub enum ProxyCommands {
         api_port: Option<u16>,
         #[arg(
             long,
-            help = "Domain suffix for auto-discovered containers [default: local on macOS, localhost elsewhere]"
+            help = "Domain suffix for auto-discovered containers [default: local — same name resolves inside and outside containers]"
         )]
         domain_suffix: Option<String>,
         #[arg(

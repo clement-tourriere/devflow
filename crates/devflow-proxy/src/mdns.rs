@@ -15,8 +15,11 @@
 //!   proxy in the path (`postgresql://postgres.app.local:5432`). This relies on
 //!   container IPs being routable from the host (OrbStack / Colima / Linux).
 //!
-//! Only macOS is wired up today; other platforms get a no-op responder that logs
-//! a warning (their `.local` names will not resolve from the host).
+//! Platform backends: macOS registers records through Apple's `mDNSResponder`
+//! (dns_sd); Linux publishes through Avahi via `avahi-publish` (avahi-utils) —
+//! absent Avahi it degrades to a no-op with a remediation warning. Other
+//! platforms get a no-op responder (their `.local` names will not resolve from
+//! the host).
 
 use crate::discovery::ProxyTarget;
 use crate::endpoint;
@@ -354,9 +357,124 @@ mod imp {
 }
 
 // ---------------------------------------------------------------------------
+// Linux: publish A records through the Avahi daemon via `avahi-publish`.
+//
+// One long-lived `avahi-publish -a -R <name> <ip>` child per record — the
+// record stays announced while the child runs and is withdrawn when it is
+// killed. This matches Avahi's own publishing model and avoids a D-Bus
+// dependency. Requires avahi-daemon running and avahi-utils installed
+// (default on most desktop distros).
+// ---------------------------------------------------------------------------
+#[cfg(target_os = "linux")]
+mod imp {
+    use std::net::Ipv4Addr;
+    use std::process::{Child, Command, Stdio};
+    use std::sync::Mutex;
+
+    struct Entry {
+        container_id: String,
+        name: String,
+        child: Child,
+    }
+
+    pub struct Responder {
+        available: bool,
+        entries: Mutex<Vec<Entry>>,
+    }
+
+    impl Responder {
+        pub fn new() -> Self {
+            let available = Command::new("avahi-publish")
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !available {
+                log::warn!(
+                    "mDNS: `avahi-publish` not found — .local names will not resolve \
+                     from this host. Install avahi-utils and ensure avahi-daemon is \
+                     running, or use `--domain-suffix localhost` for loopback-only \
+                     (web) access."
+                );
+            }
+            Self {
+                available,
+                entries: Mutex::new(Vec::new()),
+            }
+        }
+
+        pub fn advertise(&self, name: &str, ip: Ipv4Addr, container_id: &str) {
+            if !self.available {
+                return;
+            }
+            let Ok(mut entries) = self.entries.lock() else {
+                return;
+            };
+
+            // Re-advertising a name (e.g. container restart changed its IP)
+            // replaces the existing record.
+            if let Some(pos) = entries.iter().position(|e| e.name == name) {
+                let mut old = entries.remove(pos);
+                let _ = old.child.kill();
+                let _ = old.child.wait();
+            }
+
+            // -a: address record; -R: don't also publish a reverse PTR.
+            match Command::new("avahi-publish")
+                .args(["-a", "-R", name, &ip.to_string()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(child) => {
+                    log::info!("mDNS: advertising {name} -> {ip} (avahi)");
+                    entries.push(Entry {
+                        container_id: container_id.to_string(),
+                        name: name.to_string(),
+                        child,
+                    });
+                }
+                Err(e) => log::warn!("mDNS: failed to advertise {name} -> {ip}: {e}"),
+            }
+        }
+
+        pub fn remove_by_container(&self, container_id: &str) {
+            let Ok(mut entries) = self.entries.lock() else {
+                return;
+            };
+            entries.retain_mut(|e| {
+                if e.container_id == container_id {
+                    let _ = e.child.kill();
+                    let _ = e.child.wait();
+                    log::info!("mDNS: withdrawing {}", e.name);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+    }
+
+    impl Drop for Responder {
+        fn drop(&mut self) {
+            if let Ok(mut entries) = self.entries.lock() {
+                for e in entries.iter_mut() {
+                    let _ = e.child.kill();
+                    let _ = e.child.wait();
+                }
+                entries.clear();
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Other platforms: no-op responder (names won't resolve from the host).
 // ---------------------------------------------------------------------------
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod imp {
     use std::net::Ipv4Addr;
 
@@ -365,7 +483,7 @@ mod imp {
     impl Responder {
         pub fn new() -> Self {
             log::warn!(
-                "mDNS responder is only implemented on macOS; \
+                "mDNS responder is not implemented on this platform; \
                  .local names will not resolve from this host"
             );
             Responder
