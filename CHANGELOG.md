@@ -33,6 +33,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Three-tier configuration** — `.devflow.yml` (team) -> `.devflow.local.yml` (local) -> environment variables.
 - **JSON output + non-interactive mode** — For CI/CD and AI agent workflows.
 
+## v0.5.0 (2026-06-11)
+
+### Feat
+
+- **proxy**: unify domain suffix to .local on all platforms
+- **daemon**: controller daemon keeps shared engines running (G5)
+- **services**: reconcile primitive + `devflow service up` (G5 partial)
+- **services**: shared Redis logical-isolation provider (G3)
+- **services**: shared ClickHouse logical-isolation provider (G6)
+- **config**: read lightweight devflow.toml (G4)
+- **services**: RustFS shared object-storage provider (G2)
+- post-review remediation (A–F) + shared-engine provider (G1)
+
+### Refactor
+
+- **skills**: simplify devflow workspace skills
+
 ## v0.4.4 (2026-06-02)
 
 ### Fix

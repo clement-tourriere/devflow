@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "devflow"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1067,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "devflow-app"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1091,7 +1091,7 @@ dependencies = [
 
 [[package]]
 name = "devflow-core"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1129,7 +1129,7 @@ dependencies = [
 
 [[package]]
 name = "devflow-proxy"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bollard",
@@ -1155,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "devflow-terminal"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "log",
