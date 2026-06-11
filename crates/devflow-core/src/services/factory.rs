@@ -205,6 +205,23 @@ pub async fn create_provider_from_named_config(
             anyhow::bail!("RustFS provider requires the 'service-local' feature. Rebuild with --features service-local")
         }
 
+        #[cfg(feature = "service-local")]
+        "redis" => {
+            // Redis logical isolation (one global container, a DB index per
+            // workspace) is always shared; provider_type is ignored.
+            let provider = crate::services::shared::SharedRedisProvider::new(
+                &project_name,
+                &named.name,
+                named.shared.as_ref(),
+            )
+            .context("Failed to create shared Redis provider")?;
+            Ok(Box::new(provider))
+        }
+        #[cfg(not(feature = "service-local"))]
+        "redis" => {
+            anyhow::bail!("Redis provider requires the 'service-local' feature. Rebuild with --features service-local")
+        }
+
         "plugin" => {
             let plugin_config = named.plugin.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -219,7 +236,7 @@ pub async fn create_provider_from_named_config(
 
         other => {
             anyhow::bail!(
-                "Unknown service type '{}' for service '{}'. Valid types: postgres, clickhouse, mysql, mariadb, generic, rustfs, plugin",
+                "Unknown service type '{}' for service '{}'. Valid types: postgres, clickhouse, mysql, mariadb, generic, rustfs, redis, plugin",
                 other,
                 named.name
             )

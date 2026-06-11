@@ -113,6 +113,16 @@ services:
 #     shared:
 #       image: clickhouse/clickhouse-server:latest   # default; HTTP on :8123
 
+# Shared Redis (logical isolation): ONE global container, a numbered DB index
+# (0-15) per workspace, allocated atomically and stored inside Redis itself.
+# NOTE: Redis has only 16 DBs total (global), so at most 15 workspaces across
+# ALL projects sharing this Redis.
+#   - name: cache
+#     service_type: redis        # always shared/global
+#     auto_workspace: true
+#     shared:
+#       image: redis:7           # default; port :6379
+
 # Worktree configuration
 worktree:
   enabled: true

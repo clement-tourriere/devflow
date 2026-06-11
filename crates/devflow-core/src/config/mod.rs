@@ -1613,6 +1613,23 @@ template_branching = true
     }
 
     #[test]
+    fn test_redis_service_parses() {
+        let yaml = r#"
+services:
+  - name: cache
+    service_type: redis
+    auto_workspace: true
+    shared:
+      image: redis:7
+      port: 6379
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+        let services = config.resolve_services();
+        assert_eq!(services[0].service_type, "redis");
+        assert_eq!(services[0].shared.as_ref().unwrap().port, Some(6379));
+    }
+
+    #[test]
     fn test_shared_clickhouse_parses() {
         let yaml = r#"
 services:

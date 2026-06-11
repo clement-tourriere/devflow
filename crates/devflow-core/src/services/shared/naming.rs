@@ -155,6 +155,24 @@ pub fn project_bucket_prefix(project: &str) -> String {
     format!("{}-", sanitize_bucket_fragment(project))
 }
 
+// ── Redis allocation identity ───────────────────────────────────────────
+
+/// The allocation-hash field identifying a (project, workspace) pair for the
+/// shared Redis DB-index allocator: `<project>:<workspace>`. Both fragments are
+/// sanitized to contain no `:` so the field parses unambiguously on the colon.
+pub fn redis_alloc_field(project: &str, workspace: &str) -> String {
+    format!(
+        "{}:{}",
+        sanitize_bucket_fragment(project),
+        sanitize_bucket_fragment(workspace)
+    )
+}
+
+/// The field prefix shared by all of a project's Redis allocations: `<project>:`.
+pub fn redis_project_prefix(project: &str) -> String {
+    format!("{}:", sanitize_bucket_fragment(project))
+}
+
 /// Sanitize a fragment for an S3 bucket name: lowercase alphanumerics and
 /// hyphens, collapsing runs of other characters to a single `-`.
 fn sanitize_bucket_fragment(input: &str) -> String {
@@ -202,6 +220,19 @@ mod tests {
     #[test]
     fn test_project_bucket_prefix() {
         assert_eq!(project_bucket_prefix("My_App"), "my-app-");
+    }
+
+    #[test]
+    fn test_redis_alloc_field() {
+        assert_eq!(
+            redis_alloc_field("My_App", "feature/auth"),
+            "my-app:feature-auth"
+        );
+        assert_eq!(redis_project_prefix("My_App"), "my-app:");
+        // The field has exactly one colon (fragments contain none), so it
+        // round-trips by splitting on ':'.
+        let f = redis_alloc_field("proj", "ws");
+        assert_eq!(f.matches(':').count(), 1);
     }
 
     #[test]

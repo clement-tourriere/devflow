@@ -8,9 +8,11 @@
 pub mod clickhouse;
 pub mod container;
 pub mod naming;
+pub mod redis;
 pub mod rustfs;
 
 pub use clickhouse::SharedClickHouseProvider;
+pub use redis::SharedRedisProvider;
 pub use rustfs::RustFsProvider;
 
 use std::time::Duration;
