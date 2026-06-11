@@ -265,6 +265,8 @@ jobs:
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
     needs:
       - integration-linux-zfs
       - integration-linux-xfs
