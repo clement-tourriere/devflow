@@ -1312,8 +1312,7 @@ commit:
 # AI Agent Integration
 # ============================================
 agent:
-  command: claude                       # Default agent tool
-  workspace_prefix: "agent/"              # Prefix for agent workspaces</code></pre>
+  auto_context: true                    # Provide project context to agents on launch</code></pre>
 
   <div class="callout callout-warning">
     <span class="callout-icon">&#9888;</span>
@@ -1356,7 +1355,8 @@ agent:
       <tr><td><code>DEVFLOW_LLM_API_URL</code></td><td>LLM endpoint URL</td><td>OpenAI</td></tr>
       <tr><td><code>DEVFLOW_LLM_MODEL</code></td><td>LLM model name</td><td><code>gpt-4o-mini</code></td></tr>
       <tr><td><code>DEVFLOW_COMMIT_COMMAND</code></td><td>External CLI for commit messages (e.g., <code>claude -p</code>)</td><td>&mdash;</td></tr>
-      <tr><td><code>DEVFLOW_AGENT_COMMAND</code></td><td>Default agent command (e.g., <code>claude</code>, <code>codex</code>)</td><td><code>claude</code></td></tr>
+      <tr><td><code>DEVFLOW_APPROVE_HOOKS</code></td><td>Auto-approve config-file hooks (for CI/agents)</td><td><code>false</code></td></tr>
+      <tr><td><code>DEVFLOW_BACKGROUND_HOOK_TIMEOUT</code></td><td>Seconds to await background hooks before CLI exit</td><td><code>30</code></td></tr>
       <tr><td><code>DEVFLOW_CONTEXT_BRANCH</code></td><td>Override current workspace context (for CI)</td><td>auto-detected</td></tr>
     </tbody>
   </table>
@@ -2041,16 +2041,21 @@ devflow switch
       condition: "test '{{ workspace }}' = 'staging'"</code></pre>
 
   <h3>Hook Approval System</h3>
-  <p>For security, hooks from <code>.devflow.yml</code> require user approval before running for the first time. This prevents unexpected commands from executing via Git hooks. In <code>--non-interactive</code> mode, unapproved hooks fail instead of prompting.</p>
+  <p>For security, hooks from <code>.devflow.yml</code> require user approval before running for the first time. This prevents unexpected commands from executing via Git hooks.</p>
 
   <p>When a new hook is detected, devflow prompts:</p>
   <ul>
-    <li><strong>Approve always</strong> &mdash; remember and never ask again for this command</li>
+    <li><strong>Approve always</strong> &mdash; remember and never ask again for this hook</li>
     <li><strong>Approve once</strong> &mdash; run this time, ask again next time</li>
     <li><strong>Deny</strong> &mdash; skip this hook</li>
   </ul>
 
-  <p>Approvals are stored in <code>~/.config/devflow/hook_approvals.yml</code>, keyed by project path and command hash.</p>
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div><strong>Automation (<code>--non-interactive</code> / agents):</strong> an unapproved hook is <strong>skipped with a visible warning</strong> (it does not abort the command, so <code>switch</code> still completes and reports per-hook status). Set <code>DEVFLOW_APPROVE_HOOKS=1</code> to auto-approve config-file hooks in CI or agent runs.</div>
+  </div>
+
+  <p>Approvals are stored in <code>~/.config/devflow/hook_approvals.yml</code>, keyed by the canonical project root and the hook's <strong>command template</strong> (not the rendered command) &mdash; so a single approval applies across every workspace of a project, including agent-created worktrees.</p>
 
 <pre><code class="language-bash"># View approved hooks
 devflow hook approvals
@@ -2291,6 +2296,10 @@ docker compose -p myapp up -d</code></pre>
       <tr><td>5</td><td>Fallback</td><td><code>80</code></td></tr>
     </tbody>
   </table>
+  <div class="callout callout-info">
+    <span class="callout-icon">&#9432;</span>
+    <div>When a container exposes <strong>multiple</strong> ports (e.g. <code>80</code>+<code>443</code>, or ClickHouse&rsquo;s <code>8123</code>+<code>9000</code>), the choice is deterministic and HTTP-biased &mdash; well-known HTTP ports first, then the lowest port &mdash; so the same container always routes to the same upstream. Set <code>devproxy.port</code> to be explicit.</div>
+  </div>
 
   <h4>Example</h4>
 <pre><code class="language-yaml">services:
