@@ -72,30 +72,6 @@ def update_json_version(file_path: Path, new_version: str) -> bool:
     return True
 
 
-def update_docs_version(file_path: Path, new_version: str) -> bool:
-    text = file_path.read_text(encoding="utf-8")
-
-    updated = text
-    updated, count_a = re.subn(
-        r'(class="version">v)([0-9A-Za-z.+\-]+)',
-        rf"\g<1>{new_version}",
-        updated,
-        count=1,
-    )
-    updated, count_b = re.subn(
-        r"(<strong>devflow</strong>\s+v)([0-9A-Za-z.+\-]+)",
-        rf"\g<1>{new_version}",
-        updated,
-        count=1,
-    )
-
-    if count_a != 1 or count_b != 1:
-        raise ValueError(f"Could not update docs version markers in {file_path}")
-
-    file_path.write_text(updated, encoding="utf-8")
-    return True
-
-
 def update_llms_version(file_path: Path, new_version: str) -> bool:
     text = file_path.read_text(encoding="utf-8")
     updated, count = re.subn(
@@ -162,7 +138,6 @@ def main() -> int:
 
     update_json_version(root / "src-tauri/tauri.conf.json", new_version)
     update_json_version(root / "ui/package.json", new_version)
-    update_docs_version(root / "docs/index.html", new_version)
     update_llms_version(root / "llms-full.txt", new_version)
     update_cargo_lock(root / "Cargo.lock", new_version)
 
