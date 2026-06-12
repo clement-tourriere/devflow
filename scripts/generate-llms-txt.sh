@@ -103,7 +103,7 @@ HEADER
 - [AGENTS.md](AGENTS.md): Agent-first onboarding, bootstrap flow, suggested agent loop, and automation contract.
 - [CLAUDE.md](CLAUDE.md): Project structure, config schema, development commands, and AI agent context.
 - [CHANGELOG.md](CHANGELOG.md): Version history and release notes.
-- [docs/index.html](docs/index.html): Full single-page documentation site with search, dark/light theme.
+- [Documentation site](https://clement-tourriere.github.io/devflow/): Full documentation site (Astro Starlight; source in docs-site/).
 
 ## Agent workflows
 
@@ -558,7 +558,7 @@ src/
 - `README.md` — Product overview, quickstart, full reference
 - `CLAUDE.md` — Developer context and project structure
 - `CHANGELOG.md` — Version history
-- `docs/index.html` — Full documentation site
+- `docs-site/` — Documentation site source (published at https://clement-tourriere.github.io/devflow/)
 SECTION
 }
 

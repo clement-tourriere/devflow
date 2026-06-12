@@ -240,6 +240,11 @@ The project is organized as a Cargo workspace with four crates:
 - `src/utils/invoke.ts` — Typed wrappers around Tauri IPC
 - `src/types/index.ts` — TypeScript interfaces matching Rust DTOs
 
+### `docs-site/` — Documentation site (Astro Starlight)
+- `src/content/docs/` — All pages (getting-started, concepts, guides, reference, troubleshooting)
+- `astro.config.mjs` — Site config, sidebar, GitHub Pages base path (`/devflow`)
+- Local dev: `mise run docs` · build: `mise run docs:build` · deployed by `.github/workflows/docs-pages.yml` on version tags
+
 ## References
 - PostgreSQL TEMPLATE documentation for template backend
 - Git worktree documentation for worktree management

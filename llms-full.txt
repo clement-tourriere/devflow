@@ -428,4 +428,4 @@ src/
 - `README.md` — Product overview, quickstart, full reference
 - `CLAUDE.md` — Developer context and project structure
 - `CHANGELOG.md` — Version history
-- `docs/index.html` — Full documentation site
+- `docs-site/` — Documentation site source (published at https://clement-tourriere.github.io/devflow/)

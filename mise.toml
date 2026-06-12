@@ -7,8 +7,18 @@ bun = "1.2"
 "cargo:tauri-cli" = "latest"
 
 [tasks.docs]
-description = "Serve documentation site locally"
-run = "open http://localhost:8787 & python3 -m http.server 8787 -d docs"
+description = "Serve the documentation site locally (Astro Starlight, hot-reload)"
+depends = ["docs:install"]
+run = "cd docs-site && bun run dev"
+
+[tasks."docs:build"]
+description = "Build the documentation site (docs-site/dist)"
+depends = ["docs:install"]
+run = "cd docs-site && bun run build"
+
+[tasks."docs:install"]
+description = "Install documentation site dependencies"
+run = "cd docs-site && bun install"
 
 [tasks.build]
 description = "Build the project (debug)"

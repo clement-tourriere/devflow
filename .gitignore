@@ -38,5 +38,10 @@ Thumbs.db
 ui/node_modules/
 ui/dist/
 
+# Docs site
+docs-site/node_modules/
+docs-site/dist/
+docs-site/.astro/
+
 # OpenCode
 .opencode/

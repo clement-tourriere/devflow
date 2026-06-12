@@ -732,7 +732,8 @@ The current tabs are:
 | `DEVFLOW_LLM_API_URL=...` | OpenAI-compatible LLM endpoint |
 | `DEVFLOW_LLM_MODEL=...` | LLM model name |
 | `DEVFLOW_COMMIT_COMMAND=...` | External CLI used for commit generation |
-| `DEVFLOW_AGENT_COMMAND=...` | Default agent command configured for this project |
+| `DEVFLOW_APPROVE_HOOKS=1` | Auto-approve config-file hooks (CI/agent runs) |
+| `DEVFLOW_BACKGROUND_HOOK_TIMEOUT=30` | Seconds to await background hooks before CLI exit |
 
 ## Shell Integration Notes
 

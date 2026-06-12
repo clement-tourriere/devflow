@@ -1,0 +1,73 @@
+---
+title: devflow
+description: Isolated development environments for every Git workspace — worktrees, databases, caches, and stateful services that sync with your Git workflow.
+template: splash
+hero:
+  tagline: Create, switch, and clean up isolated development workspaces with matching local services — one command, from branch to running database.
+  image:
+    file: ../../assets/banner.jpg
+    alt: devflow
+  actions:
+    - text: Get started
+      link: /devflow/getting-started/quickstart/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/clement-tourriere/devflow
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Why devflow?
+
+devflow is a workspace orchestrator for local development. It connects your Git branch or worktree workflow with per-workspace state: service containers, connection strings, lifecycle hooks, generated env files, and stable HTTPS URLs. Work on multiple features, reviews, migrations, or agent tasks in parallel — without sharing a database or stashing state.
+
+```bash
+devflow switch -c feature/auth
+# → branch created, worktree at ../myapp.feature_auth
+# → postgres workspace cloned from main (Copy-on-Write, near-instant)
+# → hooks wrote .env.local with the new DATABASE_URL
+# → your shell is now inside the worktree
+```
+
+<CardGrid stagger>
+  <Card title="Workspace isolation" icon="seti:db">
+    Each workspace gets its own services — physically (a Copy-on-Write container per
+    workspace) or logically (one shared engine, one database/bucket/DB-index per
+    workspace). PostgreSQL, ClickHouse, MySQL, Redis, RustFS, or any Docker image.
+  </Card>
+  <Card title="Git worktrees, managed" icon="seti:git">
+    Optional worktree mode gives every workspace its own directory — env files,
+    gitignored caches, and AI tool configs copied in automatically with CoW reflinks.
+    Plain `git worktree add` works too: devflow's hooks set it up.
+  </Card>
+  <Card title="Lifecycle hooks" icon="setting">
+    MiniJinja-templated commands and built-in actions run at every lifecycle phase —
+    write env files, run migrations, open tmux sessions. With conditions, approvals,
+    and installable recipes.
+  </Card>
+  <Card title="Auto-HTTPS proxy" icon="rocket">
+    Every Docker container gets a trusted `https://name.local` URL the moment it
+    starts — the same name resolves from the host and from inside containers. No
+    `/etc/hosts` edits, no certificate warnings.
+  </Card>
+  <Card title="Built for AI agents" icon="seti:powershell">
+    `--json --non-interactive` everywhere, agent skills, `llms.txt`, sandboxed
+    workspaces, and a worktree-per-task pattern that lets parallel agents work
+    without stepping on each other.
+  </Card>
+  <Card title="CLI, TUI, and desktop GUI" icon="laptop">
+    Drive everything from the terminal, an interactive dashboard (`devflow tui`),
+    or a native desktop app — all sharing the same core.
+  </Card>
+</CardGrid>
+
+## The core loop
+
+1. `git checkout feature-x` (or `devflow switch feature-x`) triggers the installed Git hook.
+2. devflow creates or switches the matching service workspaces across all configured providers.
+3. Lifecycle hooks fire — update `.env.local`, run migrations, trust mise configs.
+4. With worktrees enabled, the shell wrapper `cd`s you into the right directory.
+
+Every workspace's app is reachable at a predictable HTTPS URL, every workspace's database at its own connection string — and `devflow remove` cleans all of it up.
