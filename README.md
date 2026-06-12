@@ -4,7 +4,7 @@
 
 <h1 align="center">devflow</h1>
 
-<p align="center">Create, switch, and clean up isolated development workspaces with matching local services.</p>
+<p align="center">Create, switch, and clean up isolated development workspaces with matching local services — one command, from branch to running database.</p>
 
 <p align="center">
   <a href="https://clement-tourriere.github.io/devflow/">Documentation</a> ·
@@ -15,24 +15,41 @@
 
 ## What is devflow?
 
-devflow is a workspace orchestrator for local development. It connects your Git branch or worktree workflow with per-workspace state: service containers, connection strings, lifecycle hooks, generated env files, optional worktree directories, and stable HTTPS URLs.
+devflow is a workspace orchestrator for local development. Every workspace — a Git branch, a worktree, or a Jujutsu change — gets its own complete environment: service containers, connection strings, generated env files, an optional worktree directory, and stable HTTPS URLs. Created in seconds, removed with one command.
 
-The goal is simple: work on multiple features, reviews, migrations, or agent tasks without sharing the same local database or constantly stashing and resetting state.
+```bash
+devflow switch -c feature/auth
+# → branch created, worktree at ../myapp.feature_auth
+# → postgres workspace cloned from main (Copy-on-Write, near-instant)
+# → hooks wrote .env.local with the new DATABASE_URL
+# → your shell is now inside the worktree
+```
 
-Services can be isolated two ways, chosen per service: **physically** (a Copy-on-Write Docker container per workspace) or **logically** (one shared global engine — Postgres, Redis, RustFS object storage, ClickHouse — with a database, bucket, or DB index provisioned per workspace on the fly).
+Work on multiple features, reviews, migrations, or AI-agent tasks in parallel — without sharing a database or stashing state. Drive it from the CLI, a terminal dashboard (`devflow tui`), or a desktop GUI.
 
-## Current focus
+## How it works
 
-- Branch/workspace switching with `devflow switch`
-- Optional Git worktree management
-- Per-workspace local services: Copy-on-Write Docker containers, or shared global engines with logical isolation (`type: shared`)
-- An HTTPS reverse proxy: every container gets a trusted `https://name.local` URL that resolves the same from the host and from inside containers
-- A controller daemon (`devflow daemon`) that keeps shared engines running
-- Lifecycle hooks for setup, migrations, env files, and cleanup
-- JSON and non-interactive modes for scripts and coding agents
-- A terminal dashboard via `devflow tui`
+1. `git checkout feature-x` (or `devflow switch feature-x`) triggers the Git hook installed by devflow.
+2. devflow creates or switches the matching service workspaces for every configured service.
+3. Lifecycle hooks fire — write `.env.local`, run migrations, open a tmux window.
+4. With worktrees enabled, the shell wrapper `cd`s you into the workspace directory.
 
-Some advanced areas, such as merge train, sandboxing, plugin providers, the cloud branching providers (Neon/DBLab/Xata — currently experimental), and the desktop GUI, are still evolving. Check `devflow --help-all` and the changelog for what is available in your build.
+Every workspace's app is reachable at a predictable HTTPS URL, every workspace's database at its own connection string — and `devflow remove` (or `devflow merge --cleanup`) cleans all of it up.
+
+## Highlights
+
+- **Automatic VCS integration** — installed hooks create and switch environments on plain `git checkout`; Jujutsu (jj) is auto-detected and supported alongside Git
+- **Two isolation models, chosen per service** — physical (a Copy-on-Write Docker container per workspace) or logical (one shared global engine with a database, bucket, or DB index per workspace)
+- **Multi-service** — PostgreSQL, ClickHouse, MySQL, Redis, RustFS object storage, any Docker image, or custom plugin providers; cloud branching via Neon/DBLab/Xata (experimental)
+- **Managed worktrees** — per-workspace directories from a path template, with env files, gitignored caches, and AI tool configs (`.claude/`, `.cursor/`, …) copied in automatically
+- **Lifecycle hooks** — MiniJinja-templated commands and built-in actions at every phase, with conditions, an approval system, and installable recipes
+- **Auto-HTTPS proxy** — every Docker container gets a trusted `https://name.local` URL that resolves the same from the host and from inside containers; no `/etc/hosts` edits, no certificate warnings
+- **Controller daemon** — `devflow daemon start` keeps every registered project's shared engines running
+- **Merge workflow** — `devflow merge --cleanup` merges a workspace and removes its branch, worktree, and services in one step; rebase and a queued merge train included
+- **Seeding** — initialize databases from a PostgreSQL URL, a local dump file, or S3
+- **Built for AI agents** — `--json` and `--non-interactive` everywhere, agent launch/context/skill commands, and AI-generated commit messages
+
+Cloud branching providers, sandboxing, and plugin providers are newer and still maturing — check `devflow --help-all` and the changelog for what is available in your build.
 
 ## Install
 
@@ -51,7 +68,7 @@ devflow update          # or: devflow update --check
 ## Quick start
 
 ```bash
-# 1. Initialize a project
+# 1. Initialize a project (interactive: pick services, worktrees, Git hooks)
 cd ~/my-project
 devflow init
 
@@ -63,6 +80,9 @@ devflow status
 
 # 4. Print connection details for scripts or .env files
 devflow connection feature/auth --format env
+
+# 5. When the work is merged, clean everything up in one step
+devflow merge --cleanup
 ```
 
 If worktrees are enabled, install shell integration so `devflow switch` can move your shell into the selected worktree:
@@ -79,7 +99,9 @@ devflow switch -c feature/api    # Create and switch to a workspace
 devflow list                    # List workspaces and service status
 devflow status                  # Show current workspace information
 devflow connection feature/api   # Show service connection info
-devflow remove feature/api       # Remove workspace resources
+devflow merge --cleanup          # Merge into main, then remove workspace + services
+devflow remove feature/api       # Remove workspace resources without merging
+devflow doctor                  # Diagnose Docker, VCS, and config issues
 devflow tui                     # Open the terminal dashboard
 ```
 
@@ -89,13 +111,14 @@ Run `devflow --help-all` to see advanced service, hook, proxy, agent, and config
 
 devflow can manage named services per workspace. Two models are available, per service:
 
-- `type: local` — one Copy-on-Write Docker container per workspace (Postgres, ClickHouse, MySQL, or any image). Strong isolation, instant clones.
+- `type: local` — one Copy-on-Write Docker container per workspace (Postgres, ClickHouse, MySQL, or any image). Strong isolation, instant clones via APFS, ZFS, Btrfs, or XFS.
 - `type: shared` — one global container per engine; each workspace gets a logical boundary created on the fly: a Postgres database (`CREATE DATABASE … TEMPLATE parent` keeps branch-from-parent semantics), a Redis DB index, a RustFS (S3-compatible) bucket, or a ClickHouse database.
 
 ```bash
 devflow service add app-db --provider local --service-type postgres
 devflow service create feature/auth
 devflow service connection feature/auth
+devflow service seed main --from dump.sql   # or a postgres:// URL, or s3://
 devflow service logs feature/auth
 devflow service reset feature/auth
 
@@ -107,22 +130,28 @@ Connection information can be emitted as URI, env, or JSON output for scripts an
 
 ## Hooks and automation
 
-Hooks run during workspace lifecycle phases such as creation and switching. They can write env files, run migrations, or execute project-specific commands.
+Hooks run during workspace lifecycle phases such as creation and switching. They can write env files, run migrations, or execute project-specific commands — templated with MiniJinja, gated by an approval system, and available as installable recipes.
 
 ```bash
 devflow hook show
 devflow hook explain post-switch
 devflow hook vars
+devflow hook run post-create       # run a phase manually
 ```
 
-For automation, use:
+## Built for AI agents
+
+Every command supports `--json` and `--non-interactive`, and the worktree-per-task pattern gives each agent an isolated directory, database, and env file:
 
 ```bash
-devflow --json --non-interactive switch -c agent/task-42
-devflow agent context --format json
+devflow --json --non-interactive switch -c agent/task-42   # isolated env for the task
+devflow agent context --format json                        # project + connection context for the agent
+devflow agent start fix-login -- 'Fix the login timeout bug'
+devflow commit --ai                                        # LLM-generated commit message
+devflow sync-ai-configs                                    # merge .claude/.cursor settings back to main
 ```
 
-See `AGENTS.md` for the recommended coding-agent workflow. In `--non-interactive` mode, unapproved hooks are skipped with a warning (set `DEVFLOW_APPROVE_HOOKS=1` to auto-approve in CI/agent runs).
+AI tool configs (`.claude/`, `.cursor/`, `.opencode/`, `.agents/`) are copied into new worktrees automatically. In `--non-interactive` mode, unapproved hooks are skipped with a warning (set `DEVFLOW_APPROVE_HOOKS=1` to auto-approve in CI/agent runs). See `AGENTS.md` for the recommended coding-agent workflow.
 
 ## Configuration
 
