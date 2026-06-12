@@ -1,15 +1,32 @@
 ---
 title: Installation
-description: Install devflow from source and verify your system with devflow doctor.
+description: Install devflow with the install script or from source, keep it updated with devflow update, and verify your system with devflow doctor.
 sidebar:
   order: 1
 ---
 
 ## Requirements
 
-- **Rust toolchain** (for building from source)
 - **Docker** or a compatible container runtime (OrbStack, Colima, …) for local services
+- **Rust toolchain** only if building from source
 - Optional: **bun** + Tauri prerequisites if you want to develop the desktop GUI
+
+## Install script (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/clement-tourriere/devflow/main/scripts/install.sh | sh
+```
+
+The script downloads the latest [GitHub release](https://github.com/clement-tourriere/devflow/releases) binary for your platform, verifies its SHA-256 checksum, and installs it to `~/.local/bin`.
+
+Supported platforms: Linux (x86_64, arm64) and macOS (Apple Silicon). On anything else, [install from source](#install-from-source).
+
+Environment variables to customize the install:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DEVFLOW_INSTALL_DIR` | `~/.local/bin` | Where the binary is installed |
+| `DEVFLOW_VERSION` | `latest` | Pin a specific release tag (e.g. `v0.5.0`) |
 
 ## Install from source
 
@@ -19,7 +36,18 @@ cd devflow
 cargo install --path .
 ```
 
-Pre-built binaries are attached to [GitHub releases](https://github.com/clement-tourriere/devflow/releases) when available.
+## Updating
+
+devflow can update itself in place — it downloads the new release binary, verifies its checksum, and atomically swaps the executable (rolling back if the new binary fails to run):
+
+```bash
+devflow update                   # Update to the latest release
+devflow update --check           # Only check whether an update exists
+devflow update --version 0.5.0   # Install a specific version
+devflow update --force           # Reinstall the current version
+```
+
+If you installed from source, keep using `cargo install --path .` instead — `devflow update` would replace your custom build with the release binary.
 
 ## Verify
 

@@ -34,6 +34,20 @@ Services can be isolated two ways, chosen per service: **physically** (a Copy-on
 
 Some advanced areas, such as merge train, sandboxing, plugin providers, the cloud branching providers (Neon/DBLab/Xata — currently experimental), and the desktop GUI, are still evolving. Check `devflow --help-all` and the changelog for what is available in your build.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/clement-tourriere/devflow/main/scripts/install.sh | sh
+```
+
+Installs the latest release binary to `~/.local/bin` (override with `DEVFLOW_INSTALL_DIR`; pin a release with `DEVFLOW_VERSION=v0.5.0`). Supported platforms: Linux (x86_64, arm64) and macOS (Apple Silicon) — see [Install from source](#install-from-source) for everything else.
+
+Update at any time with:
+
+```bash
+devflow update          # or: devflow update --check
+```
+
 ## Quick start
 
 ```bash

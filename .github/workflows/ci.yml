@@ -79,6 +79,35 @@ jobs:
           cargo install cargo-audit --quiet
           cargo audit
 
+  install-script:
+    name: Install script
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-24.04-arm is exercised post-release only (verify-install):
+        # the latest published release may not have an arm64 asset yet.
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint with shellcheck
+        if: runner.os == 'Linux'
+        run: shellcheck scripts/install.sh
+
+      - name: Install latest release
+        run: sh scripts/install.sh
+
+      - name: Verify installed binary
+        run: |
+          "$HOME/.local/bin/devflow" --version
+          "$HOME/.local/bin/devflow" --help > /dev/null
+
+      - name: Install pinned version into custom dir
+        run: |
+          DEVFLOW_VERSION=v0.5.0 DEVFLOW_INSTALL_DIR="$RUNNER_TEMP/devflow-bin" sh scripts/install.sh
+          "$RUNNER_TEMP/devflow-bin/devflow" --version | grep -F "0.5.0"
+
   # NOTE: macOS integration tests are disabled because GitHub Actions macOS
   # runners do not ship with Docker. The Colima-based workaround is slow and
   # flaky (~3-5 min startup, frequent timeouts). Re-enable when GitHub offers
@@ -273,10 +302,13 @@ jobs:
       - integration-linux-btrfs
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             artifact_name: devflow-linux-amd64
+          - os: ubuntu-24.04-arm
+            artifact_name: devflow-linux-arm64
           - os: macos-latest
             artifact_name: devflow-macos-arm64
     steps:
@@ -323,3 +355,29 @@ jobs:
             dist/${{ matrix.artifact_name }}
             dist/${{ matrix.artifact_name }}.sha256
           generate_release_notes: true
+
+  verify-install:
+    name: Verify install script
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install just-released version
+        run: DEVFLOW_VERSION="${{ github.ref_name }}" sh scripts/install.sh
+
+      - name: Verify installed version matches tag
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          installed="$(devflow --version | awk '{print $2}')"
+          expected="${GITHUB_REF_NAME#v}"
+          if [ "$installed" != "$expected" ]; then
+            echo "Installed version '$installed' does not match tag '$expected'" >&2
+            exit 1
+          fi
+          devflow update --check

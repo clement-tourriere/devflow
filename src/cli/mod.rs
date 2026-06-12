@@ -12,6 +12,7 @@ mod service;
 mod skill;
 mod sync_ai_configs;
 mod train;
+mod update;
 pub mod workspace;
 
 use std::path::PathBuf;
@@ -272,6 +273,18 @@ Examples:
         long_about = "Run diagnostics and check system health.\n\nVerifies that required tools (docker, git/jj) are available, configuration is valid,\nand services are reachable. Reports any issues with suggested fixes.\n\nExamples:\n  devflow doctor\n  devflow --json doctor"
     )]
     Doctor,
+    #[command(
+        about = "Update devflow to the latest release",
+        long_about = "Update devflow to the latest GitHub release.\n\nDownloads the release binary for this platform, verifies its SHA-256 checksum,\nand atomically replaces the current executable (the previous binary is\nrestored if the new one fails to run).\n\nExamples:\n  devflow update                   # Update to the latest release\n  devflow update --check           # Only check whether an update exists\n  devflow update --version 0.5.0   # Install a specific version\n  devflow update --force           # Reinstall even if up to date"
+    )]
+    Update {
+        #[arg(long, help = "Only check whether a newer release is available")]
+        check: bool,
+        #[arg(long, help = "Install a specific version (e.g. 0.5.0)")]
+        version: Option<String>,
+        #[arg(long, help = "Reinstall even if already on the target version")]
+        force: bool,
+    },
     #[command(
         about = "Install Git hooks",
         long_about = "Install Git hooks.\n\nSets up post-checkout and post-commit Git hooks so devflow\nautomatically creates service workspaces and switches environments\non checkout. Safe to re-run.\n\nExamples:\n  devflow install-hooks",
@@ -891,6 +904,16 @@ pub async fn handle_command(
     // Gc command — no config needed, operates on global state
     if let Commands::Gc { list, all, force } = cmd {
         return gc::handle_gc_command(list, all, force, json_output, non_interactive).await;
+    }
+
+    // Update command — self-contained, no config needed
+    if let Commands::Update {
+        check,
+        version,
+        force,
+    } = cmd
+    {
+        return update::handle_update_command(check, version, force, json_output).await;
     }
 
     // Commands that need service infrastructure (config loading, state injection)

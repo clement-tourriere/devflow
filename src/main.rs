@@ -17,6 +17,7 @@ Isolated dev environments for every workspace — automatically.
 Getting Started:
   init                Initialize devflow (guided setup wizard)
   doctor              Check system health and configuration
+  update              Update devflow to the latest release
 
 Daily Use:
   switch              Create or switch workspaces (-c to create new)
@@ -102,6 +103,7 @@ Isolated dev environments for every workspace — automatically.
 Getting Started:
   init                Initialize devflow (guided setup wizard)
   doctor              Check system health and configuration
+  update              Update devflow to the latest release
 
 Daily Use:
   switch              Create or switch workspaces (-c to create new)

@@ -72,8 +72,11 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 # User directories (daemon pidfile/status under the config dir)
 dirs = { version = "6.0", default-features = false }
 
-# HTTP client (for proxy status queries)
+# HTTP client (for proxy status queries and self-update)
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+
+# Checksum verification for self-update (release .sha256 assets)
+sha2 = "0.10"
 
 # Ordered maps for deterministic hook execution
 indexmap = { version = "2", default-features = false, features = ["serde"] }
