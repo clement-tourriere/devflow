@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use super::ActionResult;
+use super::{confine_path, ActionResult};
 use crate::hooks::template::TemplateEngine;
 use crate::hooks::HookContext;
 
@@ -21,7 +21,7 @@ pub fn execute(
     let pattern = template_engine.render(pattern_template, context)?;
     let replacement = template_engine.render(replacement_template, context)?;
 
-    let path = working_dir.join(&file);
+    let path = confine_path(working_dir, &file)?;
 
     let content = if path.exists() {
         std::fs::read_to_string(&path)

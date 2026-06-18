@@ -68,9 +68,14 @@ impl ApprovalStore {
                 tmp_path.display()
             )
         })?;
+        // Restrict to owner-only — the store records command templates that
+        // reveal project structure; world/group-readable is unnecessary.
+        set_owner_only(&tmp_path);
 
         fs::rename(&tmp_path, &path)
             .with_context(|| format!("Failed to write approval store: {}", path.display()))?;
+
+        set_owner_only(&path);
 
         Ok(())
     }
@@ -188,6 +193,7 @@ fn acquire_file_lock(lock_path: &PathBuf) -> Result<FileLockGuard> {
             .open(lock_path)
         {
             Ok(_) => {
+                set_owner_only(lock_path);
                 return Ok(FileLockGuard {
                     path: lock_path.clone(),
                 });
@@ -211,4 +217,19 @@ fn acquire_file_lock(lock_path: &PathBuf) -> Result<FileLockGuard> {
     }
 
     anyhow::bail!("Timed out waiting for lock file '{}'", lock_path.display())
+}
+
+/// Set file permissions to owner-only (0o600) on Unix. No-op on non-Unix.
+fn set_owner_only(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
+            log::debug!("Failed to set 0o600 on {}: {}", path.display(), e);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
 }

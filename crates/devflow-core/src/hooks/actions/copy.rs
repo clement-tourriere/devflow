@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use super::ActionResult;
+use super::{confine_path, ActionResult};
 use crate::hooks::template::TemplateEngine;
 use crate::hooks::HookContext;
 
@@ -17,8 +17,8 @@ pub fn execute(
     let from = template_engine.render(from_template, context)?;
     let to = template_engine.render(to_template, context)?;
 
-    let src = working_dir.join(&from);
-    let dst = working_dir.join(&to);
+    let src = confine_path(working_dir, &from)?;
+    let dst = confine_path(working_dir, &to)?;
 
     if !src.exists() {
         anyhow::bail!("Source file not found: {}", src.display());

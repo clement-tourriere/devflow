@@ -282,10 +282,16 @@ fn default_http_method() -> String {
 
 impl HookAction {
     /// Whether this action requires user approval before execution.
+    ///
+    /// Shell, docker-exec, and http requests require approval: they execute
+    /// arbitrary code or perform network egress that could exfiltrate
+    /// templated secrets. File actions (write-file/write-env/copy/replace)
+    /// are path-confined to the workspace instead of gated by approval, so
+    /// the common `.env.local` write keeps working without a prompt.
     pub fn requires_approval(&self) -> bool {
         matches!(
             self,
-            HookAction::Shell { .. } | HookAction::DockerExec { .. }
+            HookAction::Shell { .. } | HookAction::DockerExec { .. } | HookAction::Http { .. }
         )
     }
 
@@ -634,7 +640,7 @@ action:
         let entry: HookEntry = serde_yaml_ng::from_str(yaml).unwrap();
         match entry {
             HookEntry::Action(act) => {
-                assert!(!act.action.requires_approval());
+                assert!(act.action.requires_approval());
                 match &act.action {
                     HookAction::Http {
                         url,

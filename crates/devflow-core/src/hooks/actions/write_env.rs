@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use indexmap::IndexMap;
 use std::path::Path;
 
-use super::ActionResult;
+use super::{confine_path, ActionResult};
 use crate::hooks::template::TemplateEngine;
 use crate::hooks::{EnvWriteMode, HookContext};
 
@@ -16,7 +16,7 @@ pub fn execute(
     working_dir: &Path,
 ) -> Result<ActionResult> {
     let file_path = template_engine.render(path_template, context)?;
-    let path = working_dir.join(&file_path);
+    let path = confine_path(working_dir, &file_path)?;
 
     // Render all variable values through the template engine
     let mut rendered_vars = IndexMap::new();

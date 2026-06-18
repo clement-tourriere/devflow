@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use super::ActionResult;
+use super::{confine_path, ActionResult};
 use crate::hooks::template::TemplateEngine;
 use crate::hooks::{HookContext, WriteMode};
 
@@ -17,7 +17,7 @@ pub fn execute(
     let file_path = template_engine.render(path_template, context)?;
     let content = template_engine.render(content_template, context)?;
 
-    let path = working_dir.join(&file_path);
+    let path = confine_path(working_dir, &file_path)?;
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)

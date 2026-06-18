@@ -421,7 +421,7 @@ impl HookEngine {
             return Ok(outcome);
         }
 
-        // Check approval only for actions that require it (shell, docker-exec).
+        // Check approval only for actions that require it (shell, docker-exec, http).
         // Keyed on the templates so an approval survives across workspaces.
         if self.require_approval && act.action.requires_approval() {
             let (approval_key, display) = match &act.action {
@@ -437,7 +437,26 @@ impl HookEngine {
                     let cmd = self.template_engine.render(command, context)?;
                     (key, format!("docker exec {} sh -c '{}'", c, cmd))
                 }
-                _ => unreachable!(),
+                super::HookAction::Http {
+                    url,
+                    method,
+                    body,
+                    headers,
+                } => {
+                    let key = format!(
+                        "http {} {} body={:?} headers={:?}",
+                        method, url, body, headers
+                    );
+                    let rendered_url = self.template_engine.render(url, context)?;
+                    (key, format!("http {} {}", method, rendered_url))
+                }
+                // Any other action that requires approval must be handled above;
+                // bail explicitly instead of panicking so adding a new action
+                // surfaces a clear error rather than crashing the process.
+                other => anyhow::bail!(
+                    "approval required for action '{}' but no approval key is defined",
+                    other.type_name()
+                ),
             };
             if let Some(outcome) = self.check_approval(name, &approval_key, &display)? {
                 return Ok(outcome);
