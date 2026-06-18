@@ -60,6 +60,11 @@ pub async fn create_workspace(
     let vcs_provider =
         vcs::detect_vcs_provider(project_dir).context("Failed to open VCS repository")?;
 
+    // Reject unsafe workspace names before touching the VCS. Names flow into
+    // shell hooks, file paths, db names, and container names, so a name with
+    // shell metacharacters could break out of an approved hook template.
+    super::validate_workspace_name(workspace_name).map_err(|e| anyhow::anyhow!(e))?;
+
     let normalized_name = config.get_normalized_workspace_name(workspace_name);
     let normalized_parent = options
         .from_workspace
@@ -86,16 +91,35 @@ pub async fn create_workspace(
     // 1. Create VCS branch
     vcs_provider.create_workspace(workspace_name, options.from_workspace.as_deref())?;
 
-    // 2. Create worktree if enabled
+    // 2. Create worktree if enabled.
+    //    If this fails, roll back the branch we just created so we don't leave
+    //    an orphan branch behind — the user gets the error and can retry clean.
     let worktree_result = if create_as_worktree {
-        Some(create_worktree_with_files(
+        match create_worktree_with_files(
             vcs_provider.as_ref(),
             config,
             project_dir,
             workspace_name,
             options.copy_files.as_deref(),
             options.copy_ignored,
-        )?)
+        ) {
+            Ok(result) => Some(result),
+            Err(e) => {
+                log::warn!(
+                    "Worktree creation failed for '{}'; rolling back the branch: {:#}",
+                    workspace_name,
+                    e
+                );
+                if let Err(cleanup_err) = vcs_provider.delete_workspace(workspace_name) {
+                    log::warn!(
+                        "Failed to roll back branch '{}' after worktree error: {}",
+                        workspace_name,
+                        cleanup_err
+                    );
+                }
+                return Err(e);
+            }
+        }
     } else {
         None
     };

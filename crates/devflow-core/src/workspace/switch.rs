@@ -91,6 +91,7 @@ pub async fn switch_workspace(
                     );
                 }
 
+                super::validate_workspace_name(workspace_name).map_err(|e| anyhow::anyhow!(e))?;
                 vcs_provider.create_workspace(workspace_name, options.from_workspace.as_deref())?;
                 branch_created = true;
                 parent_for_new = options.from_workspace.clone();
@@ -117,6 +118,7 @@ pub async fn switch_workspace(
                     workspace_name
                 );
             }
+            super::validate_workspace_name(workspace_name).map_err(|e| anyhow::anyhow!(e))?;
             vcs_provider.create_workspace(workspace_name, options.from_workspace.as_deref())?;
             branch_created = true;
             parent_for_new = options.from_workspace.clone();
