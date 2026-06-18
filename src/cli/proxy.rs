@@ -60,6 +60,7 @@ pub(super) async fn handle_proxy_command(
                 domain_suffix: domain_suffix.clone(),
                 auto_network: !no_auto_network,
                 mdns,
+                ..Default::default()
             };
 
             if daemon {

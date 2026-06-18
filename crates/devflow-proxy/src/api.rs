@@ -133,10 +133,15 @@ async fn handle_api(
 
 fn json_response<T: Serialize>(data: &T) -> Result<Response<BoxBody>, hyper::Error> {
     let body = serde_json::to_string(data).unwrap_or_else(|_| "{}".to_string());
+    // No `Access-Control-Allow-Origin` header: the API is consumed by local
+    // non-browser clients (CLI, Tauri Rust backend), which don't need CORS.
+    // Emitting `*` would let any website the user visits enumerate running
+    // containers via `fetch('http://127.0.0.1:2019/api/targets')`. If a
+    // browser client ever needs access, add a loopback-origin allowlist
+    // rather than a blanket `*`.
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
-        .header("Access-Control-Allow-Origin", "*")
         .body(Full::new(Bytes::from(body)))
         .unwrap())
 }

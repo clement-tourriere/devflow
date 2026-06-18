@@ -36,6 +36,11 @@ pub struct ProxyConfig {
     pub auto_network: bool,
     #[serde(default = "default_mdns")]
     pub mdns: bool,
+    /// Address the HTTPS/HTTP servers bind on. Defaults to `0.0.0.0` (all
+    /// interfaces) for container-routing compatibility. Set to `127.0.0.1` to
+    /// keep the proxy reachable only from the host and avoid LAN exposure.
+    #[serde(default = "default_bind_address")]
+    pub bind_address: String,
 }
 
 fn default_https_port() -> u16 {
@@ -46,6 +51,9 @@ fn default_http_port() -> u16 {
 }
 fn default_api_port() -> u16 {
     2019
+}
+fn default_bind_address() -> String {
+    "0.0.0.0".to_string()
 }
 fn default_domain_suffix() -> String {
     // `.local` on every platform, so the SAME name works inside and outside
@@ -76,6 +84,7 @@ impl Default for ProxyConfig {
             domain_suffix: default_domain_suffix(),
             auto_network: default_auto_network(),
             mdns: default_mdns(),
+            bind_address: default_bind_address(),
         }
     }
 }
@@ -263,11 +272,12 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
     // Bind all listeners eagerly so callers get a real error (port already
     // in use, permission denied on 443) instead of a successful-looking
     // handle with nothing listening behind it.
-    let https_addr: SocketAddr = format!("0.0.0.0:{}", config.https_port).parse()?;
+    let bind_addr = &config.bind_address;
+    let https_addr: SocketAddr = format!("{}:{}", bind_addr, config.https_port).parse()?;
     let https_listener = tokio::net::TcpListener::bind(https_addr)
         .await
         .with_context(|| format!("Failed to bind HTTPS on {}", https_addr))?;
-    let http_addr: SocketAddr = format!("0.0.0.0:{}", config.http_port).parse()?;
+    let http_addr: SocketAddr = format!("{}:{}", bind_addr, config.http_port).parse()?;
     let http_listener = tokio::net::TcpListener::bind(http_addr)
         .await
         .with_context(|| format!("Failed to bind HTTP on {}", http_addr))?;
