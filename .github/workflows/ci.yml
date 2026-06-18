@@ -79,6 +79,53 @@ jobs:
           cargo install cargo-audit --quiet
           cargo audit
 
+  docker-integration-tests:
+    name: Docker Integration Tests
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mold linker
+        run: sudo apt-get install -y mold
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build devflow-core
+        run: cargo build -p devflow-core
+
+      - name: Run shared-provider integration tests (requires Docker)
+        run: cargo test -p devflow-core --test shared_integration -- --ignored --test-threads=1
+
+  coverage:
+    name: Coverage
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Generate coverage report
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+
   install-script:
     name: Install script
     runs-on: ${{ matrix.os }}
@@ -321,6 +368,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Install bun
+        if: runner.os != 'Linux' || matrix.artifact_name != 'devflow-linux-arm64'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.2'
+
+      - name: Build Tauri frontend
+        if: runner.os != 'Linux' || matrix.artifact_name != 'devflow-linux-arm64'
+        run: |
+          cd ui && bun install --frozen-lockfile && bun run build
+
+      - name: Create frontend stub (ARM64 Linux — bun unavailable)
+        if: runner.os == 'Linux' && matrix.artifact_name == 'devflow-linux-arm64'
+        run: mkdir -p ui/dist && touch ui/dist/index.html
 
       - name: Build release binary
         run: cargo build --release

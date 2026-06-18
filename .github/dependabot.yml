@@ -17,3 +17,21 @@ updates:
     labels:
       - dependencies
       - ci
+
+  - package-ecosystem: bun
+    directory: /ui
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - frontend
+
+  - package-ecosystem: bun
+    directory: /docs-site
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - docs
