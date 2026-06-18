@@ -348,6 +348,9 @@ jobs:
       - integration-linux-xfs
       - integration-linux-btrfs
     runs-on: ${{ matrix.os }}
+    env:
+      COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
+      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
     strategy:
       fail-fast: false
       matrix:
@@ -410,12 +413,26 @@ jobs:
           fi
           cat ${{ matrix.artifact_name }}.sha256
 
+      - name: Install cosign (for signing)
+        if: env.COSIGN_KEY != ''
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign release assets with cosign
+        if: env.COSIGN_KEY != ''
+        run: |
+          cosign sign-blob --yes --key env://COSIGN_KEY \
+            dist/${{ matrix.artifact_name }} \
+            --output-signature dist/${{ matrix.artifact_name }}.sig \
+            --output-certificate dist/${{ matrix.artifact_name }}.pem
+
       - name: Upload release assets
         uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/${{ matrix.artifact_name }}
             dist/${{ matrix.artifact_name }}.sha256
+            dist/${{ matrix.artifact_name }}.sig
+            dist/${{ matrix.artifact_name }}.pem
           generate_release_notes: true
 
   verify-install:
