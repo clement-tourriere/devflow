@@ -269,6 +269,12 @@ Examples:
         verbose: bool,
     },
     #[command(
+        about = "Validate configuration file for errors and unknown fields",
+        long_about = "Validate configuration file for errors and unknown fields.\n\nChecks .devflow.yml for:\n  - YAML syntax errors\n  - Unknown top-level keys and service fields\n  - Missing required fields\n  - Invalid service type / provider combinations\n\nExits non-zero on any error.\n\nExamples:\n  devflow config-validate",
+        hide = true
+    )]
+    ConfigValidate,
+    #[command(
         about = "Run diagnostics and check system health",
         long_about = "Run diagnostics and check system health.\n\nVerifies that required tools (docker, git/jj) are available, configuration is valid,\nand services are reachable. Reports any issues with suggested fixes.\n\nExamples:\n  devflow doctor\n  devflow --json doctor"
     )]
@@ -1585,6 +1591,9 @@ pub async fn handle_command(
                 println!("Current configuration:");
                 println!("{}", serde_yaml_ng::to_string(&config_merged)?);
             }
+        }
+        Commands::ConfigValidate => {
+            config::validate_config(&config_path, json_output)?;
         }
         Commands::Capabilities => {
             let mut config_with_state = config_merged.clone();

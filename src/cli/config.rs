@@ -2,6 +2,134 @@ use anyhow::{Context, Result};
 use devflow_core::config::{Config, EffectiveConfig};
 use devflow_core::state::LocalStateManager;
 use devflow_core::vcs;
+use std::path::PathBuf;
+
+/// Known top-level keys in .devflow.yml
+const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
+    "name", "git", "behavior", "services", "worktree", "hooks", "execute", "merge", "commit",
+    "agent", "sandbox", "proxy",
+];
+
+/// Validate the configuration file for errors and unknown fields.
+pub(super) fn validate_config(config_path: &Option<PathBuf>, json_output: bool) -> Result<()> {
+    let path = config_path
+        .as_ref()
+        .context("No configuration file found. Run 'devflow init' to create one.")?;
+
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+
+    let mut errors: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    // 1. Parse as YAML and check for syntax errors
+    let raw: serde_yaml_ng::Value = match serde_yaml_ng::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            errors.push(format!("YAML syntax error: {}", e));
+            return report_validation(&errors, &warnings, json_output);
+        }
+    };
+
+    // 2. Check for unknown top-level keys
+    if let serde_yaml_ng::Value::Mapping(map) = &raw {
+        for key in map.keys() {
+            if let serde_yaml_ng::Value::String(k) = key {
+                if !KNOWN_TOP_LEVEL_KEYS.contains(&k.as_str()) {
+                    warnings.push(format!("Unknown top-level key '{}'", k));
+                }
+            }
+        }
+    }
+
+    // 3. Try loading via the normal Config loader
+    match Config::from_file(path) {
+        Ok(_config) => {
+            // Config loaded successfully — additional checks could go here
+        }
+        Err(e) => {
+            errors.push(format!("Config loading failed: {:#}", e));
+        }
+    }
+
+    // 4. Check service entries for type/service_type consistency
+    if let serde_yaml_ng::Value::Mapping(map) = &raw {
+        if let Some(serde_yaml_ng::Value::Sequence(services)) = map.get("services") {
+            for (idx, svc) in services.iter().enumerate() {
+                if let serde_yaml_ng::Value::Mapping(svc_map) = svc {
+                    let fallback_name = format!("#{}", idx);
+                    let name = svc_map
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&fallback_name);
+                    let svc_type = svc_map
+                        .get("service_type")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| svc_map.get("type").and_then(|v| v.as_str()));
+
+                    // Check for known service types
+                    if let Some(st) = svc_type {
+                        let known_types = ["postgres", "clickhouse", "mysql", "generic", "plugin"];
+                        if !known_types.contains(&st) {
+                            warnings
+                                .push(format!("Service '{}': unknown service_type '{}'", name, st));
+                        }
+                    }
+
+                    // Check for type/provider consistency
+                    let provider_type = svc_map.get("type").and_then(|v| v.as_str());
+                    if let Some(pt) = provider_type {
+                        let known_providers = ["local", "neon", "dblab", "xata", "shared"];
+                        if !known_providers.contains(&pt) {
+                            warnings.push(format!(
+                                "Service '{}': unknown provider type '{}'",
+                                name, pt
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    report_validation(&errors, &warnings, json_output)
+}
+
+fn report_validation(errors: &[String], warnings: &[String], json_output: bool) -> Result<()> {
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "valid": errors.is_empty(),
+                "errors": errors,
+                "warnings": warnings,
+            }))?
+        );
+    } else {
+        if errors.is_empty() && warnings.is_empty() {
+            println!("✓ Configuration is valid.");
+        }
+        if !warnings.is_empty() {
+            println!("Warnings:");
+            for w in warnings {
+                println!("  ⚠ {}", w);
+            }
+        }
+        if !errors.is_empty() {
+            println!("Errors:");
+            for e in errors {
+                println!("  ✗ {}", e);
+            }
+        }
+    }
+    if !errors.is_empty() {
+        anyhow::bail!(
+            "Configuration validation failed with {} error(s)",
+            errors.len()
+        );
+    }
+    Ok(())
+}
 
 pub(super) fn yes_no(value: Option<bool>) -> &'static str {
     if value.unwrap_or(false) {
