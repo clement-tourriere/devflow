@@ -1,0 +1,164 @@
+use anyhow::Result;
+use devflow_core::config::Config;
+use devflow_core::vcs;
+use std::path::PathBuf;
+
+pub(super) async fn handle_remove_command(
+    config: &Config,
+    workspace_name: &str,
+    force: bool,
+    keep_services: bool,
+    config_path: &Option<std::path::PathBuf>,
+    json_output: bool,
+    non_interactive: bool,
+) -> Result<()> {
+    // ── CLI-specific safety checks ──────────────────────────────────
+    let vcs_repo = vcs::detect_vcs_provider(".").ok();
+
+    // Safety check: don't remove main workspace
+    if workspace_name == config.git.main_workspace {
+        anyhow::bail!("Cannot remove the main workspace '{}'", workspace_name);
+    }
+
+    // Safety check: don't remove the currently checked-out workspace
+    if let Some(ref repo) = vcs_repo {
+        if let Ok(Some(current)) = repo.current_workspace() {
+            if current == workspace_name {
+                anyhow::bail!(
+                    "Cannot remove workspace '{}' because it is currently checked out. Switch to another workspace first.",
+                    workspace_name
+                );
+            }
+        }
+    }
+
+    // Confirm unless --force (skip prompt in JSON/non-interactive mode — require --force)
+    if !force {
+        if json_output || non_interactive {
+            anyhow::bail!("Use --force to confirm removal in non-interactive or JSON output mode");
+        }
+        println!("This will remove:");
+        if vcs_repo.is_some() {
+            println!("  - VCS workspace: {}", workspace_name);
+        }
+        if let Some(ref repo) = vcs_repo {
+            if repo.worktree_path(workspace_name)?.is_some() {
+                println!("  - Worktree directory");
+            }
+        }
+        if !keep_services {
+            println!("  - Associated service workspaces");
+        }
+        print!("Continue? [y/N] ");
+        use std::io::Write;
+        std::io::stdout().flush()?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    // ── Delegate to core lifecycle ──────────────────────────────────
+    let approval_mode = if non_interactive || json_output {
+        devflow_core::workspace::hooks::HookApprovalMode::NonInteractive
+    } else {
+        devflow_core::workspace::hooks::HookApprovalMode::Interactive
+    };
+
+    let project_dir = config_path
+        .as_ref()
+        .and_then(|p| p.parent())
+        .map(|d| d.to_path_buf())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let options = devflow_core::workspace::delete::DeleteOptions {
+        lifecycle: devflow_core::workspace::LifecycleOptions {
+            skip_hooks: false,
+            skip_services: false,
+            hook_approval: approval_mode,
+            verbose_hooks: !json_output,
+            ..Default::default()
+        },
+        keep_services,
+        force,
+    };
+
+    let result = devflow_core::workspace::delete::delete_workspace(
+        config,
+        &project_dir,
+        workspace_name,
+        &options,
+    )
+    .await?;
+
+    // ── CLI-specific output ──────────────────────────────────────────
+    let service_failures = result.services.iter().filter(|r| !r.success).count();
+
+    if json_output {
+        let service_json: Vec<serde_json::Value> = result
+            .services
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "service": r.service_name,
+                    "success": r.success,
+                    "message": r.message,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": if service_failures == 0 && result.branch_deleted { "ok" } else { "error" },
+                "workspace": workspace_name,
+                "branch_deleted": result.branch_deleted,
+                "worktree_removed": result.worktree_removed,
+                "worktree_path": result.worktree_path,
+                "services_skipped": keep_services,
+                "service_failures": service_failures,
+                "service_results": service_json,
+            }))?
+        );
+    } else {
+        if result.worktree_removed {
+            if let Some(ref wt) = result.worktree_path {
+                println!("Removed worktree: {}", wt);
+            }
+        }
+        for r in &result.services {
+            if r.success {
+                println!("  [{}] {}", r.service_name, r.message);
+            } else {
+                println!("  [{}] Warning: {}", r.service_name, r.message);
+            }
+        }
+        if result.branch_deleted {
+            println!("Workspace deleted: {}", workspace_name);
+        }
+        if service_failures == 0 && result.branch_deleted {
+            println!("Workspace '{}' removed successfully.", workspace_name);
+        } else {
+            println!(
+                "Workspace '{}' removal completed with errors.",
+                workspace_name
+            );
+        }
+    }
+
+    if service_failures > 0 {
+        anyhow::bail!(
+            "Failed to remove service workspaces on {}/{} service(s)",
+            service_failures,
+            result.services.len()
+        );
+    }
+
+    if !result.branch_deleted {
+        anyhow::bail!("Failed to delete VCS workspace '{}'", workspace_name);
+    }
+
+    Ok(())
+}
