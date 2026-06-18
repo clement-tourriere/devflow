@@ -24,6 +24,7 @@ service-neon = ["devflow-core/service-neon"]
 service-dblab = ["devflow-core/service-dblab"]
 service-xata = ["devflow-core/service-xata"]
 llm = ["devflow-core/llm"]
+sandbox-landlock = ["devflow-core/sandbox-landlock"]
 
 [dependencies]
 # Core library

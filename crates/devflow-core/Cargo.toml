@@ -7,7 +7,7 @@ authors = ["Clément Tourrière <clement.tourriere@gmail.com>"]
 license = "MIT"
 
 [features]
-default = ["service-local", "service-neon", "service-dblab", "service-xata", "llm", "sandbox"]
+default = ["service-local", "service-neon", "service-dblab", "service-xata", "llm", "sandbox", "sandbox-landlock", "skills"]
 service-local = ["dep:bollard", "dep:rusqlite", "dep:rust-s3", "dep:tar", "dep:bytes", "dep:futures-util", "dep:tempfile", "dep:url"]
 service-neon = ["dep:reqwest"]
 service-dblab = ["dep:reqwest"]
