@@ -41,17 +41,17 @@ Two isolation models, chosen per service:
 
 ## Source (for code agents)
 
-- [src/cli.rs](src/cli.rs): Command routing, JSON/non-interactive behavior, multi-provider orchestration.
-- [src/agent.rs](src/agent.rs): AI agent integration (skill generation, context, rules).
-- [src/config/mod.rs](src/config/mod.rs): Config loading, 3-tier merging, env var overrides, validation.
-- [src/services/mod.rs](src/services/mod.rs): `ServiceProvider` trait — the interface all providers implement.
-- [src/services/factory.rs](src/services/factory.rs): Provider creation, dispatch, multi-provider orchestration.
-- [src/hooks/executor.rs](src/hooks/executor.rs): Hook execution engine, approval checks, conditions.
-- [src/hooks/template.rs](src/hooks/template.rs): MiniJinja template engine with custom filters.
-- [src/vcs/mod.rs](src/vcs/mod.rs): VCS abstraction (Git + Jujutsu), auto-detection.
-- [src/services/plugin.rs](src/services/plugin.rs): Plugin provider protocol (JSON-over-stdio).
+- [src/cli/mod.rs](src/cli/mod.rs): Command routing, JSON/non-interactive behavior, multi-provider orchestration.
+- [crates/devflow-core/src/agent.rs](crates/devflow-core/src/agent.rs): AI agent integration (skill generation, context, rules).
+- [crates/devflow-core/src/config/mod.rs](crates/devflow-core/src/config/mod.rs): Config loading, 3-tier merging, env var overrides, validation.
+- [crates/devflow-core/src/services/mod.rs](crates/devflow-core/src/services/mod.rs): `ServiceProvider` trait — the interface all providers implement.
+- [crates/devflow-core/src/services/factory.rs](crates/devflow-core/src/services/factory.rs): Provider creation, dispatch, multi-provider orchestration.
+- [crates/devflow-core/src/hooks/executor.rs](crates/devflow-core/src/hooks/executor.rs): Hook execution engine, approval checks, conditions.
+- [crates/devflow-core/src/hooks/template.rs](crates/devflow-core/src/hooks/template.rs): MiniJinja template engine with custom filters.
+- [crates/devflow-core/src/vcs/mod.rs](crates/devflow-core/src/vcs/mod.rs): VCS abstraction (Git + Jujutsu), auto-detection.
+- [crates/devflow-core/src/services/plugin.rs](crates/devflow-core/src/services/plugin.rs): Plugin provider protocol (JSON-over-stdio).
 
 ## Optional
 
-- [DEVFLOW_PLAN.md](DEVFLOW_PLAN.md): Historical design notes and architecture decisions.
+- [docs/history/DEVFLOW_PLAN.md](docs/history/DEVFLOW_PLAN.md): Historical design notes and architecture decisions.
 - [llms-full.txt](llms-full.txt): Comprehensive agent context (all commands, config schema, hook phases).

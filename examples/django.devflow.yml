@@ -11,9 +11,7 @@ git:
     - develop
 
 behavior:
-  auto_cleanup: true
   max_workspaces: 5
-  naming_strategy: prefix
 
 services:
   - name: app-db

@@ -21,8 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Hook engine** — MiniJinja-templated lifecycle hooks (15 phases) with approval system and built-in recipes.
 - **AI tool config sync** — Auto-copies `.claude/`, `.cursor/`, `.opencode/`, `.agents/` into worktrees; `sync-ai-configs` merges back.
 - **AI commit messages** — `devflow commit --ai` generates commit messages via LLM (CLI-first, API fallback).
-- **AI agent integration** — `devflow agent start/status/context/skill/docs` for managing AI coding agents in isolated workspaces.
-- **Native reverse proxy** — Auto-discovers Docker containers and serves them via HTTPS `*.localhost` domains with auto-generated certificates.
+- **AI agent integration** — `devflow agent status/context/skill` for managing AI coding agents in isolated workspaces; launch agents with `devflow switch -c <workspace> -x <command>`.
+- **Native reverse proxy** — Auto-discovers Docker containers and serves them via HTTPS `*.local` domains with auto-generated certificates.
 - **Desktop GUI** — Tauri 2 desktop app with React frontend for managing projects, workspaces, services, hooks, proxy, and configuration.
 - **TUI** — Ratatui-based terminal dashboard.
 - **Seed support** — Seed databases from PostgreSQL URLs, local dump files, or S3.

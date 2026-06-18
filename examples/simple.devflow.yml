@@ -11,9 +11,7 @@ git:
     - master
 
 behavior:
-  auto_cleanup: false
   max_workspaces: 10
-  naming_strategy: prefix
 
 # Single service using modern services array syntax
 services:

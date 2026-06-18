@@ -11,9 +11,7 @@ git:
     - develop
 
 behavior:
-  auto_cleanup: true
   max_workspaces: 10
-  naming_strategy: prefix
 
 # Multiple services — each service gets its own workspace per git workspace
 services:

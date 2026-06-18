@@ -57,7 +57,7 @@ VERSION=$(grep '^version' "$ROOT_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*
 
 # Extract hook phases from source
 extract_hook_phases() {
-  grep -oP '(?<=HookPhase::)\w+' "$ROOT_DIR/src/hooks/mod.rs" \
+  grep -oP '(?<=HookPhase::)\w+' "$ROOT_DIR/crates/devflow-core/src/hooks/mod.rs" \
     | grep -v Custom \
     | sort -u \
     | while read -r variant; do
@@ -115,19 +115,19 @@ HEADER
 
 ## Source (for code agents)
 
-- [src/cli.rs](src/cli.rs): Command routing, JSON/non-interactive behavior, multi-provider orchestration.
-- [src/agent.rs](src/agent.rs): AI agent integration (skill generation, context, rules).
-- [src/config/mod.rs](src/config/mod.rs): Config loading, 3-tier merging, env var overrides, validation.
-- [src/services/mod.rs](src/services/mod.rs): `ServiceProvider` trait — the interface all providers implement.
-- [src/services/factory.rs](src/services/factory.rs): Provider creation, dispatch, multi-provider orchestration.
-- [src/hooks/executor.rs](src/hooks/executor.rs): Hook execution engine, approval checks, conditions.
-- [src/hooks/template.rs](src/hooks/template.rs): MiniJinja template engine with custom filters.
-- [src/vcs/mod.rs](src/vcs/mod.rs): VCS abstraction (Git + Jujutsu), auto-detection.
-- [src/services/plugin.rs](src/services/plugin.rs): Plugin provider protocol (JSON-over-stdio).
+- [src/cli/mod.rs](src/cli/mod.rs): Command routing, JSON/non-interactive behavior, multi-provider orchestration.
+- [crates/devflow-core/src/agent.rs](crates/devflow-core/src/agent.rs): AI agent integration (skill generation, context, rules).
+- [crates/devflow-core/src/config/mod.rs](crates/devflow-core/src/config/mod.rs): Config loading, 3-tier merging, env var overrides, validation.
+- [crates/devflow-core/src/services/mod.rs](crates/devflow-core/src/services/mod.rs): `ServiceProvider` trait — the interface all providers implement.
+- [crates/devflow-core/src/services/factory.rs](crates/devflow-core/src/services/factory.rs): Provider creation, dispatch, multi-provider orchestration.
+- [crates/devflow-core/src/hooks/executor.rs](crates/devflow-core/src/hooks/executor.rs): Hook execution engine, approval checks, conditions.
+- [crates/devflow-core/src/hooks/template.rs](crates/devflow-core/src/hooks/template.rs): MiniJinja template engine with custom filters.
+- [crates/devflow-core/src/vcs/mod.rs](crates/devflow-core/src/vcs/mod.rs): VCS abstraction (Git + Jujutsu), auto-detection.
+- [crates/devflow-core/src/services/plugin.rs](crates/devflow-core/src/services/plugin.rs): Plugin provider protocol (JSON-over-stdio).
 
 ## Optional
 
-- [DEVFLOW_PLAN.md](DEVFLOW_PLAN.md): Historical design notes and architecture decisions.
+- [docs/history/DEVFLOW_PLAN.md](docs/history/DEVFLOW_PLAN.md): Historical design notes and architecture decisions.
 - [llms-full.txt](llms-full.txt): Comprehensive agent context (all commands, config schema, hook phases).
 LINKS
 }
@@ -278,11 +278,10 @@ INTRO
 
 | Command | Description |
 |---|---|
-| `devflow agent start <task> [--command <cmd>] [--dry-run] [-- <prompt>]` | Start AI agent in isolated workspace |
+| `devflow switch -c <ws> -x <cmd> [--detach] [-- <args>]` | Launch an agent/command inside an isolated workspace |
 | `devflow agent status` | Show agent status across all workspaces |
 | `devflow agent context [--format json] [--workspace <b>]` | Output project context for agents |
-| `devflow agent skill [--target claude\|cursor\|opencode\|all]` | Generate AI tool skills/rules |
-| `devflow agent docs` | Generate AGENTS.md for this project |
+| `devflow agent skill` | Install bundled workspace skills (see `devflow skill` for full management) |
 
 ### Plugins
 
@@ -520,36 +519,46 @@ SECTION
 ```
 src/
   main.rs               CLI entry point (clap derive)
-  cli.rs                All command implementations (~7800 lines)
-  agent.rs              AI agent integration (skill generation, context, rules)
-  config/mod.rs         Config types, 3-tier merging, validation
-  services/
-    mod.rs              ServiceProvider trait
-    factory.rs          Provider creation + multi-provider orchestration
-    postgres/
-      local/            Docker provider (mod.rs, docker.rs, state.rs, storage/, seed.rs)
-      template.rs       PostgreSQL TEMPLATE provider
-      neon.rs           Neon cloud provider
-      dblab.rs          DBLab cloud provider
-      xata.rs           Xata cloud provider
-    clickhouse/local.rs ClickHouse Docker provider
-    mysql/local.rs      MySQL Docker provider
-    generic/mod.rs      Generic Docker provider
-    plugin.rs           Plugin provider (JSON-over-stdio)
-  hooks/
-    mod.rs              HookPhase, HookEntry, HooksConfig types
-    executor.rs         HookEngine execution with approval/conditions
-    template.rs         MiniJinja TemplateEngine with custom filters
-    approval.rs         ApprovalStore (YAML persistence with file locking)
-  vcs/
-    mod.rs              VcsProvider trait (Git + Jujutsu auto-detection)
-    git.rs              Git implementation (git2 crate)
-    jj.rs               Jujutsu implementation (jj CLI)
-    cow_worktree.rs     CoW worktree creation
-  state/local_state.rs  User-level state (SQLite)
-  docker/compose.rs     Docker Compose file parsing
-  database.rs           PostgreSQL template provider DB operations
-  llm.rs                LLM integration for AI commit messages (CLI-first + API fallback)
+  cli/                  Command implementations (mod.rs, workspace.rs, service.rs, hook.rs, ...)
+  tui/                  Ratatui terminal dashboard
+
+crates/devflow-core/    Core library (no CLI/TTY dependencies)
+  src/
+    agent.rs            AI agent integration (skill generation, context, rules)
+    config/mod.rs       Config types, 3-tier merging, validation
+    services/
+      mod.rs            ServiceProvider trait
+      factory.rs        Provider creation + multi-provider orchestration
+      postgres/
+        local/          Docker provider (mod.rs, docker.rs, state.rs, storage/, seed.rs)
+        neon.rs         Neon cloud provider
+        dblab.rs        DBLab cloud provider
+        xata.rs         Xata cloud provider
+      clickhouse/local.rs  ClickHouse Docker provider
+      mysql/local.rs    MySQL Docker provider
+      generic/mod.rs    Generic Docker provider
+      plugin.rs         Plugin provider (JSON-over-stdio)
+      shared/           Logical-isolation providers (redis, rustfs, clickhouse, container)
+    hooks/
+      mod.rs            HookPhase, HookEntry, HooksConfig types
+      executor.rs       HookEngine execution with approval/conditions
+      template.rs       MiniJinja TemplateEngine with custom filters
+      approval.rs       ApprovalStore (YAML persistence with file locking)
+    vcs/
+      mod.rs            VcsProvider trait (Git + Jujutsu auto-detection)
+      git.rs            Git implementation (git2 crate)
+      jj.rs             Jujutsu implementation (jj CLI)
+      cow_worktree.rs   CoW worktree creation
+    state/local_state.rs  User-level state (SQLite)
+    docker/             Docker discovery + compose parsing + settings
+    sandbox/            Workspace sandboxing (seatbelt on macOS, landlock on Linux)
+    skills/             Skill marketplace, install, cache, manifest
+    workspace/          Lifecycle orchestration (create, switch, delete, worktree, hooks)
+    llm.rs              LLM integration for AI commit messages (CLI-first + API fallback)
+
+crates/devflow-proxy/   Auto-HTTPS reverse proxy (hyper/rustls/bollard, mDNS)
+crates/devflow-terminal/ PTY manager for the Tauri GUI
+src-tauri/              Tauri 2 desktop GUI (wraps devflow-core)
 ```
 
 ## Primary references

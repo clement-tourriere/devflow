@@ -146,7 +146,7 @@ Every command supports `--json` and `--non-interactive`, and the worktree-per-ta
 ```bash
 devflow --json --non-interactive switch -c agent/task-42   # isolated env for the task
 devflow agent context --format json                        # project + connection context for the agent
-devflow agent start fix-login -- 'Fix the login timeout bug'
+devflow switch -c agent/fix-login -x claude -- 'Fix the login timeout bug'
 devflow commit --ai                                        # LLM-generated commit message
 devflow sync-ai-configs                                    # merge .claude/.cursor settings back to main
 ```
