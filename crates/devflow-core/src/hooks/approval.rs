@@ -233,3 +233,144 @@ fn set_owner_only(path: &std::path::Path) {
         let _ = path;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_store() -> ApprovalStore {
+        ApprovalStore::default()
+    }
+
+    fn insert_approval(store: &mut ApprovalStore, project: &str, command: &str) {
+        let hash = ApprovalStore::hash_command(command);
+        store
+            .projects
+            .entry(project.to_string())
+            .or_default()
+            .insert(
+                hash,
+                ApprovalRecord {
+                    command: command.to_string(),
+                    approved_at: chrono::Utc::now(),
+                },
+            );
+    }
+
+    #[test]
+    fn test_empty_store_approves_nothing() {
+        let store = make_store();
+        assert!(!store.is_approved("my-project", "echo hello"));
+        assert!(store.list_approved("my-project").is_empty());
+    }
+
+    #[test]
+    fn test_approved_command_is_recognized() {
+        let mut store = make_store();
+        insert_approval(&mut store, "proj-a", "echo hello");
+        assert!(store.is_approved("proj-a", "echo hello"));
+    }
+
+    #[test]
+    fn test_unapproved_command_not_recognized() {
+        let mut store = make_store();
+        insert_approval(&mut store, "proj-a", "echo hello");
+        assert!(!store.is_approved("proj-a", "echo goodbye"));
+        assert!(!store.is_approved("proj-a", "echo hello world"));
+    }
+
+    #[test]
+    fn test_projects_are_independent() {
+        let mut store = make_store();
+        insert_approval(&mut store, "proj-a", "echo hello");
+        assert!(store.is_approved("proj-a", "echo hello"));
+        assert!(!store.is_approved("proj-b", "echo hello"));
+    }
+
+    #[test]
+    fn test_list_approved_returns_records() {
+        let mut store = make_store();
+        insert_approval(&mut store, "proj-a", "echo hello");
+        insert_approval(&mut store, "proj-a", "npm test");
+        insert_approval(&mut store, "proj-b", "echo other");
+
+        let proj_a = store.list_approved("proj-a");
+        assert_eq!(proj_a.len(), 2);
+        let commands: Vec<&str> = proj_a.iter().map(|r| r.command.as_str()).collect();
+        assert!(commands.contains(&"echo hello"));
+        assert!(commands.contains(&"npm test"));
+
+        let proj_b = store.list_approved("proj-b");
+        assert_eq!(proj_b.len(), 1);
+        assert_eq!(proj_b[0].command, "echo other");
+
+        assert!(store.list_approved("proj-c").is_empty());
+    }
+
+    #[test]
+    fn test_clear_project_removes_only_that_project() {
+        let mut store = make_store();
+        insert_approval(&mut store, "proj-a", "echo hello");
+        insert_approval(&mut store, "proj-b", "echo world");
+
+        // clear_project calls refresh_from_disk + save, which we can't do
+        // in a unit test without a real config dir. Instead, test the
+        // in-memory removal directly.
+        store.projects.remove("proj-a");
+
+        assert!(!store.is_approved("proj-a", "echo hello"));
+        assert!(store.is_approved("proj-b", "echo world"));
+    }
+
+    #[test]
+    fn test_hash_is_deterministic() {
+        let h1 = ApprovalStore::hash_command("echo hello");
+        let h2 = ApprovalStore::hash_command("echo hello");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_different_commands_have_different_hashes() {
+        let h1 = ApprovalStore::hash_command("echo hello");
+        let h2 = ApprovalStore::hash_command("echo goodbye");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_format_is_16_hex_chars() {
+        let hash = ApprovalStore::hash_command("anything");
+        assert_eq!(hash.len(), 16);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_exact_command_string_checked_not_just_hash() {
+        // is_approved hashes the INPUT command and looks up that hash, then
+        // verifies the stored command text matches. This means:
+        // 1. A different command with a different hash → not found → false.
+        // 2. Even if a collision existed (different command, same hash), the
+        //    text check would prevent false approval.
+        // Here we verify the text-match defense by inserting a record with
+        // a known hash/command, then confirming that the same hash with a
+        // tampered command text is NOT approved for the original command.
+        let mut store = make_store();
+        let real_command = "echo safe";
+        insert_approval(&mut store, "proj", real_command);
+
+        // Original command is approved
+        assert!(store.is_approved("proj", real_command));
+
+        // Tamper with the stored command text (simulating a corrupted/colliding record)
+        let hash = ApprovalStore::hash_command(real_command);
+        if let Some(cmds) = store.projects.get_mut("proj") {
+            if let Some(record) = cmds.get_mut(&hash) {
+                record.command = "echo EVIL".to_string();
+            }
+        }
+
+        // Now the original command should NOT be approved — the stored text
+        // ("echo EVIL") doesn't match the input ("echo safe"), even though
+        // the hash matches.
+        assert!(!store.is_approved("proj", real_command));
+    }
+}
