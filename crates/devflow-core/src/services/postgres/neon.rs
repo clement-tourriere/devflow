@@ -5,12 +5,24 @@ use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NeonProvider {
     client: Client,
     api_key: String,
     project_id: String,
     base_url: String,
+}
+
+impl std::fmt::Debug for NeonProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never expose the API key via {:?} — it would leak into logs.
+        f.debug_struct("NeonProvider")
+            .field("client", &self.client)
+            .field("api_key", &"<redacted>")
+            .field("project_id", &self.project_id)
+            .field("base_url", &self.base_url)
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize)]

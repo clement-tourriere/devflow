@@ -190,10 +190,12 @@ impl GenericDockerProvider {
 
         // Determine what container port to map
         if let Some(container_port_key) = self.container_port() {
+            // Bind to loopback only — dev services should not be reachable from
+            // the LAN. Users needing external access can publish ports manually.
             port_bindings.insert(
                 container_port_key,
                 Some(vec![PortBinding {
-                    host_ip: Some("0.0.0.0".to_string()),
+                    host_ip: Some("127.0.0.1".to_string()),
                     host_port: Some(port.to_string()),
                 }]),
             );

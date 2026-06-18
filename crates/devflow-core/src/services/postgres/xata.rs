@@ -7,13 +7,26 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_BASE_URL: &str = "https://api.xata.tech";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct XataProvider {
     client: Client,
     api_key: String,
     base_url: String,
     organization_id: String,
     project_id: String,
+}
+
+impl std::fmt::Debug for XataProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never expose the API key via {:?} — it would leak into logs.
+        f.debug_struct("XataProvider")
+            .field("client", &self.client)
+            .field("api_key", &"<redacted>")
+            .field("base_url", &self.base_url)
+            .field("organization_id", &self.organization_id)
+            .field("project_id", &self.project_id)
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -133,7 +133,14 @@ impl LocalProvider {
     }
 
     fn store(&self) -> std::sync::MutexGuard<'_, Store> {
-        self.store.lock().unwrap()
+        // Recover from a poisoned mutex instead of panicking. With
+        // `panic = "abort"` a panic terminates the process, but a poisoned
+        // lock can also occur across `.await` boundaries in threaded runtimes;
+        // recovering the inner store keeps the provider usable after a
+        // transient failure rather than cascading into every subsequent call.
+        self.store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     async fn ensure_project(&self) -> Result<model::Project> {

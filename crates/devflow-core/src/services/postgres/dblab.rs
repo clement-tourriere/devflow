@@ -5,11 +5,22 @@ use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DBLabProvider {
     client: Client,
     api_url: String,
     auth_token: String,
+}
+
+impl std::fmt::Debug for DBLabProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never expose the auth token via {:?} — it would leak into logs.
+        f.debug_struct("DBLabProvider")
+            .field("client", &self.client)
+            .field("api_url", &self.api_url)
+            .field("auth_token", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize)]

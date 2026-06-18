@@ -180,14 +180,14 @@ impl ClickHouseLocalProvider {
         port_bindings.insert(
             format!("{CLICKHOUSE_HTTP_PORT}/tcp"),
             Some(vec![PortBinding {
-                host_ip: Some("0.0.0.0".to_string()),
+                host_ip: Some("127.0.0.1".to_string()),
                 host_port: Some(http_port.to_string()),
             }]),
         );
         port_bindings.insert(
             format!("{CLICKHOUSE_NATIVE_PORT}/tcp"),
             Some(vec![PortBinding {
-                host_ip: Some("0.0.0.0".to_string()),
+                host_ip: Some("127.0.0.1".to_string()),
                 host_port: Some(native_port.to_string()),
             }]),
         );

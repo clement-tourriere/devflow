@@ -99,10 +99,13 @@ pub async fn ensure_running_container(docker: &Docker, spec: &GlobalContainerSpe
     ensure_image(docker, &spec.image).await?;
 
     let mut port_bindings: PortMap = HashMap::new();
+    // Bind to loopback only — dev databases should not be reachable from the
+    // LAN. Users who genuinely need external access can publish ports manually
+    // via `docker` or a custom `type: generic` service config.
     port_bindings.insert(
         format!("{}/tcp", spec.container_port),
         Some(vec![PortBinding {
-            host_ip: Some("0.0.0.0".to_string()),
+            host_ip: Some("127.0.0.1".to_string()),
             host_port: Some(spec.host_port.to_string()),
         }]),
     );
@@ -110,7 +113,7 @@ pub async fn ensure_running_container(docker: &Docker, spec: &GlobalContainerSpe
         port_bindings.insert(
             format!("{container}/tcp"),
             Some(vec![PortBinding {
-                host_ip: Some("0.0.0.0".to_string()),
+                host_ip: Some("127.0.0.1".to_string()),
                 host_port: Some(host.to_string()),
             }]),
         );

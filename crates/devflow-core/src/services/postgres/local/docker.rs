@@ -205,7 +205,7 @@ impl DockerRuntime {
         port_bindings.insert(
             "5432/tcp".to_string(),
             Some(vec![PortBinding {
-                host_ip: Some("0.0.0.0".to_string()),
+                host_ip: Some("127.0.0.1".to_string()),
                 host_port: Some(spec.port.to_string()),
             }]),
         );
