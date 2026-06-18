@@ -1139,7 +1139,7 @@ pub(super) async fn handle_service_provider_command(
             }
         }
         // Add, Remove, List, Status are handled by handle_service_dispatch
-        _ => unreachable!(),
+        _ => anyhow::bail!("service subcommand is not handled by this dispatch path"),
     }
 
     Ok(())
@@ -1809,7 +1809,7 @@ async fn handle_orchestrated_mutation(
                 );
             }
         }
-        _ => unreachable!(),
+        _ => anyhow::bail!("service provider subcommand is not handled by this dispatch path"),
     }
 
     Ok(())

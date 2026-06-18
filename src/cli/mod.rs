@@ -369,8 +369,8 @@ Examples:
 
     // ── AI Agent ──
     #[command(
-        about = "AI agent integration (start, status, context, skill)",
-        long_about = "AI agent integration.\n\nManage AI coding agents that work in isolated workspace environments.\nLaunch agents into worktrees, track their status, and install\nproject-specific skills.\n\nExamples:\n  devflow agent start fix-login -- 'Fix the login timeout bug'\n  devflow agent status\n  devflow agent context\n  devflow agent skill",
+        about = "AI agent integration (status, context, skill)",
+        long_about = "AI agent integration.\n\nManage AI coding agents that work in isolated workspace environments.\nTrack agent status, emit project context, and install project-specific skills.\n\nTo launch an agent inside an isolated workspace, use `devflow switch -c <workspace> -x <command>`.\n\nExamples:\n  devflow agent status\n  devflow agent context\n  devflow agent context --format json\n  devflow agent skill\n  devflow switch -c agent/fix-login -x claude -- 'Fix the login timeout bug'",
         hide = true
     )]
     Agent {
@@ -386,7 +386,7 @@ Examples:
     // ── Proxy ──
     #[command(
         about = "Local reverse proxy (auto-HTTPS for Docker containers)",
-        long_about = "Local reverse proxy for Docker containers.\n\nAuto-discovers Docker containers and provides HTTPS access via\n*.localhost domains. Uses a local CA for certificate generation.\n\nExamples:\n  devflow proxy start                # Start the proxy\n  devflow proxy start --daemon       # Start in background\n  devflow proxy stop                 # Stop the proxy\n  devflow proxy status               # Show proxy status\n  devflow proxy list                 # List proxied containers\n  devflow proxy trust install        # Install CA certificate\n  devflow proxy trust verify         # Check if CA is trusted\n  devflow proxy trust remove         # Remove CA from trust store\n  devflow proxy trust info           # Show trust instructions",
+        long_about = "Local reverse proxy for Docker containers.\n\nAuto-discovers Docker containers and provides HTTPS access via\n*.local domains (configurable with --domain-suffix). Uses a local CA\nfor certificate generation.\n\nExamples:\n  devflow proxy start                # Start the proxy\n  devflow proxy start --daemon       # Start in background\n  devflow proxy stop                 # Stop the proxy\n  devflow proxy status               # Show proxy status\n  devflow proxy list                 # List proxied containers\n  devflow proxy trust install        # Install CA certificate\n  devflow proxy trust verify         # Check if CA is trusted\n  devflow proxy trust remove         # Remove CA from trust store\n  devflow proxy trust info           # Show trust instructions",
         hide = true
     )]
     Proxy {
@@ -1755,7 +1755,9 @@ pub async fn handle_command(
             let mut cmd = crate::Cli::command();
             clap_complete::generate(shell, &mut cmd, "devflow", &mut std::io::stdout());
         }
-        _ => unreachable!(),
+        _ => {
+            anyhow::bail!("command is not handled here; it should be dispatched elsewhere");
+        }
     }
 
     Ok(())

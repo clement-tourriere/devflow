@@ -155,7 +155,13 @@ end
     Ok(())
 }
 
-pub(super) fn run_doctor_pre_checks(config: &Config, config_path: &Option<std::path::PathBuf>) {
+/// Run doctor pre-checks (VCS, config, hooks). Returns `true` if every check
+/// passed (warnings don't count as failures), `false` if any `[FAIL]` occurred.
+pub(super) fn run_doctor_pre_checks(
+    config: &Config,
+    config_path: &Option<std::path::PathBuf>,
+) -> bool {
+    let mut healthy = true;
     println!("General:");
 
     // Config file
@@ -170,7 +176,10 @@ pub(super) fn run_doctor_pre_checks(config: &Config, config_path: &Option<std::p
     let vcs_repo = vcs::detect_vcs_provider(".");
     match &vcs_repo {
         Ok(vcs) => println!("  [OK] {} repository: detected", vcs.provider_name()),
-        Err(_) => println!("  [FAIL] VCS repository: not found"),
+        Err(_) => {
+            println!("  [FAIL] VCS repository: not found");
+            healthy = false;
+        }
     }
 
     // VCS hooks
@@ -263,11 +272,15 @@ pub(super) fn run_doctor_pre_checks(config: &Config, config_path: &Option<std::p
     if let Some(ref regex_pattern) = config.git.workspace_filter_regex {
         match regex::Regex::new(regex_pattern) {
             Ok(_) => println!("  [OK] Workspace filter regex: valid"),
-            Err(e) => println!("  [FAIL] Workspace filter regex: {}", e),
+            Err(e) => {
+                println!("  [FAIL] Workspace filter regex: {}", e);
+                healthy = false;
+            }
         }
     }
 
     println!();
+    healthy
 }
 
 pub(super) fn show_effective_config(effective_config: &EffectiveConfig) -> Result<()> {

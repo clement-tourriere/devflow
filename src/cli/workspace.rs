@@ -1279,9 +1279,11 @@ pub(super) async fn handle_branch_command(
             .await;
         }
         super::Commands::Doctor => {
-            // Run pre-checks (VCS, config, hooks) unconditionally — they never fail
+            // Run pre-checks (VCS, config, hooks). Track failures so `doctor`
+            // can exit non-zero — usable as a CI/script health gate.
+            let mut healthy = true;
             if !json_output {
-                super::config::run_doctor_pre_checks(config, config_path);
+                healthy = super::config::run_doctor_pre_checks(config, config_path);
             }
             let has_multiple_services = config.resolve_services().len() > 1;
             if database_name.is_none() && has_multiple_services {
@@ -1297,6 +1299,7 @@ pub(super) async fn handle_branch_command(
             match services::factory::resolve_provider(config, database_name).await {
                 Ok(named) => {
                     let report = named.provider.doctor().await?;
+                    let service_healthy = report.checks.iter().all(|c| c.available);
                     if json_output {
                         println!(
                             "{}",
@@ -1314,6 +1317,7 @@ pub(super) async fn handle_branch_command(
                             println!("  [{}] {}: {}", icon, check.name, check.detail);
                         }
                     }
+                    healthy = healthy && service_healthy;
                 }
                 Err(_) => {
                     if json_output {
@@ -1332,6 +1336,9 @@ pub(super) async fn handle_branch_command(
                     }
                 }
             }
+            if !healthy {
+                anyhow::bail!("devflow doctor reported one or more failing checks");
+            }
         }
         super::Commands::GitHook {
             worktree,
@@ -1343,7 +1350,7 @@ pub(super) async fn handle_branch_command(
         super::Commands::WorktreeSetup => {
             super::git_hook::handle_worktree_setup(config, config_path).await?;
         }
-        _ => unreachable!(),
+        _ => anyhow::bail!("command is not handled by the workspace dispatch path"),
     }
 
     Ok(())
