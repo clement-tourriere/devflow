@@ -34,7 +34,7 @@ anyhow = "1.0"
 async-trait = "0.1"
 
 # Git operations
-git2 = { version = "0.20", default-features = false }
+git2 = { version = "0.21", default-features = false }
 
 # Text matching
 # Full default features: CommandGuard and workspace_matches patterns use
