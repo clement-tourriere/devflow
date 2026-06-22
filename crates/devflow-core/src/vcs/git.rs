@@ -198,7 +198,13 @@ impl GitRepository {
         // Check origin first, then others
         let remote_names: Vec<&str> = if remotes.iter().flatten().flatten().any(|r| r == "origin") {
             let mut names = vec!["origin"];
-            names.extend(remotes.iter().flatten().flatten().filter(|&r| r != "origin"));
+            names.extend(
+                remotes
+                    .iter()
+                    .flatten()
+                    .flatten()
+                    .filter(|&r| r != "origin"),
+            );
             names
         } else {
             remotes.iter().flatten().flatten().collect()
