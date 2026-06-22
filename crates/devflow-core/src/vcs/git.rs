@@ -108,7 +108,7 @@ impl GitRepository {
     pub fn get_current_workspace(&self) -> Result<Option<String>> {
         match self.repo.head() {
             Ok(head) => {
-                if let Some(workspace_name) = head.shorthand() {
+                if let Ok(workspace_name) = head.shorthand() {
                     Ok(Some(workspace_name.to_string()))
                 } else {
                     Ok(None)
@@ -119,7 +119,7 @@ impl GitRepository {
                 // Read the symbolic target of HEAD to get the workspace name.
                 match self.repo.find_reference("HEAD") {
                     Ok(head_ref) => {
-                        if let Some(target) = head_ref.symbolic_target() {
+                        if let Ok(Some(target)) = head_ref.symbolic_target() {
                             // target is e.g. "refs/heads/main"
                             let workspace_name =
                                 target.strip_prefix("refs/heads/").unwrap_or(target);
@@ -196,12 +196,12 @@ impl GitRepository {
         let remotes = self.repo.remotes()?;
 
         // Check origin first, then others
-        let remote_names: Vec<&str> = if remotes.iter().any(|r| r == Some("origin")) {
+        let remote_names: Vec<&str> = if remotes.iter().flatten().flatten().any(|r| r == "origin") {
             let mut names = vec!["origin"];
-            names.extend(remotes.iter().flatten().filter(|&r| r != "origin"));
+            names.extend(remotes.iter().flatten().flatten().filter(|&r| r != "origin"));
             names
         } else {
-            remotes.iter().flatten().collect()
+            remotes.iter().flatten().flatten().collect()
         };
 
         for remote_name in remote_names {
@@ -209,7 +209,7 @@ impl GitRepository {
                 // Look for HEAD reference in remote
                 let head_ref = format!("refs/remotes/{}/HEAD", remote_name);
                 if let Ok(reference) = self.repo.find_reference(&head_ref) {
-                    if let Some(target) = reference.symbolic_target() {
+                    if let Ok(Some(target)) = reference.symbolic_target() {
                         // Extract workspace name from refs/remotes/origin/main -> main
                         let prefix = format!("refs/remotes/{}/", remote_name);
                         if target.starts_with(&prefix) {
@@ -383,7 +383,7 @@ fn ensure_worktree_clean(path: &Path) -> Result<()> {
 
     let dirty: Vec<String> = statuses
         .iter()
-        .filter_map(|e| e.path().map(String::from))
+        .filter_map(|e| e.path().ok().map(String::from))
         .collect();
 
     if !dirty.is_empty() {
@@ -509,7 +509,7 @@ impl VcsProvider for GitRepository {
 
         let refname = reference
             .name()
-            .ok_or_else(|| anyhow::anyhow!("Workspace reference has invalid UTF-8 name"))?;
+            .context("Workspace reference has invalid UTF-8 name")?;
         self.repo
             .set_head(refname)
             .with_context(|| format!("Failed to set HEAD to workspace '{}'", name))?;
@@ -547,7 +547,7 @@ impl VcsProvider for GitRepository {
         let worktree_names = self.repo.worktrees().context("Failed to list worktrees")?;
 
         for wt_name in worktree_names.iter() {
-            let Some(name) = wt_name else { continue };
+            let Ok(Some(name)) = wt_name else { continue };
 
             if let Ok(wt) = self.repo.find_worktree(name) {
                 let wt_path = wt.path().to_path_buf();
@@ -555,7 +555,7 @@ impl VcsProvider for GitRepository {
                 // Get workspace for this worktree by opening the repo at that path
                 let wt_branch = if let Ok(wt_repo) = Repository::open(&wt_path) {
                     if let Ok(head) = wt_repo.head() {
-                        head.shorthand().map(|s| s.to_string())
+                        head.shorthand().ok().map(|s| s.to_string())
                     } else {
                         None
                     }
@@ -640,7 +640,7 @@ impl VcsProvider for GitRepository {
         let worktree_names = self.repo.worktrees().context("Failed to list worktrees")?;
 
         for wt_name in worktree_names.iter() {
-            let Some(name) = wt_name else { continue };
+            let Ok(Some(name)) = wt_name else { continue };
 
             if let Ok(wt) = self.repo.find_worktree(name) {
                 if wt.path() == path {
@@ -669,14 +669,14 @@ impl VcsProvider for GitRepository {
         let worktree_names = self.repo.worktrees().context("Failed to list worktrees")?;
 
         for wt_name in worktree_names.iter() {
-            let Some(name) = wt_name else { continue };
+            let Ok(Some(name)) = wt_name else { continue };
 
             if let Ok(wt) = self.repo.find_worktree(name) {
                 let wt_path = wt.path().to_path_buf();
                 // Check if this worktree has the target workspace checked out
                 if let Ok(wt_repo) = Repository::open(&wt_path) {
                     if let Ok(head) = wt_repo.head() {
-                        if head.shorthand() == Some(workspace) {
+                        if head.shorthand().ok() == Some(workspace) {
                             return Ok(Some(wt_path));
                         }
                     }
@@ -835,7 +835,7 @@ impl VcsProvider for GitRepository {
 
         for entry in statuses.iter() {
             if entry.status().contains(git2::Status::IGNORED) {
-                if let Some(path_str) = entry.path() {
+                if let Ok(path_str) = entry.path() {
                     let full_path = root.join(path_str);
                     // Only include actual files (not directories)
                     if full_path.is_file() {
@@ -866,7 +866,7 @@ impl VcsProvider for GitRepository {
 
         for entry in statuses.iter() {
             if entry.status().contains(git2::Status::IGNORED) {
-                if let Some(path_str) = entry.path() {
+                if let Ok(path_str) = entry.path() {
                     // git2 may append '/' for directories
                     let cleaned = path_str.trim_end_matches('/');
                     ignored.push(PathBuf::from(cleaned));
