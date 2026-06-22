@@ -45,3 +45,8 @@ docs-site/.astro/
 
 # OpenCode
 .opencode/
+
+# auto-merge-prs.sh runtime artifacts
+.auto-merge.pid
+auto-merge.out.log
+.devflow-automerge.jsonl
