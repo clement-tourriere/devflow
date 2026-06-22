@@ -1,5 +1,4 @@
 [tools]
-cargo = "latest"
 rust = "latest"
 hk = "latest"
 pkl = "latest"
