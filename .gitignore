@@ -31,8 +31,19 @@ Thumbs.db
 .env.local
 .env.*.local
 
+# Secrets / certificates (never commit key material)
+*.pem
+*.key
+*.crt
+*.csr
+.devflow/
+
 # Logs
 *.log
+
+# Python tooling (scripts use ruff)
+.ruff_cache/
+__pycache__/
 
 # Frontend
 ui/node_modules/

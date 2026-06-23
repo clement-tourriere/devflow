@@ -1,5 +1,10 @@
 [tools]
-rust = "latest"
+# Pin Rust to the same channel as rust-toolchain.toml for reproducible
+# builds across contributors and CI. (rust-toolchain.toml still governs the
+# actual toolchain selection; this just ensures mise installs a compatible
+# Rust rather than "latest", which could drift ahead of the pinned channel.)
+rust = "1.93.0"
+cargo = "latest"
 hk = "latest"
 pkl = "latest"
 bun = "1.2"
