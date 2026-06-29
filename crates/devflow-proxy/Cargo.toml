@@ -45,6 +45,9 @@ dirs = "6.0"
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["signal"] }
+
 # mDNS/Bonjour advertising (system dns_sd API) — macOS only
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

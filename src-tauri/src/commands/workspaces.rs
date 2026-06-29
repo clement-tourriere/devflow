@@ -1,3 +1,4 @@
+use devflow_core::processes::ProcessResult;
 use devflow_core::state::LocalStateManager;
 use devflow_core::workspace::hooks::HookApprovalMode;
 use devflow_core::workspace::{self, LifecycleOptions, WorkspaceCreationMode};
@@ -163,6 +164,7 @@ pub async fn get_connection_info(
 #[derive(Serialize)]
 pub struct CreateWorkspaceResult {
     pub services: Vec<OrchestrationResultDto>,
+    pub processes: Vec<ProcessResult>,
     pub worktree_path: Option<String>,
     pub hooks: Vec<HookRunResultDto>,
 }
@@ -180,6 +182,14 @@ pub struct HookRunResultDto {
 #[derive(Serialize)]
 pub struct SwitchWorkspaceResult {
     pub services: Vec<OrchestrationResultDto>,
+    pub processes: Vec<ProcessResult>,
+    pub hooks: Vec<HookRunResultDto>,
+}
+
+#[derive(Serialize)]
+pub struct DeleteWorkspaceResult {
+    pub services: Vec<OrchestrationResultDto>,
+    pub processes: Vec<ProcessResult>,
     pub hooks: Vec<HookRunResultDto>,
 }
 
@@ -229,6 +239,7 @@ pub async fn create_workspace(
                 message: r.message,
             })
             .collect(),
+        processes: result.processes,
         worktree_path: result
             .worktree
             .as_ref()
@@ -288,6 +299,7 @@ pub async fn switch_workspace(
                 message: r.message,
             })
             .collect(),
+        processes: result.processes,
         hooks: result
             .hooks
             .into_iter()
@@ -319,7 +331,7 @@ pub async fn delete_workspace(
     app: tauri::AppHandle,
     project_path: String,
     workspace_name: String,
-) -> Result<Vec<OrchestrationResultDto>, String> {
+) -> Result<DeleteWorkspaceResult, String> {
     let project_dir = std::path::Path::new(&project_path);
     let config_path = project_dir.join(".devflow.yml");
     let cfg = if config_path.exists() {
@@ -338,15 +350,30 @@ pub async fn delete_workspace(
         .await
         .map_err(crate::commands::format_error)?;
 
-    let response = result
-        .services
-        .into_iter()
-        .map(|r| OrchestrationResultDto {
-            service_name: r.service_name,
-            success: r.success,
-            message: r.message,
-        })
-        .collect();
+    let response = DeleteWorkspaceResult {
+        services: result
+            .services
+            .into_iter()
+            .map(|r| OrchestrationResultDto {
+                service_name: r.service_name,
+                success: r.success,
+                message: r.message,
+            })
+            .collect(),
+        processes: result.processes,
+        hooks: result
+            .hooks
+            .into_iter()
+            .map(|r| HookRunResultDto {
+                phase: r.phase,
+                succeeded: r.succeeded,
+                failed: r.failed,
+                skipped: r.skipped,
+                background: r.background,
+                errors: r.errors,
+            })
+            .collect(),
+    };
 
     crate::update_tray_menu(&app);
     Ok(response)
@@ -409,6 +436,7 @@ fn gui_lifecycle_options() -> LifecycleOptions {
     LifecycleOptions {
         skip_hooks: false,
         skip_services: false,
+        skip_processes: false,
         hook_approval: HookApprovalMode::NoApproval,
         verbose_hooks: false,
         trigger_source: Some("gui".to_string()),

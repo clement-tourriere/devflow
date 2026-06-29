@@ -42,6 +42,7 @@ devflow switch feature/auth --dry-run
 | `-d, --detach` | run the `-x` command in a detached tmux/zellij session |
 | `-o, --open` | open an interactive multiplexer session in the workspace |
 | `--no-services` | VCS only — skip service branching |
+| `--no-processes` | skip process auto-start during switch |
 | `--no-verify` | skip **all** hooks |
 | `--template` | switch to the main/template workspace |
 | `--dry-run` | print the plan (worktree path, services, hooks) without acting |
@@ -100,6 +101,18 @@ devflow service cleanup [--max-count N]
 devflow service destroy [--force]          # destroy ALL data for a service
 ```
 
+## Processes
+
+```bash
+devflow process start [names...] [--all] [--workspace <ws>] [--force]
+devflow process stop [names...] [--all] [--workspace <ws>]
+devflow process restart [names...] [--all] [--workspace <ws>]
+devflow process list|status [--workspace <ws>]
+devflow process logs <name> [--workspace <ws>] [--tail N] [--follow]
+```
+
+Processes are workspace-scoped app commands configured under `processes.daemons` (web servers, workers, schedulers). They run in the worktree, capture stdout/stderr to devflow logs, support dependency ordering, port bumping, and readiness checks, and can interpolate service URLs via MiniJinja (`{{ service['app-db'].url }}`). `processes.auto_start: true` makes `devflow switch` start them after services and hooks; auto-started shell commands use the same approval store as hooks (`devflow hook approvals add "npm run dev"` or `DEVFLOW_APPROVE_HOOKS=1` for automation). `processes.provider: pitchfork` embeds Pitchfork's Rust supervisor/log APIs directly. Running processes with ports are exposed by `devflow proxy` as `https://<process>.<workspace>.<project>.<suffix>` (default `.local`). `devflow remove` stops them before cleanup. Run `devflow daemon start` to keep desired-state, `watch` restart-on-change, and `retry` reconciliation active in the background.
+
 ## Controller daemon
 
 ```bash
@@ -108,7 +121,7 @@ devflow daemon status
 devflow daemon stop
 ```
 
-Keeps every registered project's shared engines running ([details](/devflow/guides/shared-engines/#keeping-engines-alive)).
+Keeps every registered project's shared engines running ([details](/devflow/guides/shared-engines/#keeping-engines-alive)) and reconciles managed process desired-state plus `watch`/`retry` behavior.
 
 ## Hooks
 

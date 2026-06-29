@@ -145,6 +145,12 @@ fn main() {
             commands::workspaces::switch_workspace,
             commands::workspaces::delete_workspace,
             commands::workspaces::prune_worktrees,
+            // Processes
+            commands::processes::list_processes,
+            commands::processes::start_processes,
+            commands::processes::stop_processes,
+            commands::processes::restart_processes,
+            commands::processes::get_process_logs,
             // Services
             commands::services::add_service,
             commands::services::list_services,

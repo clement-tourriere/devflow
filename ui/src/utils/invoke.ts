@@ -27,7 +27,6 @@ import type {
   ContainerEntry,
   CertificateStatus,
   AppSettings,
-  OrchestrationResult,
   CreateWorkspaceResult,
   DestroyResult,
   DoctorReport,
@@ -39,6 +38,9 @@ import type {
   WorkspaceCreationMode,
   PruneResult,
   SwitchWorkspaceResult,
+  DeleteWorkspaceResult,
+  ProcessStatus,
+  ProcessOperationResponse,
 } from "../types";
 
 // Projects
@@ -97,12 +99,60 @@ export const switchWorkspace = (projectPath: string, workspaceName: string) =>
     workspaceName,
   });
 export const deleteWorkspace = (projectPath: string, workspaceName: string) =>
-  invoke<OrchestrationResult[]>("delete_workspace", {
+  invoke<DeleteWorkspaceResult>("delete_workspace", {
     projectPath,
     workspaceName,
   });
 export const pruneWorktrees = (projectPath: string) =>
   invoke<PruneResult>("prune_worktrees", { projectPath });
+
+// Processes
+export const listProcesses = (projectPath: string, workspaceName?: string) =>
+  invoke<ProcessStatus[]>("list_processes", { projectPath, workspaceName });
+export const startProcesses = (
+  projectPath: string,
+  workspaceName: string | undefined,
+  names: string[],
+  force = false,
+) =>
+  invoke<ProcessOperationResponse>("start_processes", {
+    projectPath,
+    workspaceName,
+    names,
+    force,
+  });
+export const stopProcesses = (
+  projectPath: string,
+  workspaceName: string | undefined,
+  names: string[],
+) =>
+  invoke<ProcessOperationResponse>("stop_processes", {
+    projectPath,
+    workspaceName,
+    names,
+  });
+export const restartProcesses = (
+  projectPath: string,
+  workspaceName: string | undefined,
+  names: string[],
+) =>
+  invoke<ProcessOperationResponse>("restart_processes", {
+    projectPath,
+    workspaceName,
+    names,
+  });
+export const getProcessLogs = (
+  projectPath: string,
+  workspaceName: string,
+  name: string,
+  tail?: number,
+) =>
+  invoke<string>("get_process_logs", {
+    projectPath,
+    workspaceName,
+    name,
+    tail,
+  });
 
 // Services
 export const addService = (projectPath: string, request: AddServiceRequest) =>

@@ -1,0 +1,46 @@
+# Example: service-backed project processes without Docker Compose.
+# `devflow switch -c feature/x` creates/switches the database, runs hooks,
+# then starts the API/worker in that workspace when auto_start is true.
+
+name: process-demo
+
+services:
+  - name: app-db
+    type: shared
+    service_type: postgres
+    default: true
+
+worktree:
+  enabled: true
+  path_template: ../{repo}.{workspace}
+  copy_files: [.env]
+  copy_ignored: true
+
+hooks:
+  post-switch:
+    env:
+      action:
+        type: write-env
+        path: .env.local
+        vars:
+          DATABASE_URL: "{{ service['app-db'].url }}"
+
+processes:
+  # Use `pitchfork` to embed Pitchfork's Rust supervisor directly; omit for native.
+  provider: pitchfork
+  auto_start: true
+  auto_stop: true
+  daemons:
+    api:
+      run: npm run dev
+      port: { expect: [3000], bump: 50 }
+      ready_http: http://127.0.0.1:3000/health
+      env:
+        DATABASE_URL: "{{ service['app-db'].url }}"
+        DEVFLOW_WORKSPACE: "{{ workspace }}"
+    worker:
+      run: npm run worker
+      required: false
+      depends: [api]
+      env:
+        DATABASE_URL: "{{ service['app-db'].url }}"

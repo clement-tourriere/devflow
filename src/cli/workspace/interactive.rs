@@ -104,6 +104,7 @@ pub(super) async fn handle_interactive_switch(
                     true,  // create
                     None,  // from
                     false, // no_services
+                    false, // no_processes
                     false, // no_verify
                     false, // json_output
                     false, // non_interactive
@@ -121,6 +122,7 @@ pub(super) async fn handle_interactive_switch(
                     false,
                     false,
                     false,
+                    false,
                     None,
                     None,
                 )
@@ -133,6 +135,7 @@ pub(super) async fn handle_interactive_switch(
                     false, // create
                     None,  // from
                     false, // no_services
+                    false, // no_processes
                     false, // no_verify
                     false, // json_output — interactive mode
                     false, // non_interactive

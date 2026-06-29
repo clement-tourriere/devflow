@@ -1,9 +1,11 @@
 //! The devflow controller daemon: a long-running process that keeps every
 //! registered project's shared global engines (postgres/redis/rustfs/clickhouse
-//! configured with `type: shared`) running, restarting any that go down.
+//! configured with `type: shared`) running and reconciles managed process
+//! desired state plus `watch`/`retry` behavior.
 //!
 //! It reuses the same detached-spawn + pidfile pattern as the proxy. The
-//! reconcile loop body is `devflow_core::services::factory::reconcile_all_projects`.
+//! reconcile loop runs service engine reconciliation plus process desired-state,
+//! watch, and retry reconciliation.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -36,7 +38,10 @@ struct DaemonStatus {
     projects: usize,
     engines_total: usize,
     engines_running: usize,
+    processes_reconciled: usize,
+    processes_failed: usize,
     detail: Vec<DaemonEngineLine>,
+    process_detail: Vec<DaemonProcessLine>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -45,6 +50,15 @@ struct DaemonEngineLine {
     service: String,
     provider: String,
     running: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DaemonProcessLine {
+    project: String,
+    workspace: String,
+    process: String,
+    action: String,
+    success: bool,
 }
 
 /// Is a process with `pid` alive? (signal 0 probes without killing.)
@@ -174,6 +188,8 @@ pub(super) async fn handle_daemon_command(
                         "projects": status.projects,
                         "engines_running": status.engines_running,
                         "engines_total": status.engines_total,
+                        "processes_reconciled": status.processes_reconciled,
+                        "processes_failed": status.processes_failed,
                     })
                 );
             } else {
@@ -194,6 +210,19 @@ pub(super) async fn handle_daemon_command(
                             mark, line.project, line.service, line.provider
                         );
                     }
+                    if status.processes_reconciled > 0 {
+                        println!(
+                            "  {} process action(s), {} failed",
+                            status.processes_reconciled, status.processes_failed
+                        );
+                        for line in &status.process_detail {
+                            let mark = if line.success { "✓" } else { "✗" };
+                            println!(
+                                "    {} {} :: {} / {} ({})",
+                                mark, line.project, line.workspace, line.process, line.action
+                            );
+                        }
+                    }
                 }
             }
             Ok(())
@@ -204,6 +233,7 @@ pub(super) async fn handle_daemon_command(
 /// Run a single reconcile pass and persist the status file.
 async fn reconcile_once(interval: u64) -> Result<DaemonStatus> {
     let results = devflow_core::services::factory::reconcile_all_projects().await;
+    let process_results = devflow_core::processes::reconcile_all_projects_processes().await;
 
     let mut detail = Vec::new();
     let mut total = 0;
@@ -223,6 +253,19 @@ async fn reconcile_once(interval: u64) -> Result<DaemonStatus> {
         }
     }
 
+    let process_detail: Vec<DaemonProcessLine> = process_results
+        .iter()
+        .map(|p| DaemonProcessLine {
+            project: p.project.clone(),
+            workspace: p.workspace.clone(),
+            process: p.process.clone(),
+            action: p.action.clone(),
+            success: p.success,
+        })
+        .collect();
+    let processes_reconciled = process_detail.len();
+    let processes_failed = process_detail.iter().filter(|p| !p.success).count();
+
     let status = DaemonStatus {
         // chrono is available via devflow-core's re-exports; format RFC3339.
         last_reconcile: Some(now_rfc3339()),
@@ -230,7 +273,10 @@ async fn reconcile_once(interval: u64) -> Result<DaemonStatus> {
         projects: results.len(),
         engines_total: total,
         engines_running: running,
+        processes_reconciled,
+        processes_failed,
         detail,
+        process_detail,
     };
 
     if let Ok(path) = status_path() {
@@ -252,10 +298,11 @@ async fn run_loop(interval: u64) -> Result<()> {
     loop {
         match reconcile_once(interval).await {
             Ok(s) => log::info!(
-                "Reconciled {} project(s): {}/{} engines running",
+                "Reconciled {} project(s): {}/{} engines running, {} process action(s)",
                 s.projects,
                 s.engines_running,
-                s.engines_total
+                s.engines_total,
+                s.processes_reconciled
             ),
             Err(e) => log::warn!("Reconcile failed: {e:#}"),
         }
@@ -279,10 +326,12 @@ fn print_status(status: &DaemonStatus, json_output: bool) {
                 "projects": status.projects,
                 "engines_running": status.engines_running,
                 "engines_total": status.engines_total,
+                "processes_reconciled": status.processes_reconciled,
+                "processes_failed": status.processes_failed,
             })
         );
-    } else if status.engines_total == 0 {
-        println!("No shared global engines configured in any registered project.");
+    } else if status.engines_total == 0 && status.processes_reconciled == 0 {
+        println!("No shared global engines configured and no process actions needed.");
     } else {
         println!(
             "Reconciled {} project(s): {}/{} engines running",
@@ -294,6 +343,19 @@ fn print_status(status: &DaemonStatus, json_output: bool) {
                 "  {} {} :: {} ({})",
                 mark, line.project, line.service, line.provider
             );
+        }
+        if status.processes_reconciled > 0 {
+            println!(
+                "  Process reconcile: {} action(s), {} failed",
+                status.processes_reconciled, status.processes_failed
+            );
+            for line in &status.process_detail {
+                let mark = if line.success { "✓" } else { "✗" };
+                println!(
+                    "  {} {} :: {} / {} ({})",
+                    mark, line.project, line.workspace, line.process, line.action
+                );
+            }
         }
     }
 }

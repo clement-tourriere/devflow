@@ -34,6 +34,9 @@ pub struct Config {
     /// VCS event → devflow phase trigger mapping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triggers: Option<crate::hooks::triggers::TriggersConfig>,
+    /// Workspace-scoped project processes (web servers, workers, schedulers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processes: Option<crate::processes::ProcessesConfig>,
     /// AI agent integration configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentConfig>,
@@ -721,6 +724,7 @@ impl Default for Config {
             worktree: None,
             hooks: None,
             triggers: None,
+            processes: None,
             agent: None,
             commit: None,
             sandbox: None,

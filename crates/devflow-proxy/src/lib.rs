@@ -7,6 +7,7 @@ pub mod monitor;
 pub mod network;
 pub mod nss;
 pub mod platform;
+pub mod processes;
 pub mod router;
 pub mod server;
 pub mod tls;
@@ -159,6 +160,17 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
         }
     }
 
+    // Add devflow-managed host processes (app servers/workers) to the same
+    // routing table. These route to 127.0.0.1:<resolved-port>.
+    let process_targets = processes::discover_process_targets(&config.domain_suffix);
+    if !process_targets.is_empty() {
+        log::info!(
+            "Discovered {} devflow process route(s)",
+            process_targets.len()
+        );
+        router.replace_process_targets(process_targets).await;
+    }
+
     // Advertise `.local` records for everything discovered so far.
     if let Some(mdns) = &mdns {
         mdns.reconcile(&router.list().await);
@@ -184,6 +196,39 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
             }
         }
     }
+
+    // Start a lightweight polling monitor for devflow host-process routes.
+    // Process state is file-backed, so polling keeps the proxy independent of
+    // the core crate while still reflecting starts/stops/restarts.
+    let router_for_processes = router.clone();
+    let process_domain_suffix = config.domain_suffix.clone();
+    let process_shutdown = shutdown_rx.clone();
+    let mdns_for_processes = mdns.clone();
+    tokio::spawn(async move {
+        let mut shutdown = process_shutdown;
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                    let targets = processes::discover_process_targets(&process_domain_suffix);
+                    if let Some(mdns) = &mdns_for_processes {
+                        for target in router_for_processes
+                            .list()
+                            .await
+                            .into_iter()
+                            .filter(processes::is_process_target)
+                        {
+                            mdns.remove_by_container(&target.container_id);
+                        }
+                    }
+                    router_for_processes.replace_process_targets(targets).await;
+                    if let Some(mdns) = &mdns_for_processes {
+                        mdns.reconcile(&router_for_processes.list().await);
+                    }
+                }
+                _ = shutdown.changed() => break,
+            }
+        }
+    });
 
     // Start Docker event monitor
     let (events_tx, mut events_rx) = mpsc::channel(100);

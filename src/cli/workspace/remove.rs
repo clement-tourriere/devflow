@@ -96,6 +96,11 @@ pub(super) async fn handle_remove_command(
 
     // ── CLI-specific output ──────────────────────────────────────────
     let service_failures = result.services.iter().filter(|r| !r.success).count();
+    let process_failures = result
+        .processes
+        .iter()
+        .filter(|r| !r.success && r.required)
+        .count();
 
     if json_output {
         let service_json: Vec<serde_json::Value> = result
@@ -109,10 +114,24 @@ pub(super) async fn handle_remove_command(
                 })
             })
             .collect();
+        let process_json: Vec<serde_json::Value> = result
+            .processes
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "process": r.process,
+                    "success": r.success,
+                    "message": r.message,
+                    "required": r.required,
+                    "pid": r.pid,
+                    "ports": r.ports,
+                })
+            })
+            .collect();
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "status": if service_failures == 0 && result.branch_deleted { "ok" } else { "error" },
+                "status": if service_failures == 0 && process_failures == 0 && result.branch_deleted { "ok" } else { "error" },
                 "workspace": workspace_name,
                 "branch_deleted": result.branch_deleted,
                 "worktree_removed": result.worktree_removed,
@@ -120,12 +139,26 @@ pub(super) async fn handle_remove_command(
                 "services_skipped": keep_services,
                 "service_failures": service_failures,
                 "service_results": service_json,
+                "process_failures": process_failures,
+                "process_results": process_json,
             }))?
         );
     } else {
         if result.worktree_removed {
             if let Some(ref wt) = result.worktree_path {
                 println!("Removed worktree: {}", wt);
+            }
+        }
+        for r in &result.processes {
+            if r.success {
+                let required = if r.required { "" } else { " (optional)" };
+                println!("  [process:{}{}] {}", r.process, required, r.message);
+            } else {
+                let required = if r.required { "" } else { " (optional)" };
+                println!(
+                    "  [process:{}{}] Warning: {}",
+                    r.process, required, r.message
+                );
             }
         }
         for r in &result.services {
@@ -146,6 +179,14 @@ pub(super) async fn handle_remove_command(
                 workspace_name
             );
         }
+    }
+
+    if process_failures > 0 {
+        anyhow::bail!(
+            "Failed to stop {}/{} process(es)",
+            process_failures,
+            result.processes.len()
+        );
     }
 
     if service_failures > 0 {

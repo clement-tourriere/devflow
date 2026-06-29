@@ -197,7 +197,7 @@ function ProxyDashboard() {
             type="search"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            placeholder="Filter containers…"
+            placeholder="Filter targets…"
             className="search-input"
           />
         </div>
@@ -207,13 +207,13 @@ function ProxyDashboard() {
               <IconProxy size={24} />
             </div>
             <div className="empty-state-title">
-              {containers.length === 0 ? "No containers detected" : "No matches"}
+              {containers.length === 0 ? "No proxy targets detected" : "No matches"}
             </div>
             <div className="empty-state-desc">
               {containers.length === 0
                 ? status?.running
-                  ? "Start a Docker container with a devproxy.* or VIRTUAL_HOST label to see it routed here."
-                  : "Start the proxy to begin auto-discovering Docker containers."
+                  ? "Start a Docker container or a devflow-managed process with a port to see it routed here."
+                  : "Start the proxy to begin auto-discovering Docker containers and devflow processes."
                 : `Nothing matches “${filter}”.`}
             </div>
           </div>
@@ -223,7 +223,7 @@ function ProxyDashboard() {
               <thead>
                 <tr>
                   <th>Domain</th>
-                  <th>Container</th>
+                  <th>Target</th>
                   <th>Upstream</th>
                   <th>Project</th>
                   <th>Workspace</th>
@@ -249,7 +249,7 @@ function ProxyDashboard() {
                       )}
                     </td>
                     <td style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
-                      {c.container_name}
+                      {c.container_name.startsWith("process:") ? c.container_name.replace("process:", "process ") : c.container_name}
                     </td>
                     <td className="mono" style={{ color: "var(--text-muted)", fontSize: 12 }}>
                       {c.container_ip}:{c.port}

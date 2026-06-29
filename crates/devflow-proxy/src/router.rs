@@ -61,6 +61,21 @@ impl Router {
         routes.retain(|_, v| v.target.container_id != container_id);
     }
 
+    /// Replace routes produced by devflow host process discovery while
+    /// preserving Docker/container routes.
+    pub async fn replace_process_targets(&self, targets: Vec<ProxyTarget>) {
+        let mut routes = self.routes.write().await;
+        routes.retain(|_, v| !crate::processes::is_process_target(&v.target));
+        for target in targets {
+            let upstream = Upstream {
+                ip: target.container_ip.clone(),
+                port: target.port,
+                target: target.clone(),
+            };
+            routes.insert(target.domain.clone(), upstream);
+        }
+    }
+
     /// Get all current routes.
     pub async fn list(&self) -> Vec<ProxyTarget> {
         let routes = self.routes.read().await;

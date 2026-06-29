@@ -41,10 +41,11 @@ Every workspace's app is reachable at a predictable HTTPS URL, every workspace's
 - **Automatic VCS integration** — installed hooks create and switch environments on plain `git checkout`; Jujutsu (jj) is auto-detected and supported alongside Git
 - **Two isolation models, chosen per service** — physical (a Copy-on-Write Docker container per workspace) or logical (one shared global engine with a database, bucket, or DB index per workspace)
 - **Multi-service** — PostgreSQL, ClickHouse, MySQL, Redis, RustFS object storage, any Docker image, or custom plugin providers; cloud branching via Neon/DBLab/Xata (experimental)
+- **Project processes** — workspace-scoped web servers, workers, and schedulers with native or direct Pitchfork start/stop/status/logs, ready checks, dependency ordering, port bumping, and service env interpolation
 - **Managed worktrees** — per-workspace directories from a path template, with env files, gitignored caches, and AI tool configs (`.claude/`, `.cursor/`, …) copied in automatically
 - **Lifecycle hooks** — MiniJinja-templated commands and built-in actions at every phase, with conditions, an approval system, and installable recipes
-- **Auto-HTTPS proxy** — every Docker container gets a trusted `https://name.local` URL that resolves the same from the host and from inside containers; no `/etc/hosts` edits, no certificate warnings
-- **Controller daemon** — `devflow daemon start` keeps every registered project's shared engines running
+- **Auto-HTTPS proxy** — every Docker container and port-backed devflow process gets a trusted `https://name.local` URL that resolves the same from the host and from inside containers; no `/etc/hosts` edits, no certificate warnings
+- **Controller daemon** — `devflow daemon start` keeps every registered project's shared engines and process desired state reconciled
 - **Merge workflow** — `devflow merge --cleanup` merges a workspace and removes its branch, worktree, and services in one step; rebase and a queued merge train included
 - **Seeding** — initialize databases from a PostgreSQL URL, a local dump file, or S3
 - **Built for AI agents** — `--json` and `--non-interactive` everywhere, agent launch/context/skill commands, and AI-generated commit messages
@@ -123,10 +124,39 @@ devflow service logs feature/auth
 devflow service reset feature/auth
 
 devflow service up                 # ensure all shared global engines are running
-devflow daemon start               # keep them running in the background (restarts dead engines)
+devflow daemon start               # keep engines/process watch+retry running in the background
 ```
 
 Connection information can be emitted as URI, env, or JSON output for scripts and tooling.
+
+## Processes
+
+For complex projects, devflow can also manage workspace-scoped project processes — app servers, frontend dev servers, background workers, and schedulers — without Docker:
+
+```yaml
+processes:
+  auto_start: true
+  daemons:
+    api:
+      run: "npm run dev"
+      port: { expect: [3000], bump: 50 }
+      ready_http: "http://127.0.0.1:3000/health"
+      env:
+        DATABASE_URL: "{{ service['app-db'].url }}"
+    worker:
+      run: "npm run worker"
+      required: false
+      depends: [api]
+```
+
+```bash
+devflow process start --all
+devflow process status
+devflow process logs api --tail 100 --follow
+devflow process stop --all
+```
+
+When `processes.auto_start: true`, `devflow switch` starts configured processes after services and hooks are aligned. Auto-started commands use the same approval store as hooks, so agents can pre-approve with `devflow hook approvals add "npm run dev"` or set `DEVFLOW_APPROVE_HOOKS=1`. Set `processes.provider: pitchfork` to embed Pitchfork's Rust supervisor directly (no `pitchfork` CLI subprocess) for start/stop/log handling while devflow keeps desired state, proxy records, and GUI status. Running processes with ports are also exposed through the devflow proxy as `https://<process>.<workspace>.<project>.<suffix>` (default suffix: `.local`). `devflow remove` stops workspace processes before deleting the worktree and service workspaces. Run `devflow daemon start` to keep desired-state, `watch` restart-on-change, and `retry` reconciliation active in the background.
 
 ## Hooks and automation
 
@@ -178,6 +208,16 @@ hooks:
         path: .env.local
         vars:
           DATABASE_URL: "{{ service['app-db'].url }}"
+
+processes:
+  auto_start: true
+  daemons:
+    api:
+      run: "npm run dev"
+      port: { expect: [3000], bump: 50 }
+      ready_http: "http://127.0.0.1:3000/health"
+      env:
+        DATABASE_URL: "{{ service['app-db'].url }}"
 ```
 
 A shared-engine service is one stanza — no per-workspace containers, ports, or volumes:
@@ -215,6 +255,7 @@ Requirements:
 - `examples/simple.devflow.yml`
 - `examples/multi-service.devflow.yml`
 - `examples/django.devflow.yml`
+- `examples/processes.devflow.yml`
 - `docs/CLI.md`
 - `AGENTS.md`
 

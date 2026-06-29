@@ -42,15 +42,20 @@ devflow switch -c feature/auth
     gitignored caches, and AI tool configs copied in automatically with CoW reflinks.
     Plain `git worktree add` works too: devflow's hooks set it up.
   </Card>
+  <Card title="Native/Pitchfork project processes" icon="seti:nodejs">
+    App servers, frontend dev servers, workers, and schedulers run directly on the
+    machine per workspace — with ready checks, dependency ordering, logs, optional
+    direct Pitchfork supervision, and service URL interpolation.
+  </Card>
   <Card title="Lifecycle hooks" icon="setting">
     MiniJinja-templated commands and built-in actions run at every lifecycle phase —
     write env files, run migrations, open tmux sessions. With conditions, approvals,
     and installable recipes.
   </Card>
   <Card title="Auto-HTTPS proxy" icon="rocket">
-    Every Docker container gets a trusted `https://name.local` URL the moment it
-    starts — the same name resolves from the host and from inside containers. No
-    `/etc/hosts` edits, no certificate warnings.
+    Every Docker container and port-backed devflow process gets a trusted
+    `https://name.local` URL the moment it starts. No `/etc/hosts` edits, no
+    certificate warnings.
   </Card>
   <Card title="Built for AI agents" icon="seti:powershell">
     `--json --non-interactive` everywhere, agent skills, `llms.txt`, sandboxed
@@ -59,7 +64,8 @@ devflow switch -c feature/auth
   </Card>
   <Card title="CLI, TUI, and desktop GUI" icon="laptop">
     Drive everything from the terminal, an interactive dashboard (`devflow tui`),
-    or a native desktop app — all sharing the same core.
+    or a native desktop app — all sharing the same core, including process
+    status/log/start/stop controls.
   </Card>
 </CardGrid>
 
@@ -68,6 +74,7 @@ devflow switch -c feature/auth
 1. `git checkout feature-x` (or `devflow switch feature-x`) triggers the installed Git hook.
 2. devflow creates or switches the matching service workspaces across all configured providers.
 3. Lifecycle hooks fire — update `.env.local`, run migrations, trust mise configs.
-4. With worktrees enabled, the shell wrapper `cd`s you into the right directory.
+4. If configured, workspace processes start in the worktree with service URLs injected.
+5. With worktrees enabled, the shell wrapper `cd`s you into the right directory.
 
 Every workspace's app is reachable at a predictable HTTPS URL, every workspace's database at its own connection string — and `devflow remove` cleans all of it up.

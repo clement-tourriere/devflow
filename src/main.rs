@@ -50,6 +50,13 @@ Services:
   service logs        Show container logs for a workspace
   service seed        Seed a workspace from an external source
 
+Processes:
+  process start       Start workspace project processes
+  process stop        Stop workspace project processes
+  process restart     Restart workspace project processes
+  process status      Show workspace process status
+  process logs        Show process logs
+
 Setup & Config:
   config              Show current configuration (-v for precedence details)
   destroy             Tear down the entire devflow project (inverse of init)

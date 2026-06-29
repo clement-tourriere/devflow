@@ -1,5 +1,6 @@
 pub mod config;
 pub mod hooks;
+pub mod processes;
 pub mod projects;
 pub mod proxy;
 pub mod services;

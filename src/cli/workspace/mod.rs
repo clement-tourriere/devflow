@@ -97,6 +97,7 @@ pub(super) async fn handle_branch_command(
             open,
             execute_args,
             no_services,
+            no_processes,
             no_verify,
             template,
             dry_run,
@@ -184,6 +185,8 @@ pub(super) async fn handle_branch_command(
                                 "workspace_exists": workspace_exists,
                                 "services_skipped": no_services,
                                 "auto_branch_services": auto_providers,
+                                "processes_skipped": no_processes,
+                                "auto_start_processes": if !no_processes { config.processes.as_ref().map(|p| p.daemons.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() } else { Vec::<String>::new() },
                                 "hooks_skipped": no_verify,
                                 "execute": execute,
                                 "would_fail_without_create": workspace_exists == Some(false) && !create,
@@ -230,6 +233,19 @@ pub(super) async fn handle_branch_command(
                                 }
                             }
                         }
+                        if !no_processes {
+                            if let Some(processes) = config.processes.as_ref() {
+                                if !processes.daemons.is_empty() {
+                                    println!(
+                                        "  Would auto-start {} process(es):",
+                                        processes.daemons.len()
+                                    );
+                                    for name in processes.daemons.keys() {
+                                        println!("    - {}", name);
+                                    }
+                                }
+                            }
+                        }
                         if !no_verify && config.hooks.is_some() {
                             println!("  Would run post-switch hooks");
                         }
@@ -246,6 +262,7 @@ pub(super) async fn handle_branch_command(
                     config_path,
                     json_output,
                     no_services,
+                    no_processes,
                     no_verify,
                     non_interactive,
                     None,
@@ -259,6 +276,7 @@ pub(super) async fn handle_branch_command(
                         config_path,
                         json_output,
                         no_services,
+                        no_processes,
                         no_verify,
                         non_interactive,
                         None,
@@ -273,6 +291,7 @@ pub(super) async fn handle_branch_command(
                         create,
                         from.as_deref(),
                         no_services,
+                        no_processes,
                         no_verify,
                         json_output,
                         non_interactive,
@@ -456,6 +475,7 @@ pub(super) async fn handle_switch_command(
     create: bool,
     from: Option<&str>,
     no_services: bool,
+    no_processes: bool,
     no_verify: bool,
     json_output: bool,
     non_interactive: bool,
@@ -498,6 +518,7 @@ pub(super) async fn handle_switch_command(
         lifecycle: devflow_core::workspace::LifecycleOptions {
             skip_hooks: no_verify,
             skip_services: no_services,
+            skip_processes: no_processes,
             hook_approval: approval_mode,
             verbose_hooks: !json_output,
             trigger_source: trigger_source.map(String::from),
@@ -550,9 +571,15 @@ pub(super) async fn handle_switch_command(
         println!("Switched git workspace: {}", result.workspace);
     }
 
-    // Service results output
+    // Service/process results output
     let success_count = result.services.iter().filter(|r| r.success).count();
     let fail_count = result.services.iter().filter(|r| !r.success).count();
+    let process_success_count = result.processes.iter().filter(|r| r.success).count();
+    let process_fail_count = result
+        .processes
+        .iter()
+        .filter(|r| !r.success && r.required)
+        .count();
 
     if json_output {
         let service_results: Vec<serde_json::Value> = result
@@ -563,6 +590,20 @@ pub(super) async fn handle_switch_command(
                     "service": r.service_name,
                     "success": r.success,
                     "message": r.message,
+                })
+            })
+            .collect();
+        let process_results: Vec<serde_json::Value> = result
+            .processes
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "process": r.process,
+                    "success": r.success,
+                    "message": r.message,
+                    "required": r.required,
+                    "pid": r.pid,
+                    "ports": r.ports,
                 })
             })
             .collect();
@@ -589,6 +630,10 @@ pub(super) async fn handle_switch_command(
             "services_failed": fail_count,
             "services_skipped": no_services,
             "service_results": service_results,
+            "processes_started": process_success_count,
+            "processes_failed": process_fail_count,
+            "processes_skipped": no_processes,
+            "process_results": process_results,
             "hook_results": hook_results,
         });
         println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -635,6 +680,37 @@ pub(super) async fn handle_switch_command(
         println!("  (no services configured — use 'devflow service add' to add one)");
     }
 
+    if !json_output && !result.processes.is_empty() {
+        for r in &result.processes {
+            if r.success {
+                let ports = if r.ports.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ports={:?}", r.ports)
+                };
+                let required = if r.required { "" } else { " (optional)" };
+                println!(
+                    "  [process:{}{}] {}{}",
+                    r.process, required, r.message, ports
+                );
+            } else {
+                let required = if r.required { "" } else { " (optional)" };
+                println!(
+                    "  [process:{}{}] Warning: {}",
+                    r.process, required, r.message
+                );
+            }
+        }
+    }
+
+    if process_fail_count > 0 {
+        anyhow::bail!(
+            "Failed to start {}/{} process(es)",
+            process_fail_count,
+            result.processes.len()
+        );
+    }
+
     Ok(())
 }
 
@@ -644,6 +720,7 @@ pub(super) async fn handle_switch_to_main(
     config_path: &Option<std::path::PathBuf>,
     json_output: bool,
     no_services: bool,
+    no_processes: bool,
     no_verify: bool,
     non_interactive: bool,
     trigger_source: Option<&str>,
@@ -663,6 +740,7 @@ pub(super) async fn handle_switch_to_main(
         false,
         None,
         no_services,
+        no_processes,
         no_verify,
         json_output,
         non_interactive,

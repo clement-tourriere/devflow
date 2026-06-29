@@ -1,9 +1,10 @@
 import { toast } from "./notify";
-import type { OrchestrationResult, HookRunResult } from "../types";
+import type { OrchestrationResult, HookRunResult, ProcessResult } from "../types";
 
 interface WorkspaceOpResult {
   services?: OrchestrationResult[];
   hooks?: HookRunResult[];
+  processes?: ProcessResult[];
   worktree_path?: string | null;
 }
 
@@ -15,6 +16,8 @@ interface WorkspaceOpResult {
  */
 export function reportWorkspaceResult(action: string, result: WorkspaceOpResult) {
   const failedServices = (result.services ?? []).filter((s) => !s.success);
+  const failedProcesses = (result.processes ?? []).filter((p) => !p.success && p.required);
+  const optionalProcessIssues = (result.processes ?? []).filter((p) => !p.success && !p.required);
 
   const hookErrors: string[] = [];
   let hooksFailed = 0;
@@ -28,6 +31,12 @@ export function reportWorkspaceResult(action: string, result: WorkspaceOpResult)
   const problems: string[] = [];
   for (const s of failedServices) {
     problems.push(`service "${s.service_name}": ${s.message}`);
+  }
+  for (const p of failedProcesses) {
+    problems.push(`process "${p.process}": ${p.message}`);
+  }
+  for (const p of optionalProcessIssues) {
+    problems.push(`optional process "${p.process}": ${p.message}`);
   }
   if (hooksFailed > 0) {
     problems.push(

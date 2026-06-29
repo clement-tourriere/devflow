@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::config::Config;
 use crate::hooks::HookPhase;
+use crate::processes;
 use crate::services;
 use crate::state::{DevflowWorkspace, LocalStateManager};
 use crate::vcs;
@@ -231,14 +232,38 @@ pub async fn switch_workspace(
         }
     }
 
+    // 7. Process orchestration (after hooks so generated .env files exist).
+    let process_results = if !opts.skip_processes {
+        processes::auto_start_workspace_processes(
+            config,
+            project_dir,
+            workspace_name,
+            process_approval_mode(opts.hook_approval),
+        )
+        .await
+    } else {
+        Vec::new()
+    };
+
     Ok(SwitchWorkspaceResult {
         workspace: normalized_name,
         parent: normalized_parent,
         worktree: worktree_result,
         branch_created,
         services: service_results,
+        processes: process_results,
         hooks: hook_results,
     })
+}
+
+fn process_approval_mode(mode: super::hooks::HookApprovalMode) -> processes::ProcessApprovalMode {
+    match mode {
+        super::hooks::HookApprovalMode::Interactive => processes::ProcessApprovalMode::Interactive,
+        super::hooks::HookApprovalMode::NonInteractive => {
+            processes::ProcessApprovalMode::NonInteractive
+        }
+        super::hooks::HookApprovalMode::NoApproval => processes::ProcessApprovalMode::NoApproval,
+    }
 }
 
 fn ensure_default_workspace_registered(config: &Config, project_dir: &Path) {

@@ -1,6 +1,6 @@
 ---
 title: Configuration
-description: The complete .devflow.yml schema — git, behavior, services, worktree, hooks, execute, merge, commit, agent — with hierarchy and interpolation rules.
+description: The complete .devflow.yml schema — git, behavior, services, processes, worktree, hooks, execute, merge, commit, agent — with hierarchy and interpolation rules.
 sidebar:
   order: 2
 ---
@@ -116,6 +116,56 @@ services:
 ```
 
 Redis is always shared (`service_type: redis`, default `redis:7`, port 6379, a DB index 0–15 per workspace). RustFS (`service_type: rustfs`, aliases `s3`/`objectstorage`) serves S3 on 9000 with a bucket per workspace.
+
+## `processes`
+
+Workspace-scoped project processes — app servers, frontend dev servers, background workers, schedulers — run directly on the machine without Docker. Process env values use the same MiniJinja context as hooks, so service connection URLs are available as `{{ service['name'].url }}`.
+
+```yaml
+processes:
+  provider: native       # native (default) or pitchfork (direct Rust supervisor embedding)
+  auto_start: true       # start after devflow switch aligns services and hooks
+  auto_stop: true        # stop before devflow remove deletes the workspace
+  daemons:
+    api:
+      run: "npm run dev"
+      dir: "."          # relative to workspace/worktree root
+      depends: []
+      port: { expect: [3000], bump: 50 }
+      ready_http: "http://127.0.0.1:3000/health"
+      watch: ["src/**/*.ts", "package.json"]   # devflow daemon restarts on changes
+      env:
+        DATABASE_URL: "{{ service['app-db'].url }}"
+    worker:
+      run: "npm run worker"
+      required: false  # optional; failures do not fail switch/process start
+      depends: [api]
+      ready_delay: 2
+      stop_timeout: 10
+```
+
+Daemon fields:
+
+| Field | Purpose |
+| --- | --- |
+| `run` | shell command to execute |
+| `dir` | working directory relative to the workspace root, or absolute |
+| `env` | environment variables; values are templates |
+| `required` | defaults to `true`; set `false` for optional processes whose failures should not fail lifecycle commands |
+| `depends` | process names that start first |
+| `port` | a port number, port array, or `{ expect: [...], bump: true|N }`; first resolved port is exposed as `$PORT` |
+| `ready_delay` | seconds to wait before readiness checks begin, or before considering ready when no other check is configured |
+| `ready_port` | TCP readiness check |
+| `ready_http` | HTTP 2xx readiness check (ports are remapped when `port.bump` changes them) |
+| `ready_cmd` | shell command readiness check |
+| `ready_output` | regex matched against captured stdout/stderr logs |
+| `ready_timeout` | readiness timeout in seconds (default 60) |
+| `stop_timeout` | graceful shutdown timeout before SIGKILL (default 3, Unix) |
+| `shutdown_signal` | graceful Unix signal: `TERM`, `INT`, `HUP`, `QUIT`, or `KILL` |
+| `watch` | glob patterns, relative to `dir`, that the controller daemon polls for restart-on-change |
+| `retry` | number of controller-daemon restart attempts after a crash |
+
+Manage them with `devflow process start|stop|restart|status|logs`. Auto-started process commands reuse hook approvals; pre-approve with `devflow hook approvals add "npm run dev"` for non-interactive automation, or set `DEVFLOW_APPROVE_HOOKS=1`. `provider: pitchfork` embeds Pitchfork's Rust supervisor/log APIs directly; devflow still owns desired state and proxy/GUI records. `devflow proxy` reads process state and exposes port-backed processes as `https://<process>.<workspace>.<project>.<suffix>` (default suffix `.local`). Run `devflow daemon start` to keep desired-state/watch/retry reconciliation active in the background.
 
 ### Cloud providers (experimental)
 

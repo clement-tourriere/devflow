@@ -11,6 +11,11 @@ import {
   createWorkspace,
   switchWorkspace,
   deleteWorkspace,
+  listProcesses,
+  startProcesses,
+  stopProcesses,
+  restartProcesses,
+  getProcessLogs,
   startService,
   stopService,
   resetService,
@@ -36,6 +41,8 @@ import type {
   ContainerEntry,
   ProxyStatus,
   WorkspaceCreationMode,
+  ProcessStatus,
+  ProcessResult,
 } from "../../types";
 import Modal from "../../components/Modal";
 import ConfirmDialog from "../../components/ConfirmDialog";
@@ -59,6 +66,8 @@ function ProjectDetail() {
   const [detail, setDetail] = useState<ProjectDetailType | null>(null);
   const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
   const [services, setServices] = useState<ServiceEntry[]>([]);
+  const [processStatuses, setProcessStatuses] = useState<ProcessStatus[]>([]);
+  const [processWorkspace, setProcessWorkspace] = useState<string>("");
   const [currentWorkspace, setCurrentWorkspace] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [setupIssueCount, setSetupIssueCount] = useState(0);
@@ -92,6 +101,10 @@ function ProjectDetail() {
     name: string;
     workspace: string;
   } | null>(null);
+  const [logProcess, setLogProcess] = useState<{
+    name: string;
+    workspace: string;
+  } | null>(null);
   const [logContent, setLogContent] = useState("");
   const [resetTarget, setResetTarget] = useState<{
     name: string;
@@ -121,6 +134,21 @@ function ProjectDetail() {
   const projectDefaultCreationMode: WorkspaceCreationMode = detail?.worktree_enabled
     ? "worktree"
     : "branch";
+
+  const fetchProcesses = useCallback(
+    async (workspaceName?: string) => {
+      if (!projectPath || !workspaceName) {
+        setProcessStatuses([]);
+        return;
+      }
+      try {
+        setProcessStatuses(await listProcesses(projectPath, workspaceName));
+      } catch {
+        setProcessStatuses([]);
+      }
+    },
+    [projectPath]
+  );
 
   const fetchServiceWorkspaces = useCallback(
     async (svcs: ServiceEntry[]) => {
@@ -159,6 +187,18 @@ function ProjectDetail() {
         .then((b) => {
           setWorkspaces(b.workspaces);
           setCurrentWorkspace(b.current);
+          const preferredWorkspace =
+            processWorkspace ||
+            b.current ||
+            b.workspaces.find((w) => w.is_default)?.name ||
+            b.workspaces[0]?.name ||
+            "";
+          if (preferredWorkspace && !processWorkspace) {
+            setProcessWorkspace(preferredWorkspace);
+          }
+          if (preferredWorkspace) {
+            void fetchProcesses(preferredWorkspace);
+          }
         })
         .catch(() => {
           setWorkspaces([]);
@@ -179,7 +219,7 @@ function ProjectDetail() {
     ]);
     // Fetch service workspaces after we know the services
     await fetchServiceWorkspaces(loadedServices);
-  }, [projectPath, fetchServiceWorkspaces]);
+  }, [projectPath, fetchServiceWorkspaces, fetchProcesses, processWorkspace]);
 
   useEffect(() => {
     reload();
@@ -187,6 +227,12 @@ function ProjectDetail() {
       recordProjectAccess(projectPath);
     }
   }, [reload, projectPath]);
+
+  useEffect(() => {
+    if (processWorkspace) {
+      void fetchProcesses(processWorkspace);
+    }
+  }, [fetchProcesses, processWorkspace]);
 
   useEffect(() => {
     const unlisten = listen<WorkspaceSwitchedEvent>(
@@ -278,8 +324,8 @@ function ProjectDetail() {
     setActionLoading("delete");
     const target = deletingWorkspace;
     try {
-      const services = await deleteWorkspace(projectPath, target);
-      reportWorkspaceResult(`Workspace "${target}" deleted`, { services });
+      const result = await deleteWorkspace(projectPath, target);
+      reportWorkspaceResult(`Workspace "${target}" deleted`, result);
       setDeletingWorkspace(null);
       await reload();
     } catch (e) {
@@ -405,10 +451,85 @@ function ProjectDetail() {
   };
 
   const handleViewLogs = async (svcName: string, workspaceName: string) => {
+    setLogProcess(null);
     setLogService({ name: svcName, workspace: workspaceName });
     setLogContent("Loading...");
     try {
       const logs = await getServiceLogs(projectPath, svcName, workspaceName);
+      setLogContent(logs || "(no log output)");
+    } catch (e) {
+      setLogContent(`Error: ${e}`);
+    }
+  };
+
+  const summarizeProcessResults = (action: string, results: ProcessResult[]) => {
+    const requiredFailures = results.filter((r) => !r.success && r.required);
+    const optionalFailures = results.filter((r) => !r.success && !r.required);
+    if (requiredFailures.length > 0 || optionalFailures.length > 0) {
+      toast.warning(
+        [...requiredFailures, ...optionalFailures]
+          .map((r) => `${r.required ? "" : "optional "}${r.process}: ${r.message}`)
+          .join("\n"),
+        { title: `${action} completed with issues`, duration: 0 }
+      );
+    } else {
+      toast.success(`${action} succeeded`);
+    }
+  };
+
+  const handleStartProcess = async (name?: string, force = false) => {
+    if (!processWorkspace) return;
+    setActionLoading(`process-start:${name ?? "all"}`);
+    try {
+      const response = await startProcesses(
+        projectPath,
+        processWorkspace,
+        name ? [name] : [],
+        force
+      );
+      summarizeProcessResults(name ? `Started ${name}` : "Started processes", response.results);
+      await fetchProcesses(processWorkspace);
+    } catch (e) {
+      toast.error(`${e}`);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleStopProcess = async (name?: string) => {
+    if (!processWorkspace) return;
+    setActionLoading(`process-stop:${name ?? "all"}`);
+    try {
+      const response = await stopProcesses(projectPath, processWorkspace, name ? [name] : []);
+      summarizeProcessResults(name ? `Stopped ${name}` : "Stopped processes", response.results);
+      await fetchProcesses(processWorkspace);
+    } catch (e) {
+      toast.error(`${e}`);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleRestartProcess = async (name?: string) => {
+    if (!processWorkspace) return;
+    setActionLoading(`process-restart:${name ?? "all"}`);
+    try {
+      const response = await restartProcesses(projectPath, processWorkspace, name ? [name] : []);
+      summarizeProcessResults(name ? `Restarted ${name}` : "Restarted processes", response.results);
+      await fetchProcesses(processWorkspace);
+    } catch (e) {
+      toast.error(`${e}`);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleViewProcessLogs = async (name: string, workspaceName: string) => {
+    setLogService(null);
+    setLogProcess({ name, workspace: workspaceName });
+    setLogContent("Loading...");
+    try {
+      const logs = await getProcessLogs(projectPath, workspaceName, name, 300);
       setLogContent(logs || "(no log output)");
     } catch (e) {
       setLogContent(`Error: ${e}`);
@@ -991,6 +1112,205 @@ function ProjectDetail() {
                   </td>
                 </tr>
               ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Processes card */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-4" style={{ gap: 12, flexWrap: "wrap" }}>
+          <div>
+            <span className="card-title" style={{ marginBottom: 0 }}>
+              Processes
+            </span>
+            <div style={{ color: "var(--text-muted)", fontSize: 12, marginTop: 3 }}>
+              Workspace-scoped app servers and workers managed by devflow.
+            </div>
+          </div>
+          <div className="flex items-center gap-2" style={{ flexWrap: "wrap" }}>
+            <select
+              className="input"
+              value={processWorkspace}
+              onChange={(e) => setProcessWorkspace(e.target.value)}
+              style={{ width: 180, height: 32, fontSize: 13 }}
+            >
+              {workspaces.map((w) => (
+                <option key={w.name} value={w.name}>{w.name}</option>
+              ))}
+            </select>
+            <button
+              className="btn"
+              onClick={() => fetchProcesses(processWorkspace)}
+              disabled={!processWorkspace}
+              style={{ padding: "4px 10px", fontSize: 13 }}
+            >
+              Refresh
+            </button>
+            <button
+              className="btn btn-primary"
+              onClick={() => handleStartProcess(undefined, false)}
+              disabled={!processWorkspace || actionLoading === "process-start:all"}
+              style={{ padding: "4px 10px", fontSize: 13 }}
+            >
+              {actionLoading === "process-start:all" ? "Starting…" : "Start all"}
+            </button>
+            <button
+              className="btn"
+              onClick={() => handleRestartProcess(undefined)}
+              disabled={!processWorkspace || actionLoading === "process-restart:all"}
+              style={{ padding: "4px 10px", fontSize: 13 }}
+            >
+              Restart all
+            </button>
+            <button
+              className="btn"
+              onClick={() => handleStopProcess(undefined)}
+              disabled={!processWorkspace || actionLoading === "process-stop:all"}
+              style={{ padding: "4px 10px", fontSize: 13 }}
+            >
+              Stop all
+            </button>
+          </div>
+        </div>
+        {!processWorkspace ? (
+          <p style={{ color: "var(--text-muted)", fontSize: 13 }}>
+            Create or select a workspace to manage processes.
+          </p>
+        ) : processStatuses.length === 0 ? (
+          <div style={{ textAlign: "center", padding: 16 }}>
+            <p style={{ color: "var(--text-secondary)", marginBottom: 8 }}>
+              No processes configured or recorded for this workspace.
+            </p>
+            <p style={{ color: "var(--text-muted)", fontSize: 13, margin: 0 }}>
+              Add a <code>processes.daemons</code> section to <code>.devflow.yml</code> to run app servers and workers without Docker.
+            </p>
+          </div>
+        ) : (
+          <table className="table" style={{ tableLayout: "fixed", width: "100%" }}>
+            <thead>
+              <tr>
+                <th style={{ width: "18%" }}>Process</th>
+                <th style={{ width: "12%" }}>Status</th>
+                <th style={{ width: "12%" }}>PID</th>
+                <th style={{ width: "16%" }}>Ports</th>
+                <th style={{ width: "22%" }}>URL</th>
+                <th style={{ textAlign: "right", width: "20%" }}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {processStatuses.map((p) => {
+                const isRunning = p.status === "running" || p.status === "ready";
+                const isStopped = !isRunning;
+                return (
+                  <tr key={`${p.workspace}:${p.process}`}>
+                    <td style={{ overflow: "hidden" }}>
+                      <div className="flex items-center gap-1" style={{ flexWrap: "wrap" }}>
+                        <span style={{ fontWeight: 600 }}>{p.process}</span>
+                        {!p.required && <span className="badge" style={{ fontSize: 10 }}>optional</span>}
+                      </div>
+                      <div
+                        className="mono"
+                        title={p.command}
+                        style={{ color: "var(--text-muted)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                      >
+                        {p.command}
+                      </div>
+                    </td>
+                    <td>
+                      <StatusBadge state={p.status} />
+                      {p.retry_count > 0 && (
+                        <div style={{ color: "var(--text-muted)", fontSize: 11, marginTop: 4 }}>
+                          retries: {p.retry_count}
+                        </div>
+                      )}
+                    </td>
+                    <td className="mono" style={{ color: "var(--text-secondary)", fontSize: 12 }}>
+                      {p.pid ?? "-"}
+                    </td>
+                    <td className="mono" style={{ color: "var(--text-secondary)", fontSize: 12 }}>
+                      {p.ports.length ? p.ports.join(", ") : "-"}
+                    </td>
+                    <td style={{ overflow: "hidden" }}>
+                      {p.urls.length > 0 ? (
+                        <a
+                          href={p.urls[0]}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mono"
+                          style={{ fontSize: 12, color: "var(--accent)", display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                          title={p.urls[0]}
+                        >
+                          {p.urls[0]}
+                        </a>
+                      ) : (
+                        <span style={{ color: "var(--text-muted)", fontSize: 12 }}>-</span>
+                      )}
+                      {p.last_error && (
+                        <div style={{ color: "var(--danger)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={p.last_error}>
+                          {p.last_error}
+                        </div>
+                      )}
+                    </td>
+                    <td style={{ textAlign: "right" }}>
+                      <div className="flex gap-1" style={{ justifyContent: "flex-end", flexWrap: "wrap" }}>
+                        {isStopped && (
+                          <button
+                            className="btn"
+                            style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
+                            onClick={() => handleStartProcess(p.process, false)}
+                            disabled={actionLoading === `process-start:${p.process}`}
+                            title="Start"
+                          >
+                            <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+                              <path d="M4 2.5v11l9-5.5z" fill="currentColor" />
+                            </svg>
+                          </button>
+                        )}
+                        {isRunning && (
+                          <button
+                            className="btn"
+                            style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
+                            onClick={() => handleStopProcess(p.process)}
+                            disabled={actionLoading === `process-stop:${p.process}`}
+                            title="Stop"
+                          >
+                            <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+                              <rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor" />
+                            </svg>
+                          </button>
+                        )}
+                        <button
+                          className="btn"
+                          style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
+                          onClick={() => handleRestartProcess(p.process)}
+                          disabled={actionLoading === `process-restart:${p.process}`}
+                          title="Restart"
+                        >
+                          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <path d="M2 8a6 6 0 0 1 10.2-4.2" />
+                            <path d="M14 8a6 6 0 0 1-10.2 4.2" />
+                            <path d="M10 2l2.2 1.8L14 2" />
+                            <path d="M6 14l-2.2-1.8L2 14" />
+                          </svg>
+                        </button>
+                        <button
+                          className="btn"
+                          style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
+                          onClick={() => handleViewProcessLogs(p.process, p.workspace)}
+                          title="Logs"
+                        >
+                          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <rect x="2" y="2" width="12" height="12" rx="2" />
+                            <path d="M5 9l2 2 2-2" />
+                            <path d="M5 6h6" />
+                          </svg>
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -1875,9 +2195,16 @@ function ProjectDetail() {
 
       {/* Logs Modal */}
       <Modal
-        open={logService !== null}
-        onClose={() => setLogService(null)}
-        title={`Logs — ${logService?.name} (${logService?.workspace})`}
+        open={logService !== null || logProcess !== null}
+        onClose={() => {
+          setLogService(null);
+          setLogProcess(null);
+        }}
+        title={
+          logProcess
+            ? `Process logs — ${logProcess.name} (${logProcess.workspace})`
+            : `Service logs — ${logService?.name} (${logService?.workspace})`
+        }
         width={700}
       >
         <pre
@@ -1912,8 +2239,18 @@ function ProjectDetail() {
 }
 
 function StatusBadge({ state }: { state: string | null }) {
-  if (state === "running") {
-    return <span className="badge badge-success">running</span>;
+  if (state === "running" || state === "ready") {
+    return <span className="badge badge-success">{state}</span>;
+  }
+  if (state === "not_started") {
+    return (
+      <span
+        className="badge"
+        style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}
+      >
+        not started
+      </span>
+    );
   }
   if (state === "failed") {
     return <span className="badge badge-danger">failed</span>;

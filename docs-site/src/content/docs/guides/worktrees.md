@@ -38,9 +38,10 @@ devflow switch feature/x -x "npm run dev"       # run a command in the worktree 
 devflow switch feature/x -x "npm run dev" -d    # …in a detached tmux/zellij session
 devflow switch feature/x -o                     # open an interactive multiplexer session
 devflow switch -c tmp/spike --no-services       # VCS only, skip service branching
+devflow switch feature/x --no-processes         # skip process auto-start
 devflow switch -c agent/t42 --sandboxed         # restricted filesystem/commands
 devflow switch -c big --no-respect-gitignore    # also copy gitignored entries this time
-devflow switch feature/x --dry-run              # print the plan (worktree path, services, hooks)
+devflow switch feature/x --dry-run              # print the plan (worktree path, services, processes, hooks)
 ```
 
 Multiplexer sessions auto-detect tmux, then zellij; configure a preference or a fully custom launcher:

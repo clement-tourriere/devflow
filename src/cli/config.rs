@@ -6,8 +6,19 @@ use std::path::PathBuf;
 
 /// Known top-level keys in .devflow.yml
 const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
-    "name", "git", "behavior", "services", "worktree", "hooks", "execute", "merge", "commit",
-    "agent", "sandbox", "proxy",
+    "name",
+    "git",
+    "behavior",
+    "services",
+    "processes",
+    "worktree",
+    "hooks",
+    "execute",
+    "merge",
+    "commit",
+    "agent",
+    "sandbox",
+    "proxy",
 ];
 
 /// Validate the configuration file for errors and unknown fields.
@@ -54,6 +65,30 @@ pub(super) fn validate_config(config_path: &Option<PathBuf>, json_output: bool) 
 
     // 4. Check service entries for type/service_type consistency
     if let serde_yaml_ng::Value::Mapping(map) = &raw {
+        if let Some(serde_yaml_ng::Value::Mapping(processes)) = map.get("processes") {
+            if let Some(provider) = processes.get("provider").and_then(|v| v.as_str()) {
+                if !["native", "pitchfork"].contains(&provider) {
+                    errors.push(format!(
+                        "processes.provider '{}' is not supported (use 'native' or 'pitchfork')",
+                        provider
+                    ));
+                }
+            }
+            if let Some(serde_yaml_ng::Value::Mapping(daemons)) = processes.get("daemons") {
+                for (name_value, daemon_value) in daemons {
+                    let name = name_value.as_str().unwrap_or("<unknown>");
+                    if let serde_yaml_ng::Value::Mapping(daemon) = daemon_value {
+                        if !daemon.contains_key("run") {
+                            errors.push(format!(
+                                "process '{}' is missing required field 'run'",
+                                name
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(serde_yaml_ng::Value::Sequence(services)) = map.get("services") {
             for (idx, svc) in services.iter().enumerate() {
                 if let serde_yaml_ng::Value::Mapping(svc_map) = svc {

@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::config::Config;
 use crate::hooks::HookPhase;
+use crate::processes;
 use crate::services;
 use crate::state::LocalStateManager;
 use crate::vcs;
@@ -58,7 +59,27 @@ pub async fn delete_workspace(
         .await?;
     }
 
-    // 2. Remove worktree (if VCS is available and worktree exists)
+    // 2. Stop workspace processes before deleting files/services.
+    let process_results = if !opts.skip_processes {
+        let results =
+            processes::auto_stop_workspace_processes(config, project_dir, workspace_name).await;
+        if results.iter().all(|r| r.success) {
+            if let Err(e) =
+                processes::cleanup_workspace_process_state(config, project_dir, workspace_name)
+            {
+                log::warn!(
+                    "Failed to clean process state for '{}': {}",
+                    workspace_name,
+                    e
+                );
+            }
+        }
+        results
+    } else {
+        Vec::new()
+    };
+
+    // 3. Remove worktree (if VCS is available and worktree exists)
     let mut worktree_removed = false;
     let mut worktree_path_str: Option<String> = None;
 
@@ -91,7 +112,7 @@ pub async fn delete_workspace(
         }
     }
 
-    // 3. Service deletion (unless keep_services)
+    // 4. Service deletion (unless keep_services)
     let service_results: Vec<ServiceResult> = if !options.keep_services && !opts.skip_services {
         // Pre-service-delete hooks
         if !opts.skip_hooks {
@@ -132,7 +153,7 @@ pub async fn delete_workspace(
         vec![]
     };
 
-    // 4. Delete VCS workspace
+    // 5. Delete VCS workspace
     let mut branch_deleted = false;
     if let Some(ref repo) = vcs_provider {
         match repo.delete_workspace(workspace_name) {
@@ -145,14 +166,14 @@ pub async fn delete_workspace(
         }
     }
 
-    // 5. Unregister from devflow state
+    // 6. Unregister from devflow state
     if let Ok(mut state_mgr) = LocalStateManager::new() {
         if let Err(e) = state_mgr.unregister_workspace_by_dir(project_dir, &normalized) {
             log::warn!("Failed to unregister workspace from devflow state: {}", e);
         }
     }
 
-    // 6. Post-remove hooks (best-effort)
+    // 7. Post-remove hooks (best-effort)
     if !opts.skip_hooks {
         if let Some(summary) = run_lifecycle_hooks_best_effort(
             config,
@@ -173,6 +194,7 @@ pub async fn delete_workspace(
         worktree_path: worktree_path_str,
         branch_deleted,
         services: service_results,
+        processes: process_results,
         hooks: hook_results,
     })
 }

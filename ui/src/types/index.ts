@@ -93,14 +93,52 @@ export interface OrchestrationResult {
   message: string;
 }
 
+export interface ProcessResult {
+  process: string;
+  success: boolean;
+  message: string;
+  required: boolean;
+  pid: number | null;
+  ports: number[];
+}
+
+export interface ProcessStatus {
+  process: string;
+  workspace: string;
+  pid: number | null;
+  status: string;
+  required: boolean;
+  ports: number[];
+  urls: string[];
+  command: string;
+  workdir: string;
+  log_path: string;
+  retry_count: number;
+  last_error: string | null;
+  started_at: string | null;
+}
+
+export interface ProcessOperationResponse {
+  workspace: string;
+  results: ProcessResult[];
+}
+
 export interface CreateWorkspaceResult {
   services: OrchestrationResult[];
+  processes: ProcessResult[];
   worktree_path: string | null;
   hooks: HookRunResult[];
 }
 
 export interface SwitchWorkspaceResult {
   services: OrchestrationResult[];
+  processes: ProcessResult[];
+  hooks: HookRunResult[];
+}
+
+export interface DeleteWorkspaceResult {
+  services: OrchestrationResult[];
+  processes: ProcessResult[];
   hooks: HookRunResult[];
 }
 

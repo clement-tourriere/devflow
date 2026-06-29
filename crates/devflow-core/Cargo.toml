@@ -54,7 +54,7 @@ log = { version = "0.4", default-features = false, features = ["release_max_leve
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 
 # SQLite for local backend state
-rusqlite = { version = "0.38", default-features = false, features = ["bundled"], optional = true }
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"], optional = true }
 
 # UUID generation
 uuid = { version = "1.22", features = ["v4", "serde"] }
@@ -96,11 +96,17 @@ inquire = { version = "0.9", default-features = false, features = ["crossterm"] 
 # Ordered maps for deterministic hook execution
 indexmap = { version = "2", default-features = false, features = ["serde"] }
 
+# Direct Rust embedding of Pitchfork's supervisor/log APIs for process runtime
+pitchfork-cli = { version = "=2.14.0", default-features = false }
+
 # Cross-platform Copy-on-Write file copies (APFS clonefile, ioctl FICLONE, ReFS)
 reflink-copy = "0.1"
 
 # Work-stealing parallelism for directory copies
 rayon = "1.12"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = { version = "0.4", optional = true }

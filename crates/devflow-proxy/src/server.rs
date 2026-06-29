@@ -435,4 +435,115 @@ mod tests {
 
         assert!(!is_upgrade_request(&req));
     }
+
+    #[tokio::test]
+    async fn proxies_request_to_process_upstream() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let _ = seen_tx.send(request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 10\r\nconnection: close\r\n\r\nprocess-ok",
+                )
+                .await
+                .unwrap();
+        });
+
+        let router = crate::router::Router::new();
+        router
+            .upsert(crate::discovery::ProxyTarget {
+                domain: "api.main.app.local".to_string(),
+                container_ip: "127.0.0.1".to_string(),
+                port: upstream_addr.port(),
+                container_id: "devflow-process:/repo:main:api".to_string(),
+                container_name: "process:main:api".to_string(),
+                project: Some("app".to_string()),
+                service: Some("api".to_string()),
+                workspace: Some("main".to_string()),
+            })
+            .await;
+
+        let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let router_for_proxy = router.clone();
+        tokio::spawn(async move {
+            let (stream, peer_addr) = proxy.accept().await.unwrap();
+            let io = TokioIo::new(stream);
+            let service = service_fn(move |req| {
+                let router = router_for_proxy.clone();
+                async move { handle_request(req, &router, None, peer_addr).await }
+            });
+            http1::Builder::new()
+                .serve_connection(io, service)
+                .await
+                .unwrap();
+        });
+
+        let mut client = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+        client
+            .write_all(
+                b"GET /hello?x=1 HTTP/1.1\r\nHost: api.main.app.local\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+        assert!(response.contains("200 OK"), "{response}");
+        assert!(response.contains("process-ok"), "{response}");
+
+        let upstream_request = seen_rx.await.unwrap();
+        let upstream_request_lower = upstream_request.to_ascii_lowercase();
+        assert!(upstream_request.starts_with("GET /hello?x=1 HTTP/1.1"));
+        assert!(upstream_request_lower.contains("host: api.main.app.local"));
+        assert!(upstream_request_lower.contains("x-forwarded-host: api.main.app.local"));
+        assert!(upstream_request_lower.contains("x-forwarded-proto: http"));
+    }
+
+    #[tokio::test]
+    async fn unknown_host_returns_bad_gateway() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let router = crate::router::Router::new();
+        let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, peer_addr) = proxy.accept().await.unwrap();
+            let io = TokioIo::new(stream);
+            let service = service_fn(move |req| {
+                let router = router.clone();
+                async move { handle_request(req, &router, None, peer_addr).await }
+            });
+            http1::Builder::new()
+                .serve_connection(io, service)
+                .await
+                .unwrap();
+        });
+
+        let mut client = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: missing.local\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+        assert!(response.contains("502 Bad Gateway"), "{response}");
+        assert!(
+            response.contains("No upstream found for missing.local"),
+            "{response}"
+        );
+    }
 }

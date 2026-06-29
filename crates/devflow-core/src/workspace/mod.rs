@@ -5,6 +5,7 @@ pub mod switch;
 pub mod worktree;
 
 use crate::hooks::HookPhase;
+use crate::processes::ProcessResult;
 use crate::services::factory::OrchestrationResult;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -143,6 +144,8 @@ pub struct CreateWorkspaceResult {
     pub branch_created: bool,
     /// Per-service results from orchestration.
     pub services: Vec<ServiceResult>,
+    /// Per-process results from runtime orchestration.
+    pub processes: Vec<ProcessResult>,
     /// Lifecycle hook summaries that ran during this operation.
     pub hooks: Vec<LifecycleHookResult>,
 }
@@ -160,6 +163,8 @@ pub struct SwitchWorkspaceResult {
     pub branch_created: bool,
     /// Per-service results from orchestration.
     pub services: Vec<ServiceResult>,
+    /// Per-process results from runtime orchestration.
+    pub processes: Vec<ProcessResult>,
     /// Lifecycle hook summaries that ran during this operation.
     pub hooks: Vec<LifecycleHookResult>,
 }
@@ -177,6 +182,8 @@ pub struct DeleteWorkspaceResult {
     pub branch_deleted: bool,
     /// Per-service results from orchestration.
     pub services: Vec<ServiceResult>,
+    /// Per-process results from runtime orchestration.
+    pub processes: Vec<ProcessResult>,
     /// Lifecycle hook summaries that ran during this operation.
     pub hooks: Vec<LifecycleHookResult>,
 }
@@ -188,6 +195,8 @@ pub struct LifecycleOptions {
     pub skip_hooks: bool,
     /// Skip service orchestration.
     pub skip_services: bool,
+    /// Skip process orchestration.
+    pub skip_processes: bool,
     /// Hook approval mode.
     pub hook_approval: hooks::HookApprovalMode,
     /// Whether hook output should be verbose (headers/footers).
@@ -204,6 +213,7 @@ impl Default for LifecycleOptions {
         Self {
             skip_hooks: false,
             skip_services: false,
+            skip_processes: false,
             hook_approval: hooks::HookApprovalMode::NoApproval,
             verbose_hooks: false,
             trigger_source: None,

@@ -30,6 +30,7 @@ devflow switch -c feature/new --from develop
 devflow switch feature/auth -x "npm run dev"
 devflow switch feature/auth --open
 devflow switch feature/auth --no-services
+devflow switch feature/auth --no-processes
 devflow switch feature/auth --dry-run
 devflow switch -c agent/task-42 --sandboxed
 ```
@@ -42,6 +43,7 @@ Important flags:
 - `-d, --detach` run the post-switch command in a detached multiplexer session
 - `-o, --open` open an interactive multiplexer session in the workspace worktree
 - `--no-services` skip service branching/switching
+- `--no-processes` skip process auto-start during switch
 - `--no-verify` skip hooks
 - `--template` switch to the main/template workspace
 - `--no-respect-gitignore` include gitignored files in worktree copy
@@ -368,9 +370,58 @@ devflow service discover --service-type postgres
 devflow service discover --global
 ```
 
+## Processes
+
+Workspace processes are project commands such as app servers, frontend dev servers, background workers, and schedulers. They are configured under `processes.daemons` and run in the selected workspace/worktree with service connection variables rendered from the same MiniJinja context as hooks.
+
+```yaml
+processes:
+  auto_start: true
+  daemons:
+    api:
+      run: "npm run dev"
+      port: { expect: [3000], bump: 50 }
+      ready_http: "http://127.0.0.1:3000/health"
+      env:
+        DATABASE_URL: "{{ service['app-db'].url }}"
+    worker:
+      run: "npm run worker"
+      required: false
+      depends: [api]
+```
+
+### `devflow process start [names...] [--all] [--workspace <ws>] [--force]`
+
+Start selected processes, or all configured processes when no names are given (or `--all` is used). Dependencies start first. `--force` restarts an already-running process.
+
+```bash
+devflow process start --all
+devflow process start api --force
+```
+
+### `devflow process stop [names...] [--all] [--workspace <ws>]`
+
+Stop selected processes, or all configured/running workspace processes.
+
+### `devflow process restart [names...] [--all] [--workspace <ws>]`
+
+Stop then start selected processes.
+
+### `devflow process list|status [--workspace <ws>]`
+
+Show recorded process state, PID, resolved ports, proxy URLs, retry count, and log paths.
+
+### `devflow process logs <name> [--workspace <ws>] [--tail N] [--follow]`
+
+Print logs captured from stdout/stderr. Use `--follow`/`-f` to stream appended output until interrupted.
+
+Set `required: false` on optional processes so readiness failures are reported but do not fail `switch`/`process start`.
+
+When `processes.auto_start: true`, `devflow switch` starts configured processes after services and hooks are aligned. Auto-started shell commands use the same approval store as hooks: unapproved commands are skipped in `--json`/`--non-interactive` mode unless pre-approved with `devflow hook approvals add "npm run dev"` or `DEVFLOW_APPROVE_HOOKS=1`. Use `processes.provider: pitchfork` to embed Pitchfork's Rust supervisor directly without shelling out to the `pitchfork` CLI. Running processes with resolved ports are exposed by `devflow proxy` as `https://<process>.<workspace>.<project>.<suffix>` (default suffix: `.local`). `devflow remove` stops processes before deleting the worktree and service workspaces. Run `devflow daemon start` to keep desired-state, `watch` restart-on-change, and `retry` reconciliation active in the background.
+
 ## Controller Daemon
 
-A background controller that keeps every registered project's **shared global engines** running, restarting any that go down. Provisioning happens on `switch`; the daemon just keeps the engines alive.
+A background controller that keeps every registered project's **shared global engines** running and reconciles process desired state plus `watch`/`retry` behavior. Service/process provisioning happens on `switch`; the daemon keeps engines alive, starts/stops processes whose recorded desired state drifts from reality, and restarts watched/crashed processes that devflow manages.
 
 ### `devflow daemon start`
 
@@ -554,7 +605,7 @@ For `.claude/settings.local.json`, permission arrays are union-merged. For other
 
 ### `devflow proxy start`
 
-Start the native HTTP(S) reverse proxy and friendly-name discovery. Discovered containers get `*.local` names (the default suffix on all platforms) advertised over mDNS so the **same name resolves from the host and from inside containers**: on the host via Bonjour (macOS) or Avahi (Linux — needs avahi-daemon + avahi-utils), and inside containers via Docker DNS aliases. Web names resolve to the proxy (HTTPS with the trusted CA); database names resolve directly to the container IP for native access at the standard port (needs routable container IPs: OrbStack/Colima/Linux). `--domain-suffix localhost` opts into loopback-only names, but beware: many runtimes hard-resolve `*.localhost` to loopback inside containers (RFC 6761), so those names don't work container-to-container.
+Start the native HTTP(S) reverse proxy and friendly-name discovery. Discovered containers get `*.local` names (the default suffix on all platforms) advertised over mDNS so the **same name resolves from the host and from inside containers**: on the host via Bonjour (macOS) or Avahi (Linux — needs avahi-daemon + avahi-utils), and inside containers via Docker DNS aliases. Web names resolve to the proxy (HTTPS with the trusted CA); database names resolve directly to the container IP for native access at the standard port (needs routable container IPs: OrbStack/Colima/Linux). Devflow-managed host processes with resolved ports are also routed to `127.0.0.1` as `https://<process>.<workspace>.<project>.<suffix>`. `--domain-suffix localhost` opts into loopback-only names, but beware: many runtimes hard-resolve `*.localhost` to loopback inside containers (RFC 6761), so those names don't work container-to-container.
 
 ```bash
 devflow proxy start
@@ -575,7 +626,7 @@ Show proxy status, ports, and CA info.
 
 ### `devflow proxy list`
 
-List discovered endpoints. Web services are shown as HTTPS URLs (`https://name.local`); well-known database ports are shown as native direct endpoints such as `postgresql://name.local:5432`. Database names resolve to the container IP via the proxy's mDNS advertising. If a database name does not resolve, check the proxy is running with mDNS enabled and that your platform routes container IPs, or use the UPSTREAM IP shown by this command.
+List discovered endpoints. Web services and devflow-managed host processes are shown as HTTPS URLs (`https://name.local`); well-known database ports are shown as native direct endpoints such as `postgresql://name.local:5432`. Database names resolve to the container IP via the proxy's mDNS advertising. Host process names resolve to the proxy and forward to `127.0.0.1:<port>`. If a database name does not resolve, check the proxy is running with mDNS enabled and that your platform routes container IPs, or use the UPSTREAM IP shown by this command.
 
 ### `devflow proxy trust`
 

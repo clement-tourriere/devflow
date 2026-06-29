@@ -7,6 +7,7 @@ mod git_hook;
 mod hook;
 mod init;
 mod plugin;
+mod process;
 mod proxy;
 mod service;
 mod skill;
@@ -109,6 +110,8 @@ Examples:
         execute_args: Vec<String>,
         #[arg(long, help = "Skip service branching (only VCS switch)")]
         no_services: bool,
+        #[arg(long, help = "Skip process orchestration")]
+        no_processes: bool,
         #[arg(long, help = "Skip hook execution")]
         no_verify: bool,
         #[arg(long, help = "Switch to main database (template/development database)")]
@@ -195,6 +198,16 @@ Examples:
     Service {
         #[command(subcommand)]
         action: ServiceCommands,
+    },
+
+    // ── Project processes ──
+    #[command(
+        about = "Manage workspace project processes (web servers, workers, schedulers)",
+        long_about = "Manage workspace-scoped project processes configured under the `processes:` section.\n\nExamples:\n  devflow process start --all\n  devflow process start api --force\n  devflow process status\n  devflow process logs api --tail 100\n  devflow process stop --all"
+    )]
+    Process {
+        #[command(subcommand)]
+        action: ProcessCommands,
     },
 
     // ── Top-level aliases ──
@@ -391,8 +404,8 @@ Examples:
 
     // ── Proxy ──
     #[command(
-        about = "Local reverse proxy (auto-HTTPS for Docker containers)",
-        long_about = "Local reverse proxy for Docker containers.\n\nAuto-discovers Docker containers and provides HTTPS access via\n*.local domains (configurable with --domain-suffix). Uses a local CA\nfor certificate generation.\n\nExamples:\n  devflow proxy start                # Start the proxy\n  devflow proxy start --daemon       # Start in background\n  devflow proxy stop                 # Stop the proxy\n  devflow proxy status               # Show proxy status\n  devflow proxy list                 # List proxied containers\n  devflow proxy trust install        # Install CA certificate\n  devflow proxy trust verify         # Check if CA is trusted\n  devflow proxy trust remove         # Remove CA from trust store\n  devflow proxy trust info           # Show trust instructions",
+        about = "Local reverse proxy (auto-HTTPS for containers and devflow processes)",
+        long_about = "Local reverse proxy for Docker containers and devflow-managed host processes.\n\nAuto-discovers Docker containers and process records, then provides HTTPS access via\n*.local domains (configurable with --domain-suffix). Uses a local CA\nfor certificate generation.\n\nExamples:\n  devflow proxy start                # Start the proxy\n  devflow proxy start --daemon       # Start in background\n  devflow proxy stop                 # Stop the proxy\n  devflow proxy status               # Show proxy status\n  devflow proxy list                 # List proxied targets\n  devflow proxy trust install        # Install CA certificate\n  devflow proxy trust verify         # Check if CA is trusted\n  devflow proxy trust remove         # Remove CA from trust store\n  devflow proxy trust info           # Show trust instructions",
         hide = true
     )]
     Proxy {
@@ -484,6 +497,61 @@ pub enum TrainAction {
     Resume {
         #[arg(help = "Target workspace (default: main)")]
         target: Option<String>,
+    },
+}
+
+/// Subcommands for `devflow process`.
+#[derive(Subcommand)]
+pub enum ProcessCommands {
+    #[command(about = "Start configured processes for a workspace")]
+    Start {
+        #[arg(help = "Process names to start (omit with --all for every process)")]
+        names: Vec<String>,
+        #[arg(long, help = "Start all configured processes")]
+        all: bool,
+        #[arg(long, help = "Workspace name (defaults to current workspace)")]
+        workspace: Option<String>,
+        #[arg(short, long, help = "Restart if already running")]
+        force: bool,
+    },
+    #[command(about = "Stop configured or running processes for a workspace")]
+    Stop {
+        #[arg(help = "Process names to stop (omit with --all for every process)")]
+        names: Vec<String>,
+        #[arg(long, help = "Stop all configured/running processes")]
+        all: bool,
+        #[arg(long, help = "Workspace name (defaults to current workspace)")]
+        workspace: Option<String>,
+    },
+    #[command(about = "Restart configured processes for a workspace")]
+    Restart {
+        #[arg(help = "Process names to restart (omit with --all for every process)")]
+        names: Vec<String>,
+        #[arg(long, help = "Restart all configured processes")]
+        all: bool,
+        #[arg(long, help = "Workspace name (defaults to current workspace)")]
+        workspace: Option<String>,
+    },
+    #[command(about = "List process status")]
+    List {
+        #[arg(long, help = "Filter by workspace")]
+        workspace: Option<String>,
+    },
+    #[command(about = "Show process status")]
+    Status {
+        #[arg(long, help = "Filter by workspace")]
+        workspace: Option<String>,
+    },
+    #[command(about = "Show process logs")]
+    Logs {
+        #[arg(help = "Process name")]
+        name: String,
+        #[arg(long, help = "Workspace name (defaults to current workspace)")]
+        workspace: Option<String>,
+        #[arg(long, help = "Number of log lines to show")]
+        tail: Option<usize>,
+        #[arg(short = 'f', long, help = "Follow appended log output")]
+        follow: bool,
     },
 }
 
@@ -845,7 +913,7 @@ pub enum ProxyCommands {
     Stop,
     #[command(about = "Show proxy status")]
     Status,
-    #[command(about = "List proxied containers")]
+    #[command(about = "List proxied containers and devflow processes")]
     List,
     #[command(about = "Manage CA certificate trust")]
     Trust {
@@ -926,6 +994,7 @@ pub async fn handle_command(
     let uses_service = matches!(
         cmd,
         Commands::Service { .. }
+            | Commands::Process { .. }
             | Commands::List
             | Commands::Graph
             | Commands::Link { .. }
@@ -1030,6 +1099,10 @@ pub async fn handle_command(
                     &config_path,
                 )
                 .await
+            }
+            Commands::Process { action } => {
+                process::handle_process_command(action, &config_merged, &config_path, json_output)
+                    .await
             }
             // Workspace management commands that need service context
             _ => {

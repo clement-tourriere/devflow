@@ -93,6 +93,45 @@ behavior: {}
 }
 
 #[test]
+fn test_processes_yaml_parsing() {
+    let yaml = r#"
+processes:
+  provider: pitchfork
+  auto_start: true
+  daemons:
+    api:
+      run: "npm run dev"
+      required: false
+      port: { expect: [3000], bump: 25 }
+      ready_http: "http://127.0.0.1:3000/health"
+      ready_timeout: 15
+      stop_timeout: 5
+      shutdown_signal: INT
+      watch: ["src/**/*.ts"]
+      env:
+        DATABASE_URL: "{{ service['db'].url }}"
+    worker:
+      run: "npm run worker"
+      depends: [api]
+      retry: 2
+"#;
+    let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+    let processes = config.processes.expect("processes should parse");
+    assert_eq!(processes.provider, "pitchfork");
+    assert!(processes.auto_start);
+    assert_eq!(processes.daemons.len(), 2);
+    assert!(!processes.daemons["api"].required);
+    assert_eq!(processes.daemons["api"].ready_timeout, Some(15));
+    assert_eq!(processes.daemons["api"].stop_timeout, Some(5));
+    assert_eq!(
+        processes.daemons["api"].shutdown_signal.as_deref(),
+        Some("INT")
+    );
+    assert_eq!(processes.daemons["worker"].depends, vec!["api"]);
+    assert_eq!(processes.daemons["worker"].retry, Some(2));
+}
+
+#[test]
 fn test_multi_services_parsing() {
     let yaml = r#"
 git:

@@ -1,11 +1,11 @@
 ---
 title: Reverse proxy
-description: Trusted HTTPS URLs for every Docker container — automatic discovery, mDNS names that work everywhere, and a local CA.
+description: Trusted HTTPS URLs for Docker containers and devflow-managed host processes — automatic discovery, mDNS names that work everywhere, and a local CA.
 sidebar:
   order: 6
 ---
 
-Stop hand-editing `/etc/hosts`, juggling ports, and clicking through certificate warnings. The built-in proxy watches Docker and gives every container a stable `https://name.local` URL the moment it starts — with a locally-trusted certificate. Webhooks, OAuth callbacks, and cross-service calls just work, per branch.
+Stop hand-editing `/etc/hosts`, juggling ports, and clicking through certificate warnings. The built-in proxy watches Docker and devflow process state, giving every container and port-backed host process a stable `https://name.local` URL the moment it starts — with a locally-trusted certificate. Webhooks, OAuth callbacks, and cross-service calls just work, per branch.
 
 ## Quick start
 
@@ -27,9 +27,10 @@ On Linux, mDNS publishing needs `avahi-daemon` + `avahi-utils` (preinstalled on 
 
 ## How routing works
 
-The proxy monitors Docker events in real time. When a container starts it derives a domain, then:
+The proxy monitors Docker events in real time and polls devflow process records. When a target starts it derives a domain, then:
 
 - **HTTP services** — TLS is terminated with a per-domain certificate signed by the local CA; requests forward to the container. The name resolves to the proxy on `127.0.0.1`. Plain-HTTP requests get a 301 to HTTPS.
+- **Host processes, including Pitchfork-managed processes** — devflow-managed native or Pitchfork processes with resolved ports are exposed as `https://<process>.<workspace>.<project>.<suffix>` (for example `.local`) and forward to `127.0.0.1:<port>`.
 - **TCP services (databases)** — well-known ports (PostgreSQL 5432, MySQL 3306, Redis 6379, …) are exposed as **native direct endpoints** like `postgresql://postgres.myapp.local:5432`; the name resolves to the container's own IP.
 
 :::caution
@@ -43,9 +44,10 @@ Direct database endpoints need the container IP to be **routable from the host**
 | 1 | `devproxy.domains` label | `app.local, api.local` |
 | 2 | `devproxy.domain` label | `myapp.test` |
 | 3 | `VIRTUAL_HOST` env var (nginx-proxy compatible) | `myapp.local` |
-| 4 | devflow labels: `{service}.{workspace}.{project}.{suffix}` | `postgres.feat-1.myapp.local` |
-| 5 | Compose labels: `{service}.{project}.{suffix}` | `web.myapp.local` |
-| 6 | Container name: `{name}.{suffix}` | `myapp.local` |
+| 4 | devflow process state, native or Pitchfork: `{process}.{workspace}.{project}.{suffix}` | `api.feat-1.myapp.local` |
+| 5 | devflow labels: `{service}.{workspace}.{project}.{suffix}` | `postgres.feat-1.myapp.local` |
+| 6 | Compose labels: `{service}.{project}.{suffix}` | `web.myapp.local` |
+| 7 | Container name: `{name}.{suffix}` | `myapp.local` |
 
 ```yaml
 # docker-compose.yml — custom domains
@@ -59,6 +61,23 @@ services:
 ```bash
 # Compose projects need zero config:
 docker compose -p myapp up -d     # → https://web.myapp.local
+```
+
+For Pitchfork-backed project processes, keep the proxy config in devflow and set the process runtime in `.devflow.yml`:
+
+```yaml
+processes:
+  provider: pitchfork
+  daemons:
+    api:
+      run: npm run dev
+      port: { expect: [3000], bump: 50 }
+```
+
+When `api` starts in workspace `feat-1` for project `myapp`, the devflow proxy publishes the same unified URL shape as native processes:
+
+```text
+https://api.feat-1.myapp.local -> 127.0.0.1:<resolved-port>
 ```
 
 ## Port detection (first match wins)
@@ -103,7 +122,7 @@ devflow proxy status | list | stop        # all support --json
 
 Global defaults live in `~/.config/devflow/config.yml` (`proxy.domain_suffix`, `proxy.https_port`, …); CLI flags override them.
 
-A localhost-only JSON API serves dashboards: `GET /api/status`, `GET /api/targets` (all proxied targets with domain, container IP/port, project/service/workspace), `GET /api/ca`.
+A localhost-only JSON API serves dashboards: `GET /api/status`, `GET /api/targets` (all proxied targets with domain, upstream IP/port, project/service/workspace), `GET /api/ca`. Host process targets use upstream IP `127.0.0.1`.
 
 ### Label & env reference
 

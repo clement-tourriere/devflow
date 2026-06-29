@@ -145,6 +145,7 @@ pub(super) async fn handle_git_hook(
                     false,
                     false,
                     false,
+                    false,
                     true,
                     Some("vcs"),
                     Some("post-checkout"),
@@ -160,6 +161,7 @@ pub(super) async fn handle_git_hook(
                         false, // create — workspace already exists from git
                         None,  // from
                         false, // no_services
+                        false, // no_processes
                         false, // no_verify
                         false, // json_output — git hooks are non-interactive
                         true,  // non_interactive
