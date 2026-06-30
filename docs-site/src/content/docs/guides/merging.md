@@ -2,7 +2,7 @@
 title: Merging & merge trains
 description: Merge and rebase workspaces with readiness checks, cascade reports, and a queue-based merge train.
 sidebar:
-  order: 8
+  order: 9
 ---
 
 devflow wraps merge/rebase with workspace awareness: merges run in the target's worktree when it has one, cleanup removes the whole workspace (branch + worktree + services), and the **Smart Merge** feature set adds readiness checks, cascade analysis, and merge trains.

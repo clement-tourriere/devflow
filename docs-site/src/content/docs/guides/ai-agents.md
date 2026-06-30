@@ -2,7 +2,7 @@
 title: AI agents & automation
 description: Isolated environments per agent task — JSON contract, skills, sandboxing, AI commit messages, and CI patterns.
 sidebar:
-  order: 7
+  order: 8
 ---
 
 devflow is designed for autonomous agents as much as humans: every agent task can get its own worktree *and* its own database — fully isolated, instantly cloned, trivially cleaned up. `--json --non-interactive` makes every command machine-safe.

@@ -103,7 +103,7 @@ hooks:
     env: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
 ```
 
-Already running containers (started outside devflow) can be adopted: `devflow service discover` lists candidates and generates config.
+Already running containers (started outside devflow) can be adopted: `devflow service discover` lists candidates and generates config. For incremental Compose migrations and hybrid setups, see [Adding devflow to an existing project](/devflow/getting-started/existing-project/#hybrid-rollout-patterns).
 
 ## Storage layout
 

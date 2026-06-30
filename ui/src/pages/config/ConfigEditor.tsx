@@ -8,6 +8,7 @@ import GitSection from "./sections/GitSection";
 import BehaviorSection from "./sections/BehaviorSection";
 import WorktreeSection from "./sections/WorktreeSection";
 import ServicesSection from "./sections/ServicesSection";
+import ProcessesSection from "./sections/ProcessesSection";
 import ExecuteSection from "./sections/ExecuteSection";
 import AgentSection from "./sections/AgentSection";
 import CommitSection from "./sections/CommitSection";
@@ -20,6 +21,7 @@ type Section =
   | "behavior"
   | "worktree"
   | "services"
+  | "processes"
   | "execute"
   | "agent"
   | "commit"
@@ -32,6 +34,7 @@ const SECTIONS: { key: Section; label: string }[] = [
   { key: "behavior", label: "Behavior" },
   { key: "worktree", label: "Worktrees" },
   { key: "services", label: "Services" },
+  { key: "processes", label: "Processes" },
   { key: "execute", label: "Execute" },
   { key: "agent", label: "Agent" },
   { key: "commit", label: "Commit" },
@@ -226,6 +229,9 @@ function ConfigEditor() {
                   onChange={handleChange}
                   projectPath={projectPath}
                 />
+              )}
+              {activeSection === "processes" && (
+                <ProcessesSection config={config} onChange={handleChange} />
               )}
               {activeSection === "execute" && (
                 <ExecuteSection config={config} onChange={handleChange} />

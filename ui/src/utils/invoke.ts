@@ -41,6 +41,7 @@ import type {
   DeleteWorkspaceResult,
   ProcessStatus,
   ProcessOperationResponse,
+  PitchforkBridgeInfo,
 } from "../types";
 
 // Projects
@@ -107,6 +108,8 @@ export const pruneWorktrees = (projectPath: string) =>
   invoke<PruneResult>("prune_worktrees", { projectPath });
 
 // Processes
+export const getPitchforkBridgeInfo = (projectPath: string) =>
+  invoke<PitchforkBridgeInfo>("get_pitchfork_bridge_info", { projectPath });
 export const listProcesses = (projectPath: string, workspaceName?: string) =>
   invoke<ProcessStatus[]>("list_processes", { projectPath, workspaceName });
 export const startProcesses = (
@@ -380,11 +383,13 @@ export const saveSettings = (settings: AppSettings) =>
 // Terminal
 export const createTerminal = (
   projectPath?: string,
-  workspaceName?: string
+  workspaceName?: string,
+  initialCommand?: string
 ) =>
   invoke<TerminalSessionInfo>("create_terminal", {
     projectPath,
     workspaceName,
+    initialCommand,
   });
 export const listTerminals = () =>
   invoke<TerminalSessionInfo[]>("list_terminals");

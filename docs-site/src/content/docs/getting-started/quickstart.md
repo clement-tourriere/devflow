@@ -96,4 +96,6 @@ Removes the workspace, its worktree (refusing if it has uncommitted changes — 
 - [Workspaces & isolation models](/devflow/concepts/workspaces/) — how local CoW containers and shared engines differ
 - [Worktrees](/devflow/concepts/worktrees/) — what gets copied into a worktree and why
 - [Hooks](/devflow/concepts/hooks/) — automate env files, migrations, and setup
+- [Project processes & Pitchfork](/devflow/guides/processes/) — run app servers and workers per workspace
+- [Adding devflow to an existing project](/devflow/getting-started/existing-project/) — migrate from Docker Compose incrementally
 - [AI agents](/devflow/guides/ai-agents/) — give every agent task its own environment

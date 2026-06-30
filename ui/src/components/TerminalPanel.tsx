@@ -51,6 +51,7 @@ interface TerminalPanelProps {
   pendingTerminal: {
     projectPath?: string;
     workspaceName?: string;
+    initialCommand?: string;
   } | null;
   onPendingTerminalHandled: () => void;
 }
@@ -237,10 +238,10 @@ function TerminalPanel({
   }, []);
 
   const handleCreateTargetedTab = useCallback(
-    async (projectPath?: string, workspaceName?: string) => {
+    async (projectPath?: string, workspaceName?: string, initialCommand?: string) => {
       setPanelError(null);
       try {
-        const session = await createTerminalInvoke(projectPath, workspaceName);
+        const session = await createTerminalInvoke(projectPath, workspaceName, initialCommand);
         const initialStatus = exitedSessionIdsRef.current.has(session.id)
           ? "Exited"
           : session.status;
@@ -268,7 +269,8 @@ function TerminalPanel({
     const open = async () => {
       await handleCreateTargetedTab(
         pendingTerminal.projectPath,
-        pendingTerminal.workspaceName
+        pendingTerminal.workspaceName,
+        pendingTerminal.initialCommand
       );
       onPendingTerminalHandled();
     };

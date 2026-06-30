@@ -7,12 +7,14 @@ use std::path::PathBuf;
 /// Known top-level keys in .devflow.yml
 const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "name",
+    "default_vcs",
     "git",
     "behavior",
     "services",
     "processes",
     "worktree",
     "hooks",
+    "triggers",
     "execute",
     "merge",
     "commit",
@@ -74,6 +76,37 @@ pub(super) fn validate_config(config_path: &Option<PathBuf>, json_output: bool) 
                     ));
                 }
             }
+            if let Some(serde_yaml_ng::Value::Mapping(pitchfork)) = processes.get("pitchfork") {
+                if let Some(policy) = pitchfork.get("config_policy").and_then(|v| v.as_str()) {
+                    let known = ["devflow-owned", "import", "mirror", "merge"];
+                    if !known.contains(&policy) {
+                        errors.push(format!(
+                            "processes.pitchfork.config_policy '{}' is not supported (use devflow-owned, import, mirror, or merge)",
+                            policy
+                        ));
+                    }
+                }
+                if let Some(external) = pitchfork.get("external_daemons").and_then(|v| v.as_str()) {
+                    let known = ["hide", "show", "importable"];
+                    if !known.contains(&external) {
+                        errors.push(format!(
+                            "processes.pitchfork.external_daemons '{}' is not supported (use hide, show, or importable)",
+                            external
+                        ));
+                    }
+                }
+                if let Some(serde_yaml_ng::Value::Mapping(web_ui)) = pitchfork.get("web_ui") {
+                    if let Some(edit_mode) = web_ui.get("edit_mode").and_then(|v| v.as_str()) {
+                        let known = ["readonly", "warn", "merge"];
+                        if !known.contains(&edit_mode) {
+                            errors.push(format!(
+                                "processes.pitchfork.web_ui.edit_mode '{}' is not supported (use readonly, warn, or merge)",
+                                edit_mode
+                            ));
+                        }
+                    }
+                }
+            }
             if let Some(serde_yaml_ng::Value::Mapping(daemons)) = processes.get("daemons") {
                 for (name_value, daemon_value) in daemons {
                     let name = name_value.as_str().unwrap_or("<unknown>");
@@ -100,14 +133,27 @@ pub(super) fn validate_config(config_path: &Option<PathBuf>, json_output: bool) 
                     let svc_type = svc_map
                         .get("service_type")
                         .and_then(|v| v.as_str())
-                        .or_else(|| svc_map.get("type").and_then(|v| v.as_str()));
+                        .unwrap_or("postgres");
 
                     // Check for known service types
-                    if let Some(st) = svc_type {
-                        let known_types = ["postgres", "clickhouse", "mysql", "generic", "plugin"];
-                        if !known_types.contains(&st) {
-                            warnings
-                                .push(format!("Service '{}': unknown service_type '{}'", name, st));
+                    {
+                        let known_types = [
+                            "postgres",
+                            "clickhouse",
+                            "mysql",
+                            "mariadb",
+                            "generic",
+                            "plugin",
+                            "redis",
+                            "rustfs",
+                            "s3",
+                            "objectstorage",
+                        ];
+                        if !known_types.contains(&svc_type) {
+                            warnings.push(format!(
+                                "Service '{}': unknown service_type '{}'",
+                                name, svc_type
+                            ));
                         }
                     }
 

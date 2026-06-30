@@ -1,0 +1,119 @@
+# Example: migrate an existing Docker Compose app to devflow.
+#
+# Pattern:
+# - Move stateful dependencies (Postgres/Redis) to devflow services.
+# - Generate .env.local on every workspace switch.
+# - Run app/worker/scheduler commands as devflow processes, optionally backed by
+#   Pitchfork's embedded supervisor.
+# - Keep non-critical containers hybrid until you are ready to migrate them.
+
+name: existing-app
+
+services:
+  # Shared-engine Postgres: one global container, one database per workspace.
+  # Use type: local instead if you need a full CoW container per workspace.
+  - name: app-db
+    type: shared
+    service_type: postgres
+    default: true
+    shared:
+      image: postgres:17
+      port: 5432
+      template_branching: true
+
+  # Shared Redis: one global Redis, one DB index per workspace.
+  - name: cache
+    type: shared
+    service_type: redis
+    shared:
+      image: redis:7
+      port: 6379
+
+  # Optional hybrid example: keep a non-branching local container under devflow.
+  # For per-workspace containers, set auto_workspace: true and use port_range_start.
+  - name: mail
+    type: local
+    service_type: generic
+    auto_workspace: false
+    generic:
+      image: axllent/mailpit:latest
+      port_mapping: "8025:8025"
+
+worktree:
+  enabled: true
+  path_template: "../{repo}.{workspace}"
+  copy_files:
+    - .env
+  copy_ai_configs: true
+
+hooks:
+  post-create:
+    # Optional setup after a new worktree is created. Keep commands generic and
+    # approve them once per machine with `devflow hook approvals add ...`.
+    install-tools:
+      command: "mise install"
+      condition: "file_exists:mise.toml"
+      continue_on_error: true
+
+  post-switch:
+    env:
+      action:
+        type: write-env
+        path: .env.local
+        vars:
+          DATABASE_URL: "{{ service['app-db'].url }}"
+          REDIS_URL: "{{ service['cache'].url }}"
+          # Example aliases for frameworks that expect separate cache/broker URLs.
+          CACHE_URL: "{{ service['cache'].url }}"
+          CELERY_BROKER_URL: "{{ service['cache'].url }}"
+          DEVFLOW_WORKSPACE: "{{ workspace }}"
+
+    # Optional migration hook. Uncomment once the command is safe/idempotent for
+    # every workspace switch in your project.
+    # migrate:
+    #   command: "mise x -- python manage.py migrate"
+    #   condition: "file_exists:manage.py"
+
+processes:
+  # Use `pitchfork` to embed Pitchfork's Rust supervisor directly; use `native`
+  # or omit this key for devflow's built-in process runner.
+  provider: pitchfork
+  auto_start: false
+  auto_stop: true
+  pitchfork:
+    config_policy: devflow-owned
+    external_daemons: show
+    web_ui:
+      enabled: false
+      bind_address: 127.0.0.1
+      bind_port: 3120
+      edit_mode: warn
+  daemons:
+    web:
+      # Replace with your host dev command: npm, bun, cargo, uv, pdm, rails, etc.
+      # Devflow injects PORT after resolving port bumps.
+      run: "mise x -- python manage.py runserver 127.0.0.1:$PORT"
+      port: { expect: [8000], bump: 100 }
+      ready_port: 8000
+      env:
+        DATABASE_URL: "{{ service['app-db'].url }}"
+        REDIS_URL: "{{ service['cache'].url }}"
+        CACHE_URL: "{{ service['cache'].url }}"
+        CELERY_BROKER_URL: "{{ service['cache'].url }}"
+
+    worker:
+      run: "mise x -- celery -A app worker -l INFO"
+      required: false
+      env:
+        DATABASE_URL: "{{ service['app-db'].url }}"
+        REDIS_URL: "{{ service['cache'].url }}"
+        CELERY_BROKER_URL: "{{ service['cache'].url }}"
+
+    scheduler:
+      run: "mise x -- celery -A app beat -l INFO"
+      required: false
+      depends: [worker]
+      env:
+        DATABASE_URL: "{{ service['app-db'].url }}"
+        REDIS_URL: "{{ service['cache'].url }}"
+        CELERY_BROKER_URL: "{{ service['cache'].url }}"

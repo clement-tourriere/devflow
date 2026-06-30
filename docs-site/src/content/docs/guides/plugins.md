@@ -2,7 +2,7 @@
 title: Plugin providers
 description: Extend devflow with custom service providers via a JSON-over-stdio protocol — any executable, any language.
 sidebar:
-  order: 10
+  order: 11
 ---
 
 Any executable that speaks a simple JSON-over-stdio protocol can be a devflow service provider — provision DNS records, spin up VMs, call internal platform APIs, whatever your workspaces need.

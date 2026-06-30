@@ -125,7 +125,7 @@ pub trait ServiceProvider: Send + Sync {
             .filter(|b| b.name != "main" && b.name != "master")
             .collect();
 
-        sorted_branches.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        sorted_branches.sort_by_key(|b| std::cmp::Reverse(b.created_at));
 
         let mut deleted = Vec::new();
         if sorted_branches.len() > max_count {

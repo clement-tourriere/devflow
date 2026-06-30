@@ -264,7 +264,7 @@ impl ClickHouseLocalProvider {
                 ContainerStatus::NotFound => {
                     return Err(anyhow!("container '{container_name}' does not exist"));
                 }
-                ContainerStatus::Running => {
+                ContainerStatus::Running
                     // clickhouse-client --query "SELECT 1"
                     if self
                         .exec_check(
@@ -278,10 +278,9 @@ impl ClickHouseLocalProvider {
                             ],
                         )
                         .await
-                    {
+                    => {
                         return Ok(());
                     }
-                }
                 _ => {}
             }
 

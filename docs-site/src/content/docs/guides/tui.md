@@ -2,7 +2,7 @@
 title: TUI dashboard
 description: The interactive terminal dashboard — workspaces, services, proxy, system info, and logs without leaving the terminal.
 sidebar:
-  order: 12
+  order: 13
 ---
 
 ```bash

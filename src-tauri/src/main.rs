@@ -146,6 +146,7 @@ fn main() {
             commands::workspaces::delete_workspace,
             commands::workspaces::prune_worktrees,
             // Processes
+            commands::processes::get_pitchfork_bridge_info,
             commands::processes::list_processes,
             commands::processes::start_processes,
             commands::processes::stop_processes,

@@ -2,7 +2,7 @@
 title: Cloud providers
 description: Experimental managed-Postgres branching with Neon, DBLab, and Xata.
 sidebar:
-  order: 9
+  order: 10
   badge:
     text: Experimental
     variant: caution

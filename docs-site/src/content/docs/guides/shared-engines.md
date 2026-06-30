@@ -96,4 +96,4 @@ The daemon covers **every registered project's** shared engines (`type: shared`,
 | Data branching | full CoW clone of everything | Postgres: TEMPLATE copy · others: empty |
 | Reset/seed granularity | per container | per database/bucket |
 
-Mixing is normal: CoW Postgres for the data you branch, shared Redis/RustFS for caches and blobs.
+Mixing is normal: CoW Postgres for the data you branch, shared Redis/RustFS for caches and blobs. For a step-by-step Docker Compose migration, see [Adding devflow to an existing project](/devflow/getting-started/existing-project/#migration-map-from-docker-compose).

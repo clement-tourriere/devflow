@@ -437,7 +437,7 @@ impl DockerRuntime {
                 ContainerStatus::NotFound => {
                     return Err(anyhow!("container '{container_name}' does not exist"));
                 }
-                ContainerStatus::Running => {
+                ContainerStatus::Running
                     // Probe over TCP: during initdb the image's entrypoint runs
                     // a temporary server that only listens on the unix socket,
                     // so a socket-based pg_isready false-positives before the
@@ -458,10 +458,9 @@ impl DockerRuntime {
                             ],
                         )
                         .await
-                    {
+                    => {
                         return Ok(());
                     }
-                }
                 _ => {}
             }
 

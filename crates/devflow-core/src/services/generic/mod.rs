@@ -290,10 +290,8 @@ impl GenericDockerProvider {
                 ContainerStatus::NotFound => {
                     return Err(anyhow!("container '{container_name}' does not exist"));
                 }
-                ContainerStatus::Running => {
-                    if self.exec_check(container_name, hc_cmd).await {
-                        return Ok(());
-                    }
+                ContainerStatus::Running if self.exec_check(container_name, hc_cmd).await => {
+                    return Ok(());
                 }
                 _ => {}
             }

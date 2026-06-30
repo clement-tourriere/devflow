@@ -526,6 +526,7 @@ pub async fn create_terminal(
     state: State<'_, AppState>,
     project_path: Option<String>,
     workspace_name: Option<String>,
+    initial_command: Option<String>,
 ) -> Result<TerminalSessionInfo, String> {
     // Determine working directory
     let mut working_dir =
@@ -624,7 +625,7 @@ pub async fn create_terminal(
         environment: env,
         shell,
         shell_args,
-        initial_command: None,
+        initial_command,
         rows: 24,
         cols: 80,
     };

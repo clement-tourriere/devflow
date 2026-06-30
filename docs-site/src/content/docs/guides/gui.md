@@ -2,7 +2,7 @@
 title: Desktop GUI
 description: The Tauri-based desktop app — projects, workspaces, services, hooks, proxy, and configuration with a system tray.
 sidebar:
-  order: 11
+  order: 12
 ---
 
 A native desktop application (Tauri 2 + React) for managing everything devflow does — sharing the same core as the CLI, so hooks, services, and state behave identically.
@@ -21,9 +21,10 @@ Requires `bun` and the Tauri prerequisites.
 - **Dashboard** — projects at a glance: configuration status, workspace/service counts, proxy state.
 - **Workspaces** — create, switch, and delete workspaces; see worktree paths (with a *git worktree* badge), parent relationships, sandbox flags, and connection info. Creation lets you pick **branch or worktree mode** per workspace (defaulting from the project's config) and override copied files / `copy_ignored` for worktree creations.
 - **Services** — start/stop/reset instances, view logs, health diagnostics.
+- **Processes** — select a workspace, see configured/recorded app processes (including `pitchfork` runtime badges and daemon IDs), start/stop/restart/force-restart processes, batch-select rows, open logs, follow proxy URLs, and open Pitchfork Web UI/TUI bridge actions when configured.
 - **Hooks** — three-panel editor: phase list, hook entries with run/edit/delete, and a live MiniJinja preview with a variable browser.
 - **Proxy** — status, discovered containers with HTTPS links and native database endpoints, one-click CA trust management, filtering by domain/name/project.
-- **Config editor** — section-based forms (General, Git, Worktree, Services, Hooks, Agent, Commit) with validation before save, plus a raw-YAML mode.
+- **Config editor** — section-based forms (General, Git, Worktree, Services, Processes, Hooks, Agent, Commit) with validation before save, plus a raw-YAML mode. The Processes section edits provider, auto-start/stop, Pitchfork reconciliation policy, daemon commands, env templates, readiness, watch, and retry settings.
 - **Doctor** — diagnostics page mirroring `devflow doctor`.
 - **Prune worktrees** — one click to clear stale worktree metadata.
 

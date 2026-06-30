@@ -126,6 +126,15 @@ processes:
   provider: native       # native (default) or pitchfork (direct Rust supervisor embedding)
   auto_start: true       # start after devflow switch aligns services and hooks
   auto_stop: true        # stop before devflow remove deletes the workspace
+  # Optional when provider: pitchfork
+  pitchfork:
+    config_policy: devflow-owned   # devflow-owned | import | mirror | merge
+    external_daemons: show         # hide | show | importable
+    web_ui:
+      enabled: false               # show/open loopback Pitchfork Web UI bridge actions
+      bind_address: 127.0.0.1
+      bind_port: 3120
+      edit_mode: warn              # readonly | warn | merge
   daemons:
     api:
       run: "npm run dev"
@@ -165,7 +174,7 @@ Daemon fields:
 | `watch` | glob patterns, relative to `dir`, that the controller daemon polls for restart-on-change |
 | `retry` | number of controller-daemon restart attempts after a crash |
 
-Manage them with `devflow process start|stop|restart|status|logs`. Auto-started process commands reuse hook approvals; pre-approve with `devflow hook approvals add "npm run dev"` for non-interactive automation, or set `DEVFLOW_APPROVE_HOOKS=1`. `provider: pitchfork` embeds Pitchfork's Rust supervisor/log APIs directly; devflow still owns desired state and proxy/GUI records. `devflow proxy` reads process state and exposes port-backed processes as `https://<process>.<workspace>.<project>.<suffix>` (default suffix `.local`). Run `devflow daemon start` to keep desired-state/watch/retry reconciliation active in the background.
+Manage them with `devflow process start|stop|restart|status|logs`. Auto-started process commands reuse hook approvals; pre-approve with `devflow hook approvals add "npm run dev"` for non-interactive automation, or set `DEVFLOW_APPROVE_HOOKS=1`. `provider: pitchfork` embeds Pitchfork's Rust supervisor/log APIs directly; devflow still owns desired state and proxy/GUI records. `processes.pitchfork.config_policy` records how devflow should reconcile `.devflow.yml` with Pitchfork-native config files: `devflow-owned` is the safe default and the active behavior for devflow-managed processes; `import`, `mirror`, and `merge` are explicit opt-in reconciliation modes for GUI workflows and never silently overwrite devflow templates. `devflow proxy` reads process state and exposes port-backed processes as `https://<process>.<workspace>.<project>.<suffix>` (default suffix `.local`). Run `devflow daemon start` to keep desired-state/watch/retry reconciliation active in the background. See [Project processes & Pitchfork](/devflow/guides/processes/) for migration examples, readiness checks, and operational commands.
 
 ### Cloud providers (experimental)
 

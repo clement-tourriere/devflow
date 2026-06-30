@@ -3,6 +3,7 @@ import { toast } from "../../utils/notify";
 import { reportWorkspaceResult } from "../../utils/results";
 import { useParams, Link, useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
+import { open as openExternal } from "@tauri-apps/plugin-shell";
 import {
   getProjectDetail,
   listWorkspaces,
@@ -30,6 +31,7 @@ import {
   listContainers,
   getProxyStatus,
   runDoctor,
+  getPitchforkBridgeInfo,
 } from "../../utils/invoke";
 import type {
   ProjectDetail as ProjectDetailType,
@@ -43,6 +45,7 @@ import type {
   WorkspaceCreationMode,
   ProcessStatus,
   ProcessResult,
+  PitchforkBridgeInfo,
 } from "../../types";
 import Modal from "../../components/Modal";
 import ConfirmDialog from "../../components/ConfirmDialog";
@@ -57,6 +60,19 @@ interface WorkspaceSwitchedEvent {
   workspace_name: string;
 }
 
+function formatRelativeTime(iso?: string | null): string | null {
+  if (!iso) return null;
+  const ts = Date.parse(iso);
+  if (Number.isNaN(ts)) return null;
+  const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
 function ProjectDetail() {
   const { "*": splat } = useParams();
   const projectPath = splat ? decodeURIComponent(splat) : "";
@@ -68,6 +84,8 @@ function ProjectDetail() {
   const [services, setServices] = useState<ServiceEntry[]>([]);
   const [processStatuses, setProcessStatuses] = useState<ProcessStatus[]>([]);
   const [processWorkspace, setProcessWorkspace] = useState<string>("");
+  const [selectedProcesses, setSelectedProcesses] = useState<Set<string>>(new Set());
+  const [pitchforkBridge, setPitchforkBridge] = useState<PitchforkBridgeInfo | null>(null);
   const [currentWorkspace, setCurrentWorkspace] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [setupIssueCount, setSetupIssueCount] = useState(0);
@@ -213,6 +231,9 @@ function ProjectDetail() {
       getProxyStatus()
         .then(setProxyStatus)
         .catch(() => setProxyStatus(null)),
+      getPitchforkBridgeInfo(projectPath)
+        .then(setPitchforkBridge)
+        .catch(() => setPitchforkBridge(null)),
       listContainers()
         .then(setContainers)
         .catch(() => setContainers([])),
@@ -229,10 +250,19 @@ function ProjectDetail() {
   }, [reload, projectPath]);
 
   useEffect(() => {
+    setSelectedProcesses(new Set());
     if (processWorkspace) {
       void fetchProcesses(processWorkspace);
     }
   }, [fetchProcesses, processWorkspace]);
+
+  useEffect(() => {
+    if (!processWorkspace || activeTab !== "overview") return;
+    const timer = window.setInterval(() => {
+      void fetchProcesses(processWorkspace);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [activeTab, fetchProcesses, processWorkspace]);
 
   useEffect(() => {
     const unlisten = listen<WorkspaceSwitchedEvent>(
@@ -477,17 +507,22 @@ function ProjectDetail() {
     }
   };
 
-  const handleStartProcess = async (name?: string, force = false) => {
+  const processNames = (target?: string | string[]) =>
+    Array.isArray(target) ? target : target ? [target] : [];
+
+  const selectedProcessNames = () =>
+    processStatuses
+      .filter((p) => p.workspace === processWorkspace && selectedProcesses.has(p.process))
+      .map((p) => p.process);
+
+  const handleStartProcess = async (target?: string | string[], force = false) => {
     if (!processWorkspace) return;
-    setActionLoading(`process-start:${name ?? "all"}`);
+    const names = processNames(target);
+    const label = names.length === 1 ? names[0] : names.length > 1 ? `${names.length} selected` : "all";
+    setActionLoading(`process-start:${label}`);
     try {
-      const response = await startProcesses(
-        projectPath,
-        processWorkspace,
-        name ? [name] : [],
-        force
-      );
-      summarizeProcessResults(name ? `Started ${name}` : "Started processes", response.results);
+      const response = await startProcesses(projectPath, processWorkspace, names, force);
+      summarizeProcessResults(names.length === 1 ? `Started ${names[0]}` : "Started processes", response.results);
       await fetchProcesses(processWorkspace);
     } catch (e) {
       toast.error(`${e}`);
@@ -496,12 +531,14 @@ function ProjectDetail() {
     }
   };
 
-  const handleStopProcess = async (name?: string) => {
+  const handleStopProcess = async (target?: string | string[]) => {
     if (!processWorkspace) return;
-    setActionLoading(`process-stop:${name ?? "all"}`);
+    const names = processNames(target);
+    const label = names.length === 1 ? names[0] : names.length > 1 ? `${names.length} selected` : "all";
+    setActionLoading(`process-stop:${label}`);
     try {
-      const response = await stopProcesses(projectPath, processWorkspace, name ? [name] : []);
-      summarizeProcessResults(name ? `Stopped ${name}` : "Stopped processes", response.results);
+      const response = await stopProcesses(projectPath, processWorkspace, names);
+      summarizeProcessResults(names.length === 1 ? `Stopped ${names[0]}` : "Stopped processes", response.results);
       await fetchProcesses(processWorkspace);
     } catch (e) {
       toast.error(`${e}`);
@@ -510,18 +547,42 @@ function ProjectDetail() {
     }
   };
 
-  const handleRestartProcess = async (name?: string) => {
+  const handleRestartProcess = async (target?: string | string[]) => {
     if (!processWorkspace) return;
-    setActionLoading(`process-restart:${name ?? "all"}`);
+    const names = processNames(target);
+    const label = names.length === 1 ? names[0] : names.length > 1 ? `${names.length} selected` : "all";
+    setActionLoading(`process-restart:${label}`);
     try {
-      const response = await restartProcesses(projectPath, processWorkspace, name ? [name] : []);
-      summarizeProcessResults(name ? `Restarted ${name}` : "Restarted processes", response.results);
+      const response = await restartProcesses(projectPath, processWorkspace, names);
+      summarizeProcessResults(names.length === 1 ? `Restarted ${names[0]}` : "Restarted processes", response.results);
       await fetchProcesses(processWorkspace);
     } catch (e) {
       toast.error(`${e}`);
     } finally {
       setActionLoading(null);
     }
+  };
+
+  const handleOpenPitchforkWebUi = async () => {
+    const url = pitchforkBridge?.web_ui_url || "http://127.0.0.1:3120";
+    try {
+      await openExternal(url);
+      if (!pitchforkBridge?.web_ui_reachable) {
+        toast.warning("Opened the configured Pitchfork Web UI URL, but it does not appear reachable yet.", {
+          title: "Pitchfork Web UI",
+        });
+      }
+    } catch (e) {
+      toast.error(`${e}`, { title: "Failed to open Pitchfork Web UI" });
+    }
+  };
+
+  const handleLaunchPitchforkTui = () => {
+    if (!pitchforkBridge?.cli_available) {
+      toast.warning("Install the external pitchfork CLI to launch its TUI.", { title: "Pitchfork TUI" });
+      return;
+    }
+    openTerminal({ projectPath, workspaceName: processWorkspace || undefined, initialCommand: "pitchfork tui" });
   };
 
   const handleViewProcessLogs = async (name: string, workspaceName: string) => {
@@ -687,6 +748,16 @@ function ProjectDetail() {
       return { service: svc.name, state: match?.state ?? null, provisioned: !!match };
     });
   };
+
+  const selectedProcessNamesForWorkspace = selectedProcessNames();
+  const allProcessNamesForWorkspace = processStatuses
+    .filter((p) => p.workspace === processWorkspace)
+    .map((p) => p.process);
+  const allProcessesSelected =
+    allProcessNamesForWorkspace.length > 0 &&
+    allProcessNamesForWorkspace.every((name) => selectedProcesses.has(name));
+  const hasPitchforkProcesses =
+    pitchforkBridge?.enabled || processStatuses.some((p) => p.runtime === "pitchfork");
 
   return (
     <div>
@@ -1171,6 +1242,60 @@ function ProjectDetail() {
             >
               Stop all
             </button>
+            {selectedProcessNamesForWorkspace.length > 0 && (
+              <>
+                <button
+                  className="btn"
+                  onClick={() => handleStartProcess(selectedProcessNamesForWorkspace, false)}
+                  disabled={!processWorkspace || actionLoading?.startsWith("process-start:")}
+                  style={{ padding: "4px 10px", fontSize: 13 }}
+                >
+                  Start selected
+                </button>
+                <button
+                  className="btn"
+                  onClick={() => handleRestartProcess(selectedProcessNamesForWorkspace)}
+                  disabled={!processWorkspace || actionLoading?.startsWith("process-restart:")}
+                  style={{ padding: "4px 10px", fontSize: 13 }}
+                >
+                  Restart selected
+                </button>
+                <button
+                  className="btn"
+                  onClick={() => handleStopProcess(selectedProcessNamesForWorkspace)}
+                  disabled={!processWorkspace || actionLoading?.startsWith("process-stop:")}
+                  style={{ padding: "4px 10px", fontSize: 13 }}
+                >
+                  Stop selected
+                </button>
+              </>
+            )}
+            {hasPitchforkProcesses && (
+              <>
+                <button
+                  className="btn"
+                  onClick={handleOpenPitchforkWebUi}
+                  disabled={!pitchforkBridge?.web_ui_enabled}
+                  title={
+                    pitchforkBridge?.web_ui_enabled
+                      ? `${pitchforkBridge.web_ui_reachable ? "Open" : "Open configured URL (not reachable yet)"}: ${pitchforkBridge.web_ui_url}`
+                      : "Enable processes.pitchfork.web_ui in the config editor first"
+                  }
+                  style={{ padding: "4px 10px", fontSize: 13 }}
+                >
+                  Pitchfork Web UI
+                </button>
+                <button
+                  className="btn"
+                  onClick={handleLaunchPitchforkTui}
+                  disabled={!pitchforkBridge?.cli_available}
+                  title={pitchforkBridge?.cli_available ? "Open pitchfork tui in devflow's terminal" : "External pitchfork CLI not found on PATH"}
+                  style={{ padding: "4px 10px", fontSize: 13 }}
+                >
+                  Pitchfork TUI
+                </button>
+              </>
+            )}
           </div>
         </div>
         {!processWorkspace ? (
@@ -1190,7 +1315,19 @@ function ProjectDetail() {
           <table className="table" style={{ tableLayout: "fixed", width: "100%" }}>
             <thead>
               <tr>
-                <th style={{ width: "18%" }}>Process</th>
+                <th style={{ width: "4%" }}>
+                  <input
+                    type="checkbox"
+                    checked={allProcessesSelected}
+                    onChange={(e) =>
+                      setSelectedProcesses(
+                        e.target.checked ? new Set(allProcessNamesForWorkspace) : new Set()
+                      )
+                    }
+                    aria-label="Select all processes"
+                  />
+                </th>
+                <th style={{ width: "16%" }}>Process</th>
                 <th style={{ width: "12%" }}>Status</th>
                 <th style={{ width: "12%" }}>PID</th>
                 <th style={{ width: "16%" }}>Ports</th>
@@ -1204,9 +1341,25 @@ function ProjectDetail() {
                 const isStopped = !isRunning;
                 return (
                   <tr key={`${p.workspace}:${p.process}`}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={selectedProcesses.has(p.process)}
+                        onChange={(e) => {
+                          setSelectedProcesses((prev) => {
+                            const next = new Set(prev);
+                            if (e.target.checked) next.add(p.process);
+                            else next.delete(p.process);
+                            return next;
+                          });
+                        }}
+                        aria-label={`Select ${p.process}`}
+                      />
+                    </td>
                     <td style={{ overflow: "hidden" }}>
                       <div className="flex items-center gap-1" style={{ flexWrap: "wrap" }}>
                         <span style={{ fontWeight: 600 }}>{p.process}</span>
+                        {p.runtime && <span className="badge" style={{ fontSize: 10 }}>{p.runtime}</span>}
                         {!p.required && <span className="badge" style={{ fontSize: 10 }}>optional</span>}
                       </div>
                       <div
@@ -1216,9 +1369,28 @@ function ProjectDetail() {
                       >
                         {p.command}
                       </div>
+                      {p.pitchfork_id && (
+                        <div
+                          className="mono"
+                          title={p.pitchfork_id}
+                          style={{ color: "var(--text-muted)", fontSize: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                        >
+                          {p.pitchfork_id}
+                        </div>
+                      )}
                     </td>
                     <td>
                       <StatusBadge state={p.status} />
+                      {formatRelativeTime(p.started_at) && (
+                        <div style={{ color: "var(--text-muted)", fontSize: 11, marginTop: 4 }}>
+                          {formatRelativeTime(p.started_at)}
+                        </div>
+                      )}
+                      {p.desired_state && p.desired_state !== p.status && (
+                        <div style={{ color: "var(--text-muted)", fontSize: 11, marginTop: 4 }}>
+                          desired: {p.desired_state}
+                        </div>
+                      )}
                       {p.retry_count > 0 && (
                         <div style={{ color: "var(--text-muted)", fontSize: 11, marginTop: 4 }}>
                           retries: {p.retry_count}
@@ -1294,6 +1466,17 @@ function ProjectDetail() {
                             <path d="M6 14l-2.2-1.8L2 14" />
                           </svg>
                         </button>
+                        {p.runtime === "pitchfork" && (
+                          <button
+                            className="btn"
+                            style={{ width: 28, height: 24, padding: 0, justifyContent: "center", fontSize: 10 }}
+                            onClick={() => handleStartProcess(p.process, true)}
+                            disabled={actionLoading === `process-start:${p.process}`}
+                            title="Force restart through Pitchfork"
+                          >
+                            !
+                          </button>
+                        )}
                         <button
                           className="btn"
                           style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}

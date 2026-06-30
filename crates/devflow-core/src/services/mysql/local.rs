@@ -259,7 +259,7 @@ impl MySQLLocalProvider {
                 ContainerStatus::NotFound => {
                     return Err(anyhow!("container '{container_name}' does not exist"));
                 }
-                ContainerStatus::Running => {
+                ContainerStatus::Running
                     // mysqladmin ping
                     if self
                         .exec_check(
@@ -274,10 +274,9 @@ impl MySQLLocalProvider {
                             ],
                         )
                         .await
-                    {
+                    => {
                         return Ok(());
                     }
-                }
                 _ => {}
             }
 

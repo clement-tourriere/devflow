@@ -3,6 +3,7 @@ import { createContext, useContext, useState, useCallback } from "react";
 interface TerminalRequest {
   projectPath?: string;
   workspaceName?: string;
+  initialCommand?: string;
 }
 
 interface TerminalContextValue {

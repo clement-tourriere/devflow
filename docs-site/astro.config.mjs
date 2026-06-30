@@ -50,6 +50,7 @@ export default defineConfig({
             'guides/shared-engines',
             'guides/seeding',
             'guides/hooks',
+            'guides/processes',
             'guides/proxy',
             'guides/ai-agents',
             'guides/merging',

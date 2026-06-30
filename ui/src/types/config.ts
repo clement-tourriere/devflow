@@ -9,6 +9,7 @@ export interface DevflowConfig {
   behavior?: BehaviorConfig;
   services?: NamedServiceConfig[] | null;
   worktree?: WorktreeConfig | null;
+  processes?: ProcessesConfig | null;
   hooks?: Record<string, Record<string, unknown>> | null;
   triggers?: Record<string, unknown> | null;
   execute?: ExecuteConfig | null;
@@ -116,6 +117,59 @@ export interface PluginConfig {
   name?: string | null;
   timeout: number;
   config?: unknown | null;
+}
+
+export type ProcessProvider = "native" | "pitchfork";
+export type PitchforkConfigPolicy = "devflow-owned" | "import" | "mirror" | "merge";
+export type PitchforkExternalDaemons = "hide" | "show" | "importable";
+export type PitchforkWebEditMode = "readonly" | "warn" | "merge";
+export type ProcessPortBump = boolean | number;
+export type ProcessPortConfig =
+  | number
+  | number[]
+  | {
+      expect: number[];
+      bump?: ProcessPortBump;
+    };
+
+export interface PitchforkWebUiConfig {
+  enabled: boolean;
+  bind_port?: number | null;
+  bind_address?: string | null;
+  edit_mode: PitchforkWebEditMode;
+}
+
+export interface PitchforkProcessConfig {
+  config_policy: PitchforkConfigPolicy;
+  external_daemons: PitchforkExternalDaemons;
+  web_ui?: PitchforkWebUiConfig | null;
+}
+
+export interface ProcessesConfig {
+  provider: ProcessProvider;
+  auto_start: boolean;
+  auto_stop: boolean;
+  pitchfork?: PitchforkProcessConfig | null;
+  daemons: Record<string, ProcessDaemonConfig>;
+}
+
+export interface ProcessDaemonConfig {
+  run: string;
+  dir?: string | null;
+  env?: Record<string, string>;
+  required?: boolean;
+  depends?: string[];
+  port?: ProcessPortConfig | null;
+  ready_delay?: number | null;
+  ready_port?: number | null;
+  ready_http?: string | null;
+  ready_cmd?: string | null;
+  ready_output?: string | null;
+  ready_timeout?: number | null;
+  stop_timeout?: number | null;
+  shutdown_signal?: string | null;
+  watch?: string[];
+  retry?: number | null;
 }
 
 export interface ExecuteConfig {

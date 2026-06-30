@@ -2,7 +2,7 @@
 title: Reverse proxy
 description: Trusted HTTPS URLs for Docker containers and devflow-managed host processes — automatic discovery, mDNS names that work everywhere, and a local CA.
 sidebar:
-  order: 6
+  order: 7
 ---
 
 Stop hand-editing `/etc/hosts`, juggling ports, and clicking through certificate warnings. The built-in proxy watches Docker and devflow process state, giving every container and port-backed host process a stable `https://name.local` URL the moment it starts — with a locally-trusted certificate. Webhooks, OAuth callbacks, and cross-service calls just work, per branch.

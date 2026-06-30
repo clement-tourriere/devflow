@@ -40,6 +40,9 @@ pub struct ProcessesConfig {
     /// Stop all workspace processes when a workspace is removed.
     #[serde(default = "default_true")]
     pub auto_stop: bool,
+    /// Pitchfork-specific integration/reconciliation settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pitchfork: Option<PitchforkProcessConfig>,
     /// Process definitions keyed by process name.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub daemons: IndexMap<String, ProcessDaemonConfig>,
@@ -51,6 +54,69 @@ fn default_process_provider() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+/// Pitchfork-specific integration/reconciliation settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PitchforkProcessConfig {
+    /// How devflow reconciles `.devflow.yml` with Pitchfork config files.
+    #[serde(default = "default_pitchfork_config_policy")]
+    pub config_policy: String,
+    /// How external Pitchfork daemons are surfaced in devflow UX.
+    #[serde(default = "default_pitchfork_external_daemons")]
+    pub external_daemons: String,
+    /// Optional Pitchfork Web UI bridge settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_ui: Option<PitchforkWebUiConfig>,
+}
+
+impl Default for PitchforkProcessConfig {
+    fn default() -> Self {
+        Self {
+            config_policy: default_pitchfork_config_policy(),
+            external_daemons: default_pitchfork_external_daemons(),
+            web_ui: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PitchforkWebUiConfig {
+    /// Whether devflow should show/open the Pitchfork Web UI bridge.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Loopback port for Pitchfork's Web UI (default: Pitchfork's 3120).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_port: Option<u16>,
+    /// Bind address. Keep this loopback-only for devflow-managed bridges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_address: Option<String>,
+    /// How to treat edits made through Pitchfork's Web UI.
+    #[serde(default = "default_pitchfork_web_edit_mode")]
+    pub edit_mode: String,
+}
+
+impl Default for PitchforkWebUiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind_port: None,
+            bind_address: None,
+            edit_mode: default_pitchfork_web_edit_mode(),
+        }
+    }
+}
+
+fn default_pitchfork_config_policy() -> String {
+    "devflow-owned".to_string()
+}
+
+fn default_pitchfork_external_daemons() -> String {
+    "show".to_string()
+}
+
+fn default_pitchfork_web_edit_mode() -> String {
+    "warn".to_string()
 }
 
 fn is_true(value: &bool) -> bool {
@@ -585,6 +651,12 @@ pub struct ProcessStatus {
     pub last_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desired_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pitchfork_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1049,12 +1121,16 @@ fn list_workspace_processes_native(
                 retry_count: record.retry_count,
                 last_error: record.last_error,
                 started_at: Some(record.started_at),
+                desired_state: record.desired_state,
+                runtime: record.runtime,
+                pitchfork_id: record.pitchfork_id,
             });
         }
     }
     if let Some(workspace_name) = workspace_filter.as_deref() {
         if let Some(processes) = config.processes.as_ref() {
             let paths = runtime_paths(config, project_dir.as_path(), workspace_name)?;
+            let provider = processes.provider.to_ascii_lowercase();
             for (name, daemon) in &processes.daemons {
                 if out
                     .iter()
@@ -1074,6 +1150,11 @@ fn list_workspace_processes_native(
                         }
                     })
                     .unwrap_or_else(|| project_dir.clone());
+                let log_name = if provider == "pitchfork" {
+                    format!("{}.pitchfork.log", sanitize_component(name))
+                } else {
+                    format!("{}.log", sanitize_component(name))
+                };
                 out.push(ProcessStatus {
                     process: name.clone(),
                     workspace: workspace_name.to_string(),
@@ -1084,14 +1165,19 @@ fn list_workspace_processes_native(
                     urls: Vec::new(),
                     command: daemon.run.clone(),
                     workdir: workdir.display().to_string(),
-                    log_path: paths
-                        .logs_dir
-                        .join(format!("{}.log", sanitize_component(name)))
-                        .display()
-                        .to_string(),
+                    log_path: paths.logs_dir.join(log_name).display().to_string(),
                     retry_count: 0,
                     last_error: None,
                     started_at: None,
+                    desired_state: None,
+                    runtime: Some(provider.clone()),
+                    pitchfork_id: if provider == "pitchfork" {
+                        pitchfork_daemon_id(config, project_dir.as_path(), workspace_name, name)
+                            .ok()
+                            .map(|id| id.qualified())
+                    } else {
+                        None
+                    },
                 });
             }
         }
@@ -2332,6 +2418,7 @@ fn pitchfork_stop_config(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_pitchfork_failure_record(
     config: &Config,
     paths: &RuntimePaths,

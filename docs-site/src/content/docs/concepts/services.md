@@ -101,5 +101,7 @@ Every provider exposes uniform connection info per workspace — host, port, dat
 
 - [Local containers](/devflow/guides/local-containers/) — engine-specific options, ports, data roots
 - [Shared engines](/devflow/guides/shared-engines/) — logical isolation + the controller daemon
+- [Project processes & Pitchfork](/devflow/guides/processes/) — run app/worker commands against service URLs
+- [Adding devflow to an existing project](/devflow/getting-started/existing-project/) — migrate from Docker Compose incrementally
 - [Seeding](/devflow/guides/seeding/) — load dumps, live databases, or S3 backups
 - [Cloud providers](/devflow/guides/cloud-providers/) and [plugins](/devflow/guides/plugins/)

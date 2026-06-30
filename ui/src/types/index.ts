@@ -116,11 +116,26 @@ export interface ProcessStatus {
   retry_count: number;
   last_error: string | null;
   started_at: string | null;
+  desired_state?: string | null;
+  runtime?: string | null;
+  pitchfork_id?: string | null;
 }
 
 export interface ProcessOperationResponse {
   workspace: string;
   results: ProcessResult[];
+}
+
+export interface PitchforkBridgeInfo {
+  provider: string;
+  enabled: boolean;
+  web_ui_enabled: boolean;
+  web_ui_url: string;
+  web_ui_reachable: boolean;
+  cli_available: boolean;
+  config_policy: string;
+  external_daemons: string;
+  edit_mode: string;
 }
 
 export interface CreateWorkspaceResult {
