@@ -36,17 +36,41 @@ fn summarize_workspace_switch(
     verb: &str,
     workspace: &str,
     services: &[devflow_core::workspace::ServiceResult],
+    processes: &[devflow_core::processes::ProcessResult],
 ) -> Result<String> {
-    let failures: Vec<_> = services.iter().filter(|r| !r.success).collect();
-    if failures.is_empty() {
-        Ok(format!("{} workspace '{}'", verb, workspace))
-    } else {
-        let msgs: Vec<_> = failures.iter().map(|f| f.message.as_str()).collect();
-        Ok(format!(
-            "{} '{}' (some services failed: {})",
+    let mut failures: Vec<String> = services
+        .iter()
+        .filter(|r| !r.success)
+        .map(|r| format!("service '{}': {}", r.service_name, r.message))
+        .collect();
+    failures.extend(
+        processes
+            .iter()
+            .filter(|r| !r.success && r.required)
+            .map(|r| format!("process '{}': {}", r.process, r.message)),
+    );
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "{} '{}' completed with failures: {}",
             verb,
             workspace,
-            msgs.join(", ")
+            failures.join("; ")
+        );
+    }
+
+    let warnings: Vec<String> = processes
+        .iter()
+        .filter(|r| !r.success && !r.required)
+        .map(|r| format!("optional process '{}': {}", r.process, r.message))
+        .collect();
+    if warnings.is_empty() {
+        Ok(format!("{} workspace '{}'", verb, workspace))
+    } else {
+        Ok(format!(
+            "{} workspace '{}' (warnings: {})",
+            verb,
+            workspace,
+            warnings.join("; ")
         ))
     }
 }
@@ -403,7 +427,12 @@ impl DevflowContext {
             &options,
         )
         .await?;
-        summarize_workspace_switch("Switched", &result.workspace, &result.services)
+        summarize_workspace_switch(
+            "Switched",
+            &result.workspace,
+            &result.services,
+            &result.processes,
+        )
     }
 
     /// Create a workspace via the shared core lifecycle.
@@ -424,7 +453,12 @@ impl DevflowContext {
         let result =
             devflow_core::workspace::switch::switch_workspace(config, project_dir, name, &options)
                 .await?;
-        summarize_workspace_switch("Created", &result.workspace, &result.services)
+        summarize_workspace_switch(
+            "Created",
+            &result.workspace,
+            &result.services,
+            &result.processes,
+        )
     }
 
     /// Delete a workspace via the shared core lifecycle.
@@ -441,17 +475,12 @@ impl DevflowContext {
         let result =
             devflow_core::workspace::delete::delete_workspace(config, project_dir, name, &options)
                 .await?;
-        let failures: Vec<_> = result.services.iter().filter(|r| !r.success).collect();
-        if failures.is_empty() {
-            Ok(format!("Deleted workspace '{}'", result.workspace))
-        } else {
-            let msgs: Vec<_> = failures.iter().map(|f| f.message.as_str()).collect();
-            Ok(format!(
-                "Deleted '{}' (some services failed: {})",
-                result.workspace,
-                msgs.join(", ")
-            ))
-        }
+        summarize_workspace_switch(
+            "Deleted",
+            &result.workspace,
+            &result.services,
+            &result.processes,
+        )
     }
 
     /// Start a service workspace.

@@ -1882,7 +1882,7 @@ async fn start_one_pitchfork(
         .logs_dir
         .join(format!("{}.pitchfork.log", sanitize_component(name)));
     append_log_header(&log_path, name, &rendered.command)?;
-    let run_options = pitchfork_run_options(
+    let mut run_options = pitchfork_run_options(
         config,
         project_dir,
         workspace,
@@ -1891,6 +1891,13 @@ async fn start_one_pitchfork(
         &log_path,
         force,
     )?;
+    // Use Pitchfork for supervision, but keep readiness waiting in devflow.
+    // Pitchfork's direct `Supervisor::run(wait_ready=true)` can wait forever
+    // for long-running commands whose readiness signal never arrives, which
+    // blocks workspace create/switch in every frontend. Starting first and then
+    // running devflow's bounded readiness checks gives CLI/TUI/GUI the same
+    // behavior as the native runtime.
+    run_options.wait_ready = false;
 
     let response = pitchfork_cli::supervisor::SUPERVISOR
         .run(run_options)
@@ -1906,14 +1913,6 @@ async fn start_one_pitchfork(
             } else {
                 daemon.resolved_port.clone()
             };
-            let status = if matches!(
-                daemon.status,
-                pitchfork_cli::daemon_status::DaemonStatus::Running
-            ) {
-                "ready"
-            } else {
-                "running"
-            };
             let mut record = ProcessStateRecord {
                 process: name.to_string(),
                 workspace: paths.workspace.clone(),
@@ -1924,7 +1923,7 @@ async fn start_one_pitchfork(
                 workdir: rendered.workdir.display().to_string(),
                 log_path: log_path.display().to_string(),
                 ports: ports.clone(),
-                status: status.to_string(),
+                status: "running".to_string(),
                 desired_state: Some("running".to_string()),
                 runtime: Some("pitchfork".to_string()),
                 pitchfork_id: Some(daemon_id.qualified()),
@@ -1942,17 +1941,75 @@ async fn start_one_pitchfork(
             if daemon.pid.is_none() {
                 record.status = "failed".to_string();
                 record.last_error = Some("pitchfork did not report a pid".to_string());
+                write_record(&paths, &record)?;
+                let _ = sync_pitchfork_logs_to_file(&daemon_id, &log_path);
+                return Ok(ProcessResult {
+                    process: name.to_string(),
+                    success: false,
+                    message: format!(
+                        "started pitchfork process '{}' but no pid was reported",
+                        name
+                    ),
+                    required,
+                    pid: None,
+                    ports,
+                });
             }
             write_record(&paths, &record)?;
-            let _ = sync_pitchfork_logs_to_file(&daemon_id, &log_path);
-            Ok(ProcessResult {
-                process: name.to_string(),
-                success: record.pid.is_some(),
-                message: format!("started pitchfork process '{}'", name),
-                required,
-                pid: record.pid,
-                ports,
-            })
+
+            let mut wait_rendered = rendered.clone();
+            let no_ready_check = wait_rendered.ready_delay.is_none()
+                && wait_rendered.ready_output.is_none()
+                && wait_rendered.ready_http.is_none()
+                && wait_rendered.ready_port.is_none()
+                && wait_rendered.ready_cmd.is_none();
+            if no_ready_check {
+                if let Some(port) = ports.first().copied() {
+                    wait_rendered.ready_port = Some(port);
+                } else {
+                    wait_rendered.ready_delay = Some(0);
+                }
+            }
+
+            let ready = wait_ready(&wait_rendered, &log_path, record.pid).await;
+            match ready {
+                Ok(()) => {
+                    record.status = "ready".to_string();
+                    record.last_error = None;
+                    write_record(&paths, &record)?;
+                    let _ = sync_pitchfork_logs_to_file(&daemon_id, &log_path);
+                    Ok(ProcessResult {
+                        process: name.to_string(),
+                        success: true,
+                        message: format!("started pitchfork process '{}'", name),
+                        required,
+                        pid: record.pid,
+                        ports,
+                    })
+                }
+                Err(e) => {
+                    let error = format!("{e:#}");
+                    record.status = if record.pid.is_some_and(process_alive) {
+                        "running".to_string()
+                    } else {
+                        "failed".to_string()
+                    };
+                    record.last_error = Some(error.clone());
+                    write_record(&paths, &record)?;
+                    let _ = sync_pitchfork_logs_to_file(&daemon_id, &log_path);
+                    Ok(ProcessResult {
+                        process: name.to_string(),
+                        success: false,
+                        message: format!(
+                            "started pitchfork process '{}' but readiness failed: {}",
+                            name, error
+                        ),
+                        required,
+                        pid: record.pid,
+                        ports,
+                    })
+                }
+            }
         }
         pitchfork_cli::ipc::IpcResponse::DaemonAlreadyRunning => {
             let existing = read_record(&paths, name)?;
@@ -2511,16 +2568,15 @@ fn pitchfork_run_script(rendered: &RenderedProcess, log_path: &Path) -> String {
     // Pitchfork's in-memory reader task, logs disappear when a short-lived CLI
     // command exits. Redirect process output inside the shell command as well,
     // so devflow's per-process log file remains authoritative and searchable.
-    //
-    // Keep stdout/stderr attached when a ready_output regex is configured;
-    // Pitchfork needs to see those lines to mark the daemon ready.
-    if rendered.ready_output.is_some() {
-        return rendered.command.clone();
-    }
+    // Redirect the shell's own file descriptors with `exec` before running the
+    // command; otherwise command-substitution/GUI callers can keep waiting for
+    // EOF on inherited pipes while the daemon is still alive.
+    // devflow performs bounded readiness checks itself, including ready_output
+    // regexes, so the Pitchfork reader does not need to see stdout/stderr.
     format!(
-        "{{ {}; }} >> {} 2>&1",
-        rendered.command,
-        shell_single_quote(&log_path.display().to_string())
+        "exec >> {} 2>&1; {{ {}; }}",
+        shell_single_quote(&log_path.display().to_string()),
+        rendered.command
     )
 }
 
@@ -3444,7 +3500,7 @@ processes:
     }
 
     #[test]
-    fn pitchfork_run_script_redirects_output_when_no_output_readiness() {
+    fn pitchfork_run_script_redirects_output_for_devflow_readiness() {
         let rendered = RenderedProcess {
             command: "python manage.py runserver 127.0.0.1:$PORT".to_string(),
             workdir: PathBuf::from("/tmp/project"),
@@ -3460,7 +3516,7 @@ processes:
         let script = pitchfork_run_script(&rendered, Path::new("/tmp/log's/app.log"));
         assert_eq!(
             script,
-            "{ python manage.py runserver 127.0.0.1:$PORT; } >> '/tmp/log'\\''s/app.log' 2>&1"
+            "exec >> '/tmp/log'\\''s/app.log' 2>&1; { python manage.py runserver 127.0.0.1:$PORT; }"
         );
 
         let with_output_readiness = RenderedProcess {
@@ -3469,7 +3525,7 @@ processes:
         };
         assert_eq!(
             pitchfork_run_script(&with_output_readiness, Path::new("/tmp/app.log")),
-            "python manage.py runserver 127.0.0.1:$PORT"
+            "exec >> '/tmp/app.log' 2>&1; { python manage.py runserver 127.0.0.1:$PORT; }"
         );
     }
 
@@ -3553,6 +3609,61 @@ processes:
             list_workspace_processes(&config, project.path(), Some("feature/desired")).unwrap();
         let web = statuses.iter().find(|s| s.process == "web").unwrap();
         assert_eq!(web.status, "stopped");
+        std::env::remove_var("DEVFLOW_PROCESS_STATE_DIR");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn pitchfork_readiness_timeout_is_bounded() {
+        let _guard = PROCESS_TEST_ENV_LOCK.lock().unwrap();
+        let project = TempDir::new().unwrap();
+        let state = TempDir::new().unwrap();
+        std::env::set_var("DEVFLOW_PROCESS_STATE_DIR", state.path());
+        let unique = format!("devflow-pitchfork-timeout-{}", std::process::id());
+        let yaml = format!(
+            r#"
+name: myapp
+processes:
+  provider: pitchfork
+  daemons:
+    slow:
+      run: "while true; do sleep 1; done # {}"
+      ready_output: "READY_NEVER"
+      ready_timeout: 1
+"#,
+            unique
+        );
+        let config: Config = serde_yaml_ng::from_str(&yaml).unwrap();
+
+        let results = tokio::time::timeout(
+            Duration::from_secs(5),
+            start_workspace_processes(
+                &config,
+                project.path(),
+                "feature/timeout",
+                &["slow".to_string()],
+                true,
+            ),
+        )
+        .await
+        .expect("pitchfork readiness must be bounded")
+        .unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].success, "{:?}", results[0]);
+        assert!(
+            results[0].message.contains("readiness failed"),
+            "{:?}",
+            results[0]
+        );
+
+        let _ = stop_workspace_processes(
+            &config,
+            project.path(),
+            "feature/timeout",
+            &["slow".to_string()],
+        )
+        .await;
         std::env::remove_var("DEVFLOW_PROCESS_STATE_DIR");
     }
 

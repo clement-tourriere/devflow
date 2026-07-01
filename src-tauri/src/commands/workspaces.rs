@@ -209,10 +209,8 @@ pub async fn create_workspace(
     let creation_mode =
         WorkspaceCreationMode::parse(creation_mode.as_deref()).map_err(|e| e.to_string())?;
 
-    let lifecycle = gui_lifecycle_options();
-
     let options = workspace::switch::SwitchOptions {
-        lifecycle,
+        lifecycle: gui_lifecycle_options(),
         create_if_missing: true,
         creation_mode,
         from_workspace,

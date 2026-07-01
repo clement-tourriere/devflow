@@ -42,10 +42,52 @@ fn tcp_reachable(host: &str, port: u16) -> bool {
 }
 
 fn pitchfork_cli_available() -> bool {
-    std::process::Command::new("pitchfork")
-        .arg("--version")
-        .output()
-        .map(|out| out.status.success())
+    command_available_on_path("pitchfork")
+}
+
+fn command_available_on_path(command: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        command_candidates(&dir, command)
+            .into_iter()
+            .any(is_executable_file)
+    })
+}
+
+#[cfg(windows)]
+fn command_candidates(dir: &Path, command: &str) -> Vec<PathBuf> {
+    if Path::new(command).extension().is_some() {
+        return vec![dir.join(command)];
+    }
+    let pathext = std::env::var_os("PATHEXT")
+        .and_then(|v| v.into_string().ok())
+        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_string());
+    pathext
+        .split(';')
+        .filter(|ext| !ext.is_empty())
+        .map(|ext| dir.join(format!("{}{}", command, ext)))
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn command_candidates(dir: &Path, command: &str) -> Vec<PathBuf> {
+    vec![dir.join(command)]
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: PathBuf) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: PathBuf) -> bool {
+    std::fs::metadata(path)
+        .map(|meta| meta.is_file())
         .unwrap_or(false)
 }
 

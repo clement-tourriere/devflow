@@ -98,6 +98,7 @@ processes:
 ```
 
 - `depends` orders process startup; it does not replace service readiness. Services are aligned before processes start.
+- `ready_timeout` bounds readiness waiting for both native and Pitchfork runtimes, so workspace create/switch reports a process failure instead of hanging indefinitely.
 - `required: false` is useful for optional integrations: failures are reported but do not fail `devflow switch`.
 - `retry` and `watch` are reconciled by the controller daemon.
 

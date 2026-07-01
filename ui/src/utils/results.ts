@@ -28,31 +28,36 @@ export function reportWorkspaceResult(action: string, result: WorkspaceOpResult)
     hookErrors.push(...h.errors);
   }
 
-  const problems: string[] = [];
+  const blockingProblems: string[] = [];
+  const warnings: string[] = [];
   for (const s of failedServices) {
-    problems.push(`service "${s.service_name}": ${s.message}`);
+    blockingProblems.push(`service "${s.service_name}": ${s.message}`);
   }
   for (const p of failedProcesses) {
-    problems.push(`process "${p.process}": ${p.message}`);
+    blockingProblems.push(`process "${p.process}": ${p.message}`);
   }
   for (const p of optionalProcessIssues) {
-    problems.push(`optional process "${p.process}": ${p.message}`);
+    warnings.push(`optional process "${p.process}": ${p.message}`);
   }
   if (hooksFailed > 0) {
-    problems.push(
+    blockingProblems.push(
       `${hooksFailed} hook${hooksFailed > 1 ? "s" : ""} failed${
         hookErrors.length ? `: ${hookErrors.slice(0, 3).join("; ")}` : ""
       }`,
     );
   }
   if (hooksSkipped > 0) {
-    problems.push(
+    warnings.push(
       `${hooksSkipped} hook${hooksSkipped > 1 ? "s" : ""} skipped (needs approval — run from a terminal once, or set DEVFLOW_APPROVE_HOOKS=1)`,
     );
   }
 
-  if (problems.length > 0) {
-    toast.warning(problems.join("\n"), {
+  if (blockingProblems.length > 0) {
+    toast.error([...blockingProblems, ...warnings].join("\n"), {
+      title: `${action} completed with failures`,
+    });
+  } else if (warnings.length > 0) {
+    toast.warning(warnings.join("\n"), {
       title: `${action} completed with issues`,
       duration: 0,
     });
