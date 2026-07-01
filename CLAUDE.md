@@ -8,7 +8,7 @@ devflow is a Rust-based tool that provides per-workspace isolation for developme
 - **Git worktree integration**: Optionally creates worktree directories per workspace for true parallel development
 - **Multi-provider**: Per-workspace CoW containers (`type: local`), shared global containers with logical isolation (`type: shared` — one container, a database per workspace), Neon, DBLab, Xata, or custom plugins
 - **Multi-service**: A single project can manage multiple services (e.g., PostgreSQL + ClickHouse + Redis)
-- **Lifecycle hooks**: MiniJinja-templated commands that run at specific phases (post-create, pre-merge, etc.)
+- **Lifecycle hooks**: MiniJinja-templated commands that run at specific phases (post-create, post-switch, pre-commit, etc.)
 - **Copy-on-Write storage**: Uses APFS clones (macOS), ZFS snapshots, Btrfs/XFS reflinks for near-instant workspace creation
 
 ## Key Features
@@ -144,7 +144,7 @@ hooks:
   post-switch:
     update-env:
       command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
-  pre-merge:
+  pre-commit:
     test: "npm test"
 
 # AI agent configuration
@@ -189,7 +189,7 @@ The project is organized as a Cargo workspace with four crates:
 ### Root crate (`devflow`) — CLI binary
 - `src/main.rs` — CLI entry point with custom help template
 - `src/cli/mod.rs` — Command enum and dispatch
-- `src/cli/workspace.rs` — Workspace operations (switch, list, graph, link, remove, merge, cleanup)
+- `src/cli/workspace/` — Workspace operations (switch, list, graph, link, remove, cleanup)
 - `src/cli/service.rs` — Service operations (add, create, delete, start, stop, reset, seed, logs, discover)
 - `src/cli/agent.rs` — AI agent commands (start, status, context, skill, docs)
 - `src/cli/proxy.rs` — Proxy commands (start, stop, status, list, trust)

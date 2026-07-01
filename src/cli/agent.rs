@@ -33,7 +33,6 @@ pub(super) async fn handle_agent_command(
                                 "worktree_path": b.worktree_path,
                                 "executed_command": b.executed_command,
                                 "execution_status": b.execution_status,
-                                "sandboxed": b.sandboxed,
                             })
                         })
                         .collect();
@@ -45,13 +44,11 @@ pub(super) async fn handle_agent_command(
                     for b in executed {
                         let cmd = b.executed_command.as_deref().unwrap_or("unknown");
                         let status = b.execution_status.as_deref().unwrap_or("unknown");
-                        let sandbox_label = if b.sandboxed { " [sandboxed]" } else { "" };
                         println!(
-                            "  {} ({}, {}{}) — created {}",
+                            "  {} ({}, {}) — created {}",
                             b.name,
                             cmd,
                             status,
-                            sandbox_label,
                             b.created_at.format("%Y-%m-%d %H:%M")
                         );
                     }
@@ -95,17 +92,15 @@ pub(super) async fn handle_agent_command(
 
         super::AgentCommands::Skill => {
             let project_dir = std::env::current_dir()?;
-            let cache = devflow_core::skills::cache::SkillCache::new()?;
-            let installed =
-                devflow_core::skills::installer::install_bundled_skills(&project_dir, &cache)?;
+            let installed = devflow_core::agent::install_agent_skills(config, &project_dir)?;
             if json_output {
                 println!(
                     "{}",
                     serde_json::to_string(&serde_json::json!({"installed": installed}))?
                 );
             } else {
-                for name in &installed {
-                    println!("Installed: {}", name);
+                for path in &installed {
+                    println!("Installed: {}", path);
                 }
             }
             Ok(())

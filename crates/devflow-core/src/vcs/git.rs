@@ -329,21 +329,6 @@ fi
         .to_string()
     }
 
-    fn generate_post_rewrite_script(&self) -> String {
-        r#"#!/bin/sh
-# devflow auto-generated hook
-# This hook runs after git rebase or git commit --amend.
-# $1 is the cause: "rebase" or "amend"
-
-CAUSE="$1"
-
-if command -v devflow >/dev/null 2>&1; then
-    devflow hook run "post-rewrite"
-fi
-"#
-        .to_string()
-    }
-
     #[allow(dead_code)]
     pub fn get_repo_root(&self) -> &Path {
         self.repo.workdir().unwrap_or_else(|| self.repo.path())
@@ -719,7 +704,6 @@ impl VcsProvider for GitRepository {
 
         let hook_script = self.generate_hook_script();
         let pre_commit_script = self.generate_pre_commit_script();
-        let post_rewrite_script = self.generate_post_rewrite_script();
 
         // Install post-checkout hook
         let post_checkout_hook = hooks_dir.join("post-checkout");
@@ -732,19 +716,6 @@ impl VcsProvider for GitRepository {
             let mut perms = fs::metadata(&post_checkout_hook)?.permissions();
             perms.set_mode(0o755);
             fs::set_permissions(&post_checkout_hook, perms)
-                .context("Failed to set hook permissions")?;
-        }
-
-        // Install post-merge hook
-        let post_merge_hook = hooks_dir.join("post-merge");
-        fs::write(&post_merge_hook, &hook_script).context("Failed to write post-merge hook")?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&post_merge_hook)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&post_merge_hook, perms)
                 .context("Failed to set hook permissions")?;
         }
 
@@ -762,20 +733,6 @@ impl VcsProvider for GitRepository {
                 .context("Failed to set hook permissions")?;
         }
 
-        // Install post-rewrite hook (runs after rebase/amend)
-        let post_rewrite_hook = hooks_dir.join("post-rewrite");
-        fs::write(&post_rewrite_hook, &post_rewrite_script)
-            .context("Failed to write post-rewrite hook")?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&post_rewrite_hook)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&post_rewrite_hook, perms)
-                .context("Failed to set hook permissions")?;
-        }
-
         Ok(())
     }
 
@@ -787,19 +744,9 @@ impl VcsProvider for GitRepository {
             fs::remove_file(&post_checkout_hook).context("Failed to remove post-checkout hook")?;
         }
 
-        let post_merge_hook = hooks_dir.join("post-merge");
-        if post_merge_hook.exists() && self.is_devflow_hook(&post_merge_hook)? {
-            fs::remove_file(&post_merge_hook).context("Failed to remove post-merge hook")?;
-        }
-
         let pre_commit_hook = hooks_dir.join("pre-commit");
         if pre_commit_hook.exists() && self.is_devflow_hook(&pre_commit_hook)? {
             fs::remove_file(&pre_commit_hook).context("Failed to remove pre-commit hook")?;
-        }
-
-        let post_rewrite_hook = hooks_dir.join("post-rewrite");
-        if post_rewrite_hook.exists() && self.is_devflow_hook(&post_rewrite_hook)? {
-            fs::remove_file(&post_rewrite_hook).context("Failed to remove post-rewrite hook")?;
         }
 
         Ok(())
@@ -966,284 +913,6 @@ impl VcsProvider for GitRepository {
         Ok(())
     }
 
-    fn merge_branch(&self, source: &str) -> Result<()> {
-        let annotated = self
-            .repo
-            .find_branch(source, git2::BranchType::Local)
-            .with_context(|| format!("Workspace '{}' not found", source))?
-            .into_reference()
-            .peel_to_commit()
-            .context("Source workspace does not point to a commit")?;
-        let annotated_commit = self
-            .repo
-            .find_annotated_commit(annotated.id())
-            .context("Failed to create annotated commit for merge")?;
-
-        let (analysis, _) = self
-            .repo
-            .merge_analysis(&[&annotated_commit])
-            .context("Failed to perform merge analysis")?;
-
-        if analysis.is_up_to_date() {
-            return Ok(());
-        }
-
-        if analysis.is_fast_forward() {
-            // Refuse to clobber local changes — `git merge --ff` does the same.
-            let mut status_opts = git2::StatusOptions::new();
-            status_opts.include_untracked(false).include_ignored(false);
-            let statuses = self
-                .repo
-                .statuses(Some(&mut status_opts))
-                .context("Failed to read repository status before fast-forward")?;
-            if !statuses.is_empty() {
-                anyhow::bail!(
-                    "Cannot fast-forward to '{}': {} local change(s) would be overwritten. Commit or stash them first.",
-                    source,
-                    statuses.len()
-                );
-            }
-
-            // Update the working tree first with a safe (non-destructive)
-            // checkout, then move the branch ref — so a checkout failure
-            // (e.g. an untracked file collision) leaves the branch untouched.
-            let target_tree = annotated.tree().context("Source commit has no tree")?;
-            self.repo
-                .checkout_tree(
-                    target_tree.as_object(),
-                    Some(git2::build::CheckoutBuilder::new().safe()),
-                )
-                .with_context(|| {
-                    format!(
-                        "Fast-forward to '{}' aborted: local files would be overwritten. Commit or stash them first.",
-                        source
-                    )
-                })?;
-
-            let refname = format!(
-                "refs/heads/{}",
-                self.current_workspace()?.unwrap_or_default()
-            );
-            self.repo
-                .find_reference(&refname)
-                .and_then(|mut r| r.set_target(annotated.id(), "devflow: fast-forward merge"))
-                .with_context(|| format!("Failed to fast-forward to '{}'", source))?;
-            return Ok(());
-        }
-
-        if analysis.is_normal() {
-            // Normal merge
-            self.repo
-                .merge(&[&annotated_commit], None, None)
-                .with_context(|| format!("Failed to merge '{}'", source))?;
-
-            // Check for conflicts
-            let mut index = self.repo.index().context("Failed to get index")?;
-            if index.has_conflicts() {
-                anyhow::bail!("Merge conflicts detected. Resolve conflicts and commit manually.");
-            }
-
-            // Create merge commit
-            let sig = self
-                .repo
-                .signature()
-                .context("Failed to get default signature")?;
-            let tree_oid = index.write_tree().context("Failed to write tree")?;
-            let tree = self.repo.find_tree(tree_oid)?;
-            let head_commit = self
-                .repo
-                .head()?
-                .peel_to_commit()
-                .context("HEAD is not a commit")?;
-            self.repo
-                .commit(
-                    Some("HEAD"),
-                    &sig,
-                    &sig,
-                    &format!("Merge workspace '{}' into HEAD", source),
-                    &tree,
-                    &[&head_commit, &annotated],
-                )
-                .context("Failed to create merge commit")?;
-
-            self.repo.cleanup_state()?;
-            return Ok(());
-        }
-
-        anyhow::bail!(
-            "Cannot merge '{}': merge analysis returned unexpected result",
-            source
-        );
-    }
-
-    fn detach_head(&self) -> Result<()> {
-        let head = self.repo.head().context("Failed to get HEAD")?;
-        let commit = head
-            .peel_to_commit()
-            .context("HEAD does not point to a commit")?;
-        self.repo
-            .set_head_detached(commit.id())
-            .context("Failed to detach HEAD")?;
-        Ok(())
-    }
-
-    fn merge_base(&self, a: &str, b: &str) -> Result<String> {
-        let a_oid = self
-            .repo
-            .find_branch(a, git2::BranchType::Local)
-            .with_context(|| format!("Workspace '{}' not found", a))?
-            .into_reference()
-            .peel_to_commit()
-            .context("Failed to resolve commit for workspace")?
-            .id();
-
-        let b_oid = self
-            .repo
-            .find_branch(b, git2::BranchType::Local)
-            .with_context(|| format!("Workspace '{}' not found", b))?
-            .into_reference()
-            .peel_to_commit()
-            .context("Failed to resolve commit for workspace")?
-            .id();
-
-        let base = self
-            .repo
-            .merge_base(a_oid, b_oid)
-            .context("Failed to find merge base")?;
-
-        Ok(base.to_string())
-    }
-
-    fn changed_files_since(
-        &self,
-        base_commit: &str,
-        workspace: &str,
-    ) -> Result<Vec<std::path::PathBuf>> {
-        let base_oid = git2::Oid::from_str(base_commit)
-            .with_context(|| format!("Invalid commit SHA: {}", base_commit))?;
-        let base_tree = self
-            .repo
-            .find_commit(base_oid)
-            .context("Failed to find base commit")?
-            .tree()
-            .context("Failed to get tree for base commit")?;
-
-        let head_tree = self
-            .repo
-            .find_branch(workspace, git2::BranchType::Local)
-            .with_context(|| format!("Workspace '{}' not found", workspace))?
-            .into_reference()
-            .peel_to_commit()
-            .context("Failed to resolve commit")?
-            .tree()
-            .context("Failed to get tree")?;
-
-        let diff = self
-            .repo
-            .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None)
-            .context("Failed to diff trees")?;
-
-        let mut files = Vec::new();
-        for delta in diff.deltas() {
-            if let Some(path) = delta.new_file().path() {
-                files.push(path.to_path_buf());
-            }
-        }
-
-        Ok(files)
-    }
-
-    fn rebase(&self, onto: &str) -> Result<crate::merge::RebaseResult> {
-        let onto_branch = self
-            .repo
-            .find_branch(onto, git2::BranchType::Local)
-            .with_context(|| format!("Target workspace '{}' not found", onto))?;
-        let onto_annotated = self
-            .repo
-            .find_annotated_commit(
-                onto_branch
-                    .into_reference()
-                    .peel_to_commit()
-                    .context("Failed to resolve onto commit")?
-                    .id(),
-            )
-            .context("Failed to create annotated commit for rebase target")?;
-
-        let head = self
-            .repo
-            .head()
-            .context("Failed to get HEAD")?
-            .peel_to_commit()
-            .context("HEAD does not point to a commit")?;
-        let head_annotated = self
-            .repo
-            .find_annotated_commit(head.id())
-            .context("Failed to create annotated commit for HEAD")?;
-
-        let mut rebase = self
-            .repo
-            .rebase(Some(&head_annotated), None, Some(&onto_annotated), None)
-            .context("Failed to start rebase")?;
-
-        let sig = self
-            .repo
-            .signature()
-            .or_else(|_| git2::Signature::now("devflow", "devflow@localhost"))
-            .context("Failed to create signature")?;
-
-        let mut commits_replayed = 0;
-
-        loop {
-            match rebase.next() {
-                Some(Ok(_op)) => {
-                    // Check for conflicts in the index
-                    let index = self.repo.index().context("Failed to get index")?;
-                    if index.has_conflicts() {
-                        let conflict_files: Vec<String> = index
-                            .conflicts()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|c| {
-                                c.ok().and_then(|entry| {
-                                    entry
-                                        .our
-                                        .map(|e| String::from_utf8_lossy(&e.path).to_string())
-                                })
-                            })
-                            .collect();
-
-                        rebase.abort().ok();
-                        return Ok(crate::merge::RebaseResult {
-                            success: false,
-                            commits_replayed,
-                            conflicts: true,
-                            conflict_files,
-                        });
-                    }
-
-                    rebase
-                        .commit(None, &sig, None)
-                        .context("Failed to commit rebased changes")?;
-                    commits_replayed += 1;
-                }
-                Some(Err(e)) => {
-                    rebase.abort().ok();
-                    anyhow::bail!("Rebase operation failed: {}", e);
-                }
-                None => break,
-            }
-        }
-
-        rebase.finish(None).context("Failed to finish rebase")?;
-
-        Ok(crate::merge::RebaseResult {
-            success: true,
-            commits_replayed,
-            conflicts: false,
-            conflict_files: vec![],
-        })
-    }
-
     fn prune_worktrees(&self) -> Result<()> {
         // git2 doesn't expose worktree pruning directly, use git CLI
         let root = self.get_repo_root();
@@ -1333,53 +1002,5 @@ mod tests {
 
         repo.remove_worktree(&wt_path, false).unwrap();
         assert!(!wt_path.exists());
-    }
-
-    #[test]
-    fn test_ff_merge_refuses_dirty_working_tree() {
-        let (_tmp, root, repo) = repo_with_commit();
-
-        // Commit a file on main so it can be dirtied
-        std::fs::write(root.join("a.txt"), "v1").unwrap();
-        let r = git2::Repository::open(&root).unwrap();
-        let mut index = r.index().unwrap();
-        index.add_path(Path::new("a.txt")).unwrap();
-        index.write().unwrap();
-        let tree = r.find_tree(index.write_tree().unwrap()).unwrap();
-        let sig = git2::Signature::now("t", "t@t").unwrap();
-        let parent = r.head().unwrap().peel_to_commit().unwrap();
-        r.commit(Some("HEAD"), &sig, &sig, "add a", &tree, &[&parent])
-            .unwrap();
-
-        // Branch ahead of main: modify a.txt and commit on 'feature'
-        let head = r.head().unwrap().peel_to_commit().unwrap();
-        r.branch("feature", &head, false).unwrap();
-        r.set_head("refs/heads/feature").unwrap();
-        std::fs::write(root.join("a.txt"), "v2").unwrap();
-        let mut index = r.index().unwrap();
-        index.add_path(Path::new("a.txt")).unwrap();
-        index.write().unwrap();
-        let tree = r.find_tree(index.write_tree().unwrap()).unwrap();
-        let parent = r.head().unwrap().peel_to_commit().unwrap();
-        r.commit(Some("HEAD"), &sig, &sig, "edit a", &tree, &[&parent])
-            .unwrap();
-
-        // Back on main with a dirty tracked file
-        let main_name = repo.default_workspace().unwrap().unwrap();
-        r.set_head(&format!("refs/heads/{main_name}")).unwrap();
-        r.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
-            .unwrap();
-        std::fs::write(root.join("a.txt"), "local edit").unwrap();
-
-        // Re-open through devflow's provider and attempt the ff merge
-        let repo = GitRepository::new(&root).unwrap();
-        let err = repo.merge_branch("feature").unwrap_err();
-        assert!(
-            err.to_string().contains("local change"),
-            "unexpected error: {err}"
-        );
-        // Local edit survived
-        let content = std::fs::read_to_string(root.join("a.txt")).unwrap();
-        assert_eq!(content, "local edit");
     }
 }

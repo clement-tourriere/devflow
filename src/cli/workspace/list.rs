@@ -58,11 +58,6 @@ pub(super) fn print_enriched_branch_list(
         .iter()
         .map(|b| (b.name.clone(), b.parent.clone()))
         .collect();
-    let sandbox_lookup: HashSet<String> = registry_branches
-        .iter()
-        .filter(|b| b.sandboxed)
-        .map(|b| b.name.clone())
-        .collect();
 
     let context = resolve_branch_context(config);
 
@@ -169,7 +164,6 @@ pub(super) fn print_enriched_branch_list(
         service_branches: &[services::WorkspaceInfo],
         service_names: &HashSet<String>,
         wt_lookup: &HashMap<String, PathBuf>,
-        sandbox_lookup: &HashSet<String>,
         config: &Config,
         #[allow(unused_variables)] _git_branches: &[devflow_core::vcs::WorkspaceInfo],
     ) {
@@ -187,7 +181,6 @@ pub(super) fn print_enriched_branch_list(
             .and_then(|b| b.state.as_deref());
 
         let wt_path = wt_lookup.get(name);
-        let is_sandboxed = sandbox_lookup.contains(name) || sandbox_lookup.contains(&normalized);
 
         let mut parts = Vec::new();
         if let Some(state) = service_state {
@@ -200,9 +193,6 @@ pub(super) fn print_enriched_branch_list(
         }
         if is_context {
             parts.push("context".to_string());
-        }
-        if is_sandboxed {
-            parts.push("sandboxed".to_string());
         }
 
         let suffix = if parts.is_empty() {
@@ -242,7 +232,6 @@ pub(super) fn print_enriched_branch_list(
                     service_branches,
                     service_names,
                     wt_lookup,
-                    sandbox_lookup,
                     config,
                     _git_branches,
                 );
@@ -262,7 +251,6 @@ pub(super) fn print_enriched_branch_list(
             service_branches,
             &service_names,
             &wt_lookup,
-            &sandbox_lookup,
             config,
             &git_branches,
         );

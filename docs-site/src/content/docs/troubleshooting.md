@@ -68,7 +68,7 @@ devflow destroy                  # nuke the whole project's devflow footprint (i
 | `.devflow.yml` / `.devflow.local.yml` | committed config / local overrides |
 | `~/.config/devflow/local_state.yml` | workspace registry (parents, worktree paths, flags) |
 | `~/.config/devflow/hook_approvals.yml` | hook approvals (project root + template keyed) |
-| `~/.config/devflow/config.yml` | global config (proxy ports, smart merge, …) |
+| `~/.config/devflow/config.yml` | global config (proxy ports, …) |
 | `~/.local/share/devflow/` | service data directories (CoW clones) |
 | `~/.devflow/proxy/` | proxy CA cert + key |
 

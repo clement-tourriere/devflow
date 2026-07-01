@@ -25,7 +25,7 @@ const PHASE_CATEGORIES: Record<string, string[]> = {
     "pre-remove",
     "post-remove",
   ],
-  Commit: ["pre-commit", "pre-merge", "post-merge", "post-rewrite"],
+  Commit: ["pre-commit"],
   Service: [
     "pre-service-create",
     "post-service-create",
@@ -770,7 +770,6 @@ const VARIABLE_CATEGORIES: {
     vars: [
       { key: "commit", expr: "{{ commit }}", description: "Full commit hash" },
       { key: "short_commit", expr: "{{ short_commit }}", description: "Short commit hash" },
-      { key: "target", expr: "{{ target }}", description: "Target workspace for merge" },
       { key: "base", expr: "{{ base }}", description: "Base workspace" },
       { key: "previous_workspace", expr: "{{ previous_workspace }}", description: "Previously checked-out workspace" },
     ],

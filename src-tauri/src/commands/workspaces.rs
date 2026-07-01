@@ -16,7 +16,6 @@ pub struct WorkspaceEntry {
     pub created_at: Option<String>,
     pub executed_command: Option<String>,
     pub execution_status: Option<String>,
-    pub sandboxed: bool,
 }
 
 #[derive(Serialize)]
@@ -107,7 +106,6 @@ pub async fn list_workspaces(project_path: String) -> Result<WorkspacesResponse,
                 created_at: Some(b.created_at.format("%Y-%m-%d %H:%M").to_string()),
                 executed_command: b.executed_command,
                 execution_status: b.execution_status,
-                sandboxed: b.sandboxed,
             }
         })
         .collect();
@@ -204,7 +202,6 @@ pub async fn create_workspace(
     creation_mode: Option<String>,
     copy_files: Option<Vec<String>>,
     copy_ignored: Option<bool>,
-    sandboxed: Option<bool>,
 ) -> Result<CreateWorkspaceResult, String> {
     let project_dir = std::path::Path::new(&project_path);
     let cfg = crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
@@ -221,7 +218,6 @@ pub async fn create_workspace(
         from_workspace,
         copy_files,
         copy_ignored,
-        sandboxed,
     };
 
     let result = workspace::switch::switch_workspace(&cfg, project_dir, &workspace_name, &options)
@@ -278,7 +274,6 @@ pub async fn switch_workspace(
         from_workspace: None,
         copy_files: None,
         copy_ignored: None,
-        sandboxed: None,
     };
 
     let result = workspace::switch::switch_workspace(&cfg, project_dir, &workspace_name, &options)

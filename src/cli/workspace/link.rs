@@ -1,28 +1,15 @@
 use super::context::BranchContext;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use devflow_core::config::Config;
-use devflow_core::hooks::HookPhase;
-use devflow_core::services;
-use devflow_core::state::{DevflowWorkspace, LocalStateManager};
-use devflow_core::vcs;
+use devflow_core::workspace::link::{LinkOptions, LinkWorkspaceResult};
 use std::path::PathBuf;
 
 use super::context::{ensure_default_workspace_registered, linked_workspace_exists};
 
-#[derive(Debug, Clone)]
-struct LinkServiceResult {
-    service_name: String,
-    success: bool,
-    message: String,
-}
+pub(super) type LinkBranchResult = LinkWorkspaceResult;
 
-#[derive(Debug, Clone)]
-pub(super) struct LinkBranchResult {
-    workspace: String,
-    parent: Option<String>,
-    worktree_path: Option<String>,
-    service_results: Vec<LinkServiceResult>,
-    services_failed: usize,
+fn services_failed(linked: &LinkWorkspaceResult) -> usize {
+    linked.services.iter().filter(|r| !r.success).count()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -40,149 +27,21 @@ pub(super) async fn link_branch_internal(
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let normalized_branch = config.get_normalized_workspace_name(workspace_name);
-    let normalized_main = config.get_normalized_workspace_name(&config.git.main_workspace);
-
-    // Ensure main workspace is registered
-    if let Ok(mut state_mgr) = LocalStateManager::new() {
-        let _ = state_mgr.ensure_default_workspace(&project_dir, &config.git.main_workspace);
-    }
-
-    let vcs_repo = vcs::detect_vcs_provider(".").context("Failed to open VCS repository")?;
-    if !vcs_repo.workspace_exists(workspace_name)? {
-        anyhow::bail!(
-            "Workspace '{}' does not exist in {}. Create/switch it first, then run `devflow link {}`.",
-            workspace_name,
-            vcs_repo.provider_name(),
-            workspace_name
-        );
-    }
-
-    let existing_parent = LocalStateManager::new()
-        .ok()
-        .and_then(|state| state.get_workspace_by_dir(&project_dir, &normalized_branch))
-        .and_then(|b| b.parent);
-
-    let mut parent = from
-        .map(|p| config.get_normalized_workspace_name(p))
-        .or(existing_parent);
-
-    if parent.is_none() && normalized_branch != normalized_main {
-        parent = Some(normalized_main.clone());
-    }
-
-    if let Some(ref parent_workspace) = parent {
-        if parent_workspace != &normalized_main
-            && !linked_workspace_exists(config, config_path, parent_workspace)
-        {
-            anyhow::bail!(
-                "Parent '{}' is not linked in devflow. Run `devflow link {}` first.",
-                parent_workspace,
-                parent_workspace
-            );
-        }
-        if parent_workspace == &normalized_main {
-            if let Ok(mut state_mgr) = LocalStateManager::new() {
-                let _ =
-                    state_mgr.ensure_default_workspace(&project_dir, &config.git.main_workspace);
-            }
-        }
-    }
-
-    let worktree_path = vcs_repo
-        .worktree_path(workspace_name)?
-        .map(|p| p.display().to_string())
-        .or_else(|| {
-            if normalized_branch == normalized_main {
-                vcs_repo
-                    .main_worktree_dir()
-                    .map(|p| p.display().to_string())
+    let options = LinkOptions {
+        lifecycle: devflow_core::workspace::LifecycleOptions {
+            hook_approval: if non_interactive {
+                devflow_core::workspace::hooks::HookApprovalMode::NonInteractive
             } else {
-                None
-            }
-        });
-
-    // Register workspace in state using project-dir-based API
-    if let Ok(mut state_mgr) = LocalStateManager::new() {
-        let existing = state_mgr.get_workspace_by_dir(&project_dir, &normalized_branch);
-        let workspace = DevflowWorkspace {
-            name: normalized_branch.clone(),
-            parent: parent
-                .clone()
-                .or_else(|| existing.as_ref().and_then(|b| b.parent.clone())),
-            worktree_path: worktree_path
-                .clone()
-                .or_else(|| existing.as_ref().and_then(|b| b.worktree_path.clone())),
-            created_at: existing
-                .as_ref()
-                .map(|b| b.created_at)
-                .unwrap_or_else(chrono::Utc::now),
-            executed_command: existing.as_ref().and_then(|b| b.executed_command.clone()),
-            execution_status: existing.as_ref().and_then(|b| b.execution_status.clone()),
-            executed_at: existing.as_ref().and_then(|b| b.executed_at),
-            sandboxed: existing.as_ref().map(|b| b.sandboxed).unwrap_or(false),
-        };
-        if let Err(e) = state_mgr.register_workspace_by_dir(&project_dir, workspace) {
-            log::warn!("Failed to register workspace in devflow state: {}", e);
-        }
-    }
-
-    let hook_opts = devflow_core::workspace::LifecycleOptions {
-        hook_approval: if non_interactive {
-            devflow_core::workspace::hooks::HookApprovalMode::NonInteractive
-        } else {
-            devflow_core::workspace::hooks::HookApprovalMode::Interactive
+                devflow_core::workspace::hooks::HookApprovalMode::Interactive
+            },
+            verbose_hooks: true,
+            ..Default::default()
         },
-        verbose_hooks: true,
-        ..Default::default()
+        from_workspace: from.map(ToString::to_string),
     };
 
-    // Fire pre-service-switch hooks before service orchestration
-    devflow_core::workspace::hooks::run_lifecycle_hooks_best_effort(
-        config,
-        &project_dir,
-        workspace_name,
-        HookPhase::PreSwitch,
-        &hook_opts,
-    )
-    .await;
-
-    let mut service_results = Vec::new();
-    let mut services_failed = 0usize;
-
-    if !config.resolve_services().is_empty() {
-        let orchestration =
-            services::factory::orchestrate_switch(config, &normalized_branch, parent.as_deref())
-                .await?;
-        for result in orchestration {
-            if !result.success {
-                services_failed += 1;
-            }
-            service_results.push(LinkServiceResult {
-                service_name: result.service_name,
-                success: result.success,
-                message: result.message,
-            });
-        }
-    }
-
-    // Fire post-switch hooks
-    devflow_core::workspace::hooks::run_lifecycle_hooks_best_effort(
-        config,
-        &project_dir,
-        workspace_name,
-        HookPhase::PostSwitch,
-        &hook_opts,
-    )
-    .await;
-
-    Ok(LinkBranchResult {
-        workspace: normalized_branch,
-        parent,
-        worktree_path,
-        service_results,
-        services_failed,
-    })
+    devflow_core::workspace::link::link_workspace(config, &project_dir, workspace_name, &options)
+        .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -197,9 +56,11 @@ pub(super) async fn handle_link_command(
     let linked =
         link_branch_internal(config, config_path, workspace_name, from, non_interactive).await?;
 
+    let failed = services_failed(&linked);
+
     if json_output {
         let service_results: Vec<serde_json::Value> = linked
-            .service_results
+            .services
             .iter()
             .map(|r| {
                 serde_json::json!({
@@ -213,11 +74,11 @@ pub(super) async fn handle_link_command(
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "status": if linked.services_failed == 0 { "ok" } else { "error" },
+                "status": if failed == 0 { "ok" } else { "error" },
                 "workspace": linked.workspace,
                 "parent": linked.parent,
                 "worktree_path": linked.worktree_path,
-                "services_failed": linked.services_failed,
+                "services_failed": failed,
                 "service_results": service_results,
             }))?
         );
@@ -230,10 +91,10 @@ pub(super) async fn handle_link_command(
             println!("  Worktree: {}", path);
         }
 
-        if linked.service_results.is_empty() {
+        if linked.services.is_empty() {
             println!("  Services: none configured");
         } else {
-            for r in &linked.service_results {
+            for r in &linked.services {
                 if r.success {
                     println!("  [{}] {}", r.service_name, r.message);
                 } else {
@@ -243,12 +104,12 @@ pub(super) async fn handle_link_command(
         }
     }
 
-    if linked.services_failed > 0 {
+    if failed > 0 {
         anyhow::bail!(
             "Linked workspace '{}' but failed on {}/{} service(s)",
             linked.workspace,
-            linked.services_failed,
-            linked.service_results.len()
+            failed,
+            linked.services.len()
         );
     }
 
@@ -316,12 +177,13 @@ pub(super) async fn resolve_parent_for_branch_creation(
 
     if choice.starts_with("Link '") {
         let linked = link_branch_internal(config, config_path, parent_name, None, false).await?;
-        if linked.services_failed > 0 {
+        let failed = services_failed(&linked);
+        if failed > 0 {
             anyhow::bail!(
                 "Linked parent '{}' but failed on {}/{} service(s)",
                 parent_name,
-                linked.services_failed,
-                linked.service_results.len()
+                failed,
+                linked.services.len()
             );
         }
         return Ok(parent);
@@ -330,13 +192,13 @@ pub(super) async fn resolve_parent_for_branch_creation(
     if choice.starts_with("Use default workspace") {
         if !linked_workspace_exists(config, config_path, &default_workspace) {
             match link_branch_internal(config, config_path, &default_workspace, None, false).await {
-                Ok(linked) if linked.services_failed == 0 => {}
+                Ok(linked) if services_failed(&linked) == 0 => {}
                 Ok(linked) => {
                     anyhow::bail!(
                         "Linked default workspace '{}' but failed on {}/{} service(s)",
                         default_workspace,
-                        linked.services_failed,
-                        linked.service_results.len()
+                        services_failed(&linked),
+                        linked.services.len()
                     );
                 }
                 Err(_) => {

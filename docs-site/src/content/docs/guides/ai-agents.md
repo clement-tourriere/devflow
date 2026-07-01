@@ -1,6 +1,6 @@
 ---
 title: AI agents & automation
-description: Isolated environments per agent task — JSON contract, skills, sandboxing, AI commit messages, and CI patterns.
+description: Isolated environments per agent task — JSON contract, workspace helpers, AI commit messages, and CI patterns.
 sidebar:
   order: 8
 ---
@@ -69,23 +69,13 @@ devflow agent context --format json                     # project/services/conne
 
 `-x` runs the command inside the workspace's worktree; `--detach` puts it in a detached multiplexer session so you can run several agents in parallel and attach later.
 
-## Sandboxed workspaces
-
-For higher-risk tasks, create the workspace sandboxed — platform-aware filesystem/command restrictions applied to its hooks and executed commands:
-
-```bash
-devflow switch -c agent/experiment --sandboxed
-devflow switch -c trusted-task --no-sandbox     # opt out if sandbox is the default
-```
-
 ## Skills & context files
 
 ```bash
-devflow agent skill      # install bundled workspace skills into .claude/skills/
-devflow skill list       # full skills management (search/install/remove/update via skills.sh)
+devflow agent skill      # install bundled workspace helper skills into .claude/skills/
 ```
 
-The bundled skills teach agents to list/switch/create workspaces with the JSON contract. Context files follow open conventions:
+The bundled workspace helpers teach agents to list/switch/create workspaces with the JSON contract. Context files follow open conventions:
 
 | File | Audience |
 | --- | --- |

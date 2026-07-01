@@ -124,7 +124,6 @@ pub(super) fn register_workspace_in_state(
             executed_command: None,
             execution_status: None,
             executed_at: None,
-            sandboxed: existing.as_ref().map(|b| b.sandboxed).unwrap_or(false),
         },
     )?;
 

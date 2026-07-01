@@ -16,10 +16,8 @@ const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "hooks",
     "triggers",
     "execute",
-    "merge",
     "commit",
     "agent",
-    "sandbox",
     "proxy",
 ];
 
@@ -395,12 +393,10 @@ pub(super) fn run_doctor_pre_checks(
     let hooks_dir = std::path::Path::new(".git/hooks");
     let has_hooks = if hooks_dir.exists() {
         let post_checkout = hooks_dir.join("post-checkout");
-        let post_merge = hooks_dir.join("post-merge");
         if let Ok(ref vcs) = vcs_repo {
-            (post_checkout.exists() && vcs.is_devflow_hook(&post_checkout).unwrap_or(false))
-                || (post_merge.exists() && vcs.is_devflow_hook(&post_merge).unwrap_or(false))
+            post_checkout.exists() && vcs.is_devflow_hook(&post_checkout).unwrap_or(false)
         } else {
-            post_checkout.exists() || post_merge.exists()
+            post_checkout.exists()
         }
     } else {
         false

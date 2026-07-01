@@ -5,7 +5,7 @@ sidebar:
   order: 4
 ---
 
-Hooks are commands (or built-in actions) that run at specific points of the workspace lifecycle: write env files after a switch, run migrations after creation, test before a merge, clean up after removal. They are defined in `.devflow.yml` and rendered with [MiniJinja](https://docs.rs/minijinja/) (Jinja2-compatible) templates.
+Hooks are commands (or built-in actions) that run at specific points of the workspace lifecycle: write env files after a switch, run migrations after creation, test before a commit, clean up before removal. They are defined in `.devflow.yml` and rendered with [MiniJinja](https://docs.rs/minijinja/) (Jinja2-compatible) templates.
 
 ```yaml
 hooks:
@@ -17,7 +17,7 @@ hooks:
         path: .env.local
         vars:
           DATABASE_URL: "{{ service['app-db'].url }}"
-  pre-merge:
+  pre-commit:
     test:                                              # extended form
       command: "npm test"
       condition: "file_exists:package.json"
@@ -36,9 +36,9 @@ The full schema, every template variable, filter, condition, and action is in th
 
 ## Phases
 
-Phases group into VCS lifecycle (`pre-switch`, `post-create`, `post-switch`, `pre-remove`, `post-remove`, …), merge/rebase lifecycle (`pre-commit`, `pre-merge`, `post-merge`, `pre-rebase`, `post-rebase`, `post-rewrite`, `post-merge-cascade`), and service lifecycle (`pre/post-service-create`, `pre/post-service-delete`, `post-service-switch`). Unknown phase names are **custom phases** you can run manually with `devflow hook run <phase>`.
+Phases group into workspace lifecycle (`pre-switch`, `post-create`, `post-switch`, `pre-remove`, `post-remove`, …), commit lifecycle (`pre-commit`), and service lifecycle (`pre/post-service-create`, `pre/post-service-delete`, `post-service-switch`). Unknown phase names are **custom phases** you can run manually with `devflow hook run <phase>`.
 
-**Blocking** phases (`pre-switch`, `post-create`, `pre-remove`, `pre-commit`, `pre-merge`, `pre-rebase`, `pre-service-create`, `pre-service-delete`) run synchronously and a failure aborts the operation (unless `continue_on_error: true`). All other phases are best-effort: failures are reported but don't abort. Hooks with `background: true` are spawned concurrently and awaited at process exit, up to `DEVFLOW_BACKGROUND_HOOK_TIMEOUT` seconds (default 30).
+**Blocking** phases (`pre-switch`, `post-create`, `pre-remove`, `pre-commit`, `pre-service-create`, `pre-service-delete`) run synchronously and a failure aborts the operation (unless `continue_on_error: true`). All other phases are best-effort: failures are reported but don't abort. Hooks with `background: true` are spawned concurrently and awaited at process exit, up to `DEVFLOW_BACKGROUND_HOOK_TIMEOUT` seconds (default 30).
 
 ## Worktree awareness
 

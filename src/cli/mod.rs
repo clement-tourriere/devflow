@@ -10,9 +10,7 @@ mod plugin;
 mod process;
 mod proxy;
 mod service;
-mod skill;
 mod sync_ai_configs;
-mod train;
 mod update;
 pub mod workspace;
 
@@ -120,13 +118,6 @@ Examples:
         dry_run: bool,
         #[arg(long, help = "Include gitignored files in worktree (overrides config)")]
         no_respect_gitignore: bool,
-        #[arg(
-            long,
-            help = "Create workspace in sandboxed mode (restricted filesystem + commands)"
-        )]
-        sandboxed: bool,
-        #[arg(long, help = "Disable sandbox even if default is enabled")]
-        no_sandbox: bool,
     },
     #[command(
         about = "Remove a workspace, its worktree, and associated service workspaces",
@@ -139,45 +130,6 @@ Examples:
         force: bool,
         #[arg(long, help = "Keep service workspaces (only remove worktree)")]
         keep_services: bool,
-    },
-    #[command(
-        about = "Merge current workspace into target (with optional cleanup)",
-        long_about = "Merge current workspace into target (with optional cleanup).\n\nPerforms a git merge of the current workspace into the target workspace (defaults to main).\nWith --cleanup, also removes the source workspace, its worktree, and associated service workspaces.\n\nExamples:\n  devflow merge                        # Merge into main\n  devflow merge develop                # Merge into develop\n  devflow merge --cleanup              # Merge and delete source workspace + services\n  devflow merge --dry-run              # Preview without merging",
-        hide = true
-    )]
-    Merge {
-        #[arg(help = "Target workspace to merge into (default: main workspace)")]
-        target: Option<String>,
-        #[arg(long, help = "Delete the source workspace and worktree after merge")]
-        cleanup: bool,
-        #[arg(long, help = "Simulate merge without actual operations")]
-        dry_run: bool,
-        #[arg(long, help = "Skip merge readiness checks")]
-        force: bool,
-        #[arg(long, help = "Run checks only without merging")]
-        check_only: bool,
-        #[arg(long, help = "Auto-rebase affected child workspaces after merge")]
-        cascade_rebase: bool,
-    },
-    #[command(
-        about = "Rebase current workspace onto target",
-        long_about = "Rebase current workspace onto target.\n\nReplays commits from the current workspace onto the target workspace.\n\nExamples:\n  devflow rebase                # Rebase onto main\n  devflow rebase develop        # Rebase onto develop\n  devflow rebase --dry-run      # Preview without rebasing",
-        hide = true
-    )]
-    Rebase {
-        #[arg(help = "Target workspace to rebase onto (default: main)")]
-        target: Option<String>,
-        #[arg(long, help = "Simulate rebase without actual operations")]
-        dry_run: bool,
-    },
-    #[command(
-        about = "Merge train — queue-based sequential merge pipeline",
-        long_about = "Merge train — queue-based sequential merge pipeline.\n\nQueue workspaces for sequential merge into a target with readiness checks.\n\nExamples:\n  devflow train add                    # Add current workspace to train\n  devflow train status                 # Show train status\n  devflow train run                    # Run the merge train\n  devflow train remove feature-auth    # Remove workspace from train",
-        hide = true
-    )]
-    Train {
-        #[command(subcommand)]
-        action: TrainAction,
     },
     #[command(
         about = "Clean up old service workspaces (alias for 'service cleanup')",
@@ -306,13 +258,13 @@ Examples:
     },
     #[command(
         about = "Install Git hooks",
-        long_about = "Install Git hooks.\n\nSets up post-checkout and post-commit Git hooks so devflow\nautomatically creates service workspaces and switches environments\non checkout. Safe to re-run.\n\nExamples:\n  devflow install-hooks",
+        long_about = "Install Git hooks.\n\nSets up post-checkout and pre-commit Git hooks so devflow\nautomatically creates service workspaces, switches environments\non checkout, and can run commit hooks. Safe to re-run.\n\nExamples:\n  devflow install-hooks",
         hide = true
     )]
     InstallHooks,
     #[command(
         about = "Uninstall Git hooks",
-        long_about = "Uninstall Git hooks.\n\nRemoves the devflow Git hooks (post-checkout, post-commit).\nYour existing service workspaces and worktrees are not affected.\n\nExamples:\n  devflow uninstall-hooks",
+        long_about = "Uninstall Git hooks.\n\nRemoves the devflow Git hooks (post-checkout, pre-commit).\nYour existing service workspaces and worktrees are not affected.\n\nExamples:\n  devflow uninstall-hooks",
         hide = true
     )]
     UninstallHooks,
@@ -369,7 +321,7 @@ Examples:
     // ── Extensibility ──
     #[command(
         about = "Manage lifecycle hooks",
-        long_about = "Manage lifecycle hooks.\n\nHooks are MiniJinja-templated commands that run at specific lifecycle phases\n(post-create, post-switch, pre-merge, etc.). Configure them in .devflow.yml\nunder the 'hooks' section.\n\nExamples:\n  devflow hook show                  # List all configured hooks\n  devflow hook show post-create      # Show hooks for a specific phase\n  devflow hook run post-create       # Run hooks for a phase manually\n  devflow hook approvals             # List approved hooks\n  devflow hook approvals clear       # Clear all approvals",
+        long_about = "Manage lifecycle hooks.\n\nHooks are MiniJinja-templated commands that run at specific lifecycle phases\n(post-create, post-switch, pre-commit, etc.). Configure them in .devflow.yml\nunder the 'hooks' section.\n\nExamples:\n  devflow hook show                  # List all configured hooks\n  devflow hook show post-create      # Show hooks for a specific phase\n  devflow hook run post-create       # Run a phase manually\n  devflow hook approvals             # List approved hooks\n  devflow hook approvals clear       # Clear all approvals",
         hide = true
     )]
     Hook {
@@ -396,11 +348,6 @@ Examples:
         #[command(subcommand)]
         action: AgentCommands,
     },
-
-    // ── Skills Management ──
-    /// Manage agent skills
-    #[command(subcommand)]
-    Skill(SkillCommands),
 
     // ── Proxy ──
     #[command(
@@ -456,47 +403,6 @@ Examples:
         all: bool,
         #[arg(long, help = "Skip confirmation prompts")]
         force: bool,
-    },
-}
-
-/// Subcommands for `devflow train`.
-#[derive(Subcommand)]
-pub enum TrainAction {
-    #[command(about = "Add a workspace to the merge train")]
-    Add {
-        #[arg(help = "Target workspace to merge into (default: main)")]
-        target: Option<String>,
-        #[arg(help = "Workspace to add (default: current)")]
-        workspace: Option<String>,
-    },
-    #[command(about = "Remove a workspace from the merge train")]
-    Remove {
-        #[arg(help = "Workspace to remove")]
-        workspace: String,
-    },
-    #[command(about = "Show merge train status")]
-    Status {
-        #[arg(help = "Target workspace (default: main)")]
-        target: Option<String>,
-    },
-    #[command(about = "Run the merge train")]
-    Run {
-        #[arg(help = "Target workspace (default: main)")]
-        target: Option<String>,
-        #[arg(long, help = "Stop on first failure")]
-        stop_on_failure: bool,
-        #[arg(long, help = "Delete source workspaces after successful merge")]
-        cleanup: bool,
-    },
-    #[command(about = "Pause the merge train")]
-    Pause {
-        #[arg(help = "Target workspace (default: main)")]
-        target: Option<String>,
-    },
-    #[command(about = "Resume the merge train")]
-    Resume {
-        #[arg(help = "Target workspace (default: main)")]
-        target: Option<String>,
     },
 }
 
@@ -821,63 +727,10 @@ pub enum AgentCommands {
         workspace: Option<String>,
     },
     #[command(
-        about = "Install bundled workspace skills (use `devflow skill` for full management)",
-        long_about = "Install devflow's bundled workspace skills into .claude/skills/.\n\nFor full skills management (search, install from marketplace, remove, update),\nuse `devflow skill` instead.\n\nExamples:\n  devflow agent skill          # Install bundled skills only\n  devflow skill list            # List all installed skills\n  devflow skill search foo      # Search skills.sh marketplace"
+        about = "Install bundled workspace helper skills",
+        long_about = "Install devflow's bundled workspace helper skills into .claude/skills/.\n\nThese are the small built-in agent helpers for listing, creating, and switching devflow workspaces.\n\nExamples:\n  devflow agent skill          # Install bundled workspace helpers"
     )]
     Skill,
-}
-
-/// Subcommands for `devflow skill`.
-#[derive(Subcommand)]
-pub enum SkillCommands {
-    #[command(about = "List installed skills")]
-    List {
-        #[arg(long, help = "Include available skills from marketplace")]
-        available: bool,
-        #[arg(long, help = "Show only skills with updates available")]
-        updates: bool,
-        #[arg(long, help = "Operate on user-scope (global) skills")]
-        user: bool,
-    },
-    #[command(about = "Search skills.sh marketplace")]
-    Search {
-        /// Search query
-        query: String,
-        #[arg(long, default_value = "20", help = "Maximum results")]
-        limit: usize,
-    },
-    #[command(about = "Install a skill")]
-    Install {
-        /// Skill identifier: owner/repo, owner/repo/skill-name, or skill name from search
-        identifier: String,
-        #[arg(long, help = "Install specific skill(s) from a repo")]
-        skill: Option<Vec<String>>,
-        #[arg(long, help = "Install to user-scope (global) instead of project")]
-        user: bool,
-    },
-    #[command(about = "Remove a skill")]
-    Remove {
-        /// Skill name to remove
-        name: String,
-        #[arg(long, help = "Remove from user-scope (global) instead of project")]
-        user: bool,
-    },
-    #[command(about = "Update skills to latest versions")]
-    Update {
-        /// Specific skill to update (updates all if omitted)
-        name: Option<String>,
-        #[arg(long, help = "Check for updates without applying")]
-        check: bool,
-        #[arg(long, help = "Update user-scope (global) skills")]
-        user: bool,
-    },
-    #[command(about = "Show details of an installed skill")]
-    Show {
-        /// Skill name
-        name: String,
-        #[arg(long, help = "Show a user-scope (global) skill")]
-        user: bool,
-    },
 }
 
 /// Subcommands for `devflow proxy`.
@@ -1005,9 +858,6 @@ pub async fn handle_command(
             | Commands::GitHook { .. }
             | Commands::WorktreeSetup
             | Commands::Remove { .. }
-            | Commands::Merge { .. }
-            | Commands::Rebase { .. }
-            | Commands::Train { .. }
             | Commands::Doctor
     );
 
@@ -1456,7 +1306,7 @@ pub async fn handle_command(
 
                         println!();
                         let install_recipe = inquire::Confirm::new(
-                            "Install AI config sync recipe? (merge .claude/.cursor settings back on workspace removal)",
+                            "Install AI config sync recipe? (copy .claude/.cursor settings back on workspace removal)",
                         )
                         .with_default(true)
                         .with_help_message("Recommended for AI coding tools. Syncs permissions and settings back to main worktree.")
@@ -1695,9 +1545,6 @@ pub async fn handle_command(
                 &config_path,
             )
             .await?;
-        }
-        Commands::Skill(action) => {
-            skill::handle_skill_command(action, json_output, &config_path).await?;
         }
         Commands::Config { verbose } => {
             if json_output {

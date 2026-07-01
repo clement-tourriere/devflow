@@ -9,8 +9,6 @@ use super::HookPhase;
 /// ```text
 /// git post-checkout  → [post-switch]  (or post-create if workspace is new)
 /// git pre-commit     → [pre-commit]
-/// git post-merge     → [post-merge, post-switch]
-/// git post-rewrite   → [post-rewrite]
 /// ```
 ///
 /// Overridable via config:
@@ -19,8 +17,6 @@ use super::HookPhase;
 ///   git:
 ///     post-checkout: [post-switch]
 ///     pre-commit: [pre-commit]
-///     post-merge: [post-merge, post-switch]
-///     post-rewrite: [post-rewrite]
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriggersConfig {
@@ -41,11 +37,6 @@ fn default_git_triggers() -> HashMap<String, Vec<String>> {
     let mut m = HashMap::new();
     m.insert("post-checkout".to_string(), vec!["post-switch".to_string()]);
     m.insert("pre-commit".to_string(), vec!["pre-commit".to_string()]);
-    m.insert(
-        "post-merge".to_string(),
-        vec!["post-merge".to_string(), "post-switch".to_string()],
-    );
-    m.insert("post-rewrite".to_string(), vec!["post-rewrite".to_string()]);
     m
 }
 
@@ -95,9 +86,6 @@ mod tests {
 
         let phases = triggers.resolve_git_event("post-checkout");
         assert_eq!(phases, vec![HookPhase::PostSwitch]);
-
-        let phases = triggers.resolve_git_event("post-merge");
-        assert_eq!(phases, vec![HookPhase::PostMerge, HookPhase::PostSwitch]);
 
         let phases = triggers.resolve_git_event("pre-commit");
         assert_eq!(phases, vec![HookPhase::PreCommit]);

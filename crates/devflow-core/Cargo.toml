@@ -7,15 +7,12 @@ authors = ["Clément Tourrière <clement.tourriere@gmail.com>"]
 license = "MIT"
 
 [features]
-default = ["service-local", "service-neon", "service-dblab", "service-xata", "llm", "sandbox", "sandbox-landlock", "skills"]
+default = ["service-local", "service-neon", "service-dblab", "service-xata", "llm"]
 service-local = ["dep:bollard", "dep:rusqlite", "dep:rust-s3", "dep:tar", "dep:bytes", "dep:futures-util", "dep:tempfile", "dep:url"]
 service-neon = ["dep:reqwest"]
 service-dblab = ["dep:reqwest"]
 service-xata = ["dep:reqwest"]
 llm = ["dep:reqwest"]
-sandbox = ["dep:tempfile"]
-sandbox-landlock = ["dep:landlock"]
-skills = ["dep:reqwest", "dep:sha2"]
 
 [dependencies]
 # Serialization
@@ -37,8 +34,8 @@ async-trait = "0.1"
 git2 = { version = "0.21", default-features = false }
 
 # Text matching
-# Full default features: CommandGuard and workspace_matches patterns use
-# \b/\s, which require the unicode feature to compile.
+# Full default features: workspace matching patterns use \b/\s,
+# which require the unicode feature to compile.
 regex = "1.12"
 
 # Template engine for hooks
@@ -58,9 +55,6 @@ rusqlite = { version = "0.40", default-features = false, features = ["bundled"],
 
 # UUID generation
 uuid = { version = "1.22", features = ["v4", "serde"] }
-
-# Glob pattern matching for merge checks
-glob = { version = "0.3", default-features = false }
 
 # HTTP client for cloud backends
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
@@ -82,9 +76,6 @@ futures-util = { version = "0.3", default-features = false, features = ["std"], 
 # Tar archive creation (for bollard upload_to_container)
 tar = { version = "0.4", default-features = false, optional = true }
 
-# Content hashing for skill versioning
-sha2 = { version = "0.10", optional = true }
-
 which = "8.0.0"
 
 # Password input
@@ -105,8 +96,9 @@ reflink-copy = "0.1"
 # Work-stealing parallelism for directory copies
 rayon = "1.12"
 
+# Process file watchers use glob patterns for watch sets
+glob = "0.3"
+
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-landlock = { version = "0.4", optional = true }

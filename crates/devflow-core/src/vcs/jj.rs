@@ -386,19 +386,18 @@ impl VcsProvider for JjRepository {
 
             let hook_script = self.generate_hook_script();
 
-            for hook_name in &["post-checkout", "post-merge"] {
-                let hook_path = git_hooks_dir.join(hook_name);
-                std::fs::write(&hook_path, &hook_script)
-                    .with_context(|| format!("Failed to write {} hook", hook_name))?;
+            let hook_name = "post-checkout";
+            let hook_path = git_hooks_dir.join(hook_name);
+            std::fs::write(&hook_path, &hook_script)
+                .with_context(|| format!("Failed to write {} hook", hook_name))?;
 
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let mut perms = std::fs::metadata(&hook_path)?.permissions();
-                    perms.set_mode(0o755);
-                    std::fs::set_permissions(&hook_path, perms)
-                        .context("Failed to set hook permissions")?;
-                }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&hook_path)?.permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&hook_path, perms)
+                    .context("Failed to set hook permissions")?;
             }
 
             log::info!("Installed hooks into colocated .git/hooks");
@@ -422,12 +421,11 @@ impl VcsProvider for JjRepository {
         // Only relevant for colocated repos
         let git_hooks_dir = self.root.join(".git").join("hooks");
         if git_hooks_dir.exists() {
-            for hook_name in &["post-checkout", "post-merge"] {
-                let hook_path = git_hooks_dir.join(hook_name);
-                if hook_path.exists() && self.is_devflow_hook(&hook_path)? {
-                    std::fs::remove_file(&hook_path)
-                        .with_context(|| format!("Failed to remove {} hook", hook_name))?;
-                }
+            let hook_name = "post-checkout";
+            let hook_path = git_hooks_dir.join(hook_name);
+            if hook_path.exists() && self.is_devflow_hook(&hook_path)? {
+                std::fs::remove_file(&hook_path)
+                    .with_context(|| format!("Failed to remove {} hook", hook_name))?;
             }
         }
         Ok(())

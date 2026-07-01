@@ -9,12 +9,6 @@ import type {
   AddServiceRequest,
   DiscoveredContainer,
   DestroyServiceResult,
-  AgentSkillsStatus,
-  InstalledSkillInfo,
-  SkillSearchResult,
-  SkillSearchDetail,
-  SkillDetail,
-  UserSkillInfo,
   HookPhaseEntry,
   VcsHooksActionResult,
   ActionTypeInfo,
@@ -82,8 +76,7 @@ export const createWorkspace = (
   fromWorkspace?: string,
   creationMode?: WorkspaceCreationMode,
   copyFiles?: string[],
-  copyIgnored?: boolean,
-  sandboxed?: boolean
+  copyIgnored?: boolean
 ) =>
   invoke<CreateWorkspaceResult>("create_workspace", {
     projectPath,
@@ -92,7 +85,6 @@ export const createWorkspace = (
     creationMode,
     copyFiles,
     copyIgnored,
-    sandboxed,
   });
 export const switchWorkspace = (projectPath: string, workspaceName: string) =>
   invoke<SwitchWorkspaceResult>("switch_workspace", {
@@ -244,42 +236,6 @@ export const discoverDockerContainers = (
   });
 export const installAgentSkills = (projectPath: string) =>
   invoke<string[]>("install_agent_skills", { projectPath });
-export const uninstallAgentSkills = (projectPath: string) =>
-  invoke<void>("uninstall_agent_skills", { projectPath });
-export const checkAgentSkills = (projectPath: string) =>
-  invoke<AgentSkillsStatus>("check_agent_skills", { projectPath });
-
-// Skills management
-export const skillList = (projectPath: string) =>
-  invoke<InstalledSkillInfo[]>("skill_list", { projectPath });
-export const skillSearch = (query: string, limit: number) =>
-  invoke<SkillSearchResult[]>("skill_search", { query, limit });
-export const skillSearchDetail = (source: string, name: string) =>
-  invoke<SkillSearchDetail>("skill_search_detail", { source, name });
-export const skillInstall = (projectPath: string, identifier: string) =>
-  invoke<string[]>("skill_install", { projectPath, identifier });
-export const skillRemove = (projectPath: string, name: string) =>
-  invoke<void>("skill_remove", { projectPath, name });
-export const skillUpdate = (projectPath: string, name?: string) =>
-  invoke<string[]>("skill_update", { projectPath, name: name ?? null });
-export const skillShow = (projectPath: string, name: string) =>
-  invoke<SkillDetail>("skill_show", { projectPath, name });
-export const skillCheckUpdates = (projectPath: string) =>
-  invoke<string[]>("skill_check_updates", { projectPath });
-
-// User-scope skills
-export const userSkillList = () =>
-  invoke<UserSkillInfo[]>("user_skill_list");
-export const userSkillInstall = (identifier: string) =>
-  invoke<string[]>("user_skill_install", { identifier });
-export const userSkillRemove = (name: string) =>
-  invoke<void>("user_skill_remove", { name });
-export const userSkillUpdate = (name?: string) =>
-  invoke<string[]>("user_skill_update", { name: name ?? null });
-export const userSkillShow = (name: string) =>
-  invoke<SkillDetail>("user_skill_show", { name });
-export const userSkillCheckUpdates = () =>
-  invoke<string[]>("user_skill_check_updates");
 
 // Hooks
 export const listHooks = (projectPath: string) =>
@@ -412,73 +368,3 @@ export const resizeTerminal = (
 ) => invoke<void>("resize_terminal", { sessionId, rows, cols });
 export const closeTerminal = (sessionId: string) =>
   invoke<void>("close_terminal", { sessionId });
-
-// Merge & Train
-export const mergeCheck = (
-  projectPath: string,
-  source: string,
-  target?: string
-) =>
-  invoke<import("../types").MergeReadinessReport>("merge_check", {
-    projectPath,
-    source,
-    target,
-  });
-
-export const mergeWorkspace = (
-  projectPath: string,
-  source: string,
-  target?: string,
-  cleanup?: boolean
-) =>
-  invoke<import("../types").MergeResult>("merge_workspace", {
-    projectPath,
-    source,
-    target,
-    cleanup,
-  });
-
-export const rebaseWorkspace = (
-  projectPath: string,
-  workspace: string,
-  target?: string
-) =>
-  invoke<import("../types").RebaseResult>("rebase_workspace", {
-    projectPath,
-    workspace,
-    target,
-  });
-
-export const trainAdd = (
-  projectPath: string,
-  workspace?: string,
-  target?: string
-) => invoke<void>("train_add", { projectPath, workspace, target });
-
-export const trainRemove = (projectPath: string, workspace: string) =>
-  invoke<void>("train_remove", { projectPath, workspace });
-
-export const trainStatus = (projectPath: string, target?: string) =>
-  invoke<import("../types").MergeTrain | null>("train_status", {
-    projectPath,
-    target,
-  });
-
-export const trainRun = (
-  projectPath: string,
-  target?: string,
-  stopOnFailure?: boolean,
-  cleanup?: boolean
-) =>
-  invoke<import("../types").MergeTrainEntry[]>("train_run", {
-    projectPath,
-    target,
-    stopOnFailure,
-    cleanup,
-  });
-
-export const trainPause = (projectPath: string, target?: string) =>
-  invoke<void>("train_pause", { projectPath, target });
-
-export const trainResume = (projectPath: string, target?: string) =>
-  invoke<void>("train_resume", { projectPath, target });

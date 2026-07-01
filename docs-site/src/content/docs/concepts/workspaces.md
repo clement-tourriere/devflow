@@ -33,7 +33,7 @@ Three frontends (CLI, TUI, desktop GUI) drive one shared core:
  └──────────────────────────────────────────┘
 ```
 
-The lifecycle (create → switch → merge → remove) lives in core, so every frontend gets the same behavior: hooks fire, services follow, state stays consistent.
+The lifecycle (create → switch → remove) lives in core, so every frontend gets the same behavior: hooks fire, services follow, state stays consistent.
 
 ## Two isolation models
 
@@ -95,14 +95,13 @@ Distinct branches can normalize to the same name (`feature/auth` and `feature-au
 
 ## State & identity
 
-Workspace metadata (parent relationships, worktree paths, sandbox flags, executed commands) lives in `~/.config/devflow/local_state.yml` — machine-local, never committed. Project identity is the **canonical main-repo root**: commands run from inside a worktree resolve to the same project as the main checkout, so registries, hook approvals, and lookups agree no matter where you invoke devflow.
+Workspace metadata (parent relationships, worktree paths, executed commands) lives in `~/.config/devflow/local_state.yml` — machine-local, never committed. Project identity is the **canonical main-repo root**: commands run from inside a worktree resolve to the same project as the main checkout, so registries, hook approvals, and lookups agree no matter where you invoke devflow.
 
 ## Parent relationships
 
 Every created workspace records a parent (`--from <ws>`, or your current context branch). Parents drive:
 
 - **service branching** — the new database is cloned from the parent's,
-- **merge defaults and cascade reports** — see [Merging](/devflow/guides/merging/),
 - **`devflow graph`** — the rendered tree.
 
 Override the inferred context with `DEVFLOW_CONTEXT_BRANCH=<ws>` (useful in CI).

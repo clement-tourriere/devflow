@@ -29,7 +29,7 @@ Five service types: postgres, clickhouse, mysql, generic (any Docker image), plu
 - Use `--no-verify` only when hooks are genuinely unwanted — it skips ALL hooks entirely.
 - Non-zero exit code on any failure; partial multi-provider failures also return non-zero.
 - `destroy` and `remove` require `--force` in `--json` or `--non-interactive` mode.
-- Unapproved shell hooks are skipped with a warning in non-interactive mode (commands still complete; JSON `hooks` summary shows `skipped`). Pre-approve with `devflow hook approvals add <template>` or set `DEVFLOW_APPROVE_HOOKS=1`.
+- Hook approvals are required; unapproved hooks fail in non-interactive mode.
 - `devflow --json capabilities` returns a machine-readable contract summary.
 
 ## Minimal agent loop
@@ -40,9 +40,8 @@ BRANCH="agent/$TASK_ID"
 
 OUTPUT=$(devflow --json --non-interactive switch -c "$BRANCH")
 
-# If worktrees are enabled, switch to the worktree directory
+# If worktrees are enabled, capture the path and use it as the workdir for subsequent agent tool calls
 WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
-[ -n "$WORKTREE" ] && cd "$WORKTREE"
 
 CONN=$(devflow --json service connection "$BRANCH" | jq -r '.connection_string')
 
@@ -89,21 +88,11 @@ devflow --json --non-interactive service delete "$BRANCH"   # cleanup
 | `devflow service connection <workspace> [--format uri\|env\|json]` | Connection info |
 | `devflow service capabilities` | Service provider capability matrix |
 | `devflow service cleanup` | Clean up old workspaces for a service |
-| `devflow service up` | Ensure all shared global engines are running (one-shot reconcile) |
-
-### Shared engines & controller daemon
-
-| Command | Description |
-|---|---|
-| `devflow daemon start [--interval N] [--once] [--foreground]` | Background controller: keeps shared global engines running, restarts dead ones |
-| `devflow daemon status` | Daemon state + last reconcile + per-engine health |
-| `devflow daemon stop` | Stop the controller daemon |
 
 ### VCS
 
 | Command | Description |
 |---|---|
-| `devflow merge [<target>] [--cleanup] [--dry-run]` | Merge current workspace into target |
 | `devflow commit [-m <msg>] [--ai] [--edit] [--dry-run]` | Commit staged changes |
 
 ### Info & diagnostics
@@ -148,7 +137,7 @@ devflow --json --non-interactive service delete "$BRANCH"   # cleanup
 | `devflow switch -c <ws> -x <cmd> [--detach] [-- <args>]` | Launch an agent/command inside an isolated workspace |
 | `devflow agent status` | Show agent status across all workspaces |
 | `devflow agent context [--format json] [--workspace <b>]` | Output project context for agents |
-| `devflow agent skill` | Install bundled workspace skills (see `devflow skill` for full management) |
+| `devflow agent skill` | Install bundled workspace helper skills |
 
 ### Plugins
 
@@ -175,8 +164,8 @@ behavior:
 
 services:
   - name: app-db                      # Service identifier
-    type: local                       # local (CoW), shared (global engine), neon, dblab, xata
-    service_type: postgres            # postgres, clickhouse, mysql, generic, rustfs, redis, plugin
+    type: local                       # local, neon, dblab, xata
+    service_type: postgres            # postgres, clickhouse, mysql, generic, plugin
     auto_workspace: true                 # Workspace this service with git (default: true)
     default: true                     # Default target for -s flag
     local:                            # Local Docker provider config
@@ -220,21 +209,6 @@ services:
       volumes: []
       command: null
       healthcheck: null
-
-  # Shared global engines (logical isolation: one container, a namespace per workspace)
-  - name: shared-db
-    type: shared                      # one global postgres; CREATE DATABASE project_ws [TEMPLATE parent]
-    service_type: postgres
-    shared:
-      image: postgres:17              # default
-      port: 5432                      # fixed well-known port
-      template_branching: true        # branch-from-parent via TEMPLATE (default)
-  - name: cache
-    service_type: redis               # always shared; a numbered DB (1-15) per workspace
-    shared: { image: redis:7 }
-  - name: storage
-    service_type: rustfs              # S3-compatible (also: s3, objectstorage); a bucket per workspace
-    shared: { image: rustfs/rustfs:latest }   # S3 :9000, console :9001
 
   - name: my-plugin
     type: local
@@ -284,7 +258,7 @@ hooks:
   post-switch:
     update-env:
       command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
-  pre-merge:
+  pre-commit:
     test: "npm test"
 
 agent:
@@ -335,9 +309,6 @@ commit:
 | `pre-remove` | Before removing a workspace | Yes |
 | `post-remove` | After removing a workspace | No |
 | `pre-commit` | Before committing (Git pre-commit) | Yes |
-| `pre-merge` | Before merging workspaces | Yes |
-| `post-merge` | After merging (Git post-merge) | No |
-| `post-rewrite` | After rebase/amend (Git post-rewrite) | No |
 | `pre-service-create` | Before creating a service workspace | Yes |
 | `post-service-create` | After creating a service workspace | No |
 | `pre-service-delete` | Before deleting a service workspace | Yes |
@@ -353,8 +324,7 @@ commit:
 | `{{ worktree_path }}` | Worktree path (if enabled) |
 | `{{ default_workspace }}` | Default workspace (main/master) |
 | `{{ commit }}` | Current commit hash (when available) |
-| `{{ target }}` | Target workspace (merge/rebase operations) |
-| `{{ base }}` | Base workspace (merge/rebase operations) |
+| `{{ base }}` | Parent/base workspace for creation hooks |
 | `{{ service.<name>.host }}` | Service host |
 | `{{ service.<name>.port }}` | Service port |
 | `{{ service.<name>.database }}` | Database name |
@@ -421,8 +391,6 @@ crates/devflow-core/    Core library (no CLI/TTY dependencies)
       cow_worktree.rs   CoW worktree creation
     state/local_state.rs  User-level state (SQLite)
     docker/             Docker discovery + compose parsing + settings
-    sandbox/            Workspace sandboxing (seatbelt on macOS, landlock on Linux)
-    skills/             Skill marketplace, install, cache, manifest
     workspace/          Lifecycle orchestration (create, switch, delete, worktree, hooks)
     llm.rs              LLM integration for AI commit messages (CLI-first + API fallback)
 

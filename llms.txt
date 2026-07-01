@@ -4,21 +4,13 @@
 
 devflow gives each Git workspace its own isolated development environment. When you
 `git checkout feature-auth`, devflow automatically creates (or switches to)
-a dedicated worktree and service instances that belong to that workspace.
-
-Two isolation models, chosen per service:
-- Physical (`type: local`): one Copy-on-Write container per workspace; data is cloned
-  for near-instant, space-efficient branching.
-- Logical (`type: shared`, or `service_type: rustfs`/`redis`): one global container per
-  engine; each workspace gets a database / bucket / DB-index provisioned on the fly
-  (Postgres `CREATE DATABASE … TEMPLATE`, a RustFS bucket, a Redis DB, a ClickHouse db).
-  `devflow daemon start` keeps the global engines running; `devflow service up` reconciles
-  them once. Config can be `.devflow.yml` or a lightweight `devflow.toml`.
+a dedicated worktree and service instances that belong to that workspace. Data is
+cloned using Copy-on-Write for near-instant, space-efficient branching.
 
 ## Automation defaults
 
 - Always pass `--json --non-interactive` for machine-safe execution.
-- Use `--non-interactive` on `switch`: unapproved hooks are skipped with a warning (never block); pre-approve via `devflow hook approvals add` or set `DEVFLOW_APPROVE_HOOKS=1`.
+- Use `--non-interactive` on `switch` to run hooks without prompts (requires pre-approved hooks).
 - Use `devflow --json capabilities` to detect automation guarantees at runtime.
 - Non-zero exit code means failure; partial multi-provider failures also return non-zero.
 - Note: `--no-verify` skips ALL hooks entirely — only use when hooks are genuinely unwanted.

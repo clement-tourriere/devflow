@@ -167,24 +167,6 @@ fn main() {
             commands::services::destroy_service,
             commands::services::discover_docker_containers,
             commands::services::install_agent_skills,
-            commands::services::uninstall_agent_skills,
-            commands::services::check_agent_skills,
-            // Skills
-            commands::skills::skill_list,
-            commands::skills::skill_search,
-            commands::skills::skill_install,
-            commands::skills::skill_remove,
-            commands::skills::skill_update,
-            commands::skills::skill_show,
-            commands::skills::skill_search_detail,
-            commands::skills::skill_check_updates,
-            // User-scope Skills
-            commands::skills::user_skill_list,
-            commands::skills::user_skill_install,
-            commands::skills::user_skill_remove,
-            commands::skills::user_skill_update,
-            commands::skills::user_skill_show,
-            commands::skills::user_skill_check_updates,
             // Hooks
             commands::hooks::list_hooks,
             commands::hooks::render_template,
@@ -223,16 +205,6 @@ fn main() {
             commands::terminal::write_terminal,
             commands::terminal::resize_terminal,
             commands::terminal::close_terminal,
-            // Merge & Train
-            commands::train::merge_check,
-            commands::train::merge_workspace,
-            commands::train::rebase_workspace,
-            commands::train::train_add,
-            commands::train::train_remove,
-            commands::train::train_status,
-            commands::train::train_run,
-            commands::train::train_pause,
-            commands::train::train_resume,
         ])
         .setup(move |app| {
             log::info!("Application setup complete");

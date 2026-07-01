@@ -30,7 +30,6 @@ devflow switch
 devflow switch feature/auth
 devflow switch -c feature/new --from develop
 devflow switch feature/auth -x "npm run dev" --detach
-devflow switch -c agent/task-42 --sandboxed
 devflow switch feature/auth --dry-run
 ```
 
@@ -47,7 +46,6 @@ devflow switch feature/auth --dry-run
 | `--template` | switch to the main/template workspace |
 | `--dry-run` | print the plan (worktree path, services, hooks) without acting |
 | `--no-respect-gitignore` | also copy gitignored entries into a newly created worktree (one-shot `copy_ignored: true`) |
-| `--sandboxed` / `--no-sandbox` | force sandbox on/off for this workspace |
 
 ### `devflow list` · `devflow graph` · `devflow status`
 
@@ -72,16 +70,6 @@ Delete workspace + worktree + services. Refuses on a dirty worktree without `--f
 ### `devflow cleanup`
 
 Alias for `service cleanup` (`--max-count <n>`).
-
-## Merge & rebase
-
-```bash
-devflow merge [target] [--cleanup] [--dry-run] [--check-only] [--force] [--cascade-rebase]
-devflow rebase [target] [--dry-run]
-devflow train add|remove|status|run|pause|resume [...]
-```
-
-See [Merging & merge trains](/devflow/guides/merging/). Train flags: `--target <ws>`, `run --stop-on-failure --cleanup`.
 
 ## Services
 
@@ -143,9 +131,8 @@ devflow hook install <recipe>
 ```bash
 devflow commit [--ai] [--edit] [--dry-run] [-m <msg>]
 devflow agent status | context [--format json] [--workspace <ws>]
-devflow agent skill                    # install bundled workspace skills
-devflow skill list | search <q> | ...  # full skills management (skills.sh marketplace)
-devflow sync-ai-configs                # merge AI tool configs from worktree back to main
+devflow agent skill                    # install bundled workspace helper skills
+devflow sync-ai-configs                # sync AI tool configs from worktree back to main
 devflow capabilities                   # machine-readable automation contract
 ```
 
@@ -167,7 +154,7 @@ devflow init [path] [--name <n>] [--force]    # initialize (worktrees default ON
 devflow destroy [--force]                     # tear down the whole project (irreversible)
 devflow config [-v]                           # merged config (+ precedence details)
 devflow doctor                                # diagnostics: docker, vcs, config, storage, hooks
-devflow install-hooks | uninstall-hooks       # git hooks: post-checkout, post-merge, pre-commit, post-rewrite
+devflow install-hooks | uninstall-hooks       # git hooks: post-checkout, pre-commit
 devflow shell-init [bash|zsh|fish]            # print the auto-cd wrapper
 devflow worktree-setup                        # set up devflow inside a manually created worktree
 devflow setup-zfs [--size 20G] [--pool-name p]  # file-backed ZFS pool (Linux)

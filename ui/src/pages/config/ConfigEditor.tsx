@@ -12,7 +12,6 @@ import ProcessesSection from "./sections/ProcessesSection";
 import ExecuteSection from "./sections/ExecuteSection";
 import AgentSection from "./sections/AgentSection";
 import CommitSection from "./sections/CommitSection";
-import MergeSection from "./sections/MergeSection";
 import YamlEditor from "./YamlEditor";
 
 type Section =
@@ -25,7 +24,6 @@ type Section =
   | "execute"
   | "agent"
   | "commit"
-  | "merge"
   | "yaml";
 
 const SECTIONS: { key: Section; label: string }[] = [
@@ -38,7 +36,6 @@ const SECTIONS: { key: Section; label: string }[] = [
   { key: "execute", label: "Execute" },
   { key: "agent", label: "Agent" },
   { key: "commit", label: "Commit" },
-  { key: "merge", label: "Merge" },
   { key: "yaml", label: "YAML" },
 ];
 
@@ -241,9 +238,6 @@ function ConfigEditor() {
               )}
               {activeSection === "commit" && (
                 <CommitSection config={config} onChange={handleChange} />
-              )}
-              {activeSection === "merge" && (
-                <MergeSection config={config} onChange={handleChange} />
               )}
 
               {/* Save/Reset bar for GUI sections */}

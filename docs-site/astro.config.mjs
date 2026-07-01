@@ -53,7 +53,6 @@ export default defineConfig({
             'guides/processes',
             'guides/proxy',
             'guides/ai-agents',
-            'guides/merging',
             'guides/cloud-providers',
             'guides/plugins',
             'guides/gui',

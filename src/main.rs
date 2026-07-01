@@ -30,7 +30,6 @@ Daily Use:
 Workspace Management:
   graph               Render full environment graph (workspace tree + services)
   link                Link an existing workspace into devflow
-  merge               Merge current workspace into target (with optional cleanup)
   cleanup             Clean up old service workspaces
 
 Services:
@@ -80,7 +79,7 @@ AI Agents:
   agent start         Start an AI agent in a new isolated workspace
   agent status        Show agent status across all workspaces
   agent context       Output project context for current workspace
-  agent skill         Generate AI tool skills/rules for this project
+  agent skill         Install workspace helper skills for AI tools
   agent docs          Generate AGENTS.md for this project
 
 Proxy:
@@ -182,7 +181,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Hooks on non-blocking phases (post-switch, post-merge, …) run as
+    // Hooks on non-blocking phases (post-switch, custom phases, …) run as
     // background tasks; give them a bounded window to finish before this
     // short-lived process exits, or they are killed mid-flight.
     let timeout_secs = std::env::var("DEVFLOW_BACKGROUND_HOOK_TIMEOUT")

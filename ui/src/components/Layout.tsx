@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Outlet, NavLink, useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
-import { getProxyStatus, listProjects, getSettings } from "../utils/invoke";
-import type { ProjectEntry, ProxyStatus, AppSettings } from "../types";
+import { getProxyStatus, listProjects } from "../utils/invoke";
+import type { ProjectEntry, ProxyStatus } from "../types";
 import TerminalPanel from "./TerminalPanel";
 import { useTerminal } from "../context/TerminalContext";
 import { sortByRecent } from "../utils/recentProjects";
@@ -11,8 +11,6 @@ import {
   IconProjects,
   IconProxy,
   IconTerminal,
-  IconSkills,
-  IconMerge,
   IconSettings,
   IconFolder,
 } from "./icons";
@@ -23,7 +21,6 @@ function Layout() {
   const [proxyStatus, setProxyStatus] = useState<ProxyStatus | null>(null);
   const [projects, setProjects] = useState<ProjectEntry[]>([]);
   const [sidebarOrder, setSidebarOrder] = useState<ProjectEntry[]>([]);
-  const [smartMerge, setSmartMerge] = useState(false);
   const navigate = useNavigate();
   const navigateRef = useRef(navigate);
   navigateRef.current = navigate;
@@ -59,10 +56,6 @@ function Layout() {
       .then(updateProjectList)
       .catch(() => {});
 
-    getSettings()
-      .then((s) => setSmartMerge(s.smart_merge))
-      .catch(() => {});
-
     // Listen for proxy status changes from backend
     const unlistenProxy = listen<ProxyStatus>("proxy-status-changed", (event) => {
       setProxyStatus(event.payload);
@@ -73,13 +66,6 @@ function Layout() {
       navigateRef.current(event.payload);
     });
 
-    // Listen for settings changes (e.g. smart_merge toggle)
-    const handleSettingsUpdate = (e: Event) => {
-      const detail = (e as CustomEvent<AppSettings>).detail;
-      if (detail) setSmartMerge(detail.smart_merge);
-    };
-    window.addEventListener("devflow:settings-updated", handleSettingsUpdate);
-
     // Listen for project list changes (add/remove)
     const handleProjectsChanged = () => {
       listProjects().then(updateProjectList).catch(() => {});
@@ -89,7 +75,6 @@ function Layout() {
     return () => {
       unlistenProxy.then((fn) => fn());
       unlistenNav.then((fn) => fn());
-      window.removeEventListener("devflow:settings-updated", handleSettingsUpdate);
       window.removeEventListener("devflow:projects-changed", handleProjectsChanged);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -140,16 +125,6 @@ function Layout() {
             {projects.length > 0 ? `All projects (${projects.length})` : "Add project"}
           </NavLink>
 
-          {smartMerge && (
-            <>
-              <div className="nav-section">Merge</div>
-              <NavLink to="/merge-train" className={navClass}>
-                <IconMerge size={16} />
-                Merge Train
-              </NavLink>
-            </>
-          )}
-
           <div className="nav-section">Infrastructure</div>
           <NavLink to="/proxy" className={navClass}>
             <IconProxy size={16} />
@@ -168,10 +143,6 @@ function Layout() {
           </a>
 
           <div className="nav-section">Tools</div>
-          <NavLink to="/skills" className={navClass}>
-            <IconSkills size={16} />
-            Skills
-          </NavLink>
           <NavLink to="/settings" className={navClass}>
             <IconSettings size={16} />
             Settings

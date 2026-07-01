@@ -14,7 +14,7 @@ pub struct TerminalSessionConfig {
     pub environment: HashMap<String, String>,
     pub shell: Option<String>,
     /// Custom arguments for the shell program. When set, overrides the default
-    /// login shell flags (`-l`). Used to wrap shells with sandbox-exec, etc.
+    /// login shell flags (`-l`).
     pub shell_args: Option<Vec<String>>,
     pub initial_command: Option<String>,
     pub rows: u16,

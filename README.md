@@ -34,7 +34,7 @@ Work on multiple features, reviews, migrations, or AI-agent tasks in parallel �
 3. Lifecycle hooks fire — write `.env.local`, run migrations, open a tmux window.
 4. With worktrees enabled, the shell wrapper `cd`s you into the workspace directory.
 
-Every workspace's app is reachable at a predictable HTTPS URL, every workspace's database at its own connection string — and `devflow remove` (or `devflow merge --cleanup`) cleans all of it up.
+Every workspace's app is reachable at a predictable HTTPS URL, every workspace's database at its own connection string — and `devflow remove` cleans all of it up.
 
 ## Highlights
 
@@ -46,11 +46,10 @@ Every workspace's app is reachable at a predictable HTTPS URL, every workspace's
 - **Lifecycle hooks** — MiniJinja-templated commands and built-in actions at every phase, with conditions, an approval system, and installable recipes
 - **Auto-HTTPS proxy** — every Docker container and port-backed devflow process gets a trusted `https://name.local` URL that resolves the same from the host and from inside containers; no `/etc/hosts` edits, no certificate warnings
 - **Controller daemon** — `devflow daemon start` keeps every registered project's shared engines and process desired state reconciled
-- **Merge workflow** — `devflow merge --cleanup` merges a workspace and removes its branch, worktree, and services in one step; rebase and a queued merge train included
 - **Seeding** — initialize databases from a PostgreSQL URL, a local dump file, or S3
-- **Built for AI agents** — `--json` and `--non-interactive` everywhere, agent launch/context/skill commands, and AI-generated commit messages
+- **Built for AI agents** — `--json` and `--non-interactive` everywhere, agent launch/context/workspace-helper commands, and AI-generated commit messages
 
-Cloud branching providers, sandboxing, and plugin providers are newer and still maturing — check `devflow --help-all` and the changelog for what is available in your build.
+Cloud branching providers and plugin providers are newer and still maturing — check `devflow --help-all` and the changelog for what is available in your build.
 
 ## Install
 
@@ -82,8 +81,8 @@ devflow status
 # 4. Print connection details for scripts or .env files
 devflow connection feature/auth --format env
 
-# 5. When the work is merged, clean everything up in one step
-devflow merge --cleanup
+# 5. When the work is done, clean everything up in one step
+devflow remove feature/auth
 ```
 
 If worktrees are enabled, install shell integration so `devflow switch` can move your shell into the selected worktree:
@@ -100,8 +99,7 @@ devflow switch -c feature/api    # Create and switch to a workspace
 devflow list                    # List workspaces and service status
 devflow status                  # Show current workspace information
 devflow connection feature/api   # Show service connection info
-devflow merge --cleanup          # Merge into main, then remove workspace + services
-devflow remove feature/api       # Remove workspace resources without merging
+devflow remove feature/api       # Remove workspace resources
 devflow doctor                  # Diagnose Docker, VCS, and config issues
 devflow tui                     # Open the terminal dashboard
 ```
@@ -178,7 +176,7 @@ devflow --json --non-interactive switch -c agent/task-42   # isolated env for th
 devflow agent context --format json                        # project + connection context for the agent
 devflow switch -c agent/fix-login -x claude -- 'Fix the login timeout bug'
 devflow commit --ai                                        # LLM-generated commit message
-devflow sync-ai-configs                                    # merge .claude/.cursor settings back to main
+devflow sync-ai-configs                                    # sync .claude/.cursor settings back to main
 ```
 
 AI tool configs (`.claude/`, `.cursor/`, `.opencode/`, `.agents/`) are copied into new worktrees automatically. In `--non-interactive` mode, unapproved hooks are skipped with a warning (set `DEVFLOW_APPROVE_HOOKS=1` to auto-approve in CI/agent runs). See `AGENTS.md` for the recommended coding-agent workflow.

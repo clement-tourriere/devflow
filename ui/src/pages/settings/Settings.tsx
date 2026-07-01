@@ -301,53 +301,6 @@ function Settings() {
       </div>
 
       <div className="card">
-        <div className="card-title">Features</div>
-        <p style={{ color: "var(--text-secondary)", marginBottom: 12 }}>
-          Toggle experimental features on or off.
-        </p>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 12,
-            padding: "10px 12px",
-            border: "1px solid var(--border)",
-            borderRadius: 8,
-            background: "var(--bg-primary)",
-          }}
-        >
-          <div>
-            <div style={{ fontWeight: 500, marginBottom: 2 }}>Smart Merge</div>
-            <div style={{ color: "var(--text-muted)", fontSize: 12 }}>
-              Enable merge readiness checks, rebase, merge trains, and cascade
-              notifications.
-            </div>
-          </div>
-          <label
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 8,
-              color: "var(--text-secondary)",
-              fontSize: 13,
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={settings.smart_merge}
-              onChange={(e) =>
-                setSettings((prev) =>
-                  prev ? { ...prev, smart_merge: e.target.checked } : prev
-                )
-              }
-            />
-            {settings.smart_merge ? "On" : "Off"}
-          </label>
-        </div>
-      </div>
-
-      <div className="card">
         <div className="card-title">Terminal</div>
         <p style={{ color: "var(--text-secondary)", marginBottom: 12 }}>
           Embedded terminal rendering is powered by libghostty-vt with restty.

@@ -32,37 +32,6 @@ pub enum Action {
         from: Option<String>,
     },
     DeleteBranch(String),
-    /// Internal: delete the VCS workspace after service workspaces are cleaned up.
-    /// Sent by background tasks back to the main thread.
-    DeleteVcsBranch(String),
-    /// Merge a workspace into a target.
-    MergeWorkspace {
-        source: String,
-        target: String,
-    },
-    /// Rebase a workspace onto a target.
-    RebaseWorkspace {
-        source: String,
-        target: String,
-    },
-    /// Merge checks completed — show results in overlay.
-    MergeChecksComplete(devflow_core::merge::MergeReadinessReport),
-    /// Rebase completed — show results.
-    RebaseComplete(devflow_core::merge::RebaseResult),
-
-    // ── Merge train actions ──
-    TrainAdd {
-        workspace: String,
-        target: String,
-    },
-    TrainRun {
-        target: String,
-    },
-    TrainStatus {
-        target: String,
-    },
-    MergeTrainProgress(devflow_core::merge::train::MergeTrainEntry),
-
     // ── Service config actions ──
     /// Add a new service configuration (triggers wizard flow)
     AddServiceConfig {
@@ -91,19 +60,6 @@ pub enum Action {
     },
     RunDoctor,
     InstallAgentSkills,
-
-    // ── Skill tab actions ──
-    SkillSearch(String),
-    SkillSearchResults(Vec<SkillSearchEntry>),
-    SkillInstall(String),
-    SkillRemove(String),
-    SkillUpdate(Option<String>),
-    /// Toggle skills tab between project and user scope
-    SkillToggleScope,
-    /// User-scope variants
-    UserSkillInstall(String),
-    UserSkillRemove(String),
-    UserSkillUpdate(Option<String>),
 
     // ── Environments tree actions ──
     /// Start all services for a workspace
@@ -157,7 +113,6 @@ pub enum InputTarget {
     AddServiceName {
         service_type: String,
     },
-    SkillSearch,
 }
 
 /// Where to send select dialog results.
@@ -179,8 +134,6 @@ pub enum DataPayload {
     HooksData(HooksData),
     ProxyStatus(super::components::proxy_tab::ProxyStatusData),
     ProxyTargets(Vec<super::components::proxy_tab::ProxyTargetEntry>),
-    Skills(SkillsTabData),
-    UserSkills(SkillsTabData),
 }
 
 /// Enriched workspace info combining VCS + service data.
@@ -284,29 +237,4 @@ pub struct HookEntryInfo {
     pub is_extended: bool,
     pub background: bool,
     pub condition: Option<String>,
-}
-
-/// Data for the Skills tab.
-#[derive(Debug, Clone)]
-pub struct SkillsTabData {
-    pub installed: Vec<SkillEntry>,
-    pub updates_available: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SkillEntry {
-    pub name: String,
-    pub source_label: String,
-    pub content_hash: String,
-    pub installed_at: String,
-    pub content: Option<String>,
-    /// Whether this skill is managed by devflow (true) or discovered externally (false).
-    pub managed: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct SkillSearchEntry {
-    pub name: String,
-    pub source: String,
-    pub installs: u64,
 }

@@ -18,12 +18,6 @@ Concepts and patterns: [Hooks concept](/devflow/concepts/hooks/) · [hooks guide
 | `pre-remove` | before removing a workspace | **yes** |
 | `post-remove` | after removal | no |
 | `pre-commit` | before a commit (installed Git pre-commit hook) | **yes** |
-| `pre-merge` | before `devflow merge` | **yes** |
-| `post-merge` | after a merge (also via Git post-merge hook) | no |
-| `post-rewrite` | after rebase/amend (Git post-rewrite hook) | no |
-| `pre-rebase` | before `devflow rebase` | **yes** |
-| `post-rebase` | after a rebase | no |
-| `post-merge-cascade` | during cascade processing after a merge | no |
 | `pre-service-create` | before creating service workspaces | **yes** |
 | `post-service-create` | after creating service workspaces | no |
 | `pre-service-delete` | before deleting service workspaces | **yes** |
@@ -72,7 +66,6 @@ Rendered with MiniJinja (Jinja2-compatible) in commands, environment values, act
 | `{{ worktree_path }}` | absolute worktree path, when in worktree context | `/…/my-project.feature_auth` |
 | `{{ default_workspace }}` | main workspace | `main` |
 | `{{ commit }}` / `{{ short_commit }}` | HEAD SHA / abbreviated | `a1b2c3d…` / `a1b2c3d` |
-| `{{ target }}` | target workspace (merge/rebase hooks) | `main` |
 | `{{ base }}` | base/parent workspace (creation hooks) | `main` |
 | `{{ trigger_source }}` | what invoked the hook: `cli`, `vcs`, `gui` | `vcs` |
 | `{{ vcs_event }}` | originating VCS event, when any | `post-checkout` |
@@ -130,7 +123,7 @@ Conditions are template-rendered first, then evaluated. Built-ins:
 
 ```bash
 devflow hook recipes              # list
-devflow hook install <name>      # merge into .devflow.yml (never overwrites your entries)
+devflow hook install <name>      # add to .devflow.yml (never overwrites your entries)
 ```
 
 `sync-ai-configs` · `install-deps` · `docker-compose` · `local-dev-setup` · `db-migrate` · `multiplexer-session` — descriptions in the [hooks guide](/devflow/guides/hooks/#recipes).
@@ -143,8 +136,6 @@ Installed Git hooks dispatch to devflow phases:
 | --- | --- |
 | `post-checkout` | `post-switch` (plus `post-create` when the workspace is new) |
 | `pre-commit` | `pre-commit` |
-| `post-merge` | `post-merge`, `post-switch` |
-| `post-rewrite` | `post-rewrite` |
 
 `devflow hook triggers` displays the active mapping.
 

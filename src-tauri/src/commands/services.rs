@@ -340,12 +340,10 @@ pub async fn run_doctor(project_path: String) -> Result<serde_json::Value, Strin
     let hooks_dir = project_dir.join(".git").join("hooks");
     let has_hooks = if hooks_dir.exists() {
         let post_checkout = hooks_dir.join("post-checkout");
-        let post_merge = hooks_dir.join("post-merge");
         if let Some(ref vcs) = vcs_repo {
-            (post_checkout.exists() && vcs.is_devflow_hook(&post_checkout).unwrap_or(false))
-                || (post_merge.exists() && vcs.is_devflow_hook(&post_merge).unwrap_or(false))
+            post_checkout.exists() && vcs.is_devflow_hook(&post_checkout).unwrap_or(false)
         } else {
-            post_checkout.exists() || post_merge.exists()
+            post_checkout.exists()
         }
     } else {
         false
@@ -814,24 +812,8 @@ pub async fn discover_docker_containers(
 #[tauri::command]
 pub async fn install_agent_skills(project_path: String) -> Result<Vec<String>, String> {
     let project_dir = std::path::Path::new(&project_path);
-    let cache =
-        devflow_core::skills::cache::SkillCache::new().map_err(crate::commands::format_error)?;
-    devflow_core::skills::installer::install_bundled_skills(project_dir, &cache)
+    let config =
+        crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
+    devflow_core::agent::install_agent_skills(&config, project_dir)
         .map_err(crate::commands::format_error)
-}
-
-#[tauri::command]
-pub async fn uninstall_agent_skills(project_path: String) -> Result<(), String> {
-    let project_dir = std::path::Path::new(&project_path);
-    devflow_core::agent::uninstall_agent_skills(project_dir).map_err(crate::commands::format_error)
-}
-
-#[tauri::command]
-pub async fn check_agent_skills(
-    project_path: String,
-) -> Result<devflow_core::agent::SkillInstallStatus, String> {
-    let project_dir = std::path::Path::new(&project_path);
-    Ok(devflow_core::agent::check_agent_skills_installed(
-        project_dir,
-    ))
 }

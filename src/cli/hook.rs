@@ -116,8 +116,8 @@ fn handle_hook_show(config: &Config, phase_filter: Option<&str>, json_output: bo
             if let HookPhase::Custom(ref name) = parsed {
                 eprintln!(
                     "Warning: '{}' is not a built-in phase. Built-in phases: pre-switch, post-create, \
-                     post-start, post-switch, pre-remove, post-remove, pre-commit, pre-merge, \
-                     post-merge, pre-service-create, post-service-create, pre-service-delete, \
+                     post-start, post-switch, pre-remove, post-remove, pre-commit, \
+                     pre-service-create, post-service-create, pre-service-delete, \
                      post-service-delete, post-service-switch",
                     name
                 );
@@ -225,10 +225,7 @@ fn handle_hook_explain(phase: Option<&str>, json_output: bool) -> Result<()> {
         ("post-switch",          "After switching to a workspace/worktree",          false, "VCS",     "Runs every time you switch workspaces. Use for updating .env files, restarting dev servers."),
         ("pre-remove",           "Before removing a workspace",                      true,  "VCS",     "Runs before `devflow remove`. Use for cleanup tasks or archival."),
         ("post-remove",          "After removing a workspace",                       false, "VCS",     "Runs after workspace removal. Use for notifying external systems."),
-        ("pre-commit",           "Before committing",                             true,  "Merge",   "Runs before `devflow commit`. Use for linting, formatting, or test checks."),
-        ("pre-merge",            "Before merging workspaces",                       true,  "Merge",   "Runs before `devflow merge`. Use for running tests or CI checks."),
-        ("post-merge",           "After merging workspaces",                        false, "Merge",   "Runs after a successful merge. Use for cleanup or deployment triggers."),
-        ("post-rewrite",         "After rewriting history (rebase, amend)",       false, "Merge",   "Runs after Git history rewrite. Use for re-applying migrations."),
+        ("pre-commit",           "Before committing",                             true,  "VCS",     "Runs before `devflow commit`. Use for linting, formatting, or test checks."),
         ("pre-service-create",   "Before creating a service workspace",              true,  "Service", "Runs before service provisioning. Use for pre-flight checks."),
         ("post-service-create",  "After creating a service workspace",               true,  "Service", "Runs after service provisioning. THE most common hook — use for npm ci, migrations, writing .env files."),
         ("pre-service-delete",   "Before deleting a service workspace",              true,  "Service", "Runs before service teardown. Use for data export or backups."),
@@ -296,7 +293,7 @@ fn handle_hook_explain(phase: Option<&str>, json_output: bool) -> Result<()> {
                     println!("        DATABASE_URL={{{{ service['db'].url }}}}");
                     println!("        EOF");
                 }
-                "pre-merge" | "pre-commit" => {
+                "pre-commit" => {
                     println!("  hooks:");
                     println!("    {}:", name);
                     println!("      lint: \"npm run lint\"");
@@ -352,7 +349,7 @@ fn handle_hook_explain(phase: Option<&str>, json_output: bool) -> Result<()> {
         println!("Which hook should I use?");
         println!("  Setting up a new workspace?     -> post-create or post-service-create");
         println!("  Updating env on switch?      -> post-switch");
-        println!("  Running tests before merge?  -> pre-merge");
+        println!("  Running tests before commit? -> pre-commit");
         println!("  Custom setup per service?    -> post-service-create");
         println!();
 
@@ -580,8 +577,8 @@ async fn handle_hook_run(
     if let HookPhase::Custom(ref name) = phase {
         eprintln!(
             "Warning: '{}' is not a built-in phase. Built-in phases: pre-switch, post-create, \
-             post-start, post-switch, pre-remove, post-remove, pre-commit, pre-merge, \
-             post-merge, pre-service-create, post-service-create, pre-service-delete, \
+             post-start, post-switch, pre-remove, post-remove, pre-commit, \
+             pre-service-create, post-service-create, pre-service-delete, \
              post-service-delete, post-service-switch",
             name
         );

@@ -127,24 +127,9 @@ fn sync_ai_configs_recipe() -> HookRecipe {
     );
     hooks.insert(HookPhase::PreRemove, pre_remove);
 
-    // post-merge: sync AI configs after merging
-    let mut post_merge = IndexMap::new();
-    post_merge.insert(
-        "sync-ai-configs".to_string(),
-        HookEntry::Extended(ExtendedHookEntry {
-            command: "devflow sync-ai-configs".to_string(),
-            working_dir: None,
-            continue_on_error: Some(true),
-            condition: None,
-            environment: None,
-            background: false,
-        }),
-    );
-    hooks.insert(HookPhase::PostMerge, post_merge);
-
     HookRecipe {
         name: "sync-ai-configs",
-        description: "Sync AI tool configs (.claude, .cursor, etc.) back to main worktree on workspace removal and merge",
+        description: "Sync AI tool configs (.claude, .cursor, etc.) back to the main worktree before workspace removal",
         category: "AI Tools",
         hooks,
     }
@@ -407,10 +392,9 @@ mod tests {
         let mut config = IndexMap::new();
         let recipe = sync_ai_configs_recipe();
         let result = merge_recipe_into_config(&mut config, &recipe);
-        assert_eq!(result.hooks_added, 2);
+        assert_eq!(result.hooks_added, 1);
         assert_eq!(result.hooks_skipped, 0);
         assert!(config.contains_key(&HookPhase::PreRemove));
-        assert!(config.contains_key(&HookPhase::PostMerge));
     }
 
     #[test]
@@ -422,7 +406,7 @@ mod tests {
         // Second install should skip
         let result = merge_recipe_into_config(&mut config, &recipe);
         assert_eq!(result.hooks_added, 0);
-        assert_eq!(result.hooks_skipped, 2);
+        assert_eq!(result.hooks_skipped, 1);
     }
 
     #[test]
@@ -431,7 +415,7 @@ mod tests {
         let info = recipe.to_info();
         assert_eq!(info.name, "sync-ai-configs");
         assert_eq!(info.category, "AI Tools");
-        assert_eq!(info.hooks_preview.len(), 2);
+        assert_eq!(info.hooks_preview.len(), 1);
     }
 
     #[test]

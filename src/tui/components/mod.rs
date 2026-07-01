@@ -6,7 +6,6 @@ pub mod hooks;
 pub mod logs;
 pub mod proxy_tab;
 pub mod services_tab;
-pub mod skills_tab;
 pub mod system;
 pub mod workspaces;
 

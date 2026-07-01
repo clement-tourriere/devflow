@@ -10,7 +10,6 @@ mod exec;
 mod interactive;
 mod link;
 mod list;
-mod merge;
 mod remove;
 
 pub(crate) use context::{
@@ -20,7 +19,6 @@ pub(crate) use context::{
 use interactive::handle_interactive_switch;
 use link::{handle_link_command, resolve_parent_for_branch_creation};
 use list::{enrich_branch_list_json, handle_environment_graph, print_enriched_branch_list};
-use merge::{handle_merge_command, handle_rebase_command};
 use remove::handle_remove_command;
 
 pub(super) async fn handle_branch_command(
@@ -102,30 +100,7 @@ pub(super) async fn handle_branch_command(
             template,
             dry_run,
             no_respect_gitignore,
-            sandboxed,
-            no_sandbox,
         } => {
-            let sandbox_resolved = if sandboxed || no_sandbox {
-                Some(devflow_core::sandbox::resolve_sandbox_enabled(
-                    sandboxed,
-                    no_sandbox,
-                    false,
-                    config.sandbox.as_ref(),
-                ))
-            } else {
-                let is_sandboxed = devflow_core::sandbox::resolve_sandbox_enabled(
-                    false,
-                    false,
-                    false,
-                    config.sandbox.as_ref(),
-                );
-                if is_sandboxed {
-                    Some(true)
-                } else {
-                    None
-                }
-            };
-
             if dry_run {
                 if let Some(ref workspace) = workspace_name {
                     let normalized_branch = config.get_normalized_workspace_name(workspace);
@@ -302,7 +277,6 @@ pub(super) async fn handle_branch_command(
                         } else {
                             None
                         },
-                        sandbox_resolved,
                     )
                     .await?;
                 }
@@ -327,7 +301,6 @@ pub(super) async fn handle_branch_command(
                     cmd,
                     &execute_args,
                     detach || open,
-                    sandbox_resolved,
                     json_output,
                 )
                 .await?;
@@ -348,32 +321,6 @@ pub(super) async fn handle_branch_command(
                 non_interactive,
             )
             .await?;
-        }
-        super::Commands::Merge {
-            target,
-            cleanup,
-            dry_run,
-            force,
-            check_only,
-            cascade_rebase,
-        } => {
-            handle_merge_command(
-                config,
-                target.as_deref(),
-                cleanup,
-                dry_run,
-                json_output,
-                force,
-                check_only,
-                cascade_rebase,
-            )
-            .await?;
-        }
-        super::Commands::Rebase { target, dry_run } => {
-            handle_rebase_command(config, target.as_deref(), dry_run, json_output).await?;
-        }
-        super::Commands::Train { action } => {
-            super::train::handle_train_command(config, action, json_output).await?;
         }
         super::Commands::Cleanup { max_count } => {
             // Top-level alias for `devflow service cleanup`
@@ -482,7 +429,6 @@ pub(super) async fn handle_switch_command(
     trigger_source: Option<&str>,
     vcs_event: Option<&str>,
     copy_ignored_override: Option<bool>,
-    sandboxed: Option<bool>,
 ) -> Result<()> {
     // Resolve parent via CLI-specific interactive prompt (if needed)
     let from_workspace = if create {
@@ -529,7 +475,6 @@ pub(super) async fn handle_switch_command(
         from_workspace,
         copy_files: None,
         copy_ignored: copy_ignored_override,
-        sandboxed,
     };
 
     let result = devflow_core::workspace::switch::switch_workspace(
@@ -748,7 +693,6 @@ pub(super) async fn handle_switch_to_main(
         trigger_source,
         vcs_event,
         None, // copy_ignored — use config default
-        None, // sandboxed — main workspace is never sandboxed
     )
     .await
 }

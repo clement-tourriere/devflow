@@ -43,15 +43,9 @@ pub struct Config {
     /// Commit message generation configuration (LLM).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<CommitConfig>,
-    /// Sandbox configuration for workspace isolation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sandbox: Option<crate::sandbox::SandboxConfig>,
     /// Execute configuration (detach command template, etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execute: Option<ExecuteConfig>,
-    /// Merge readiness checks and merge train configuration.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub merge: Option<MergeConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -368,80 +362,6 @@ pub struct CommitGenerationConfig {
     pub model: Option<String>,
 }
 
-/// Merge strategy: merge commit or rebase-then-fast-forward.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum MergeStrategy {
-    #[default]
-    Merge,
-    Rebase,
-}
-
-/// Configuration for merge readiness checks and merge behavior.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct MergeConfig {
-    /// Merge strategy: "merge" (default) or "rebase" (rebase-then-fast-forward).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub strategy: Option<MergeStrategy>,
-    /// Delete workspace after successful merge.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cleanup_after_merge: Option<bool>,
-    /// Auto-rebase child workspaces after merge.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cascade_rebase: Option<bool>,
-    /// List of merge checks to run before merging.
-    #[serde(default)]
-    pub checks: Vec<MergeCheckConfig>,
-}
-
-impl MergeConfig {
-    /// Resolve effective cleanup: CLI flag `true` wins, else config, else `false`.
-    pub fn effective_cleanup(&self, cli_flag: bool) -> bool {
-        if cli_flag {
-            true
-        } else {
-            self.cleanup_after_merge.unwrap_or(false)
-        }
-    }
-
-    /// Resolve effective cascade_rebase: CLI flag `true` wins, else config, else `false`.
-    pub fn effective_cascade_rebase(&self, cli_flag: bool) -> bool {
-        if cli_flag {
-            true
-        } else {
-            self.cascade_rebase.unwrap_or(false)
-        }
-    }
-
-    /// Resolve effective strategy, defaulting to Merge.
-    pub fn effective_strategy(&self) -> MergeStrategy {
-        self.strategy.clone().unwrap_or_default()
-    }
-}
-
-/// A single merge check configuration entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MergeCheckConfig {
-    /// Check type: "sequential-files", "git-conflicts", or "hook".
-    #[serde(rename = "type")]
-    pub check_type: String,
-    /// Human-readable label for the check.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    /// Severity: "error" (blocks merge) or "warning" (advisory).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub severity: Option<String>,
-    /// Directory glob pattern (for sequential-files check).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub directory_pattern: Option<String>,
-    /// File regex pattern (for sequential-files check).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file_pattern: Option<String>,
-    /// Shell command to run (for hook check).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorktreeConfig {
     /// Whether worktree mode is enabled (default: false).
@@ -621,10 +541,6 @@ pub struct GlobalConfig {
     /// Used by `devflow init` when auto-initializing a VCS.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_vcs: Option<crate::vcs::VcsKind>,
-    /// Feature flag: enable smart merge features (readiness checks, rebase,
-    /// merge trains, cascade notifications). Default: `false`.
-    #[serde(default)]
-    pub smart_merge: bool,
     /// Global proxy configuration (used by `devflow proxy start`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<ProxyGlobalConfig>,
@@ -680,11 +596,6 @@ impl GlobalConfig {
         Ok(())
     }
 
-    /// Check if smart merge features are enabled.
-    pub fn smart_merge_enabled(&self) -> bool {
-        self.smart_merge
-    }
-
     /// The canonical path for the global config file.
     pub fn path() -> Result<PathBuf> {
         let config_dir = dirs::config_dir()
@@ -729,9 +640,7 @@ impl Default for Config {
             processes: None,
             agent: None,
             commit: None,
-            sandbox: None,
             execute: None,
-            merge: None,
         }
     }
 }

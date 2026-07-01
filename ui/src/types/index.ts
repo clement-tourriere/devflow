@@ -28,7 +28,6 @@ export interface WorkspaceEntry {
   created_at: string | null;
   executed_command: string | null;
   execution_status: string | null;
-  sandboxed: boolean;
 }
 
 export interface WorkspacesResponse {
@@ -309,7 +308,6 @@ export interface AppSettings {
   } | null;
   terminal_renderer: TerminalRenderer;
   terminal_font_size: number;
-  smart_merge: boolean;
 }
 
 export type TerminalRenderer = "auto" | "webgpu" | "webgl2";
@@ -353,64 +351,6 @@ export interface OrphanCleanupResult {
   errors: string[];
 }
 
-export interface AgentSkillsStatus {
-  installed: boolean;
-  installed_skills: string[];
-  missing_skills: string[];
-  update_available: boolean;
-  stale_skills: string[];
-}
-
-export interface InstalledSkillInfo {
-  name: string;
-  source: SkillSource;
-  content_hash: string;
-  installed_at: string;
-}
-
-export interface SkillSource {
-  type: "bundled" | "github";
-  owner?: string;
-  repo?: string;
-  path?: string;
-}
-
-export interface SkillSearchResult {
-  id: string;
-  name: string;
-  source: string;
-  installs: number;
-}
-
-export interface SkillDetail {
-  name: string;
-  source: SkillSource;
-  content_hash: string;
-  installed_at: string;
-  content: string;
-}
-
-export interface SkillSearchDetail {
-  name: string;
-  source: string;
-  description: string;
-  content: string;
-}
-
-export interface UserSkillInfo {
-  name: string;
-  source: SkillSource;
-  content_hash: string;
-  installed_at: string;
-  agents: string[];
-  /** Whether this skill is managed by devflow (true) or discovered externally (false). */
-  managed: boolean;
-  /** For external skills: which agent this was discovered in (e.g. "opencode", "codex"). */
-  external_agent?: string;
-  /** For external skills: short description from frontmatter. */
-  description?: string;
-}
-
 export interface VcsInfo {
   existing_vcs: string | null;
   available_tools: string[];
@@ -437,59 +377,4 @@ export interface TerminalOutputEvent {
 
 export interface TerminalExitEvent {
   session_id: string;
-}
-
-// ── Merge & Train types ──
-
-export interface MergeCheckResult {
-  check_name: string;
-  passed: boolean;
-  severity: "error" | "warning";
-  message: string;
-  files: string[];
-  suggestion: string | null;
-}
-
-export interface MergeReadinessReport {
-  source: string;
-  target: string;
-  ready: boolean;
-  checks: MergeCheckResult[];
-}
-
-export interface RebaseResult {
-  success: boolean;
-  commits_replayed: number;
-  conflicts: boolean;
-  conflict_files: string[];
-}
-
-export interface CascadeRebaseNeeded {
-  workspace: string;
-  reason: string;
-}
-
-export interface CascadeReport {
-  affected_children: string[];
-  needs_rebase: CascadeRebaseNeeded[];
-}
-
-export interface MergeResult {
-  success: boolean;
-  message: string;
-  cascade: CascadeReport | null;
-}
-
-export interface MergeTrainEntry {
-  workspace: string;
-  position: number;
-  status: string;
-  error: string | null;
-}
-
-export interface MergeTrain {
-  id: string;
-  target: string;
-  status: string;
-  entries: MergeTrainEntry[];
 }

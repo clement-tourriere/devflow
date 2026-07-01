@@ -68,6 +68,6 @@ hooks:
         CLICKHOUSE_URL={{ service.analytics.url }}
         EOF
 
-  pre-merge:
+  pre-commit:
     test: "npm test"
     lint: "npm run lint"

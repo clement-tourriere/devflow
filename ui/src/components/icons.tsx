@@ -58,22 +58,6 @@ export const IconTerminal = svg(
   </>,
 );
 
-export const IconSkills = svg(
-  <>
-    <path d="M12 2 4 6v6c0 5 3.5 8 8 10 4.5-2 8-5 8-10V6z" />
-    <path d="m9 12 2 2 4-4" />
-  </>,
-);
-
-export const IconMerge = svg(
-  <>
-    <circle cx="6" cy="6" r="2.5" />
-    <circle cx="6" cy="18" r="2.5" />
-    <circle cx="18" cy="15" r="2.5" />
-    <path d="M6 8.5v7M8.5 6H14a3 3 0 0 1 3 3v3.5" />
-  </>,
-);
-
 export const IconSettings = svg(
   <>
     <circle cx="12" cy="12" r="3" />

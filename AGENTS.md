@@ -83,8 +83,7 @@ devflow agent context
 devflow agent context --format json
 devflow agent context --workspace feature/auth
 
-# Install bundled workspace skills (.claude/skills/) — see `devflow skill`
-# for full management (search, install, remove, update)
+# Install the bundled workspace helper skills (.claude/skills/)
 devflow agent skill
 ```
 

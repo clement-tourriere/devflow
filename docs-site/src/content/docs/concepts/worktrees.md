@@ -82,17 +82,17 @@ The hook-driven setup path currently copies `copy_files` and gitignored entries 
 
 ## Safety on removal
 
-`devflow remove <ws>` (and `merge --cleanup`, and GUI/TUI deletion) refuse to delete a worktree with uncommitted or untracked changes — the same set `git worktree remove` protects. `--force` overrides, and also falls back to plain directory removal if Git metadata is stale. Nothing else (branch, services) is touched until the worktree check passes.
+`devflow remove <ws>` and GUI/TUI deletion refuse to delete a worktree with uncommitted or untracked changes — the same set `git worktree remove` protects. `--force` overrides, and also falls back to plain directory removal if Git metadata is stale. Nothing else (branch, services) is touched until the worktree check passes.
 
 ## Syncing AI configs back
 
-Changes agents make to `.claude/settings.local.json` (approved permissions, etc.) in a worktree can be merged back to the main checkout:
+Changes agents make to `.claude/settings.local.json` (approved permissions, etc.) in a worktree can be synced back to the main checkout:
 
 ```bash
 devflow sync-ai-configs
 ```
 
-Permission arrays are union-merged and deduplicated; other AI config files are copied only if missing in main. The `sync-ai-configs` [hook recipe](/devflow/reference/hooks/#recipes) automates this on workspace removal and merge.
+Permission arrays are unioned and deduplicated; other AI config files are copied only if missing in main. The `sync-ai-configs` [hook recipe](/devflow/reference/hooks/#recipes) automates this before workspace removal.
 
 ## Related
 

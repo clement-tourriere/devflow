@@ -3490,6 +3490,7 @@ processes:
 
     #[tokio::test]
     #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
     async fn daemon_reconcile_honors_desired_state() {
         let _guard = PROCESS_TEST_ENV_LOCK.lock().unwrap();
         let project = TempDir::new().unwrap();
@@ -3557,6 +3558,7 @@ processes:
 
     #[tokio::test]
     #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
     async fn start_status_logs_and_stop_process() {
         let _guard = PROCESS_TEST_ENV_LOCK.lock().unwrap();
         let project = TempDir::new().unwrap();

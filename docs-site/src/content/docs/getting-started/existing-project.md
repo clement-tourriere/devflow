@@ -12,7 +12,7 @@ cd ~/existing-project
 devflow init
 ```
 
-`init` never touches your application code. It writes `.devflow.yml`, installs VCS hooks (`post-checkout`, `post-merge`, `pre-commit`, `post-rewrite`; all marked so `devflow uninstall-hooks` removes only devflow's), and registers the project in local state.
+`init` never touches your application code. It writes `.devflow.yml`, installs VCS hooks (`post-checkout` and `pre-commit`; both marked so `devflow uninstall-hooks` removes only devflow's), and registers the project in local state.
 
 For non-interactive adoption, start from a small committed config and validate it:
 

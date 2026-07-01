@@ -171,12 +171,7 @@ function DoctorPage() {
                       </button>
                     ) : isSkillsCheck ? (
                       check.available ? (
-                        <Link
-                          to={`/projects/${encodeURIComponent(projectPath)}#skills`}
-                          style={{ fontSize: 12, color: "var(--text-muted)", textDecoration: "underline" }}
-                        >
-                          Manage Skills
-                        </Link>
+                        <span style={{ color: "var(--text-muted)", fontSize: 12 }}>Installed</span>
                       ) : (
                         <button
                           className="btn btn-primary"

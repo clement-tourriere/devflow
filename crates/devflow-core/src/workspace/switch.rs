@@ -30,8 +30,6 @@ pub struct SwitchOptions {
     pub copy_files: Option<Vec<String>>,
     /// Override the config `worktree.copy_ignored` for worktree creation.
     pub copy_ignored: Option<bool>,
-    /// Whether the workspace should be sandboxed.
-    pub sandboxed: Option<bool>,
 }
 
 /// Switch to a workspace with the full lifecycle: pre-switch hooks,
@@ -152,7 +150,6 @@ pub async fn switch_workspace(
         &normalized_name,
         normalized_parent.as_deref(),
         worktree_result.as_ref(),
-        options.sandboxed,
     );
 
     let worktree_created = worktree_result.as_ref().is_some_and(|wt| wt.created);
@@ -352,10 +349,9 @@ async fn write_workspace_env_overrides(
                     updates.insert("DATABASE_URL".to_string(), url);
                 }
             }
-            "redis"
-                if !updates.contains_key("REDIS_URL") => {
-                    updates.insert("REDIS_URL".to_string(), url);
-                }
+            "redis" if !updates.contains_key("REDIS_URL") => {
+                updates.insert("REDIS_URL".to_string(), url);
+            }
             _ => {}
         }
     }
@@ -443,7 +439,6 @@ fn register_workspace_state(
     normalized_name: &str,
     normalized_parent: Option<&str>,
     worktree: Option<&WorktreeSetupResult>,
-    sandboxed: Option<bool>,
 ) {
     let Ok(mut state_mgr) = LocalStateManager::new() else {
         return;
@@ -467,8 +462,6 @@ fn register_workspace_state(
         executed_command: existing.as_ref().and_then(|b| b.executed_command.clone()),
         execution_status: existing.as_ref().and_then(|b| b.execution_status.clone()),
         executed_at: existing.as_ref().and_then(|b| b.executed_at),
-        sandboxed: sandboxed
-            .unwrap_or_else(|| existing.as_ref().map(|b| b.sandboxed).unwrap_or(false)),
     };
 
     if let Err(e) = state_mgr.register_workspace_by_dir(project_dir, workspace) {

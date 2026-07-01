@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::hooks::{self, HookEngine, HookPhase};
-use crate::state::LocalStateManager;
 
 use super::LifecycleOptions;
 
@@ -87,10 +86,7 @@ pub async fn run_lifecycle_hooks_with_result(
         }
     };
 
-    let sandbox_config = resolve_workspace_sandbox_config(config, project_dir, workspace_name);
-    let engine = engine
-        .with_quiet_output(!opts.verbose_hooks)
-        .with_sandbox(sandbox_config);
+    let engine = engine.with_quiet_output(!opts.verbose_hooks);
 
     if opts.verbose_hooks {
         engine.run_phase_verbose(&phase, &context).await
@@ -123,27 +119,5 @@ pub async fn run_lifecycle_hooks_best_effort(
                 errors: vec![message],
             })
         }
-    }
-}
-
-/// Check if a workspace is sandboxed and return the sandbox config if so.
-fn resolve_workspace_sandbox_config(
-    config: &Config,
-    project_dir: &Path,
-    workspace_name: &str,
-) -> Option<crate::sandbox::SandboxConfig> {
-    let normalized = config.get_normalized_workspace_name(workspace_name);
-
-    // Look up workspace state to check if sandboxed
-    let is_sandboxed = LocalStateManager::new()
-        .ok()
-        .and_then(|state| state.get_workspace_by_dir(project_dir, &normalized))
-        .map(|ws| ws.sandboxed)
-        .unwrap_or(false);
-
-    if is_sandboxed {
-        Some(config.sandbox.clone().unwrap_or_default())
-    } else {
-        None
     }
 }

@@ -2,10 +2,10 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use devflow_core::config::{Config, NamedServiceConfig};
+use devflow_core::config::Config;
 use devflow_core::hooks::HookEntry;
 use devflow_core::services::factory;
-use devflow_core::state::{DevflowWorkspace, LocalStateManager};
+use devflow_core::state::LocalStateManager;
 use devflow_core::vcs::{self, VcsProvider, WorktreeInfo};
 
 use super::action::*;
@@ -30,6 +30,25 @@ pub struct DevflowContext {
     pub config_path: Option<PathBuf>,
     vcs: Box<dyn VcsProvider>,
     vcs_snapshot: VcsSnapshot,
+}
+
+fn summarize_workspace_switch(
+    verb: &str,
+    workspace: &str,
+    services: &[devflow_core::workspace::ServiceResult],
+) -> Result<String> {
+    let failures: Vec<_> = services.iter().filter(|r| !r.success).collect();
+    if failures.is_empty() {
+        Ok(format!("{} workspace '{}'", verb, workspace))
+    } else {
+        let msgs: Vec<_> = failures.iter().map(|f| f.message.as_str()).collect();
+        Ok(format!(
+            "{} '{}' (some services failed: {})",
+            verb,
+            workspace,
+            msgs.join(", ")
+        ))
+    }
 }
 
 impl DevflowContext {
@@ -125,108 +144,6 @@ impl DevflowContext {
         self.vcs_snapshot = Self::take_vcs_snapshot(&*self.vcs);
     }
 
-    fn upsert_branch_state(&self, workspace_name: &str, parent: Option<&str>) {
-        let Some(config_path) = self.config_path.as_ref() else {
-            return;
-        };
-
-        let normalized_branch = self.config.get_normalized_workspace_name(workspace_name);
-        let normalized_parent = parent.map(|p| self.config.get_normalized_workspace_name(p));
-
-        match LocalStateManager::new() {
-            Ok(mut state) => {
-                let existing = state.get_workspace(config_path, &normalized_branch);
-
-                let worktree_path = self
-                    .vcs
-                    .worktree_path(workspace_name)
-                    .ok()
-                    .flatten()
-                    .map(|p| p.display().to_string())
-                    .or_else(|| {
-                        existing
-                            .as_ref()
-                            .and_then(|b| b.worktree_path.as_ref().cloned())
-                    });
-
-                let created_at = existing
-                    .as_ref()
-                    .map(|b| b.created_at)
-                    .unwrap_or_else(chrono::Utc::now);
-
-                let parent = existing
-                    .as_ref()
-                    .and_then(|b| b.parent.clone())
-                    .or(normalized_parent);
-                let workspace = DevflowWorkspace {
-                    name: normalized_branch,
-                    parent,
-                    worktree_path,
-                    created_at,
-                    executed_command: None,
-                    execution_status: None,
-                    executed_at: None,
-                    sandboxed: existing.as_ref().map(|b| b.sandboxed).unwrap_or(false),
-                };
-
-                if let Err(e) = state.register_workspace(config_path, workspace) {
-                    log::warn!("Failed to register workspace in local state: {}", e);
-                }
-            }
-            Err(e) => {
-                log::warn!("Failed to open local state manager: {}", e);
-            }
-        }
-    }
-
-    fn remove_branch_state(&self, workspace_name: &str) {
-        let Some(config_path) = self.config_path.as_ref() else {
-            return;
-        };
-
-        let normalized = self.config.get_normalized_workspace_name(workspace_name);
-
-        match LocalStateManager::new() {
-            Ok(mut state) => {
-                if let Err(e) = state.unregister_workspace(config_path, &normalized) {
-                    log::warn!("Failed to unregister workspace from local state: {}", e);
-                }
-            }
-            Err(e) => {
-                log::warn!("Failed to open local state manager: {}", e);
-            }
-        }
-    }
-
-    // ── Synchronous VCS operations (fast, run on main thread) ───────
-
-    /// Create a new workspace and check it out.
-    pub fn create_and_checkout_workspace(&mut self, name: &str, from: Option<&str>) -> Result<()> {
-        let previous_branch = self
-            .vcs
-            .current_workspace()?
-            .map(|b| self.config.get_normalized_workspace_name(&b));
-
-        self.vcs.create_workspace(name, from)?;
-        self.vcs.checkout_workspace(name)?;
-
-        let parent = from
-            .map(|b| self.config.get_normalized_workspace_name(b))
-            .or(previous_branch);
-        self.upsert_branch_state(name, parent.as_deref());
-
-        self.vcs_snapshot = Self::take_vcs_snapshot(&*self.vcs);
-        Ok(())
-    }
-
-    /// Delete a VCS workspace. Called after service workspaces are deleted.
-    pub fn delete_vcs_branch(&mut self, name: &str) -> Result<()> {
-        self.vcs.delete_workspace(name)?;
-        self.remove_branch_state(name);
-        self.vcs_snapshot = Self::take_vcs_snapshot(&*self.vcs);
-        Ok(())
-    }
-
     // ── Synchronous data fetchers (local, no network) ───────────────
 
     /// Get effective config as YAML string.
@@ -274,11 +191,6 @@ impl DevflowContext {
         }
 
         HooksData { phases }
-    }
-
-    /// Get service configs.
-    pub fn service_configs(&self) -> Vec<NamedServiceConfig> {
-        self.config.resolve_services()
     }
 
     // ── Background task methods (static, take Config, no &self) ─────
@@ -470,183 +382,73 @@ impl DevflowContext {
         named.provider.logs(workspace_name, Some(200)).await
     }
 
-    /// Switch/align services to a workspace without changing VCS checkout.
+    /// Switch a workspace via the shared core lifecycle.
     pub async fn switch_services_bg(
         config: &Config,
         workspace_name: &str,
         project_dir: &std::path::Path,
     ) -> Result<String> {
-        if config.resolve_services().is_empty() {
-            return Ok("No services configured".to_string());
-        }
-
-        use devflow_core::workspace::hooks::run_lifecycle_hooks_best_effort;
-        let hook_opts = devflow_core::workspace::LifecycleOptions::default();
-
-        // Pre-switch hooks (best-effort, no approval in TUI)
-        run_lifecycle_hooks_best_effort(
+        let options = devflow_core::workspace::switch::SwitchOptions {
+            lifecycle: devflow_core::workspace::LifecycleOptions::default(),
+            create_if_missing: false,
+            creation_mode: devflow_core::workspace::WorkspaceCreationMode::Default,
+            from_workspace: None,
+            copy_files: None,
+            copy_ignored: None,
+        };
+        let result = devflow_core::workspace::switch::switch_workspace(
             config,
             project_dir,
             workspace_name,
-            devflow_core::hooks::HookPhase::PreSwitch,
-            &hook_opts,
+            &options,
         )
-        .await;
-
-        let results = factory::orchestrate_switch(config, workspace_name, None).await?;
-        let failures: Vec<_> = results.iter().filter(|r| !r.success).collect();
-
-        // Post-service-switch hooks
-        if failures.len() < results.len() {
-            run_lifecycle_hooks_best_effort(
-                config,
-                project_dir,
-                workspace_name,
-                devflow_core::hooks::HookPhase::PostServiceSwitch,
-                &hook_opts,
-            )
-            .await;
-        }
-
-        // Post-switch hooks
-        run_lifecycle_hooks_best_effort(
-            config,
-            project_dir,
-            workspace_name,
-            devflow_core::hooks::HookPhase::PostSwitch,
-            &hook_opts,
-        )
-        .await;
-
-        if failures.is_empty() {
-            Ok(format!(
-                "Aligned services to workspace '{}'",
-                workspace_name
-            ))
-        } else {
-            let msgs: Vec<_> = failures.iter().map(|f| f.message.as_str()).collect();
-            Ok(format!(
-                "Aligned services to '{}' (some services failed: {})",
-                workspace_name,
-                msgs.join(", ")
-            ))
-        }
+        .await?;
+        summarize_workspace_switch("Switched", &result.workspace, &result.services)
     }
 
-    /// Create service workspaces (VCS create+checkout done on main thread before this).
+    /// Create a workspace via the shared core lifecycle.
     pub async fn create_workspace_bg(
         config: &Config,
         name: &str,
         from: Option<&str>,
         project_dir: &std::path::Path,
     ) -> Result<String> {
-        use devflow_core::workspace::hooks::run_lifecycle_hooks_best_effort;
-        let hook_opts = devflow_core::workspace::LifecycleOptions::default();
-
-        // Pre-service-create hooks
-        run_lifecycle_hooks_best_effort(
-            config,
-            project_dir,
-            name,
-            devflow_core::hooks::HookPhase::PreServiceCreate,
-            &hook_opts,
-        )
-        .await;
-
-        let results = factory::orchestrate_create(config, name, from).await?;
-        let failures: Vec<_> = results.iter().filter(|r| !r.success).collect();
-
-        // Post-service-create hooks
-        run_lifecycle_hooks_best_effort(
-            config,
-            project_dir,
-            name,
-            devflow_core::hooks::HookPhase::PostServiceCreate,
-            &hook_opts,
-        )
-        .await;
-
-        // Post-create hooks
-        run_lifecycle_hooks_best_effort(
-            config,
-            project_dir,
-            name,
-            devflow_core::hooks::HookPhase::PostCreate,
-            &hook_opts,
-        )
-        .await;
-
-        // Post-switch hooks
-        run_lifecycle_hooks_best_effort(
-            config,
-            project_dir,
-            name,
-            devflow_core::hooks::HookPhase::PostSwitch,
-            &hook_opts,
-        )
-        .await;
-
-        if failures.is_empty() {
-            Ok(format!("Created and switched to workspace '{}'", name))
-        } else {
-            let msgs: Vec<_> = failures.iter().map(|f| f.message.as_str()).collect();
-            Ok(format!(
-                "Created '{}' (some services failed: {})",
-                name,
-                msgs.join(", ")
-            ))
-        }
+        let options = devflow_core::workspace::switch::SwitchOptions {
+            lifecycle: devflow_core::workspace::LifecycleOptions::default(),
+            create_if_missing: true,
+            creation_mode: devflow_core::workspace::WorkspaceCreationMode::Default,
+            from_workspace: from.map(ToString::to_string),
+            copy_files: None,
+            copy_ignored: None,
+        };
+        let result =
+            devflow_core::workspace::switch::switch_workspace(config, project_dir, name, &options)
+                .await?;
+        summarize_workspace_switch("Created", &result.workspace, &result.services)
     }
 
-    /// Delete service workspaces + VCS workspace.
+    /// Delete a workspace via the shared core lifecycle.
     pub async fn delete_workspace_bg(
         config: &Config,
         name: &str,
         project_dir: &std::path::Path,
     ) -> Result<String> {
-        use devflow_core::workspace::hooks::run_lifecycle_hooks_best_effort;
-        let hook_opts = devflow_core::workspace::LifecycleOptions::default();
-
-        // Pre-remove hooks
-        run_lifecycle_hooks_best_effort(
-            config,
-            project_dir,
-            name,
-            devflow_core::hooks::HookPhase::PreRemove,
-            &hook_opts,
-        )
-        .await;
-
-        // Pre-service-delete hooks
-        run_lifecycle_hooks_best_effort(
-            config,
-            project_dir,
-            name,
-            devflow_core::hooks::HookPhase::PreServiceDelete,
-            &hook_opts,
-        )
-        .await;
-
-        let results = factory::orchestrate_delete(config, name).await?;
-        let failures: Vec<_> = results.iter().filter(|r| !r.success).collect();
-
-        // Post-service-delete hooks
-        run_lifecycle_hooks_best_effort(
-            config,
-            project_dir,
-            name,
-            devflow_core::hooks::HookPhase::PostServiceDelete,
-            &hook_opts,
-        )
-        .await;
-
+        let options = devflow_core::workspace::delete::DeleteOptions {
+            lifecycle: devflow_core::workspace::LifecycleOptions::default(),
+            keep_services: false,
+            force: false,
+        };
+        let result =
+            devflow_core::workspace::delete::delete_workspace(config, project_dir, name, &options)
+                .await?;
+        let failures: Vec<_> = result.services.iter().filter(|r| !r.success).collect();
         if failures.is_empty() {
-            Ok(format!("Deleted workspace '{}'", name))
+            Ok(format!("Deleted workspace '{}'", result.workspace))
         } else {
             let msgs: Vec<_> = failures.iter().map(|f| f.message.as_str()).collect();
             Ok(format!(
                 "Deleted '{}' (some services failed: {})",
-                name,
+                result.workspace,
                 msgs.join(", ")
             ))
         }

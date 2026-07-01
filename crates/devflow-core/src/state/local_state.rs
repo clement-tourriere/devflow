@@ -34,9 +34,6 @@ pub struct DevflowWorkspace {
     /// When the command was executed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executed_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Whether this workspace runs in sandboxed mode.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub sandboxed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,9 +44,6 @@ pub struct ProjectState {
     /// Registry of devflow workspaces tracked for this project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspaces: Option<Vec<DevflowWorkspace>>,
-    /// Active merge trains for this project.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub merge_trains: Option<Vec<crate::merge::train::MergeTrain>>,
 }
 
 pub struct LocalStateManager {
@@ -202,14 +196,12 @@ impl LocalStateManager {
 
         let existing = self.state.projects.get(&project_key);
         let existing_branches = existing.and_then(|p| p.workspaces.clone());
-        let existing_trains = existing.and_then(|p| p.merge_trains.clone());
         normalize_service_defaults(&mut services);
 
         let project_state = ProjectState {
             last_updated: chrono::Utc::now(),
             services: Some(services),
             workspaces: existing_branches,
-            merge_trains: existing_trains,
         };
 
         self.state.projects.insert(project_key, project_state);
@@ -257,13 +249,10 @@ impl LocalStateManager {
 
         normalize_service_defaults(&mut services);
 
-        let existing_trains = existing.and_then(|p| p.merge_trains.clone());
-
         let project_state = ProjectState {
             last_updated: chrono::Utc::now(),
             services: Some(services),
             workspaces: existing_branches,
-            merge_trains: existing_trains,
         };
 
         self.state.projects.insert(project_key, project_state);
@@ -368,7 +357,6 @@ impl LocalStateManager {
                 last_updated: chrono::Utc::now(),
                 services: None,
                 workspaces: None,
-                merge_trains: None,
             });
 
         let workspaces = project.workspaces.get_or_insert_with(Vec::new);
@@ -457,7 +445,6 @@ impl LocalStateManager {
             executed_command: None,
             execution_status: None,
             executed_at: None,
-            sandboxed: false,
         };
 
         self.register_workspace(&config_path, workspace)
@@ -483,56 +470,6 @@ impl LocalStateManager {
         }
 
         Ok(())
-    }
-
-    // ── Merge train CRUD ─────────────────────────────────────────────
-
-    /// Get all merge trains for a project.
-    pub fn get_merge_trains(&self, project_dir: &Path) -> Vec<crate::merge::train::MergeTrain> {
-        let config_path = project_dir.join(".devflow.yml");
-        self.get_project_key(&config_path)
-            .and_then(|key| self.state.projects.get(&key))
-            .and_then(|p| p.merge_trains.clone())
-            .unwrap_or_default()
-    }
-
-    /// Save (upsert) a merge train for a project.
-    pub fn save_merge_train(
-        &mut self,
-        project_dir: &Path,
-        train: &crate::merge::train::MergeTrain,
-    ) -> Result<()> {
-        self.refresh_state()?;
-
-        let config_path = project_dir.join(".devflow.yml");
-        let project_key = self.get_project_key(&config_path).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Failed to get project key for path: {}",
-                project_dir.display()
-            )
-        })?;
-
-        let project = self
-            .state
-            .projects
-            .entry(project_key)
-            .or_insert_with(|| ProjectState {
-                last_updated: chrono::Utc::now(),
-                services: None,
-                workspaces: None,
-                merge_trains: None,
-            });
-
-        let trains = project.merge_trains.get_or_insert_with(Vec::new);
-
-        if let Some(pos) = trains.iter().position(|t| t.id == train.id) {
-            trains[pos] = train.clone();
-        } else {
-            trains.push(train.clone());
-        }
-
-        project.last_updated = chrono::Utc::now();
-        self.save_state()
     }
 
     // ── Workspace relationship queries ──────────────────────────────
@@ -712,12 +649,9 @@ fn merge_project_state(dst: &mut ProjectState, src: ProjectState) {
             }
         }
     }
-    // Services / merge trains: fill in only if the destination has none.
+    // Services: fill in only if the destination has none.
     if dst.services.is_none() {
         dst.services = src.services;
-    }
-    if dst.merge_trains.is_none() {
-        dst.merge_trains = src.merge_trains;
     }
     dst.last_updated = dst.last_updated.max(src.last_updated);
 }
@@ -756,7 +690,6 @@ mod tests {
             executed_command: None,
             execution_status: None,
             executed_at: None,
-            sandboxed: false,
         }
     }
 
@@ -768,13 +701,11 @@ mod tests {
             last_updated: chrono::Utc::now() - chrono::Duration::hours(1),
             services: None,
             workspaces: Some(vec![ws("main")]),
-            merge_trains: None,
         };
         let src = ProjectState {
             last_updated: chrono::Utc::now(),
             services: None,
             workspaces: Some(vec![ws("main"), ws("feature")]),
-            merge_trains: None,
         };
 
         merge_project_state(&mut dst, src);

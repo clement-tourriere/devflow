@@ -32,7 +32,6 @@ devflow switch feature/auth --open
 devflow switch feature/auth --no-services
 devflow switch feature/auth --no-processes
 devflow switch feature/auth --dry-run
-devflow switch -c agent/task-42 --sandboxed
 ```
 
 Important flags:
@@ -47,8 +46,6 @@ Important flags:
 - `--no-verify` skip hooks
 - `--template` switch to the main/template workspace
 - `--no-respect-gitignore` include gitignored files in worktree copy
-- `--sandboxed` create the workspace with sandbox restrictions
-- `--no-sandbox` disable sandboxing even if enabled by default
 
 ### Multiplexer Integration
 
@@ -142,101 +139,6 @@ Alias for `devflow service cleanup`.
 ```bash
 devflow cleanup
 devflow cleanup --max-count 5
-```
-
-## Merge and Rebase
-
-These commands are available in the CLI and are especially useful when Smart Merge is enabled.
-
-### `devflow merge [target]`
-
-Merge the current workspace into the target workspace, which defaults to the configured main workspace.
-
-```bash
-devflow merge
-devflow merge develop
-devflow merge --cleanup
-devflow merge --dry-run
-devflow merge --check-only
-devflow merge --cascade-rebase
-```
-
-Important flags:
-
-- `--cleanup` remove the source workspace after a successful merge
-- `--dry-run` preview without mutating state
-- `--force` skip readiness checks
-- `--check-only` run checks without merging
-- `--cascade-rebase` rebase affected child workspaces after merge
-
-### `devflow rebase [target]`
-
-Rebase the current workspace onto the target workspace.
-
-```bash
-devflow rebase
-devflow rebase develop
-devflow rebase --dry-run
-```
-
-## Merge Train
-
-Merge train is part of the Smart Merge feature set. If disabled, `devflow train` exits with guidance on enabling it.
-
-### `devflow train add [workspace]`
-
-Add a workspace to the merge train for a target.
-
-```bash
-devflow train add
-devflow train add feature/auth
-devflow train add --target develop feature/auth
-```
-
-### `devflow train remove <workspace>`
-
-Remove a workspace from the merge train.
-
-```bash
-devflow train remove feature/auth
-```
-
-### `devflow train status`
-
-Show the current merge train queue and entry states.
-
-```bash
-devflow train status
-devflow train status --target develop
-devflow --json train status
-```
-
-### `devflow train run`
-
-Run the merge train queue.
-
-```bash
-devflow train run
-devflow train run --stop-on-failure
-devflow train run --cleanup
-```
-
-### `devflow train pause`
-
-Pause a merge train.
-
-```bash
-devflow train pause
-devflow train pause --target develop
-```
-
-### `devflow train resume`
-
-Resume a paused merge train.
-
-```bash
-devflow train resume
-devflow train resume --target develop
 ```
 
 ## Services
@@ -450,8 +352,7 @@ Current built-in phases include:
 
 - `pre-switch`, `post-create`, `post-start`, `post-switch`
 - `pre-remove`, `post-remove`
-- `pre-commit`, `pre-merge`, `post-merge`, `post-rewrite`
-- `pre-rebase`, `post-rebase`, `post-merge-cascade`
+- `pre-commit`
 - `pre-service-create`, `post-service-create`
 - `pre-service-delete`, `post-service-delete`, `post-service-switch`
 
@@ -584,7 +485,7 @@ devflow agent context --workspace feature/auth
 
 ### `devflow agent skill`
 
-Install project-specific workspace skills into `.claude/skills/`.
+Install devflow workspace helper skills into `.claude/skills/`.
 
 ```bash
 devflow agent skill
@@ -593,13 +494,13 @@ devflow --json agent skill
 
 ### `devflow sync-ai-configs`
 
-Merge AI tool configuration directories from the current worktree back to the main worktree.
+Sync AI tool configuration directories from the current worktree back to the main worktree.
 
 ```bash
 devflow sync-ai-configs
 ```
 
-For `.claude/settings.local.json`, permission arrays are union-merged. For other AI config directories, copying is additive only.
+For `.claude/settings.local.json`, permission arrays are unioned and deduplicated. For other AI config directories, copying is additive only.
 
 ## Reverse Proxy
 
@@ -681,7 +582,7 @@ devflow --json doctor
 
 ### `devflow install-hooks`
 
-Install devflow-managed VCS hooks. Current Git integration uses `post-checkout`, `post-merge`, `pre-commit`, and `post-rewrite`.
+Install devflow-managed VCS hooks. Current Git integration uses `post-checkout` and `pre-commit`.
 
 ### `devflow uninstall-hooks`
 

@@ -17,8 +17,6 @@ pub struct CreateOptions {
     pub copy_files: Option<Vec<String>>,
     /// Override the config `worktree.copy_ignored` for this creation.
     pub copy_ignored: Option<bool>,
-    /// Whether the workspace should be sandboxed.
-    pub sandboxed: Option<bool>,
 }
 
 impl Default for CreateOptions {
@@ -29,7 +27,6 @@ impl Default for CreateOptions {
             from_workspace: None,
             copy_files: None,
             copy_ignored: None,
-            sandboxed: None,
         }
     }
 }
@@ -57,7 +54,6 @@ pub async fn create_workspace(
             from_workspace: options.from_workspace.clone(),
             copy_files: options.copy_files.clone(),
             copy_ignored: options.copy_ignored,
-            sandboxed: options.sandboxed,
         },
     )
     .await?;

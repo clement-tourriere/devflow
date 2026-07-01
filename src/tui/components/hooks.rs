@@ -24,7 +24,6 @@ const TEMPLATE_VARIABLES: &[(&str, &str)] = &[
     ),
     ("{{ default_workspace }}", "Default workspace (main/master)"),
     ("{{ commit }}", "Current commit SHA when available"),
-    ("{{ target }}", "Merge target workspace for merge hooks"),
     ("{{ base }}", "Parent/base workspace for create hooks"),
     ("{{ service['db'].url }}", "Service connection URL"),
     ("{{ service['db'].host }}", "Service host"),

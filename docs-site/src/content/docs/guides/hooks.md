@@ -41,7 +41,7 @@ hooks:
     dev-server:
       command: "npm run dev -- --port {{ workspace | hash_port }}"
       background: true                       # deterministic port per workspace
-  pre-merge:
+  pre-commit:
     test: { command: "npm test", continue_on_error: false }
     lint: { command: "npm run lint", continue_on_error: false }
   post-remove:
@@ -72,7 +72,7 @@ devflow hook install local-dev-setup
 | `install-deps` | dependency install for detected package managers |
 | `db-migrate` | run migrations after create/switch |
 | `docker-compose` | bring compose services up/down with the workspace |
-| `sync-ai-configs` | merge AI tool configs back to main on remove/merge |
+| `sync-ai-configs` | sync AI tool configs back to main before workspace removal |
 | `multiplexer-session` | auto-open a tmux/zellij session in the worktree after creation |
 
 ## Approvals in automation

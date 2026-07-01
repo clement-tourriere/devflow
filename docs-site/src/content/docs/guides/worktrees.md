@@ -39,7 +39,6 @@ devflow switch feature/x -x "npm run dev" -d    # …in a detached tmux/zellij s
 devflow switch feature/x -o                     # open an interactive multiplexer session
 devflow switch -c tmp/spike --no-services       # VCS only, skip service branching
 devflow switch feature/x --no-processes         # skip process auto-start
-devflow switch -c agent/t42 --sandboxed         # restricted filesystem/commands
 devflow switch -c big --no-respect-gitignore    # also copy gitignored entries this time
 devflow switch feature/x --dry-run              # print the plan (worktree path, services, processes, hooks)
 ```
@@ -79,24 +78,15 @@ For branches created outside devflow (no worktree yet), `devflow link <branch>` 
 Hook-driven setup currently skips AI config dirs (`.claude/` etc.) — see the [worktrees concept page](/devflow/concepts/worktrees/#manually-created-worktrees).
 :::
 
-## Merging back and cleaning up
+## Cleaning up
 
-```bash
-devflow merge                 # merge current workspace into main
-devflow merge --cleanup       # …and delete the source branch, worktree, and services
-```
-
-When the *target* has its own worktree, the merge runs there — your current directory isn't disturbed. Cleanup refuses to delete a dirty worktree; commit/stash first, or remove explicitly:
+When a workspace is no longer needed, remove its branch/worktree and any associated service workspaces:
 
 ```bash
 devflow remove feature/auth            # confirm, then delete worktree + branch + services
 devflow remove feature/auth --force    # skip confirmation AND dirty-worktree protection
 devflow remove feature/auth --keep-services
 ```
-
-:::tip
-Run `merge --cleanup` from the **main** worktree (or any directory other than the worktree being deleted). Deleting the directory you're standing in confuses both git and your shell.
-:::
 
 ## Pruning stale worktrees
 

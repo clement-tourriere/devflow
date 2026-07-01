@@ -53,7 +53,6 @@ import ConfirmDialog from "../../components/ConfirmDialog";
 import AddServiceModal from "../../components/AddServiceModal";
 import { useTerminal } from "../../context/TerminalContext";
 import { recordProjectAccess } from "../../utils/recentProjects";
-import ProjectSkillsTab from "./ProjectSkillsTab";
 import { IconTerminal } from "../../components/icons";
 
 interface WorkspaceSwitchedEvent {
@@ -113,11 +112,6 @@ function ProjectDetail() {
   const [error, setError] = useState<string | null>(null);
   const [setupIssueCount, setSetupIssueCount] = useState(0);
 
-  // Tab state — sync with URL hash
-  const [activeTab, setActiveTab] = useState<"overview" | "skills">(
-    window.location.hash === "#skills" ? "skills" : "overview"
-  );
-
   // Service workspace tracking: { "service-name": ServiceWorkspaceInfo[] }
   const [serviceWorkspaces, setServiceWorkspaces] = useState<
     Record<string, ServiceWorkspaceInfo[]>
@@ -133,7 +127,6 @@ function ProjectDetail() {
   const [creationMode, setCreationMode] = useState<WorkspaceCreationMode>("branch");
   const [copyFiles, setCopyFiles] = useState<string[]>([]);
   const [copyIgnored, setCopyIgnored] = useState(false);
-  const [sandboxed, setSandboxed] = useState(false);
   const [deletingWorkspace, setDeletingWorkspace] = useState<string | null>(null);
   const [connInfoWorkspace, setConnInfoWorkspace] = useState<string | null>(null);
   const [connInfo, setConnInfo] = useState<Record<string, ConnectionInfo>>({});
@@ -289,12 +282,12 @@ function ProjectDetail() {
   }, [fetchProcesses, processWorkspace]);
 
   useEffect(() => {
-    if (!processWorkspace || activeTab !== "overview") return;
+    if (!processWorkspace) return;
     const timer = window.setInterval(() => {
       void fetchProcesses(processWorkspace);
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [activeTab, fetchProcesses, processWorkspace]);
+  }, [fetchProcesses, processWorkspace]);
 
   useEffect(() => {
     const unlisten = listen<WorkspaceSwitchedEvent>(
@@ -323,22 +316,6 @@ function ProjectDetail() {
       .catch(() => setSetupIssueCount(0));
   }, [detail?.has_config, projectPath]);
 
-  // Sync tab state with URL hash
-  useEffect(() => {
-    const onHashChange = () => {
-      setActiveTab(window.location.hash === "#skills" ? "skills" : "overview");
-    };
-    window.addEventListener("hashchange", onHashChange);
-    return () => window.removeEventListener("hashchange", onHashChange);
-  }, []);
-
-  useEffect(() => {
-    const newHash = activeTab === "skills" ? "#skills" : "";
-    if (window.location.hash !== newHash) {
-      window.history.replaceState(null, "", newHash || window.location.pathname + window.location.search);
-    }
-  }, [activeTab]);
-
   const handleCreateWorkspace = async () => {
     const requestedWorkspace = newWorkspaceName.trim();
     if (!requestedWorkspace || isCreatingWorkspace) return;
@@ -350,8 +327,7 @@ function ProjectDetail() {
         fromWorkspace || undefined,
         creationMode,
         creationMode === "worktree" ? copyFiles : undefined,
-        creationMode === "worktree" ? copyIgnored : undefined,
-        sandboxed || undefined
+        creationMode === "worktree" ? copyIgnored : undefined
       );
       const createdWorkspace = result.workspace || requestedWorkspace;
       reportWorkspaceResult(`Workspace "${requestedWorkspace}"`, result);
@@ -362,7 +338,6 @@ function ProjectDetail() {
       setCreationMode(projectDefaultCreationMode);
       setCopyFiles(detail?.worktree_copy_files ?? []);
       setCopyIgnored(detail?.worktree_copy_ignored ?? false);
-      setSandboxed(false);
       await reload();
       await fetchProcesses(createdWorkspace);
     } catch (e) {
@@ -1029,59 +1004,14 @@ function ProjectDetail() {
         </div>
       )}
 
-      {/* Tab bar */}
-      <div style={{
-        display: "flex",
-        borderBottom: "1px solid var(--border)",
-        marginBottom: 16,
-        gap: 0,
-      }}>
-        <button
-          onClick={() => setActiveTab("overview")}
-          style={{
-            padding: "8px 16px",
-            fontSize: 14,
-            fontWeight: activeTab === "overview" ? 600 : 400,
-            color: activeTab === "overview" ? "var(--text-primary)" : "var(--text-muted)",
-            background: "none",
-            border: "none",
-            borderBottom: activeTab === "overview" ? "2px solid var(--accent)" : "2px solid transparent",
-            cursor: "pointer",
-            marginBottom: -1,
-          }}
-        >
-          Overview
-        </button>
-        <button
-          onClick={() => setActiveTab("skills")}
-          style={{
-            padding: "8px 16px",
-            fontSize: 14,
-            fontWeight: activeTab === "skills" ? 600 : 400,
-            color: activeTab === "skills" ? "var(--text-primary)" : "var(--text-muted)",
-            background: "none",
-            border: "none",
-            borderBottom: activeTab === "skills" ? "2px solid var(--accent)" : "2px solid transparent",
-            cursor: "pointer",
-            marginBottom: -1,
-          }}
-        >
-          Skills
-        </button>
-      </div>
-
-      {/* Skills tab */}
-      {activeTab === "skills" && <ProjectSkillsTab projectPath={projectPath} />}
-
-      {/* Overview tab */}
-      {activeTab === "overview" && !detail.has_config && (
+      {!detail.has_config && (
         <div className="card" style={{ textAlign: "center", padding: 32 }}>
           <p style={{ color: "var(--text-muted)", fontSize: 14 }}>
             Initialize the project configuration to manage workspaces and services.
           </p>
         </div>
       )}
-      {activeTab === "overview" && detail.has_config && (<>
+      {detail.has_config && (<>
 
       {/* Workspaces card */}
       <div className="card">
@@ -1166,9 +1096,6 @@ function ProjectDetail() {
                         >
                           {b.execution_status}
                         </span>
-                      )}
-                      {b.sandboxed && (
-                        <span className="badge" style={{ fontSize: 10 }} title="Sandboxed: restricted filesystem and command access">sandboxed</span>
                       )}
                     </div>
                   </td>
@@ -2322,28 +2249,6 @@ function ProjectDetail() {
             </p>
           </div>
         )}
-        <div style={{ marginBottom: 16 }}>
-          <label
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              fontSize: 13,
-              color: "var(--text-secondary)",
-              cursor: "pointer",
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={sandboxed}
-              onChange={(e) => setSandboxed(e.target.checked)}
-            />
-            Sandboxed workspace
-          </label>
-          <p style={{ marginTop: 4, color: "var(--text-muted)", fontSize: 12 }}>
-            Restricts filesystem access and blocks dangerous commands (git push, npm publish, etc.).
-          </p>
-        </div>
         <div style={{ marginBottom: 16 }}>
           <label
             style={{

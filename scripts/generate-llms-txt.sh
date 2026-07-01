@@ -236,7 +236,6 @@ INTRO
 
 | Command | Description |
 |---|---|
-| `devflow merge [<target>] [--cleanup] [--dry-run]` | Merge current workspace into target |
 | `devflow commit [-m <msg>] [--ai] [--edit] [--dry-run]` | Commit staged changes |
 
 ### Info & diagnostics
@@ -281,7 +280,7 @@ INTRO
 | `devflow switch -c <ws> -x <cmd> [--detach] [-- <args>]` | Launch an agent/command inside an isolated workspace |
 | `devflow agent status` | Show agent status across all workspaces |
 | `devflow agent context [--format json] [--workspace <b>]` | Output project context for agents |
-| `devflow agent skill` | Install bundled workspace skills (see `devflow skill` for full management) |
+| `devflow agent skill` | Install bundled workspace helper skills |
 
 ### Plugins
 
@@ -406,7 +405,7 @@ hooks:
   post-switch:
     update-env:
       command: "echo DATABASE_URL={{ service['app-db'].url }} > .env.local"
-  pre-merge:
+  pre-commit:
     test: "npm test"
 
 agent:
@@ -461,9 +460,6 @@ SECTION
 | `pre-remove` | Before removing a workspace | Yes |
 | `post-remove` | After removing a workspace | No |
 | `pre-commit` | Before committing (Git pre-commit) | Yes |
-| `pre-merge` | Before merging workspaces | Yes |
-| `post-merge` | After merging (Git post-merge) | No |
-| `post-rewrite` | After rebase/amend (Git post-rewrite) | No |
 | `pre-service-create` | Before creating a service workspace | Yes |
 | `post-service-create` | After creating a service workspace | No |
 | `pre-service-delete` | Before deleting a service workspace | Yes |
@@ -479,8 +475,7 @@ SECTION
 | `{{ worktree_path }}` | Worktree path (if enabled) |
 | `{{ default_workspace }}` | Default workspace (main/master) |
 | `{{ commit }}` | Current commit hash (when available) |
-| `{{ target }}` | Target workspace (merge/rebase operations) |
-| `{{ base }}` | Base workspace (merge/rebase operations) |
+| `{{ base }}` | Parent/base workspace for creation hooks |
 | `{{ service.<name>.host }}` | Service host |
 | `{{ service.<name>.port }}` | Service port |
 | `{{ service.<name>.database }}` | Database name |
@@ -551,8 +546,6 @@ crates/devflow-core/    Core library (no CLI/TTY dependencies)
       cow_worktree.rs   CoW worktree creation
     state/local_state.rs  User-level state (SQLite)
     docker/             Docker discovery + compose parsing + settings
-    sandbox/            Workspace sandboxing (seatbelt on macOS, landlock on Linux)
-    skills/             Skill marketplace, install, cache, manifest
     workspace/          Lifecycle orchestration (create, switch, delete, worktree, hooks)
     llm.rs              LLM integration for AI commit messages (CLI-first + API fallback)
 

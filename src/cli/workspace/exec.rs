@@ -6,8 +6,7 @@ use devflow_core::state::LocalStateManager;
 use devflow_core::vcs;
 
 /// Execute a command inside a workspace's worktree, optionally detached via a
-/// terminal multiplexer (tmux/zellij). Honors the sandbox policy when the
-/// workspace is sandboxed, and records execution state in the local store.
+/// terminal multiplexer (tmux/zellij), and record execution state in the local store.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_in_workspace(
     config: &Config,
@@ -16,7 +15,6 @@ pub(super) async fn execute_in_workspace(
     cmd: &str,
     execute_args: &[String],
     detach: bool,
-    sandbox_resolved: Option<bool>,
     json_output: bool,
 ) -> Result<()> {
     // Build full command from -x value + trailing args
@@ -31,33 +29,6 @@ pub(super) async fn execute_in_workspace(
         .ok()
         .and_then(|repo| repo.worktree_path(workspace_name).ok().flatten())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-    // Build sandbox policy if workspace is sandboxed
-    let is_sandboxed = sandbox_resolved.unwrap_or(false);
-    let sandbox_policy = if is_sandboxed {
-        let sandbox_config = config.sandbox.clone().unwrap_or_default();
-        Some(devflow_core::sandbox::SandboxPolicy::from_config(
-            &sandbox_config,
-            &work_dir,
-        ))
-    } else {
-        None
-    };
-
-    // Validate command against sandbox policy
-    if let Some(ref policy) = sandbox_policy {
-        policy.validate_command(&full_cmd)?;
-    }
-
-    if !json_output && is_sandboxed {
-        println!(
-            "Sandbox: enabled (platform: {})",
-            sandbox_policy
-                .as_ref()
-                .map(|p| p.platform.to_string())
-                .unwrap_or_else(|| "none".to_string())
-        );
-    }
 
     // Record execution state
     let normalized = config.get_normalized_workspace_name(workspace_name);
@@ -172,7 +143,6 @@ pub(super) async fn execute_in_workspace(
                     "command": full_cmd,
                     "session": session,
                     "worktree": work_dir.display().to_string(),
-                    "sandboxed": is_sandboxed,
                     "detached": true,
                 }))?
             );
@@ -185,21 +155,12 @@ pub(super) async fn execute_in_workspace(
             println!("Running: {}", full_cmd);
         }
 
-        let status = if let Some(ref policy) = sandbox_policy {
-            let (prog, args) = policy.wrap_command_string(&full_cmd);
-            let mut cmd = tokio::process::Command::new(&prog);
-            cmd.args(&args).current_dir(&work_dir);
-            cmd.status()
-                .await
-                .context("Failed to execute sandboxed command")?
-        } else {
-            tokio::process::Command::new("sh")
-                .args(["-c", &full_cmd])
-                .current_dir(&work_dir)
-                .status()
-                .await
-                .context("Failed to execute command")?
-        };
+        let status = tokio::process::Command::new("sh")
+            .args(["-c", &full_cmd])
+            .current_dir(&work_dir)
+            .status()
+            .await
+            .context("Failed to execute command")?;
 
         // Update state on completion
         let execution_status = if status.success() { "done" } else { "failed" };
@@ -229,7 +190,6 @@ pub(super) async fn execute_in_workspace(
                     "command": full_cmd,
                     "exit_code": status.code(),
                     "worktree": work_dir.display().to_string(),
-                    "sandboxed": is_sandboxed,
                     "detached": false,
                 }))?
             );

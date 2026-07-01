@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **CLI** — Full command-line interface: `init`, `switch`, `list`, `graph`, `link`, `remove`, `merge`, `cleanup`, `status`, `doctor`, `capabilities`, `gc`.
+- **CLI** — Full command-line interface: `init`, `switch`, `list`, `graph`, `link`, `remove`, `cleanup`, `status`, `doctor`, `capabilities`, `gc`.
 - **Multi-service support** — PostgreSQL, ClickHouse, MySQL, generic Docker containers, and plugin backends from a single config.
 - **Local Docker backend** — Docker containers with CoW storage (APFS clones, ZFS snapshots, Btrfs/XFS reflinks).
 - **Template backend** — PostgreSQL `CREATE DATABASE ... WITH TEMPLATE` for server-side branching.
@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Git worktree management** — Creates worktree directories with configurable path templates and file copying.
 - **Jujutsu (jj) VCS support** — Auto-detects and supports Jujutsu alongside Git.
 - **Git hook integration** — Auto-creates/switches service workspaces on `git checkout` via installed hooks.
-- **Hook engine** — MiniJinja-templated lifecycle hooks (15 phases) with approval system and built-in recipes.
+- **Hook engine** — MiniJinja-templated lifecycle hooks with approval system and built-in recipes.
 - **AI tool config sync** — Auto-copies `.claude/`, `.cursor/`, `.opencode/`, `.agents/` into worktrees; `sync-ai-configs` merges back.
 - **AI commit messages** — `devflow commit --ai` generates commit messages via LLM (CLI-first, API fallback).
 - **AI agent integration** — `devflow agent status/context/skill` for managing AI coding agents in isolated workspaces; launch agents with `devflow switch -c <workspace> -x <command>`.
@@ -27,8 +27,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **TUI** — Ratatui-based terminal dashboard.
 - **Seed support** — Seed databases from PostgreSQL URLs, local dump files, or S3.
 - **Shell integration** — `eval "$(devflow shell-init)"` for automatic `cd` into worktrees.
-- **Smart merge system** — Per-project merge configuration with workspace cleanup.
-- **Workspace sandbox** — OS-level isolation for workspace processes.
 - **Multiplexer support** — Terminal multiplexer integration (tmux, zellij) with `--open` flag.
 - **Three-tier configuration** — `.devflow.yml` (team) -> `.devflow.local.yml` (local) -> environment variables.
 - **JSON output + non-interactive mode** — For CI/CD and AI agent workflows.
@@ -55,10 +53,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **config**: read lightweight devflow.toml (G4)
 - **services**: RustFS shared object-storage provider (G2)
 - post-review remediation (A–F) + shared-engine provider (G1)
-
-### Refactor
-
-- **skills**: simplify devflow workspace skills
 
 ## v0.4.4 (2026-06-02)
 
@@ -94,16 +88,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Feat
 
 - **proxy**: add Firefox trust via enterprise policies.json on Linux
-- **skills**: add full skills management system
 
 ### Fix
 
-- handle missing configs and simplify skills
+- handle missing configs
 - **proxy**: preserve original Host header and use origin-form URI
 - **gui**: pin bun and tauri-cli in mise, fix hanging bun install
 - gate HashSet import behind cfg(target_os = "macos") for Linux CI
 - resolve remaining clippy errors on Linux CI
-- rename _cmd to cmd in sandbox apply_to_command
 
 ## v0.2.0 (2026-03-06)
 

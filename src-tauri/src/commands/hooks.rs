@@ -98,10 +98,8 @@ fn detect_hooks_installed(project_path: &Path, vcs: &dyn devflow_core::vcs::VcsP
     }
 
     let post_checkout = hooks_dir.join("post-checkout");
-    let post_merge = hooks_dir.join("post-merge");
 
-    (post_checkout.exists() && vcs.is_devflow_hook(&post_checkout).unwrap_or(false))
-        || (post_merge.exists() && vcs.is_devflow_hook(&post_merge).unwrap_or(false))
+    post_checkout.exists() && vcs.is_devflow_hook(&post_checkout).unwrap_or(false)
 }
 
 #[tauri::command]

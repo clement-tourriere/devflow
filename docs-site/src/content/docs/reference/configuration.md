@@ -1,6 +1,6 @@
 ---
 title: Configuration
-description: The complete .devflow.yml schema — git, behavior, services, processes, worktree, hooks, execute, merge, commit, agent — with hierarchy and interpolation rules.
+description: The complete .devflow.yml schema — git, behavior, services, processes, worktree, hooks, execute, commit, agent — with hierarchy and interpolation rules.
 sidebar:
   order: 2
 ---
@@ -212,7 +212,7 @@ Full semantics in [Worktrees](/devflow/concepts/worktrees/#configuration). Note 
 
 ```yaml
 hooks:
-  <phase>:                  # post-create, post-switch, pre-merge, … or any custom name
+  <phase>:                  # post-create, post-switch, pre-commit, … or any custom name
     <hook-name>: "command"  # simple form
     <hook-name>:            # extended form
       command: "npm run migrate"
@@ -240,16 +240,6 @@ execute:
 
 Used by `devflow switch -o/--open` and `-d/--detach`.
 
-## `merge`
-
-```yaml
-merge:
-  # readiness checks evaluated by `devflow merge` when Smart Merge is enabled
-  # (see the desktop app settings / global config for the feature flag)
-```
-
-See [Merging & merge trains](/devflow/guides/merging/#smart-merge).
-
 ## `commit`
 
 ```yaml
@@ -266,14 +256,6 @@ commit:
 ```yaml
 agent:
   auto_context: true       # provide project context to agents on launch
-```
-
-## `sandbox`
-
-```yaml
-sandbox:
-  # platform-aware restrictions applied to sandboxed workspaces
-  # (devflow switch -c <ws> --sandboxed)
 ```
 
 ## Value interpolation

@@ -111,7 +111,6 @@ pub(super) async fn handle_interactive_switch(
                     None,
                     None,
                     None, // copy_ignored — use config default
-                    None, // sandboxed — use config default
                 )
                 .await?;
             } else if selected_branch == config.git.main_workspace {
@@ -142,7 +141,6 @@ pub(super) async fn handle_interactive_switch(
                     None,
                     None,
                     None, // copy_ignored — use config default
-                    None, // sandboxed — use existing state
                 )
                 .await?;
             }

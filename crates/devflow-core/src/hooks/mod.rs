@@ -30,18 +30,8 @@ pub enum HookPhase {
     PreRemove,
     PostRemove,
 
-    // Merge lifecycle
+    // Commit lifecycle
     PreCommit,
-    PreMerge,
-    PostMerge,
-    PostRewrite,
-
-    // Rebase lifecycle
-    PreRebase,
-    PostRebase,
-
-    // Cascade lifecycle
-    PostMergeCascade,
 
     // Service lifecycle
     PreServiceCreate,
@@ -65,12 +55,6 @@ impl fmt::Display for HookPhase {
             HookPhase::PreRemove => write!(f, "pre-remove"),
             HookPhase::PostRemove => write!(f, "post-remove"),
             HookPhase::PreCommit => write!(f, "pre-commit"),
-            HookPhase::PreMerge => write!(f, "pre-merge"),
-            HookPhase::PostMerge => write!(f, "post-merge"),
-            HookPhase::PostRewrite => write!(f, "post-rewrite"),
-            HookPhase::PreRebase => write!(f, "pre-rebase"),
-            HookPhase::PostRebase => write!(f, "post-rebase"),
-            HookPhase::PostMergeCascade => write!(f, "post-merge-cascade"),
             HookPhase::PreServiceCreate => write!(f, "pre-service-create"),
             HookPhase::PostServiceCreate => write!(f, "post-service-create"),
             HookPhase::PreServiceDelete => write!(f, "pre-service-delete"),
@@ -90,8 +74,6 @@ impl HookPhase {
                 | HookPhase::PostCreate
                 | HookPhase::PreRemove
                 | HookPhase::PreCommit
-                | HookPhase::PreMerge
-                | HookPhase::PreRebase
                 | HookPhase::PreServiceCreate
                 | HookPhase::PreServiceDelete
         )
@@ -110,12 +92,6 @@ impl FromStr for HookPhase {
             "pre-remove" => HookPhase::PreRemove,
             "post-remove" => HookPhase::PostRemove,
             "pre-commit" => HookPhase::PreCommit,
-            "pre-merge" => HookPhase::PreMerge,
-            "post-merge" => HookPhase::PostMerge,
-            "post-rewrite" => HookPhase::PostRewrite,
-            "pre-rebase" => HookPhase::PreRebase,
-            "post-rebase" => HookPhase::PostRebase,
-            "post-merge-cascade" => HookPhase::PostMergeCascade,
             "pre-service-create" => HookPhase::PreServiceCreate,
             "post-service-create" => HookPhase::PostServiceCreate,
             "pre-service-delete" => HookPhase::PreServiceDelete,
@@ -375,9 +351,6 @@ pub struct HookContext {
     /// Abbreviated HEAD commit SHA
     #[serde(skip_serializing_if = "Option::is_none")]
     pub short_commit: Option<String>,
-    /// Target workspace (for merge hooks)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target: Option<String>,
     /// Base workspace (for creation hooks)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
@@ -517,7 +490,6 @@ pub async fn build_hook_context(
         default_workspace: config.git.main_workspace.clone(),
         commit,
         short_commit,
-        target: None,
         base: None,
         previous_workspace: None,
         trigger_source: "cli".to_string(),
