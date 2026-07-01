@@ -21,6 +21,8 @@ pub struct ContainerEntry {
     pub project: Option<String>,
     pub service: Option<String>,
     pub workspace: Option<String>,
+    /// Source of this proxy target for UI explanations.
+    pub source: String,
     /// Reachable endpoint URL: `https://<domain>` for web services, or a native
     /// scheme such as `postgresql://<domain>:5432` for database/TCP endpoints.
     pub endpoint_url: String,
@@ -133,6 +135,14 @@ pub async fn list_containers(state: State<'_, AppState>) -> Result<Vec<Container
     for container in &containers {
         let targets = devflow_proxy::discovery::extract_proxy_targets(container, &domain_suffix);
         for target in targets {
+            let source =
+                if target.workspace.is_some() && target.container_name.starts_with("devflow-") {
+                    "devflow-service"
+                } else if target.project.is_some() && target.service.is_some() {
+                    "docker-compose"
+                } else {
+                    "standalone-container"
+                };
             entries.push(ContainerEntry {
                 // Web -> https://<domain>; databases -> postgresql://<domain>:5432, etc.
                 endpoint_url: devflow_proxy::endpoint::display_endpoint(
@@ -146,6 +156,7 @@ pub async fn list_containers(state: State<'_, AppState>) -> Result<Vec<Container
                 project: target.project,
                 service: target.service,
                 workspace: target.workspace,
+                source: source.to_string(),
             });
         }
     }

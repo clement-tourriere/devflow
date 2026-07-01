@@ -1328,6 +1328,7 @@ pub async fn handle_command(
 
                 let interactive = !non_interactive;
                 let mut added_services: Vec<String> = Vec::new();
+                let mut imported_processes: Vec<String> = Vec::new();
                 let mut hooks_installed = false;
                 let mut shell_configured = false;
 
@@ -1368,6 +1369,60 @@ pub async fn handle_command(
                             if !add_another {
                                 break;
                             }
+                        }
+                    }
+
+                    // Step 1.5: Offer to import non-data Docker Compose services as processes.
+                    if init_config.processes.is_none() {
+                        match init::discover_compose_processes() {
+                            Ok(suggestions) if !suggestions.is_empty() => {
+                                println!();
+                                println!(
+                                    "Detected Docker Compose app processes: {}",
+                                    suggestions
+                                        .iter()
+                                        .map(|s| s.name.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                );
+                                let import_processes = inquire::Confirm::new(
+                                    "Import these as devflow Pitchfork processes?",
+                                )
+                                .with_default(true)
+                                .with_help_message(
+                                    "Database/cache containers are skipped; app containers become editable processes.daemons entries.",
+                                )
+                                .prompt()
+                                .unwrap_or(false);
+
+                                if import_processes {
+                                    let names = suggestions
+                                        .iter()
+                                        .map(|s| s.name.clone())
+                                        .collect::<Vec<_>>();
+                                    match init::install_compose_processes(
+                                        &mut init_config,
+                                        &init_config_path,
+                                        suggestions,
+                                    ) {
+                                        Ok(count) => {
+                                            imported_processes =
+                                                names.into_iter().take(count).collect();
+                                            println!(
+                                                "Imported {} Pitchfork process{} into .devflow.yml",
+                                                count,
+                                                if count == 1 { "" } else { "es" }
+                                            );
+                                        }
+                                        Err(e) => eprintln!(
+                                            "Warning: could not import Compose processes: {}",
+                                            e
+                                        ),
+                                    }
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(e) => eprintln!("Warning: could not inspect Docker Compose: {}", e),
                         }
                     }
 
@@ -1519,6 +1574,9 @@ pub async fn handle_command(
                     println!("  Config:     {}", init_config_path.display());
                     if !added_services.is_empty() {
                         println!("  Services:   {}", added_services.join(", "));
+                    }
+                    if !imported_processes.is_empty() {
+                        println!("  Processes:  {}", imported_processes.join(", "));
                     }
                     println!(
                         "  Hooks:      {}",

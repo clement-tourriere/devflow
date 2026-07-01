@@ -1,19 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
 
+use super::{CreateWorkspaceResult, LifecycleOptions, WorkspaceCreationMode};
 use crate::config::Config;
-use crate::hooks::HookPhase;
-use crate::processes;
-use crate::services;
-use crate::state::{DevflowWorkspace, LocalStateManager};
-use crate::vcs;
-
-use super::hooks::run_lifecycle_hooks_best_effort;
-use super::worktree::create_worktree_with_files;
-use super::{
-    CreateWorkspaceResult, LifecycleOptions, ServiceResult, WorkspaceCreationMode,
-    WorktreeSetupResult,
-};
 
 /// Options specific to workspace creation.
 #[derive(Debug, Clone)]
@@ -45,247 +34,41 @@ impl Default for CreateOptions {
     }
 }
 
-/// Create a new workspace with the full lifecycle: VCS branch creation,
-/// optional worktree setup, hook execution, service orchestration, and
-/// state registration.
+/// Create a new workspace using the same core lifecycle as switching with
+/// `create_if_missing`.
 ///
-/// Hook phase ordering:
-///   PreServiceCreate → services → PostServiceCreate → PostCreate → PostSwitch
+/// This intentionally delegates to `switch::switch_workspace` so CLI, TUI, and
+/// GUI paths cannot drift into separate branch/worktree/service/process
+/// semantics.
 pub async fn create_workspace(
     config: &Config,
     project_dir: &Path,
     workspace_name: &str,
     options: &CreateOptions,
 ) -> Result<CreateWorkspaceResult> {
-    let opts = &options.lifecycle;
-    let vcs_provider =
-        vcs::detect_vcs_provider(project_dir).context("Failed to open VCS repository")?;
-
-    // Reject unsafe workspace names before touching the VCS. Names flow into
-    // shell hooks, file paths, db names, and container names, so a name with
-    // shell metacharacters could break out of an approved hook template.
-    super::validate_workspace_name(workspace_name).map_err(|e| anyhow::anyhow!(e))?;
-
-    let normalized_name = config.get_normalized_workspace_name(workspace_name);
-    let normalized_parent = options
-        .from_workspace
-        .as_deref()
-        .map(|fb| config.get_normalized_workspace_name(fb));
-    let mut hook_results = Vec::new();
-
-    // Decide whether to create a worktree
-    let config_prefers_worktree = config.worktree.as_ref().is_some_and(|wt| wt.enabled);
-
-    let create_as_worktree = match options.creation_mode {
-        WorkspaceCreationMode::Default => config_prefers_worktree,
-        WorkspaceCreationMode::Worktree => true,
-        WorkspaceCreationMode::Branch => false,
-    };
-
-    if create_as_worktree && !vcs_provider.supports_worktrees() {
-        anyhow::bail!(
-            "VCS provider '{}' does not support worktrees",
-            vcs_provider.provider_name()
-        );
-    }
-
-    // 1. Create VCS branch
-    vcs_provider.create_workspace(workspace_name, options.from_workspace.as_deref())?;
-
-    // 2. Create worktree if enabled.
-    //    If this fails, roll back the branch we just created so we don't leave
-    //    an orphan branch behind — the user gets the error and can retry clean.
-    let worktree_result = if create_as_worktree {
-        match create_worktree_with_files(
-            vcs_provider.as_ref(),
-            config,
-            project_dir,
-            workspace_name,
-            options.copy_files.as_deref(),
-            options.copy_ignored,
-        ) {
-            Ok(result) => Some(result),
-            Err(e) => {
-                log::warn!(
-                    "Worktree creation failed for '{}'; rolling back the branch: {:#}",
-                    workspace_name,
-                    e
-                );
-                if let Err(cleanup_err) = vcs_provider.delete_workspace(workspace_name) {
-                    log::warn!(
-                        "Failed to roll back branch '{}' after worktree error: {}",
-                        workspace_name,
-                        cleanup_err
-                    );
-                }
-                return Err(e);
-            }
-        }
-    } else {
-        None
-    };
-
-    // 3. Pre-service-create hooks
-    if !opts.skip_hooks {
-        if let Some(summary) = run_lifecycle_hooks_best_effort(
-            config,
-            project_dir,
-            workspace_name,
-            HookPhase::PreServiceCreate,
-            opts,
-        )
-        .await
-        {
-            hook_results.push(summary);
-        }
-    }
-
-    // 4. Service orchestration
-    let service_results: Vec<ServiceResult> = if !opts.skip_services {
-        match services::factory::orchestrate_create(
-            config,
-            workspace_name,
-            options.from_workspace.as_deref(),
-        )
-        .await
-        {
-            Ok(results) => results.into_iter().map(ServiceResult::from).collect(),
-            Err(e) => {
-                // Branch/worktree already exist — record the failure and
-                // finish creation instead of aborting half-way.
-                log::warn!("Service orchestration failed: {:#}", e);
-                vec![ServiceResult {
-                    service_name: "(orchestration)".to_string(),
-                    success: false,
-                    message: format!("{:#}", e),
-                }]
-            }
-        }
-    } else {
-        vec![]
-    };
-
-    // 5. Post-service-create hooks
-    if !opts.skip_hooks {
-        if let Some(summary) = run_lifecycle_hooks_best_effort(
-            config,
-            project_dir,
-            workspace_name,
-            HookPhase::PostServiceCreate,
-            opts,
-        )
-        .await
-        {
-            hook_results.push(summary);
-        }
-    }
-
-    // 6. Register in devflow state
-    register_workspace_state(
+    let result = super::switch::switch_workspace(
         config,
         project_dir,
-        &normalized_name,
-        normalized_parent.as_deref(),
-        worktree_result.as_ref(),
-        options.sandboxed,
-    );
-
-    // 7. Post-create + post-switch hooks
-    if !opts.skip_hooks {
-        if let Some(summary) = run_lifecycle_hooks_best_effort(
-            config,
-            project_dir,
-            workspace_name,
-            HookPhase::PostCreate,
-            opts,
-        )
-        .await
-        {
-            hook_results.push(summary);
-        }
-
-        if let Some(summary) = run_lifecycle_hooks_best_effort(
-            config,
-            project_dir,
-            workspace_name,
-            HookPhase::PostSwitch,
-            opts,
-        )
-        .await
-        {
-            hook_results.push(summary);
-        }
-    }
-
-    // 8. Process orchestration (after hooks so generated .env files exist).
-    let process_results = if !opts.skip_processes {
-        processes::auto_start_workspace_processes(
-            config,
-            project_dir,
-            workspace_name,
-            process_approval_mode(opts.hook_approval),
-        )
-        .await
-    } else {
-        Vec::new()
-    };
+        workspace_name,
+        &super::switch::SwitchOptions {
+            lifecycle: options.lifecycle.clone(),
+            create_if_missing: true,
+            creation_mode: options.creation_mode,
+            from_workspace: options.from_workspace.clone(),
+            copy_files: options.copy_files.clone(),
+            copy_ignored: options.copy_ignored,
+            sandboxed: options.sandboxed,
+        },
+    )
+    .await?;
 
     Ok(CreateWorkspaceResult {
-        workspace: normalized_name,
-        parent: normalized_parent,
-        worktree: worktree_result,
-        branch_created: true,
-        services: service_results,
-        processes: process_results,
-        hooks: hook_results,
+        workspace: result.workspace,
+        parent: result.parent,
+        worktree: result.worktree,
+        branch_created: result.branch_created,
+        services: result.services,
+        processes: result.processes,
+        hooks: result.hooks,
     })
-}
-
-fn process_approval_mode(mode: super::hooks::HookApprovalMode) -> processes::ProcessApprovalMode {
-    match mode {
-        super::hooks::HookApprovalMode::Interactive => processes::ProcessApprovalMode::Interactive,
-        super::hooks::HookApprovalMode::NonInteractive => {
-            processes::ProcessApprovalMode::NonInteractive
-        }
-        super::hooks::HookApprovalMode::NoApproval => processes::ProcessApprovalMode::NoApproval,
-    }
-}
-
-fn register_workspace_state(
-    _config: &Config,
-    project_dir: &Path,
-    normalized_name: &str,
-    normalized_parent: Option<&str>,
-    worktree: Option<&WorktreeSetupResult>,
-    sandboxed: Option<bool>,
-) {
-    let Ok(mut state_mgr) = LocalStateManager::new() else {
-        return;
-    };
-
-    // Preserve existing metadata on upsert
-    let existing = state_mgr.get_workspace_by_dir(project_dir, normalized_name);
-
-    let workspace = DevflowWorkspace {
-        name: normalized_name.to_string(),
-        parent: normalized_parent
-            .map(String::from)
-            .or_else(|| existing.as_ref().and_then(|b| b.parent.clone())),
-        worktree_path: worktree
-            .map(|w| w.path.display().to_string())
-            .or_else(|| existing.as_ref().and_then(|b| b.worktree_path.clone())),
-        created_at: existing
-            .as_ref()
-            .map(|b| b.created_at)
-            .unwrap_or_else(chrono::Utc::now),
-        executed_command: existing.as_ref().and_then(|b| b.executed_command.clone()),
-        execution_status: existing.as_ref().and_then(|b| b.execution_status.clone()),
-        executed_at: existing.as_ref().and_then(|b| b.executed_at),
-        sandboxed: sandboxed
-            .unwrap_or_else(|| existing.as_ref().map(|b| b.sandboxed).unwrap_or(false)),
-    };
-
-    if let Err(e) = state_mgr.register_workspace_by_dir(project_dir, workspace) {
-        log::warn!("Failed to register workspace in devflow state: {}", e);
-    }
 }

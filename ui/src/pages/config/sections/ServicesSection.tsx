@@ -13,6 +13,7 @@ const SERVICE_TYPE_COLORS: Record<string, string> = {
   postgres: "var(--accent)",
   clickhouse: "var(--warning)",
   mysql: "#f0883e",
+  redis: "#dc382d",
   generic: "var(--text-muted)",
 };
 

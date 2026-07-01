@@ -11,7 +11,7 @@ const DEFAULT_WORKTREE: WorktreeConfig = {
   enabled: true,
   path_template: "../{repo}.{workspace}",
   copy_files: [".env", ".env.local"],
-  copy_ignored: true,
+  copy_ignored: false,
   respect_gitignore: true,
 };
 
@@ -93,7 +93,7 @@ function WorktreeSection({ config, onChange }: Props) {
 
       <FormField
         label="Copy ignored files"
-        description="Also copy git-ignored files (e.g. .env.local)"
+        description="Also copy gitignored dependency/cache dirs like .venv, node_modules, and target. Leave off for fastest workspace creation."
       >
         <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
           <input

@@ -558,4 +558,5 @@ worktree:
 fn test_worktree_recommended_default_includes_respect_gitignore() {
     let wt = WorktreeConfig::recommended_default();
     assert!(wt.respect_gitignore);
+    assert!(!wt.copy_ignored);
 }

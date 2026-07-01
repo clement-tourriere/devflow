@@ -129,9 +129,9 @@ pub async fn get_connection_info(
     workspace_name: String,
     service_name: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(crate::commands::format_error)?;
+    let project_dir = std::path::Path::new(&project_path);
+    let config =
+        crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
 
     let named_services = config.resolve_services();
     let service_name = service_name.unwrap_or_else(|| "default".to_string());
@@ -163,6 +163,7 @@ pub async fn get_connection_info(
 
 #[derive(Serialize)]
 pub struct CreateWorkspaceResult {
+    pub workspace: String,
     pub services: Vec<OrchestrationResultDto>,
     pub processes: Vec<ProcessResult>,
     pub worktree_path: Option<String>,
@@ -206,18 +207,16 @@ pub async fn create_workspace(
     sandboxed: Option<bool>,
 ) -> Result<CreateWorkspaceResult, String> {
     let project_dir = std::path::Path::new(&project_path);
-    let config_path = project_dir.join(".devflow.yml");
-    let cfg = if config_path.exists() {
-        config::Config::from_file(&config_path).map_err(crate::commands::format_error)?
-    } else {
-        config::Config::default()
-    };
+    let cfg = crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
 
     let creation_mode =
         WorkspaceCreationMode::parse(creation_mode.as_deref()).map_err(|e| e.to_string())?;
 
-    let options = workspace::create::CreateOptions {
-        lifecycle: gui_lifecycle_options(),
+    let lifecycle = gui_lifecycle_options();
+
+    let options = workspace::switch::SwitchOptions {
+        lifecycle,
+        create_if_missing: true,
         creation_mode,
         from_workspace,
         copy_files,
@@ -225,11 +224,12 @@ pub async fn create_workspace(
         sandboxed,
     };
 
-    let result = workspace::create::create_workspace(&cfg, project_dir, &workspace_name, &options)
+    let result = workspace::switch::switch_workspace(&cfg, project_dir, &workspace_name, &options)
         .await
         .map_err(crate::commands::format_error)?;
 
     let response = CreateWorkspaceResult {
+        workspace: result.workspace.clone(),
         services: result
             .services
             .into_iter()
@@ -269,16 +269,12 @@ pub async fn switch_workspace(
     workspace_name: String,
 ) -> Result<SwitchWorkspaceResult, String> {
     let project_dir = std::path::Path::new(&project_path);
-    let config_path = project_dir.join(".devflow.yml");
-    let cfg = if config_path.exists() {
-        config::Config::from_file(&config_path).map_err(crate::commands::format_error)?
-    } else {
-        config::Config::default()
-    };
+    let cfg = crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
 
     let options = workspace::switch::SwitchOptions {
         lifecycle: gui_lifecycle_options(),
         create_if_missing: false,
+        creation_mode: WorkspaceCreationMode::Default,
         from_workspace: None,
         copy_files: None,
         copy_ignored: None,
@@ -333,22 +329,27 @@ pub async fn delete_workspace(
     workspace_name: String,
 ) -> Result<DeleteWorkspaceResult, String> {
     let project_dir = std::path::Path::new(&project_path);
-    let config_path = project_dir.join(".devflow.yml");
-    let cfg = if config_path.exists() {
-        config::Config::from_file(&config_path).map_err(crate::commands::format_error)?
-    } else {
-        config::Config::default()
-    };
+    let cfg = crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
 
     let options = workspace::delete::DeleteOptions {
         lifecycle: gui_lifecycle_options(),
         keep_services: false,
-        force: false,
+        // The GUI has already shown a destructive confirmation dialog. Use the
+        // confirmed/force path so stale worktree metadata or manually-deleted
+        // directories can still be cleaned up instead of leaving phantom rows.
+        force: true,
     };
 
-    let result = workspace::delete::delete_workspace(&cfg, project_dir, &workspace_name, &options)
-        .await
-        .map_err(crate::commands::format_error)?;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        workspace::delete::delete_workspace(&cfg, project_dir, &workspace_name, &options),
+    )
+    .await
+    .map_err(|_| {
+        "Timed out deleting workspace; cleanup may still be partially complete. Refresh and retry."
+            .to_string()
+    })?
+    .map_err(crate::commands::format_error)?;
 
     let response = DeleteWorkspaceResult {
         services: result

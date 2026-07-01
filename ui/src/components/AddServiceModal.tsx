@@ -19,6 +19,7 @@ const defaultImageForType = (type: string) => {
     case "postgres": return "postgres:17";
     case "clickhouse": return "clickhouse/clickhouse-server:latest";
     case "mysql": return "mysql:8";
+    case "redis": return "redis:7";
     default: return "";
   }
 };
@@ -28,6 +29,7 @@ const defaultNameForType = (type: string) => {
     case "postgres": return "app-db";
     case "clickhouse": return "analytics";
     case "mysql": return "app-db";
+    case "redis": return "redis";
     case "generic": return "cache";
     default: return "service";
   }
@@ -37,6 +39,7 @@ const SERVICE_TYPE_LABELS: Record<string, string> = {
   postgres: "PostgreSQL",
   clickhouse: "ClickHouse",
   mysql: "MySQL",
+  redis: "Redis",
   generic: "Generic Docker",
 };
 
@@ -149,7 +152,9 @@ function AddServiceModal({
     setDockerEnv("");
     setDockerRestartPolicy("");
     setDockerSettingsExpanded(false);
-    if (type !== "postgres") {
+    if (type === "redis") {
+      setProvider("shared");
+    } else if (type !== "postgres") {
       setProvider("local");
     }
     runDiscovery(type);
@@ -213,7 +218,7 @@ function AddServiceModal({
           Service Type
         </label>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-          {(["postgres", "clickhouse", "mysql", "generic"] as const).map((t) => (
+          {(["postgres", "clickhouse", "mysql", "redis", "generic"] as const).map((t) => (
             <button
               key={t}
               onClick={() => handleServiceTypeChange(t)}
@@ -335,6 +340,7 @@ function AddServiceModal({
             style={{ width: "100%" }}
           >
             <option value="local">Local Docker</option>
+            <option value="shared">Shared Docker</option>
             <option value="neon">Neon</option>
             <option value="dblab">DBLab</option>
             <option value="xata">Xata</option>

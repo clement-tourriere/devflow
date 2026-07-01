@@ -152,6 +152,7 @@ fn main() {
             commands::processes::stop_processes,
             commands::processes::restart_processes,
             commands::processes::get_process_logs,
+            commands::processes::forget_process_record,
             // Services
             commands::services::add_service,
             commands::services::list_services,

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::path::Path;
+use std::time::Duration;
 
 use crate::config::Config;
 use crate::hooks::HookPhase;
@@ -45,6 +46,9 @@ pub async fn delete_workspace(
     // VCS is optional — `remove` must work even without a git/jj repo
     let vcs_provider = vcs::detect_vcs_provider(project_dir).ok();
     let normalized = config.get_normalized_workspace_name(workspace_name);
+    let registered_workspace = LocalStateManager::new()
+        .ok()
+        .and_then(|state| state.get_workspace_by_dir(project_dir, &normalized));
     let mut hook_results = Vec::new();
 
     // 1. Pre-remove hooks (blocking)
@@ -61,8 +65,22 @@ pub async fn delete_workspace(
 
     // 2. Stop workspace processes before deleting files/services.
     let process_results = if !opts.skip_processes {
-        let results =
-            processes::auto_stop_workspace_processes(config, project_dir, workspace_name).await;
+        let results = match tokio::time::timeout(
+            Duration::from_secs(20),
+            processes::auto_stop_workspace_processes(config, project_dir, workspace_name),
+        )
+        .await
+        {
+            Ok(results) => results,
+            Err(_) => vec![processes::ProcessResult {
+                process: "(process-runtime)".to_string(),
+                success: false,
+                message: "timed out stopping workspace processes; continuing cleanup".to_string(),
+                required: false,
+                pid: None,
+                ports: Vec::new(),
+            }],
+        };
         if results.iter().all(|r| r.success) {
             if let Err(e) =
                 processes::cleanup_workspace_process_state(config, project_dir, workspace_name)
@@ -84,29 +102,53 @@ pub async fn delete_workspace(
     let mut worktree_path_str: Option<String> = None;
 
     if let Some(ref repo) = vcs_provider {
-        if let Ok(Some(wt_path)) = repo.worktree_path(workspace_name) {
+        // First prune stale metadata. This is safe for valid worktrees and is
+        // critical when the user manually deleted the worktree directory — git
+        // otherwise keeps a phantom checked-out branch that blocks deletion.
+        if let Err(e) = repo.prune_worktrees() {
+            log::debug!("Failed to prune stale worktrees before delete: {:#}", e);
+        }
+
+        let registered_path = registered_workspace
+            .as_ref()
+            .and_then(|w| w.worktree_path.as_ref())
+            .map(std::path::PathBuf::from);
+        let wt_path = repo
+            .worktree_path(workspace_name)
+            .ok()
+            .flatten()
+            .or(registered_path);
+
+        if let Some(wt_path) = wt_path {
             worktree_path_str = Some(wt_path.display().to_string());
-            match repo.remove_worktree(&wt_path, options.force) {
-                Ok(()) => worktree_removed = true,
-                Err(e) if options.force => {
-                    // Forced: VCS removal failed (e.g. stale metadata) — fall
-                    // back to plain directory removal.
-                    log::warn!(
-                        "Failed to remove worktree via VCS, falling back to fs removal: {}",
-                        e
-                    );
-                    if wt_path.exists() {
-                        std::fs::remove_dir_all(&wt_path)
-                            .context("Failed to remove worktree directory")?;
+            if !wt_path.exists() {
+                // Already removed outside devflow. Treat this as success and
+                // continue cleaning services, branch, state, and git metadata.
+                worktree_removed = true;
+            } else {
+                match repo.remove_worktree(&wt_path, options.force) {
+                    Ok(()) => worktree_removed = true,
+                    Err(e) if options.force => {
+                        // Forced: VCS removal failed (e.g. stale metadata) — fall
+                        // back to plain directory removal.
+                        log::warn!(
+                            "Failed to remove worktree via VCS, falling back to fs removal: {}",
+                            e
+                        );
+                        if wt_path.exists() {
+                            std::fs::remove_dir_all(&wt_path)
+                                .context("Failed to remove worktree directory")?;
+                        }
+                        worktree_removed = true;
                     }
-                    worktree_removed = true;
-                }
-                Err(e) => {
-                    // Abort before deleting services/branch — nothing has been
-                    // destroyed yet and the user can retry with force.
-                    return Err(
-                        e.context(format!("Refusing to delete workspace '{}'", workspace_name))
-                    );
+                    Err(e) => {
+                        // Abort before deleting services/branch — nothing has been
+                        // destroyed yet and the user can retry with force.
+                        return Err(e.context(format!(
+                            "Refusing to delete workspace '{}'",
+                            workspace_name
+                        )));
+                    }
                 }
             }
         }
@@ -129,9 +171,20 @@ pub async fn delete_workspace(
             }
         }
 
-        let results = services::factory::orchestrate_delete(config, &normalized).await?;
-        let service_results: Vec<ServiceResult> =
-            results.into_iter().map(ServiceResult::from).collect();
+        let service_results: Vec<ServiceResult> = match tokio::time::timeout(
+            Duration::from_secs(30),
+            services::factory::orchestrate_delete(config, &normalized),
+        )
+        .await
+        {
+            Ok(Ok(results)) => results.into_iter().map(ServiceResult::from).collect(),
+            Ok(Err(e)) => return Err(e),
+            Err(_) => vec![ServiceResult {
+                service_name: "(orchestration)".to_string(),
+                success: false,
+                message: "timed out deleting service workspaces; continuing cleanup".to_string(),
+            }],
+        };
 
         // Post-service-delete hooks (best-effort)
         if !opts.skip_hooks {
@@ -161,9 +214,21 @@ pub async fn delete_workspace(
                 branch_deleted = true;
             }
             Err(e) => {
-                log::warn!("Failed to delete workspace '{}': {}", workspace_name, e);
+                if repo.workspace_exists(workspace_name).unwrap_or(true) {
+                    log::warn!("Failed to delete workspace '{}': {}", workspace_name, e);
+                } else {
+                    // Already deleted outside devflow.
+                    branch_deleted = true;
+                }
             }
         }
+        if let Err(e) = repo.prune_worktrees() {
+            log::debug!("Failed to prune stale worktrees after delete: {:#}", e);
+        }
+    } else {
+        // Plain-directory / VCS-missing cleanup still removed devflow state and
+        // services; there is no VCS branch left for devflow to delete.
+        branch_deleted = true;
     }
 
     // 6. Unregister from devflow state

@@ -84,7 +84,7 @@ pub async fn discover_containers(
                 "postgres" => service_type == DiscoveredServiceType::Postgres,
                 "clickhouse" => service_type == DiscoveredServiceType::ClickHouse,
                 "mysql" => service_type == DiscoveredServiceType::MySQL,
-                "generic" => service_type == DiscoveredServiceType::Redis,
+                "generic" | "redis" => service_type == DiscoveredServiceType::Redis,
                 _ => true,
             };
             if !matches {

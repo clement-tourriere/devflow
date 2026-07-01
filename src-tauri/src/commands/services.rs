@@ -1,6 +1,6 @@
 use devflow_core::config::{
     ClickHouseConfig, DockerCustomSettings, GenericDockerConfig, LocalServiceConfig, MySQLConfig,
-    NamedServiceConfig,
+    NamedServiceConfig, SharedServiceConfig,
 };
 use devflow_core::docker::discovery;
 use devflow_core::services;
@@ -14,6 +14,8 @@ pub struct ServiceEntry {
     pub service_type: String,
     pub provider_type: String,
     pub auto_workspace: bool,
+    /// Where this service definition came from: `config` or `local_state`.
+    pub source: String,
 }
 
 #[derive(Serialize)]
@@ -36,33 +38,39 @@ pub struct AddServiceRequest {
     pub docker_restart_policy: Option<String>,
 }
 
+fn service_entry(named: &NamedServiceConfig, source: &str) -> ServiceEntry {
+    ServiceEntry {
+        name: named.name.clone(),
+        service_type: named.service_type.clone(),
+        provider_type: named.provider_type.clone(),
+        auto_workspace: named.auto_workspace,
+        source: source.to_string(),
+    }
+}
+
 #[tauri::command]
 pub async fn add_service(
     project_path: String,
     request: AddServiceRequest,
 ) -> Result<ServiceEntry, String> {
-    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let mut config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(crate::commands::format_error)?;
-
-    // Ensure config.name is set so container names derive from the project, not cwd
-    if config.name.is_none() {
-        config.name = std::path::Path::new(&project_path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string());
-    }
-
+    let project_dir = std::path::Path::new(&project_path);
+    let config_path = crate::commands::project_config::config_path(project_dir);
     let named = build_named_config(&request)?;
 
-    config
-        .add_service(named.clone(), false)
-        .map_err(crate::commands::format_error)?;
-    config
-        .save_to_file(&config_path)
+    // Match CLI behavior: service definitions added from the GUI are stored in
+    // local state, not committed into `.devflow.yml`, unless the user edits the
+    // config file explicitly. This avoids leaking local images/credentials and
+    // keeps CLI and GUI service lists consistent.
+    let mut state = LocalStateManager::new().map_err(crate::commands::format_error)?;
+    state
+        .add_service(&config_path, named.clone(), false)
         .map_err(crate::commands::format_error)?;
 
-    // For local providers, initialize the service
-    if request.provider_type == "local" || request.provider_type.is_empty() {
+    let config =
+        crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
+
+    // For local providers, initialize the service.
+    if services::factory::ProviderType::is_local(&named.provider_type) {
         if let Ok(provider) =
             services::factory::create_provider_from_named_config(&config, &named).await
         {
@@ -76,17 +84,16 @@ pub async fn add_service(
         }
     }
 
-    Ok(ServiceEntry {
-        name: named.name,
-        service_type: named.service_type,
-        provider_type: named.provider_type,
-        auto_workspace: named.auto_workspace,
-    })
+    Ok(service_entry(&named, "local_state"))
 }
 
 fn build_named_config(request: &AddServiceRequest) -> Result<NamedServiceConfig, String> {
     let provider_type = if request.provider_type.is_empty() {
-        "local".to_string()
+        if request.service_type == "redis" {
+            "shared".to_string()
+        } else {
+            "local".to_string()
+        }
     } else {
         request.provider_type.clone()
     };
@@ -100,7 +107,19 @@ fn build_named_config(request: &AddServiceRequest) -> Result<NamedServiceConfig,
         auto_workspace,
         default: false,
         local: None,
-        shared: None,
+        shared: if request.service_type == "redis" {
+            Some(SharedServiceConfig {
+                image: Some(
+                    request
+                        .image
+                        .clone()
+                        .unwrap_or_else(|| "redis:7".to_string()),
+                ),
+                ..Default::default()
+            })
+        } else {
+            None
+        },
         neon: None,
         dblab: None,
         xata: None,
@@ -155,6 +174,10 @@ fn build_named_config(request: &AddServiceRequest) -> Result<NamedServiceConfig,
                 password: None,
             });
         }
+        "redis" => {
+            // Shared Redis uses one global container and allocates a DB index
+            // per devflow workspace.
+        }
         "mysql" => {
             named.mysql = Some(MySQLConfig {
                 image: request
@@ -195,20 +218,13 @@ fn build_named_config(request: &AddServiceRequest) -> Result<NamedServiceConfig,
 
 #[tauri::command]
 pub async fn list_services(project_path: String) -> Result<Vec<ServiceEntry>, String> {
-    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(crate::commands::format_error)?;
-
-    let named_services = config.resolve_services();
-    Ok(named_services
-        .iter()
-        .map(|s| ServiceEntry {
-            name: s.name.clone(),
-            service_type: s.service_type.clone(),
-            provider_type: s.provider_type.clone(),
-            auto_workspace: s.auto_workspace,
-        })
-        .collect())
+    let project_dir = std::path::Path::new(&project_path);
+    Ok(
+        crate::commands::project_config::list_services_with_sources(project_dir)?
+            .into_iter()
+            .map(|entry| service_entry(&entry.service, entry.source))
+            .collect(),
+    )
 }
 
 #[tauri::command]
@@ -217,9 +233,9 @@ pub async fn start_service(
     service_name: String,
     workspace_name: String,
 ) -> Result<(), String> {
-    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(crate::commands::format_error)?;
+    let project_dir = std::path::Path::new(&project_path);
+    let config =
+        crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -243,9 +259,9 @@ pub async fn stop_service(
     service_name: String,
     workspace_name: String,
 ) -> Result<(), String> {
-    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(crate::commands::format_error)?;
+    let project_dir = std::path::Path::new(&project_path);
+    let config =
+        crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -293,7 +309,7 @@ pub async fn run_doctor(project_path: String) -> Result<serde_json::Value, Strin
         ));
     }
 
-    let config = match devflow_core::config::Config::from_file(&config_path) {
+    let _config = match devflow_core::config::Config::from_file(&config_path) {
         Ok(cfg) => {
             general_checks.push(check("Config syntax", true, "Configuration is valid"));
             Some(cfg)
@@ -427,6 +443,29 @@ pub async fn run_doctor(project_path: String) -> Result<serde_json::Value, Strin
         }
     }
 
+    if let Ok((config_count, local_count, local_names)) =
+        crate::commands::project_config::service_source_counts(project_dir)
+    {
+        let detail = if local_count == 0 {
+            format!(
+                "{} service(s) from config, none from local state",
+                config_count
+            )
+        } else {
+            format!(
+                "{} service(s) from config, {} from local state{}",
+                config_count,
+                local_count,
+                if local_names.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", local_names.join(", "))
+                }
+            )
+        };
+        general_checks.push(check("Service config sources", true, detail));
+    }
+
     // Agent skills check
     let skill_status = devflow_core::agent::check_agent_skills_installed(project_dir);
     general_checks.push(check(
@@ -461,14 +500,16 @@ pub async fn run_doctor(project_path: String) -> Result<serde_json::Value, Strin
         },
     ));
 
-    let named_services = config
+    let service_config =
+        crate::commands::project_config::load_project_config_with_local_state(project_dir).ok();
+    let named_services = service_config
         .as_ref()
         .map(|c| c.resolve_services())
         .unwrap_or_default();
     let mut reports = Vec::new();
 
     for svc in &named_services {
-        if let Some(ref cfg) = config {
+        if let Some(ref cfg) = service_config {
             if let Ok(provider) =
                 services::factory::create_provider_from_named_config(cfg, svc).await
             {
@@ -494,9 +535,9 @@ pub async fn get_service_logs(
     service_name: String,
     workspace_name: String,
 ) -> Result<String, String> {
-    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(crate::commands::format_error)?;
+    let project_dir = std::path::Path::new(&project_path);
+    let config =
+        crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -520,9 +561,9 @@ pub async fn reset_service(
     service_name: String,
     workspace_name: String,
 ) -> Result<(), String> {
-    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(crate::commands::format_error)?;
+    let project_dir = std::path::Path::new(&project_path);
+    let config =
+        crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -546,9 +587,9 @@ pub async fn delete_service_workspace(
     service_name: String,
     workspace_name: String,
 ) -> Result<(), String> {
-    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(crate::commands::format_error)?;
+    let project_dir = std::path::Path::new(&project_path);
+    let config =
+        crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -577,9 +618,10 @@ pub async fn destroy_service(
     project_path: String,
     service_name: String,
 ) -> Result<DestroyServiceResult, String> {
-    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let mut config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(crate::commands::format_error)?;
+    let project_dir = std::path::Path::new(&project_path);
+    let config_path = crate::commands::project_config::config_path(project_dir);
+    let config =
+        crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -604,17 +646,20 @@ pub async fn destroy_service(
         .await
         .map_err(crate::commands::format_error)?;
 
-    // Remove from local state
-    let path = std::path::Path::new(&project_path);
+    // Remove from local state (CLI/GUI-managed services) and committed config
+    // (if this service came from `.devflow.yml`).
     if let Ok(mut state_mgr) = LocalStateManager::new() {
-        let _ = state_mgr.remove_service(path, &service_name);
+        let _ = state_mgr.remove_service(&config_path, &service_name);
     }
 
-    // Remove from config and save
-    config.remove_service(&service_name);
-    config
-        .save_to_file(&config_path)
-        .map_err(crate::commands::format_error)?;
+    if config_path.exists() {
+        if let Ok(mut disk_config) = devflow_core::config::Config::from_file(&config_path) {
+            disk_config.remove_service(&service_name);
+            disk_config
+                .save_to_file(&config_path)
+                .map_err(crate::commands::format_error)?;
+        }
+    }
 
     Ok(DestroyServiceResult {
         service_name,
@@ -636,9 +681,9 @@ pub async fn list_service_workspaces(
     project_path: String,
     service_name: String,
 ) -> Result<Vec<ServiceWorkspaceInfo>, String> {
-    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(crate::commands::format_error)?;
+    let project_dir = std::path::Path::new(&project_path);
+    let config =
+        crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
 
     let named_services = config.resolve_services();
     let svc = named_services
@@ -673,9 +718,9 @@ pub async fn get_service_status(
     service_name: String,
     workspace_name: String,
 ) -> Result<ServiceWorkspaceStatus, String> {
-    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(crate::commands::format_error)?;
+    let project_dir = std::path::Path::new(&project_path);
+    let config =
+        crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
 
     let named_services = config.resolve_services();
     let svc = named_services

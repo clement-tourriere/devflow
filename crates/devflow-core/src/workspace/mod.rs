@@ -48,9 +48,10 @@ pub fn validate_workspace_name(name: &str) -> Result<(), String> {
 }
 
 /// How a workspace was created (worktree vs. classic branch).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorkspaceCreationMode {
     /// Use the project's `.devflow.yml` worktree config (worktree if enabled, branch otherwise).
+    #[default]
     Default,
     /// Force worktree creation regardless of config.
     Worktree,

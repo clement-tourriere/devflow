@@ -217,7 +217,7 @@ impl std::fmt::Display for VcsKind {
 /// Detection order:
 /// 1. **jj-only** — `.jj/` exists but `.git/` does not → `JjRepository`
 /// 2. **jj colocated** — both `.jj/` and `.git/` exist → `JjRepository`
-///    (jj is the "primary" VCS in colocated mode; it manages `.git/` for you)
+///    when the `jj` CLI is available; otherwise fall back to `GitRepository`
 /// 3. **git-only** — `.git/` exists without `.jj/` → `GitRepository`
 /// 4. Neither → error
 ///
@@ -227,22 +227,36 @@ pub fn detect_vcs_provider<P: AsRef<Path>>(path: P) -> Result<Box<dyn VcsProvide
 
     // Walk up to find .jj or .git
     let (has_jj, has_git) = find_vcs_markers(start);
+    let jj_available = tool_available("jj");
 
-    match (has_jj, has_git) {
-        (true, _) => {
-            // jj (with or without colocated .git/) — prefer jj
+    match effective_vcs_kind(has_jj, has_git, jj_available) {
+        Some(VcsKind::Jj) => {
             let provider = JjRepository::new(start)?;
             log::debug!("Detected VCS: jj (colocated={})", has_git);
             Ok(Box::new(provider))
         }
-        (false, true) => {
+        Some(VcsKind::Git) => {
+            if has_jj && has_git && !jj_available {
+                log::warn!(
+                    "Detected colocated jj/git repository, but the 'jj' CLI is unavailable; falling back to git"
+                );
+            }
             let provider = GitRepository::new(start)?;
             log::debug!("Detected VCS: git");
             Ok(Box::new(provider))
         }
-        (false, false) => {
+        None => {
             anyhow::bail!("No VCS repository found. Initialize with 'git init' or 'jj init'.");
         }
+    }
+}
+
+fn effective_vcs_kind(has_jj: bool, has_git: bool, jj_available: bool) -> Option<VcsKind> {
+    match (has_jj, has_git, jj_available) {
+        (true, true, false) => Some(VcsKind::Git),
+        (true, _, _) => Some(VcsKind::Jj),
+        (false, true, _) => Some(VcsKind::Git),
+        (false, false, _) => None,
     }
 }
 
@@ -438,6 +452,15 @@ fn find_vcs_markers(start: &Path) -> (bool, bool) {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn test_effective_vcs_kind_falls_back_to_git_for_colocated_without_jj() {
+        assert_eq!(effective_vcs_kind(true, true, false), Some(VcsKind::Git));
+        assert_eq!(effective_vcs_kind(true, true, true), Some(VcsKind::Jj));
+        assert_eq!(effective_vcs_kind(true, false, false), Some(VcsKind::Jj));
+        assert_eq!(effective_vcs_kind(false, true, false), Some(VcsKind::Git));
+        assert_eq!(effective_vcs_kind(false, false, false), None);
+    }
 
     #[test]
     fn test_find_vcs_markers_git_only() {

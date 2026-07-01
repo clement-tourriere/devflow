@@ -477,6 +477,37 @@ pub(super) fn run_doctor_pre_checks(
         }
     }
 
+    if let Some(path) = config_path {
+        match LocalStateManager::new() {
+            Ok(state) => {
+                let config_services = config.resolve_services();
+                let local_services = state.get_services(path).unwrap_or_default();
+                if local_services.is_empty() {
+                    println!(
+                        "  [OK] Service config sources: {} service(s) from config, none from local state",
+                        config_services.len()
+                    );
+                } else {
+                    let names = local_services
+                        .iter()
+                        .map(|service| service.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!(
+                        "  [OK] Service config sources: {} service(s) from config, {} from local state ({})",
+                        config_services
+                            .iter()
+                            .filter(|service| !local_services.iter().any(|local| local.name == service.name))
+                            .count(),
+                        local_services.len(),
+                        names
+                    );
+                }
+            }
+            Err(e) => println!("  [WARN] Service config sources: inspection failed ({})", e),
+        }
+    }
+
     // Workspace filter regex
     if let Some(ref regex_pattern) = config.git.workspace_filter_regex {
         match regex::Regex::new(regex_pattern) {

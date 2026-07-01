@@ -456,7 +456,9 @@ pub struct WorktreeConfig {
     /// Files to copy from the main worktree into each new worktree.
     #[serde(default)]
     pub copy_files: Vec<String>,
-    /// Also copy files that are git-ignored (e.g. `.env.local`).
+    /// Also copy gitignored dependency/cache directories (e.g. `.venv/`,
+    /// `node_modules/`, `target/`). Environment files should usually be listed
+    /// explicitly in `copy_files` instead, so the recommended default is false.
     #[serde(default)]
     pub copy_ignored: bool,
     /// Exclude gitignored files from worktrees (both CoW and non-CoW paths).
@@ -480,7 +482,7 @@ impl WorktreeConfig {
             enabled: true,
             path_template: default_worktree_path_template(),
             copy_files: vec![".env".to_string(), ".env.local".to_string()],
-            copy_ignored: true,
+            copy_ignored: false,
             respect_gitignore: true,
             copy_ai_configs: true,
             extra_ai_dirs: Vec::new(),

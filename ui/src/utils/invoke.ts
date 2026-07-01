@@ -156,6 +156,16 @@ export const getProcessLogs = (
     name,
     tail,
   });
+export const forgetProcessRecord = (
+  projectPath: string,
+  workspaceName: string,
+  name: string,
+) =>
+  invoke<boolean>("forget_process_record", {
+    projectPath,
+    workspaceName,
+    name,
+  });
 
 // Services
 export const addService = (projectPath: string, request: AddServiceRequest) =>

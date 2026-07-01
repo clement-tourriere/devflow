@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { toast } from "../../utils/notify";
 import { reportWorkspaceResult } from "../../utils/results";
 import { useParams, Link, useNavigate } from "react-router-dom";
@@ -17,6 +17,7 @@ import {
   stopProcesses,
   restartProcesses,
   getProcessLogs,
+  forgetProcessRecord,
   startService,
   stopService,
   resetService,
@@ -60,6 +61,12 @@ interface WorkspaceSwitchedEvent {
   workspace_name: string;
 }
 
+type LogTarget = {
+  kind: "process" | "service";
+  name: string;
+  workspace: string;
+};
+
 function formatRelativeTime(iso?: string | null): string | null {
   if (!iso) return null;
   const ts = Date.parse(iso);
@@ -71,6 +78,22 @@ function formatRelativeTime(iso?: string | null): string | null {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ago`;
   return `${Math.floor(hours / 24)}d ago`;
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(message)), ms);
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
 }
 
 function ProjectDetail() {
@@ -115,15 +138,13 @@ function ProjectDetail() {
   const [connInfoWorkspace, setConnInfoWorkspace] = useState<string | null>(null);
   const [connInfo, setConnInfo] = useState<Record<string, ConnectionInfo>>({});
   const [connInfoContainers, setConnInfoContainers] = useState<Record<string, ContainerEntry>>({});
-  const [logService, setLogService] = useState<{
-    name: string;
-    workspace: string;
-  } | null>(null);
-  const [logProcess, setLogProcess] = useState<{
-    name: string;
-    workspace: string;
-  } | null>(null);
+  const [logTarget, setLogTarget] = useState<LogTarget | null>(null);
   const [logContent, setLogContent] = useState("");
+  const [logSearch, setLogSearch] = useState("");
+  const [logLoading, setLogLoading] = useState(false);
+  const [logAutoRefresh, setLogAutoRefresh] = useState(true);
+  const [logFollow, setLogFollow] = useState(true);
+  const logScrollRef = useRef<HTMLDivElement>(null);
   const [resetTarget, setResetTarget] = useState<{
     name: string;
     workspace: string;
@@ -160,9 +181,20 @@ function ProjectDetail() {
         return;
       }
       try {
-        setProcessStatuses(await listProcesses(projectPath, workspaceName));
+        const statuses = await listProcesses(projectPath, workspaceName);
+        setProcessStatuses(statuses);
+        const controllable = new Set(
+          statuses
+            .filter((p) => p.workspace === workspaceName && p.configured)
+            .map((p) => p.process)
+        );
+        setSelectedProcesses((prev) => {
+          const next = new Set([...prev].filter((name) => controllable.has(name)));
+          return next.size === prev.size ? prev : next;
+        });
       } catch {
         setProcessStatuses([]);
+        setSelectedProcesses(new Set());
       }
     },
     [projectPath]
@@ -308,19 +340,22 @@ function ProjectDetail() {
   }, [activeTab]);
 
   const handleCreateWorkspace = async () => {
-    if (!newWorkspaceName.trim() || isCreatingWorkspace) return;
+    const requestedWorkspace = newWorkspaceName.trim();
+    if (!requestedWorkspace || isCreatingWorkspace) return;
     setActionLoading("create");
     try {
       const result = await createWorkspace(
         projectPath,
-        newWorkspaceName.trim(),
+        requestedWorkspace,
         fromWorkspace || undefined,
         creationMode,
         creationMode === "worktree" ? copyFiles : undefined,
         creationMode === "worktree" ? copyIgnored : undefined,
         sandboxed || undefined
       );
-      reportWorkspaceResult(`Workspace "${newWorkspaceName.trim()}"`, result);
+      const createdWorkspace = result.workspace || requestedWorkspace;
+      reportWorkspaceResult(`Workspace "${requestedWorkspace}"`, result);
+      setProcessWorkspace(createdWorkspace);
       setShowCreateWorkspace(false);
       setNewWorkspaceName("");
       setFromWorkspace("");
@@ -329,6 +364,7 @@ function ProjectDetail() {
       setCopyIgnored(detail?.worktree_copy_ignored ?? false);
       setSandboxed(false);
       await reload();
+      await fetchProcesses(createdWorkspace);
     } catch (e) {
       toast.error(`${e}`);
     } finally {
@@ -341,7 +377,9 @@ function ProjectDetail() {
     try {
       const result = await switchWorkspace(projectPath, workspaceName);
       reportWorkspaceResult(`Switched to "${workspaceName}"`, result);
+      setProcessWorkspace(workspaceName);
       await reload();
+      await fetchProcesses(workspaceName);
     } catch (e) {
       toast.error(`${e}`);
     } finally {
@@ -354,12 +392,18 @@ function ProjectDetail() {
     setActionLoading("delete");
     const target = deletingWorkspace;
     try {
-      const result = await deleteWorkspace(projectPath, target);
+      const result = await withTimeout(
+        deleteWorkspace(projectPath, target),
+        65000,
+        "Workspace deletion timed out. Refreshing state; retry if the workspace still appears."
+      );
       reportWorkspaceResult(`Workspace "${target}" deleted`, result);
       setDeletingWorkspace(null);
       await reload();
     } catch (e) {
       toast.error(`${e}`);
+      setDeletingWorkspace(null);
+      await reload();
     } finally {
       setActionLoading(null);
     }
@@ -480,16 +524,29 @@ function ProjectDetail() {
     }
   };
 
+  const loadLogs = useCallback(
+    async (target: LogTarget) => {
+      setLogLoading(true);
+      try {
+        const logs = target.kind === "process"
+          ? await getProcessLogs(projectPath, target.workspace, target.name, 1000)
+          : await getServiceLogs(projectPath, target.name, target.workspace);
+        setLogContent(logs || "(no log output)");
+      } catch (e) {
+        setLogContent(`Error: ${e}`);
+      } finally {
+        setLogLoading(false);
+      }
+    },
+    [projectPath]
+  );
+
   const handleViewLogs = async (svcName: string, workspaceName: string) => {
-    setLogProcess(null);
-    setLogService({ name: svcName, workspace: workspaceName });
+    const target: LogTarget = { kind: "service", name: svcName, workspace: workspaceName };
+    setLogTarget(target);
+    setLogSearch("");
     setLogContent("Loading...");
-    try {
-      const logs = await getServiceLogs(projectPath, svcName, workspaceName);
-      setLogContent(logs || "(no log output)");
-    } catch (e) {
-      setLogContent(`Error: ${e}`);
-    }
+    await loadLogs(target);
   };
 
   const summarizeProcessResults = (action: string, results: ProcessResult[]) => {
@@ -512,7 +569,7 @@ function ProjectDetail() {
 
   const selectedProcessNames = () =>
     processStatuses
-      .filter((p) => p.workspace === processWorkspace && selectedProcesses.has(p.process))
+      .filter((p) => p.workspace === processWorkspace && p.configured && selectedProcesses.has(p.process))
       .map((p) => p.process);
 
   const handleStartProcess = async (target?: string | string[], force = false) => {
@@ -586,14 +643,24 @@ function ProjectDetail() {
   };
 
   const handleViewProcessLogs = async (name: string, workspaceName: string) => {
-    setLogService(null);
-    setLogProcess({ name, workspace: workspaceName });
+    const target: LogTarget = { kind: "process", name, workspace: workspaceName };
+    setLogTarget(target);
+    setLogSearch("");
     setLogContent("Loading...");
+    await loadLogs(target);
+  };
+
+  const handleForgetProcessRecord = async (name: string, workspaceName: string) => {
+    setActionLoading(`process-forget:${name}`);
     try {
-      const logs = await getProcessLogs(projectPath, workspaceName, name, 300);
-      setLogContent(logs || "(no log output)");
+      const removed = await forgetProcessRecord(projectPath, workspaceName, name);
+      if (removed) toast.success(`Forgot stale process record '${name}'`);
+      else toast.info(`No process record found for '${name}'`);
+      await fetchProcesses(workspaceName);
     } catch (e) {
-      setLogContent(`Error: ${e}`);
+      toast.error(`${e}`);
+    } finally {
+      setActionLoading(null);
     }
   };
 
@@ -688,6 +755,60 @@ function ProjectDetail() {
     await reload();
   };
 
+  useEffect(() => {
+    if (!logTarget || !logAutoRefresh) return;
+    const timer = window.setInterval(() => {
+      void loadLogs(logTarget);
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [loadLogs, logAutoRefresh, logTarget]);
+
+  useEffect(() => {
+    if (!logFollow) return;
+    const node = logScrollRef.current;
+    if (!node) return;
+    node.scrollTop = node.scrollHeight;
+  }, [logContent, logFollow]);
+
+  const logLines = useMemo(() => logContent.split(/\r?\n/), [logContent]);
+  const normalizedLogSearch = logSearch.trim().toLowerCase();
+  const visibleLogLines = useMemo(() => {
+    if (!normalizedLogSearch) {
+      return logLines.map((line, index) => ({ line, index }));
+    }
+    return logLines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => line.toLowerCase().includes(normalizedLogSearch));
+  }, [logLines, normalizedLogSearch]);
+
+  const renderLogLine = (line: string) => {
+    if (!normalizedLogSearch) return line || "\u00a0";
+    const parts = [];
+    const lower = line.toLowerCase();
+    let cursor = 0;
+    let matchIndex = lower.indexOf(normalizedLogSearch);
+    while (matchIndex !== -1) {
+      if (matchIndex > cursor) {
+        parts.push(line.slice(cursor, matchIndex));
+      }
+      const end = matchIndex + normalizedLogSearch.length;
+      parts.push(
+        <mark
+          key={`${matchIndex}-${end}`}
+          style={{ background: "rgba(250, 204, 21, 0.32)", color: "inherit", padding: 0 }}
+        >
+          {line.slice(matchIndex, end)}
+        </mark>
+      );
+      cursor = end;
+      matchIndex = lower.indexOf(normalizedLogSearch, cursor);
+    }
+    if (cursor < line.length) {
+      parts.push(line.slice(cursor));
+    }
+    return parts.length ? parts : "\u00a0";
+  };
+
   if (error) {
     return (
       <div className="card" style={{ marginTop: 24 }}>
@@ -750,9 +871,10 @@ function ProjectDetail() {
   };
 
   const selectedProcessNamesForWorkspace = selectedProcessNames();
-  const allProcessNamesForWorkspace = processStatuses
-    .filter((p) => p.workspace === processWorkspace)
-    .map((p) => p.process);
+  const controllableProcessStatuses = processStatuses.filter(
+    (p) => p.workspace === processWorkspace && p.configured
+  );
+  const allProcessNamesForWorkspace = controllableProcessStatuses.map((p) => p.process);
   const allProcessesSelected =
     allProcessNamesForWorkspace.length > 0 &&
     allProcessNamesForWorkspace.every((name) => selectedProcesses.has(name));
@@ -1086,7 +1208,7 @@ function ProjectDetail() {
                   </td>
                   <td style={{ textAlign: "right" }}>
                     <div className="flex gap-2" style={{ justifyContent: "flex-end", flexWrap: "wrap", rowGap: 6 }}>
-                      {!b.is_current && !b.worktree_path && (
+                      {!b.is_current && (
                         <button
                           className="btn"
                           style={{ padding: "2px 10px", fontSize: 12 }}
@@ -1319,6 +1441,7 @@ function ProjectDetail() {
                   <input
                     type="checkbox"
                     checked={allProcessesSelected}
+                    disabled={allProcessNamesForWorkspace.length === 0}
                     onChange={(e) =>
                       setSelectedProcesses(
                         e.target.checked ? new Set(allProcessNamesForWorkspace) : new Set()
@@ -1344,7 +1467,9 @@ function ProjectDetail() {
                     <td>
                       <input
                         type="checkbox"
-                        checked={selectedProcesses.has(p.process)}
+                        checked={p.configured && selectedProcesses.has(p.process)}
+                        disabled={!p.configured}
+                        title={p.configured ? undefined : "Runtime-only record; forget it or re-add it to config before controlling it"}
                         onChange={(e) => {
                           setSelectedProcesses((prev) => {
                             const next = new Set(prev);
@@ -1360,6 +1485,8 @@ function ProjectDetail() {
                       <div className="flex items-center gap-1" style={{ flexWrap: "wrap" }}>
                         <span style={{ fontWeight: 600 }}>{p.process}</span>
                         {p.runtime && <span className="badge" style={{ fontSize: 10 }}>{p.runtime}</span>}
+                        {!p.configured && <span className="badge badge-warning" style={{ fontSize: 10 }}>runtime-only</span>}
+                        {p.source === "config+runtime" && <span className="badge badge-info" style={{ fontSize: 10 }}>configured</span>}
                         {!p.required && <span className="badge" style={{ fontSize: 10 }}>optional</span>}
                       </div>
                       <div
@@ -1404,7 +1531,7 @@ function ProjectDetail() {
                       {p.ports.length ? p.ports.join(", ") : "-"}
                     </td>
                     <td style={{ overflow: "hidden" }}>
-                      {p.urls.length > 0 ? (
+                      {(p.urls?.length ?? 0) > 0 ? (
                         <a
                           href={p.urls[0]}
                           target="_blank"
@@ -1426,7 +1553,7 @@ function ProjectDetail() {
                     </td>
                     <td style={{ textAlign: "right" }}>
                       <div className="flex gap-1" style={{ justifyContent: "flex-end", flexWrap: "wrap" }}>
-                        {isStopped && (
+                        {isStopped && p.configured && (
                           <button
                             className="btn"
                             style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
@@ -1439,7 +1566,7 @@ function ProjectDetail() {
                             </svg>
                           </button>
                         )}
-                        {isRunning && (
+                        {isRunning && p.configured && (
                           <button
                             className="btn"
                             style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
@@ -1452,21 +1579,23 @@ function ProjectDetail() {
                             </svg>
                           </button>
                         )}
-                        <button
-                          className="btn"
-                          style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
-                          onClick={() => handleRestartProcess(p.process)}
-                          disabled={actionLoading === `process-restart:${p.process}`}
-                          title="Restart"
-                        >
-                          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                            <path d="M2 8a6 6 0 0 1 10.2-4.2" />
-                            <path d="M14 8a6 6 0 0 1-10.2 4.2" />
-                            <path d="M10 2l2.2 1.8L14 2" />
-                            <path d="M6 14l-2.2-1.8L2 14" />
-                          </svg>
-                        </button>
-                        {p.runtime === "pitchfork" && (
+                        {p.configured && (
+                          <button
+                            className="btn"
+                            style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
+                            onClick={() => handleRestartProcess(p.process)}
+                            disabled={actionLoading === `process-restart:${p.process}`}
+                            title="Restart"
+                          >
+                            <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                              <path d="M2 8a6 6 0 0 1 10.2-4.2" />
+                              <path d="M14 8a6 6 0 0 1-10.2 4.2" />
+                              <path d="M10 2l2.2 1.8L14 2" />
+                              <path d="M6 14l-2.2-1.8L2 14" />
+                            </svg>
+                          </button>
+                        )}
+                        {p.configured && p.runtime === "pitchfork" && (
                           <button
                             className="btn"
                             style={{ width: 28, height: 24, padding: 0, justifyContent: "center", fontSize: 10 }}
@@ -1489,6 +1618,21 @@ function ProjectDetail() {
                             <path d="M5 6h6" />
                           </svg>
                         </button>
+                        {!p.configured && (
+                          <button
+                            className="btn btn-danger"
+                            style={{ width: 28, height: 24, padding: 0, justifyContent: "center", fontSize: 12 }}
+                            onClick={() => handleForgetProcessRecord(p.process, p.workspace)}
+                            disabled={isRunning || actionLoading === `process-forget:${p.process}`}
+                            title={
+                              isRunning
+                                ? "Process is still running; re-add it to config or stop it outside devflow before forgetting"
+                                : "Forget stale runtime record"
+                            }
+                          >
+                            ×
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -1610,6 +1754,9 @@ function ProjectDetail() {
                         }}
                       >
                         {s.provider_type}
+                      </span>
+                      <span className="badge badge-info" style={{ fontSize: 11 }}>
+                        {s.source === "local_state" ? "local state" : "config"}
                       </span>
                       {s.auto_workspace && (
                         <span className="badge badge-info" style={{ fontSize: 11 }}>
@@ -1866,6 +2013,7 @@ function ProjectDetail() {
               <thead>
                 <tr>
                   <th>Domain</th>
+                  <th>Source</th>
                   <th>Service</th>
                   <th>Workspace</th>
                 </tr>
@@ -1887,6 +2035,7 @@ function ProjectDetail() {
                         {c.domain}
                       </a>
                     </td>
+                    <td>{c.source}</td>
                     <td>{c.service || "-"}</td>
                     <td>{c.workspace || "-"}</td>
                   </tr>
@@ -2166,10 +2315,10 @@ function ProjectDetail() {
                 checked={copyIgnored}
                 onChange={(e) => setCopyIgnored(e.target.checked)}
               />
-              Copy gitignored files (node_modules, target, etc.)
+              Copy gitignored dependency/cache dirs (.venv, node_modules, target, etc.)
             </label>
             <p style={{ marginTop: 4, color: "var(--text-muted)", fontSize: 12 }}>
-              Reflink-copies ignored directories from the main worktree for faster setup.
+              Leave this off for the fastest workspace creation. Even CoW copies must enumerate thousands of files.
             </p>
           </div>
         )}
@@ -2376,39 +2525,139 @@ function ProjectDetail() {
         )}
       </Modal>
 
-      {/* Logs Modal */}
-      <Modal
-        open={logService !== null || logProcess !== null}
-        onClose={() => {
-          setLogService(null);
-          setLogProcess(null);
-        }}
-        title={
-          logProcess
-            ? `Process logs — ${logProcess.name} (${logProcess.workspace})`
-            : `Service logs — ${logService?.name} (${logService?.workspace})`
-        }
-        width={700}
-      >
-        <pre
-          className="mono"
+      {/* Floating Logs Panel */}
+      {logTarget && (
+        <div
           style={{
-            background: "var(--bg-primary)",
+            position: "fixed",
+            right: 24,
+            bottom: 24,
+            width: "min(1080px, calc(100vw - 48px))",
+            maxHeight: "68vh",
+            background: "var(--bg-secondary)",
             border: "1px solid var(--border)",
-            borderRadius: 6,
-            padding: 12,
-            maxHeight: 400,
-            overflowY: "auto",
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-all",
-            fontSize: 12,
-            lineHeight: 1.4,
-            color: "var(--text-secondary)",
+            borderRadius: 12,
+            boxShadow: "0 18px 50px rgba(0,0,0,0.35)",
+            zIndex: 900,
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
           }}
         >
-          {logContent}
-        </pre>
-      </Modal>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+              padding: "10px 12px",
+              borderBottom: "1px solid var(--border)",
+              flexWrap: "wrap",
+            }}
+          >
+            <div style={{ minWidth: 220 }}>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>
+                {logTarget.kind === "process" ? "Process" : "Service"} logs — {logTarget.name}
+              </div>
+              <div className="mono" style={{ color: "var(--text-muted)", fontSize: 11 }}>
+                workspace: {logTarget.workspace}
+                {logLoading ? " · refreshing…" : ""}
+              </div>
+            </div>
+            <div className="flex items-center gap-2" style={{ flex: 1, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <input
+                className="input"
+                value={logSearch}
+                onChange={(e) => setLogSearch(e.target.value)}
+                placeholder="Search logs…"
+                style={{ width: 240, height: 30, fontSize: 12 }}
+              />
+              {normalizedLogSearch && (
+                <span className="badge" style={{ fontSize: 11 }}>
+                  {visibleLogLines.length} match{visibleLogLines.length === 1 ? "" : "es"}
+                </span>
+              )}
+              <label className="flex items-center gap-1" style={{ color: "var(--text-muted)", fontSize: 12 }}>
+                <input
+                  type="checkbox"
+                  checked={logAutoRefresh}
+                  onChange={(e) => setLogAutoRefresh(e.target.checked)}
+                />
+                live
+              </label>
+              <label className="flex items-center gap-1" style={{ color: "var(--text-muted)", fontSize: 12 }}>
+                <input
+                  type="checkbox"
+                  checked={logFollow}
+                  onChange={(e) => setLogFollow(e.target.checked)}
+                />
+                follow
+              </label>
+              <button className="btn" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => void loadLogs(logTarget)}>
+                Refresh
+              </button>
+              <button
+                className="btn"
+                style={{ padding: "4px 10px", fontSize: 12 }}
+                onClick={() => {
+                  void navigator.clipboard.writeText(logContent);
+                  toast.success("Copied logs");
+                }}
+              >
+                Copy
+              </button>
+              <button
+                className="btn"
+                style={{ padding: "4px 10px", fontSize: 12 }}
+                onClick={() => setLogTarget(null)}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+          <div
+            ref={logScrollRef}
+            className="mono"
+            style={{
+              background: "var(--bg-primary)",
+              padding: 0,
+              overflow: "auto",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+              fontSize: 12,
+              lineHeight: 1.45,
+              color: "var(--text-secondary)",
+              flex: 1,
+              minHeight: 220,
+            }}
+          >
+            {visibleLogLines.length === 0 ? (
+              <div style={{ padding: 16, color: "var(--text-muted)" }}>
+                {normalizedLogSearch ? "No matching log lines." : "(no log output)"}
+              </div>
+            ) : (
+              visibleLogLines.map(({ line, index }) => (
+                <div key={`${index}:${line}`} style={{ display: "flex", alignItems: "flex-start" }}>
+                  <span
+                    style={{
+                      width: 56,
+                      flexShrink: 0,
+                      textAlign: "right",
+                      padding: "0 10px 0 8px",
+                      color: "var(--text-muted)",
+                      userSelect: "none",
+                      borderRight: "1px solid var(--border)",
+                    }}
+                  >
+                    {index + 1}
+                  </span>
+                  <span style={{ paddingLeft: 10, paddingRight: 12 }}>{renderLogLine(line)}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Add Service Modal */}
       <AddServiceModal
@@ -2437,6 +2686,9 @@ function StatusBadge({ state }: { state: string | null }) {
   }
   if (state === "failed") {
     return <span className="badge badge-danger">failed</span>;
+  }
+  if (state === "pending") {
+    return <span className="badge badge-warning">pending</span>;
   }
   if (state === "provisioning") {
     return <span className="badge badge-warning">provisioning</span>;

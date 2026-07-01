@@ -1,6 +1,7 @@
 pub mod config;
 pub mod hooks;
 pub mod processes;
+pub mod project_config;
 pub mod projects;
 pub mod proxy;
 pub mod services;

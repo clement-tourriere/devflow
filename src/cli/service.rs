@@ -37,6 +37,7 @@ pub(crate) async fn run_add_service_wizard(
             "postgres    — PostgreSQL database",
             "clickhouse  — ClickHouse analytics database",
             "mysql       — MySQL database",
+            "redis       — Redis cache (shared DB per workspace)",
             "generic     — Generic Docker container",
             "plugin      — External plugin",
         ];
@@ -74,6 +75,7 @@ pub(crate) async fn run_add_service_wizard(
             ],
             "clickhouse" => vec!["local               — Docker container on this machine"],
             "mysql" => vec!["local               — Docker container on this machine"],
+            "redis" => vec!["shared              — One global container, DB index per workspace"],
             "generic" => vec!["local               — Docker container on this machine"],
             "plugin" => vec!["local               — Managed by plugin"],
             _ => vec!["local               — Docker container on this machine"],
@@ -118,6 +120,7 @@ pub(crate) async fn run_add_service_wizard(
         match service_type.as_str() {
             "clickhouse" => "analytics".to_string(),
             "mysql" => "mysql".to_string(),
+            "redis" => "redis".to_string(),
             "generic" => "app".to_string(),
             "plugin" => "plugin".to_string(),
             _ => "db".to_string(),
@@ -130,6 +133,7 @@ pub(crate) async fn run_add_service_wizard(
             match service_type.as_str() {
                 "clickhouse" => "analytics",
                 "mysql" => "mysql",
+                "redis" => "redis",
                 "generic" => "app",
                 "plugin" => "plugin",
                 _ => "db",
@@ -158,7 +162,7 @@ pub(crate) async fn run_add_service_wizard(
     let discovered_seed = discovered.as_ref().map(|d| d.seed_url.clone());
 
     // Build named service config
-    let named_cfg = devflow_core::config::NamedServiceConfig {
+    let mut named_cfg = devflow_core::config::NamedServiceConfig {
         name: name.clone(),
         provider_type: provider_type.clone(),
         service_type: service_type.clone(),
@@ -177,7 +181,16 @@ pub(crate) async fn run_add_service_wizard(
         } else {
             None
         },
-        shared: None,
+        shared: if service_type == "redis" {
+            Some(devflow_core::config::SharedServiceConfig {
+                image: discovered_image
+                    .clone()
+                    .or_else(|| Some("redis:7".to_string())),
+                ..Default::default()
+            })
+        } else {
+            None
+        },
         neon: None,
         dblab: None,
         xata: None,
@@ -212,18 +225,101 @@ pub(crate) async fn run_add_service_wizard(
         docker: discovered.as_ref().and_then(|d| d.docker_settings.clone()),
     };
 
-    // Store service in local state
+    // Store service in local state. The wizard is intentionally idempotent:
+    // removing `.devflow.yml` should not strand users with an opaque duplicate
+    // error when local devflow state still remembers a service.
     let mut state = LocalStateManager::new()?;
-    state.add_service(config_path, named_cfg.clone(), false)?;
-    if !json_output {
-        println!("Added service '{}' ({})", name, service_type);
+    loop {
+        let existing = state
+            .get_services(config_path)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|service| service.name == named_cfg.name)
+            .or_else(|| {
+                config
+                    .resolve_services()
+                    .into_iter()
+                    .find(|service| service.name == named_cfg.name)
+            });
+
+        let Some(existing) = existing else {
+            state.add_service(config_path, named_cfg.clone(), false)?;
+            if !json_output {
+                println!("Added service '{}' ({})", named_cfg.name, service_type);
+            }
+            break;
+        };
+
+        if non_interactive || json_output {
+            if !json_output {
+                println!(
+                    "Service '{}' already exists; reusing existing configuration.",
+                    existing.name
+                );
+            }
+            named_cfg = existing;
+            break;
+        }
+
+        let choices = vec![
+            "Keep existing service",
+            "Replace existing service",
+            "Use a different service name",
+            "Cancel",
+        ];
+        let selection = inquire::Select::new(
+            &format!("Service '{}' already exists. What should devflow do?", named_cfg.name),
+            choices,
+        )
+        .with_help_message(
+            "Services are stored in local devflow state; deleting .devflow.yml does not delete them.",
+        )
+        .prompt();
+
+        match selection {
+            Ok("Keep existing service") => {
+                println!("Keeping existing service '{}'.", existing.name);
+                named_cfg = existing;
+                break;
+            }
+            Ok("Replace existing service") => {
+                named_cfg.default = existing.default;
+                state.add_service(config_path, named_cfg.clone(), true)?;
+                println!("Replaced service '{}' ({}).", named_cfg.name, service_type);
+                break;
+            }
+            Ok("Use a different service name") => {
+                named_cfg.default = false;
+                let default_name = format!("{}-2", named_cfg.name);
+                let input = inquire::Text::new("New service name:")
+                    .with_default(&default_name)
+                    .prompt();
+                match input {
+                    Ok(n) if !n.trim().is_empty() => named_cfg.name = n.trim().to_string(),
+                    Ok(_) => named_cfg.name = default_name,
+                    Err(
+                        inquire::InquireError::OperationCanceled
+                        | inquire::InquireError::OperationInterrupted,
+                    ) => return Ok(None),
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            Ok("Cancel")
+            | Err(
+                inquire::InquireError::OperationCanceled
+                | inquire::InquireError::OperationInterrupted,
+            ) => return Ok(None),
+            Err(e) => return Err(e.into()),
+            _ => return Ok(None),
+        }
     }
 
     // Use explicit seed source or discovered container's connection URL
     let effective_seed = from.map(|s| s.to_string()).or(discovered_seed);
 
     // Create main workspace for local providers
-    if is_local {
+    let is_effective_local = services::factory::ProviderType::is_local(&named_cfg.provider_type);
+    if is_effective_local {
         let mut config_with_service = config.clone();
         if let Some(state_services) = state.get_services(config_path) {
             config_with_service.services = Some(state_services);
@@ -313,7 +409,13 @@ pub(super) async fn handle_service_dispatch(
                 // Direct mode with explicit flags — keep existing behavior for CLI power users
                 let service_type =
                     service_type.unwrap_or_else(devflow_core::config::default_service_type);
-                let provider_type = provider.unwrap_or_else(|| "local".to_string());
+                let provider_type = provider.unwrap_or_else(|| {
+                    if service_type == "redis" {
+                        "shared".to_string()
+                    } else {
+                        "local".to_string()
+                    }
+                });
                 let name = if let Some(n) = name {
                     n
                 } else if non_interactive || json_output {
@@ -323,6 +425,7 @@ pub(super) async fn handle_service_dispatch(
                     let default_name = match service_type.as_str() {
                         "clickhouse" => "analytics",
                         "mysql" => "mysql",
+                        "redis" => "redis",
                         "generic" => "app",
                         "plugin" => "plugin",
                         _ => "db",
@@ -353,7 +456,14 @@ pub(super) async fn handle_service_dispatch(
                     } else {
                         None
                     },
-                    shared: None,
+                    shared: if service_type == "redis" {
+                        Some(devflow_core::config::SharedServiceConfig {
+                            image: Some("redis:7".to_string()),
+                            ..Default::default()
+                        })
+                    } else {
+                        None
+                    },
                     neon: None,
                     dblab: None,
                     xata: None,

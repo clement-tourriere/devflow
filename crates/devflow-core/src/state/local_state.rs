@@ -179,13 +179,17 @@ impl LocalStateManager {
             .projects
             .get(&project_key)
             .and_then(|project| project.services.clone())
+            .map(|mut services| {
+                normalize_service_defaults(&mut services);
+                services
+            })
     }
 
     #[allow(dead_code)]
     pub fn set_services(
         &mut self,
         project_path: &Path,
-        services: Vec<NamedServiceConfig>,
+        mut services: Vec<NamedServiceConfig>,
     ) -> Result<()> {
         self.refresh_state()?;
 
@@ -199,6 +203,7 @@ impl LocalStateManager {
         let existing = self.state.projects.get(&project_key);
         let existing_branches = existing.and_then(|p| p.workspaces.clone());
         let existing_trains = existing.and_then(|p| p.merge_trains.clone());
+        normalize_service_defaults(&mut services);
 
         let project_state = ProjectState {
             last_updated: chrono::Utc::now(),
@@ -249,6 +254,8 @@ impl LocalStateManager {
             }
             services.push(service);
         }
+
+        normalize_service_defaults(&mut services);
 
         let existing_trains = existing.and_then(|p| p.merge_trains.clone());
 
@@ -678,6 +685,19 @@ impl LocalStateManager {
     }
 }
 
+fn normalize_service_defaults(services: &mut [NamedServiceConfig]) {
+    let mut seen_default = false;
+    for service in services {
+        if service.default {
+            if seen_default {
+                service.default = false;
+            } else {
+                seen_default = true;
+            }
+        }
+    }
+}
+
 /// Merge `src` project state into `dst`, preferring `dst` on conflicts.
 ///
 /// Used by the worktree-key migration: the main repo's state is authoritative;
@@ -706,6 +726,26 @@ fn merge_project_state(dst: &mut ProjectState, src: ProjectState) {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn service(name: &str, default: bool) -> NamedServiceConfig {
+        NamedServiceConfig {
+            name: name.to_string(),
+            provider_type: "local".to_string(),
+            service_type: "postgres".to_string(),
+            auto_workspace: true,
+            default,
+            local: None,
+            shared: None,
+            neon: None,
+            dblab: None,
+            xata: None,
+            clickhouse: None,
+            mysql: None,
+            generic: None,
+            plugin: None,
+            docker: None,
+        }
+    }
 
     fn ws(name: &str) -> DevflowWorkspace {
         DevflowWorkspace {
@@ -748,6 +788,16 @@ mod tests {
             .collect();
         // "main" not duplicated; "feature" merged in.
         assert_eq!(names, vec!["main".to_string(), "feature".to_string()]);
+    }
+
+    #[test]
+    fn test_normalize_service_defaults_keeps_first_default_only() {
+        let mut services = vec![service("db", true), service("cache", true)];
+
+        normalize_service_defaults(&mut services);
+
+        assert!(services[0].default);
+        assert!(!services[1].default);
     }
 
     #[test]

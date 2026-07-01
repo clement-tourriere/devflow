@@ -10,7 +10,10 @@ use crate::vcs;
 
 use super::hooks::{run_lifecycle_hooks, run_lifecycle_hooks_best_effort};
 use super::worktree::create_worktree_with_files;
-use super::{LifecycleOptions, ServiceResult, SwitchWorkspaceResult, WorktreeSetupResult};
+use super::{
+    LifecycleOptions, ServiceResult, SwitchWorkspaceResult, WorkspaceCreationMode,
+    WorktreeSetupResult,
+};
 
 /// Options specific to workspace switching.
 #[derive(Debug, Clone, Default)]
@@ -19,6 +22,8 @@ pub struct SwitchOptions {
     pub lifecycle: LifecycleOptions,
     /// Allow creating the workspace if it doesn't exist.
     pub create_if_missing: bool,
+    /// How to materialize a newly-created workspace.
+    pub creation_mode: WorkspaceCreationMode,
     /// Parent workspace to branch from when creating.
     pub from_workspace: Option<String>,
     /// Override the config `worktree.copy_files` for worktree creation.
@@ -47,7 +52,12 @@ pub async fn switch_workspace(
         vcs::detect_vcs_provider(project_dir).context("Failed to open VCS repository")?;
 
     let normalized_name = config.get_normalized_workspace_name(workspace_name);
-    let worktree_enabled = config.worktree.as_ref().is_some_and(|wt| wt.enabled);
+    let config_prefers_worktree = config.worktree.as_ref().is_some_and(|wt| wt.enabled);
+    let worktree_enabled = match options.creation_mode {
+        WorkspaceCreationMode::Default => config_prefers_worktree,
+        WorkspaceCreationMode::Worktree => true,
+        WorkspaceCreationMode::Branch => false,
+    };
     let mut hook_results = Vec::new();
 
     // Ensure main workspace is registered in state
@@ -145,62 +155,80 @@ pub async fn switch_workspace(
         options.sandboxed,
     );
 
-    // 4. Service orchestration
-    let service_results: Vec<ServiceResult> =
-        if !opts.skip_services && !config.resolve_services().is_empty() {
-            // Determine parent for service creation
-            let service_parent = if branch_created {
-                normalized_parent.clone()
-            } else {
-                // Look up stored parent from registry
-                LocalStateManager::new()
-                    .ok()
-                    .and_then(|state| state.get_workspace_by_dir(project_dir, &normalized_name))
-                    .and_then(|b| b.parent)
-            };
+    let worktree_created = worktree_result.as_ref().is_some_and(|wt| wt.created);
+    let workspace_created = branch_created || worktree_created;
+    let workspace_parent = if branch_created {
+        normalized_parent.clone()
+    } else {
+        // Look up stored parent from registry. This covers newly-created
+        // worktrees for existing branches and existing workspaces selected from
+        // the GUI.
+        LocalStateManager::new()
+            .ok()
+            .and_then(|state| state.get_workspace_by_dir(project_dir, &normalized_name))
+            .and_then(|b| b.parent)
+    };
 
-            let service_results: Vec<ServiceResult> = match services::factory::orchestrate_switch(
+    // 4. Service orchestration
+    let services_skipped = opts.skip_services || config.resolve_services().is_empty();
+    let service_results: Vec<ServiceResult> = if !services_skipped {
+        let service_results: Vec<ServiceResult> = match services::factory::orchestrate_switch(
+            config,
+            &normalized_name,
+            workspace_parent.as_deref(),
+        )
+        .await
+        {
+            Ok(results) => results.into_iter().map(ServiceResult::from).collect(),
+            Err(e) => {
+                // Branch/worktree already exist — record the failure and
+                // finish the switch instead of aborting half-way.
+                log::warn!("Service orchestration failed: {:#}", e);
+                vec![ServiceResult {
+                    service_name: "(orchestration)".to_string(),
+                    success: false,
+                    message: format!("{:#}", e),
+                }]
+            }
+        };
+
+        // Post-service-switch hooks (only if any service succeeded)
+        let any_success = service_results.iter().any(|r| r.success);
+        if any_success && !opts.skip_hooks {
+            if let Some(summary) = run_lifecycle_hooks_best_effort(
                 config,
-                &normalized_name,
-                service_parent.as_deref(),
+                project_dir,
+                workspace_name,
+                HookPhase::PostServiceSwitch,
+                opts,
             )
             .await
             {
-                Ok(results) => results.into_iter().map(ServiceResult::from).collect(),
-                Err(e) => {
-                    // Branch/worktree already exist — record the failure and
-                    // finish the switch instead of aborting half-way.
-                    log::warn!("Service orchestration failed: {:#}", e);
-                    vec![ServiceResult {
-                        service_name: "(orchestration)".to_string(),
-                        success: false,
-                        message: format!("{:#}", e),
-                    }]
-                }
-            };
-
-            // Post-service-switch hooks (only if any service succeeded)
-            let any_success = service_results.iter().any(|r| r.success);
-            if any_success && !opts.skip_hooks {
-                if let Some(summary) = run_lifecycle_hooks_best_effort(
-                    config,
-                    project_dir,
-                    workspace_name,
-                    HookPhase::PostServiceSwitch,
-                    opts,
-                )
-                .await
-                {
-                    hook_results.push(summary);
-                }
+                hook_results.push(summary);
             }
+        }
 
-            service_results
-        } else {
-            vec![]
-        };
+        service_results
+    } else {
+        vec![]
+    };
 
-    let worktree_created = worktree_result.as_ref().is_some_and(|wt| wt.created);
+    if !services_skipped && service_results.iter().any(|r| r.success) {
+        if let Err(e) = write_workspace_env_overrides(
+            config,
+            project_dir,
+            &normalized_name,
+            worktree_result.as_ref(),
+        )
+        .await
+        {
+            log::warn!(
+                "Failed to write workspace environment overrides for '{}': {:#}",
+                normalized_name,
+                e
+            );
+        }
+    }
 
     // 5. Post-create hooks (branch or worktree newly created)
     if (branch_created || worktree_created) && !opts.skip_hooks {
@@ -234,13 +262,33 @@ pub async fn switch_workspace(
 
     // 7. Process orchestration (after hooks so generated .env files exist).
     let process_results = if !opts.skip_processes {
-        processes::auto_start_workspace_processes(
-            config,
-            project_dir,
-            workspace_name,
-            process_approval_mode(opts.hook_approval),
-        )
-        .await
+        let clone_parent_processes = workspace_created
+            || workspace_parent.as_deref().is_some_and(|_| {
+                workspace_has_no_runtime_processes(config, project_dir, &normalized_name)
+            });
+
+        if clone_parent_processes {
+            if let Some(parent) = workspace_parent.as_deref() {
+                processes::auto_start_workspace_processes_like_parent(
+                    config,
+                    project_dir,
+                    &normalized_name,
+                    parent,
+                    process_approval_mode(opts.hook_approval),
+                )
+                .await
+            } else {
+                Vec::new()
+            }
+        } else {
+            processes::auto_start_workspace_processes(
+                config,
+                project_dir,
+                &normalized_name,
+                process_approval_mode(opts.hook_approval),
+            )
+            .await
+        }
     } else {
         Vec::new()
     };
@@ -254,6 +302,122 @@ pub async fn switch_workspace(
         processes: process_results,
         hooks: hook_results,
     })
+}
+
+async fn write_workspace_env_overrides(
+    config: &Config,
+    project_dir: &Path,
+    workspace: &str,
+    worktree: Option<&WorktreeSetupResult>,
+) -> Result<()> {
+    let target_dir = worktree
+        .map(|wt| wt.path.clone())
+        .unwrap_or_else(|| project_dir.to_path_buf());
+    let env_path = target_dir.join(".env.local");
+
+    let mut updates = std::collections::BTreeMap::new();
+    updates.insert("DEVFLOW_WORKSPACE".to_string(), workspace.to_string());
+
+    let services = config.resolve_services();
+    for service in services.iter().filter(|service| service.auto_workspace) {
+        let Ok(provider) =
+            services::factory::create_provider_from_named_config(config, service).await
+        else {
+            continue;
+        };
+        let Ok(info) = provider.get_connection_info(workspace).await else {
+            continue;
+        };
+        let Some(url) = info.connection_string else {
+            continue;
+        };
+
+        let service_key = service
+            .name
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_uppercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        updates.insert(format!("DEVFLOW_{}_URL", service_key), url.clone());
+
+        match service.service_type.as_str() {
+            "postgres" => {
+                if service.default || service.name == "db" || !updates.contains_key("DATABASE_URL")
+                {
+                    updates.insert("DATABASE_URL".to_string(), url);
+                }
+            }
+            "redis"
+                if !updates.contains_key("REDIS_URL") => {
+                    updates.insert("REDIS_URL".to_string(), url);
+                }
+            _ => {}
+        }
+    }
+
+    if updates.len() <= 1 {
+        return Ok(());
+    }
+
+    upsert_env_file(&env_path, &updates)
+}
+
+fn upsert_env_file(
+    path: &Path,
+    updates: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    let existing = if path.exists() {
+        std::fs::read_to_string(path)?
+    } else {
+        String::new()
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    let mut lines = Vec::new();
+    for line in existing.lines() {
+        let key = line
+            .split_once('=')
+            .map(|(key, _)| key.trim())
+            .filter(|key| !key.is_empty() && !key.starts_with('#'));
+        if let Some(key) = key {
+            if let Some(value) = updates.get(key) {
+                lines.push(format!("{}={}", key, value));
+                seen.insert(key.to_string());
+                continue;
+            }
+        }
+        lines.push(line.to_string());
+    }
+
+    if !updates.keys().all(|key| seen.contains(key)) && !lines.is_empty() {
+        lines.push(String::new());
+    }
+    for (key, value) in updates {
+        if !seen.contains(key) {
+            lines.push(format!("{}={}", key, value));
+        }
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, lines.join("\n") + "\n")?;
+    Ok(())
+}
+
+fn workspace_has_no_runtime_processes(
+    config: &Config,
+    project_dir: &Path,
+    workspace: &str,
+) -> bool {
+    processes::list_workspace_processes(config, project_dir, Some(workspace))
+        .map(|statuses| statuses.iter().all(|status| status.source == "config"))
+        .unwrap_or(false)
 }
 
 fn process_approval_mode(mode: super::hooks::HookApprovalMode) -> processes::ProcessApprovalMode {

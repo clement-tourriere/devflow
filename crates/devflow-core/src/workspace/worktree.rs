@@ -168,6 +168,8 @@ pub fn create_worktree_with_files(
         }
     }
 
+    trust_mise_configs(&wt_path);
+
     let resolved = std::fs::canonicalize(&wt_path).unwrap_or(wt_path);
     Ok(WorktreeSetupResult {
         path: resolved,
@@ -175,41 +177,171 @@ pub fn create_worktree_with_files(
     })
 }
 
-/// Recursively copy a directory using parallel reflink (CoW) per file.
+/// Copy a directory using the platform's bulk CoW-capable copy first.
 ///
-/// Uses rayon's work-stealing thread pool to copy files across all CPU
-/// cores.  Directory creation is sequential (must happen before children),
-/// but file copies within each directory level run in parallel.
+/// A previous implementation reflinked every file one-by-one. That was correct
+/// but surprisingly slow for large ignored dependency directories like
+/// `.venv/` or `node_modules/`, and it dereferenced symlinks. Bulk copy keeps
+/// workspace creation close to the underlying filesystem's clone speed
+/// (`cp -cR` on APFS, `cp -a --reflink=auto` on Linux) and preserves symlinks.
 ///
 /// Non-fatal on errors — logs warnings and continues.
 pub fn reflink_copy_dir(src: &Path, dst: &Path) {
-    use rayon::prelude::*;
+    if let Err(e) = copy_dir_bulk(src, dst).or_else(|bulk_err| {
+        log::debug!(
+            "Bulk CoW copy from '{}' to '{}' failed: {:#}; falling back to recursive copy",
+            src.display(),
+            dst.display(),
+            bulk_err
+        );
+        copy_dir_recursive(src, dst)
+    }) {
+        log::warn!(
+            "Failed to copy directory '{}' to '{}': {:#}",
+            src.display(),
+            dst.display(),
+            e
+        );
+    }
+}
 
-    let entries: Vec<_> = match std::fs::read_dir(src) {
-        Ok(iter) => iter.filter_map(|e| e.ok()).collect(),
-        Err(e) => {
-            log::warn!("Failed to read directory '{}': {}", src.display(), e);
-            return;
+fn trust_mise_configs(worktree_path: &Path) {
+    for file_name in ["mise.toml", ".mise.toml"] {
+        let path = worktree_path.join(file_name);
+        if !path.is_file() {
+            continue;
         }
-    };
+        let output = std::process::Command::new("mise")
+            .args(["trust", "-y"])
+            .arg(&path)
+            .output();
+        match output {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                log::warn!(
+                    "Failed to trust mise config '{}': {}",
+                    path.display(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                log::debug!("mise not found; skipping trust for '{}'", path.display());
+            }
+            Err(e) => {
+                log::warn!("Failed to run mise trust for '{}': {}", path.display(), e);
+            }
+        }
+    }
+}
 
-    if let Err(e) = std::fs::create_dir_all(dst) {
-        log::warn!("Failed to create directory '{}': {}", dst.display(), e);
-        return;
+fn copy_dir_bulk(src: &Path, dst: &Path) -> Result<()> {
+    if !src.is_dir() {
+        anyhow::bail!("source directory '{}' not found", src.display());
+    }
+    std::fs::create_dir_all(dst)
+        .with_context(|| format!("failed to create directory '{}'", dst.display()))?;
+
+    let source_dot = src.join(".");
+
+    #[cfg(target_os = "macos")]
+    {
+        if run_cp(&["-cR"], &source_dot, dst).is_ok() {
+            return Ok(());
+        }
+        run_cp(&["-R"], &source_dot, dst)
+            .with_context(|| format!("failed to copy '{}'", src.display()))?;
+        Ok(())
     }
 
-    entries.par_iter().for_each(|entry| {
+    #[cfg(target_os = "linux")]
+    {
+        if run_cp(&["-a", "--reflink=auto"], &source_dot, dst).is_ok() {
+            return Ok(());
+        }
+        run_cp(&["-a"], &source_dot, dst)
+            .with_context(|| format!("failed to copy '{}'", src.display()))?;
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        copy_dir_recursive(src, dst)
+    }
+}
+
+fn run_cp(flags: &[&str], src: &Path, dst: &Path) -> Result<()> {
+    let output = std::process::Command::new("cp")
+        .args(flags)
+        .arg(src)
+        .arg(dst)
+        .output()
+        .context("failed to execute cp")?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    anyhow::bail!("cp failed: {stderr}")
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    use rayon::prelude::*;
+
+    let entries: Vec<_> = std::fs::read_dir(src)
+        .with_context(|| format!("failed to read directory '{}'", src.display()))?
+        .collect::<std::io::Result<Vec<_>>>()?;
+
+    std::fs::create_dir_all(dst)
+        .with_context(|| format!("failed to create directory '{}'", dst.display()))?;
+
+    entries.par_iter().try_for_each(|entry| -> Result<()> {
+        let file_type = entry.file_type()?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
 
-        if src_path.is_dir() {
-            reflink_copy_dir(&src_path, &dst_path);
-        } else if src_path.is_file() {
-            if let Err(e) = reflink_copy::reflink_or_copy(&src_path, &dst_path) {
-                log::warn!("Failed to reflink copy '{}': {}", src_path.display(), e);
-            }
+        if file_type.is_symlink() {
+            copy_symlink(&src_path, &dst_path)?;
+        } else if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else if file_type.is_file() {
+            reflink_copy::reflink_or_copy(&src_path, &dst_path)
+                .with_context(|| format!("failed to copy '{}'", src_path.display()))?;
         }
-    });
+        Ok(())
+    })?;
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
+    let target = std::fs::read_link(src)
+        .with_context(|| format!("failed to read symlink '{}'", src.display()))?;
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _ = std::fs::remove_file(dst);
+    std::os::unix::fs::symlink(&target, dst)
+        .with_context(|| format!("failed to create symlink '{}'", dst.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
+    // Conservative fallback for platforms where creating a symlink may require
+    // privileges: copy the target contents if it resolves to a file/directory.
+    let target = std::fs::canonicalize(src)
+        .with_context(|| format!("failed to resolve symlink '{}'", src.display()))?;
+    if target.is_dir() {
+        copy_dir_recursive(&target, dst)
+    } else {
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        reflink_copy::reflink_or_copy(&target, dst)
+            .with_context(|| format!("failed to copy symlink target '{}'", target.display()))
+    }
 }
 
 #[cfg(test)]
@@ -254,5 +386,28 @@ mod tests {
     fn test_resolve_repo_name_fallback() {
         let config = Config::default();
         assert_eq!(resolve_repo_name(&config, Path::new("/")), "repo");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_reflink_copy_dir_preserves_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(src.join("bin")).unwrap();
+        std::fs::write(src.join("bin/python-real"), "python").unwrap();
+        std::os::unix::fs::symlink("python-real", src.join("bin/python")).unwrap();
+
+        reflink_copy_dir(&src, &dst);
+
+        let copied_link = dst.join("bin/python");
+        assert!(std::fs::symlink_metadata(&copied_link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_link(copied_link).unwrap(),
+            PathBuf::from("python-real")
+        );
     }
 }

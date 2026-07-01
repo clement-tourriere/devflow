@@ -41,6 +41,7 @@ export interface ServiceEntry {
   service_type: string;
   provider_type: string;
   auto_workspace: boolean;
+  source: "config" | "local_state" | string;
 }
 
 export interface ServiceWorkspaceStatus {
@@ -119,6 +120,8 @@ export interface ProcessStatus {
   desired_state?: string | null;
   runtime?: string | null;
   pitchfork_id?: string | null;
+  configured: boolean;
+  source: "config" | "config+runtime" | "runtime_state" | string;
 }
 
 export interface ProcessOperationResponse {
@@ -139,6 +142,7 @@ export interface PitchforkBridgeInfo {
 }
 
 export interface CreateWorkspaceResult {
+  workspace: string;
   services: OrchestrationResult[];
   processes: ProcessResult[];
   worktree_path: string | null;
@@ -251,6 +255,7 @@ export interface ContainerEntry {
   project: string | null;
   service: string | null;
   workspace: string | null;
+  source: "devflow-service" | "docker-compose" | "standalone-container" | string;
   /** Reachable endpoint: `https://<domain>` for web, `postgresql://<domain>:5432` etc. for databases. */
   endpoint_url: string;
 }

@@ -118,7 +118,10 @@ pub struct VcsInfo {
 #[tauri::command]
 pub async fn detect_vcs_info(path: String) -> Result<VcsInfo, String> {
     let dir = std::path::Path::new(&path);
-    let existing_vcs = devflow_core::vcs::detect_vcs_kind(dir).map(|k| k.to_string());
+    let existing_vcs = match devflow_core::vcs::detect_vcs_provider(dir) {
+        Ok(provider) => Some(provider.provider_name().to_string()),
+        Err(_) => devflow_core::vcs::detect_vcs_kind(dir).map(|k| k.to_string()),
+    };
     let available_tools = devflow_core::vcs::available_vcs_tools()
         .into_iter()
         .map(|k| k.to_string())
@@ -436,10 +439,14 @@ pub async fn get_project_detail(
 
     let current_workspace = normalized_branch;
 
-    let service_count = config
-        .as_ref()
-        .and_then(|c| c.services.as_ref().map(|s| s.len()))
-        .unwrap_or(0);
+    let service_count = crate::commands::project_config::list_services_with_sources(path)
+        .map(|services| services.len())
+        .unwrap_or_else(|_| {
+            config
+                .as_ref()
+                .and_then(|c| c.services.as_ref().map(|s| s.len()))
+                .unwrap_or(0)
+        });
 
     let hook_count = config
         .as_ref()

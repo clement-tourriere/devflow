@@ -1,9 +1,16 @@
 use anyhow::Result;
 use devflow_core::config::Config;
 use devflow_core::hooks::approval::ApprovalStore;
+use devflow_core::processes::{
+    PitchforkProcessConfig, ProcessDaemonConfig, ProcessPortBump, ProcessPortConfig,
+    ProcessesConfig,
+};
 use devflow_core::services::{self};
 use devflow_core::state::LocalStateManager;
 use devflow_core::vcs;
+use indexmap::IndexMap;
+use serde_yaml_ng::Value;
+use std::collections::{HashMap, HashSet};
 
 /// Check if ZFS auto-setup should be offered during init (Linux only).
 /// Returns `Some(data_root)` if a pool was created or already exists,
@@ -169,6 +176,328 @@ pub(super) async fn init_local_service_main(
             );
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ComposeProcessSuggestion {
+    pub name: String,
+    pub daemon: ProcessDaemonConfig,
+}
+
+pub(super) fn discover_compose_processes() -> Result<Vec<ComposeProcessSuggestion>> {
+    let files = devflow_core::docker::find_docker_compose_files();
+    let mut services = HashMap::new();
+
+    for file in files {
+        let content = std::fs::read_to_string(&file)?;
+        let value: Value = serde_yaml_ng::from_str(&content)?;
+        let Some(service_map) = mapping_get(&value, "services").and_then(Value::as_mapping) else {
+            continue;
+        };
+
+        for (key, service_value) in service_map {
+            let Some(name) = key.as_str() else { continue };
+            if service_value.as_mapping().is_some() {
+                services.insert(name.to_string(), service_value.clone());
+            }
+        }
+    }
+
+    let service_names: HashSet<String> = services.keys().cloned().collect();
+    let mut suggestions = Vec::new();
+
+    for (name, value) in services {
+        let Some(service) = value.as_mapping() else {
+            continue;
+        };
+        if is_compose_data_service(&name, &value) {
+            continue;
+        }
+
+        let compose_command = mapping_get(&value, "command")
+            .and_then(value_to_command)
+            .unwrap_or_else(|| format!("docker compose up --no-deps {name}"));
+        let port = extract_port_from_service(&value)
+            .or_else(|| extract_port_from_command(&compose_command));
+        let mut command = adapt_compose_command_for_host(&compose_command);
+        if let Some(port) = port {
+            command = command
+                .replace(&format!("0.0.0.0:{port}"), "127.0.0.1:$PORT")
+                .replace(&format!("localhost:{port}"), "127.0.0.1:$PORT");
+        }
+
+        let mut env = IndexMap::new();
+        env.insert(
+            "DEVFLOW_WORKSPACE".to_string(),
+            "{{ workspace }}".to_string(),
+        );
+
+        let depends = extract_depends(service)
+            .into_iter()
+            .filter(|dep| service_names.contains(dep) && !is_data_service_name(dep))
+            .collect();
+
+        let daemon = ProcessDaemonConfig {
+            run: command,
+            dir: None,
+            env,
+            required: !looks_optional_process(&name),
+            depends,
+            port: port.map(|port| ProcessPortConfig {
+                expect: vec![port],
+                bump: ProcessPortBump(50),
+            }),
+            ready_delay: None,
+            ready_port: None,
+            ready_http: None,
+            ready_cmd: None,
+            ready_output: None,
+            ready_timeout: None,
+            stop_timeout: None,
+            shutdown_signal: None,
+            watch: Vec::new(),
+            retry: None,
+        };
+
+        suggestions.push(ComposeProcessSuggestion { name, daemon });
+    }
+
+    suggestions.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(suggestions)
+}
+
+pub(super) fn install_compose_processes(
+    config: &mut Config,
+    config_path: &std::path::Path,
+    suggestions: Vec<ComposeProcessSuggestion>,
+) -> Result<usize> {
+    if suggestions.is_empty() {
+        return Ok(0);
+    }
+
+    let processes = config.processes.get_or_insert_with(|| ProcessesConfig {
+        provider: "pitchfork".to_string(),
+        auto_start: true,
+        auto_stop: true,
+        pitchfork: Some(PitchforkProcessConfig::default()),
+        daemons: IndexMap::new(),
+    });
+    if processes.provider == "native" {
+        processes.provider = "pitchfork".to_string();
+    }
+
+    let mut added = 0usize;
+    for suggestion in suggestions {
+        if !processes.daemons.contains_key(&suggestion.name) {
+            processes.daemons.insert(suggestion.name, suggestion.daemon);
+            added += 1;
+        }
+    }
+
+    if added > 0 {
+        config.save_to_file(config_path)?;
+    }
+    Ok(added)
+}
+
+fn mapping_get<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+    value
+        .as_mapping()
+        .and_then(|mapping| mapping.get(Value::String(key.to_string())))
+}
+
+fn value_to_command(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Sequence(items) => {
+            let parts: Vec<String> = items.iter().filter_map(value_scalar_to_string).collect();
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join(" "))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn value_scalar_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+fn adapt_compose_command_for_host(command: &str) -> String {
+    let trimmed = command.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with("uv run ")
+        || trimmed.starts_with("mise x -- uv run ")
+        || trimmed.starts_with("docker compose ")
+    {
+        return command.to_string();
+    }
+
+    let first = trimmed.split_whitespace().next().unwrap_or_default();
+    let looks_python_entrypoint = matches!(
+        first,
+        "python"
+            | "python3"
+            | "celery"
+            | "django-admin"
+            | "gunicorn"
+            | "uvicorn"
+            | "rq"
+            | "dramatiq"
+    );
+    if !looks_python_entrypoint {
+        return command.to_string();
+    }
+
+    if std::path::Path::new("uv.lock").exists() || std::path::Path::new("pyproject.toml").exists() {
+        if project_uses_mise_for_uv() {
+            format!("mise x -- uv run {trimmed}")
+        } else {
+            format!("uv run {trimmed}")
+        }
+    } else if std::path::Path::new(".venv/bin/python").exists() {
+        if matches!(first, "python" | "python3") {
+            trimmed.replacen(first, ".venv/bin/python", 1)
+        } else {
+            format!(".venv/bin/{trimmed}")
+        }
+    } else {
+        command.to_string()
+    }
+}
+
+fn project_uses_mise_for_uv() -> bool {
+    ["mise.toml", ".mise.toml"]
+        .into_iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .any(|content| content.contains("uv") || content.contains("astral-sh/uv"))
+}
+
+fn is_compose_data_service(name: &str, value: &Value) -> bool {
+    if is_data_service_name(name) {
+        return true;
+    }
+    mapping_get(value, "image")
+        .and_then(Value::as_str)
+        .map(is_data_service_name)
+        .unwrap_or(false)
+}
+
+fn is_data_service_name(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "postgres",
+        "postgresql",
+        "postgis",
+        "pgvector",
+        "timescale",
+        "mysql",
+        "mariadb",
+        "clickhouse",
+        "redis",
+        "valkey",
+        "dragonfly",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn looks_optional_process(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        "worker",
+        "beat",
+        "cron",
+        "bot",
+        "queue",
+        "scheduler",
+        "integration",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn extract_depends(service: &serde_yaml_ng::Mapping) -> Vec<String> {
+    let Some(depends) = service.get(Value::String("depends_on".to_string())) else {
+        return Vec::new();
+    };
+    match depends {
+        Value::Sequence(items) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(ToString::to_string)
+            .collect(),
+        Value::Mapping(mapping) => mapping
+            .keys()
+            .filter_map(Value::as_str)
+            .map(ToString::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn extract_port_from_service(value: &Value) -> Option<u16> {
+    let ports = mapping_get(value, "ports")?.as_sequence()?;
+    for port in ports {
+        match port {
+            Value::String(s) => {
+                if let Some(port) = parse_compose_short_port(s) {
+                    return Some(port);
+                }
+            }
+            Value::Number(n) => {
+                if let Some(port) = n.as_u64().and_then(|n| u16::try_from(n).ok()) {
+                    return Some(port);
+                }
+            }
+            Value::Mapping(mapping) => {
+                for key in ["published", "target"] {
+                    if let Some(port) = mapping
+                        .get(Value::String(key.to_string()))
+                        .and_then(value_to_port)
+                    {
+                        return Some(port);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn value_to_port(value: &Value) -> Option<u16> {
+    match value {
+        Value::Number(n) => n.as_u64().and_then(|n| u16::try_from(n).ok()),
+        Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+fn parse_compose_short_port(value: &str) -> Option<u16> {
+    let without_protocol = value.split('/').next().unwrap_or(value);
+    let parts: Vec<&str> = without_protocol.split(':').collect();
+    match parts.as_slice() {
+        [port] => port.parse().ok(),
+        // HOST:CONTAINER or IP:HOST:CONTAINER. In both cases the published
+        // host port is immediately before the container port.
+        parts if parts.len() >= 2 => parts[parts.len() - 2].parse().ok(),
+        _ => None,
+    }
+}
+
+fn extract_port_from_command(command: &str) -> Option<u16> {
+    let re = regex::Regex::new(r"(?:(?:0\.0\.0\.0|127\.0\.0\.1|localhost):)(\d{2,5})").ok()?;
+    re.captures(command)
+        .and_then(|captures| captures.get(1))
+        .and_then(|port| port.as_str().parse().ok())
 }
 
 /// Destroy a devflow project and all associated resources.

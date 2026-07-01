@@ -641,7 +641,7 @@ pub struct ProcessStatus {
     pub required: bool,
     #[serde(default)]
     pub ports: Vec<u16>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub urls: Vec<String>,
     pub command: String,
     pub workdir: String,
@@ -657,6 +657,13 @@ pub struct ProcessStatus {
     pub runtime: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pitchfork_id: Option<String>,
+    /// Whether this process is present in the current `.devflow.yml` process definitions.
+    #[serde(default)]
+    pub configured: bool,
+    /// Human-readable source for GUI/doctor state explanations: `config`,
+    /// `config+runtime`, or `runtime_state`.
+    #[serde(default)]
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -743,6 +750,85 @@ pub async fn auto_start_workspace_processes(
 
     match runtime
         .start_with_approval(config, project_dir, workspace, &[], false, approval_mode)
+        .await
+    {
+        Ok(results) => results,
+        Err(e) => vec![ProcessResult {
+            process: "(process-runtime)".to_string(),
+            success: false,
+            message: format!("{e:#}"),
+            required: true,
+            pid: None,
+            ports: Vec::new(),
+        }],
+    }
+}
+
+/// Start in `workspace` the processes that are currently desired/running in
+/// `parent_workspace`.
+///
+/// This is used when creating a new isolated workspace: services are branched
+/// from the parent, and the process runtime should mirror the parent's active
+/// app servers/workers on newly-resolved ports instead of blindly starting every
+/// configured daemon.
+pub async fn auto_start_workspace_processes_like_parent(
+    config: &Config,
+    project_dir: &Path,
+    workspace: &str,
+    parent_workspace: &str,
+    approval_mode: ProcessApprovalMode,
+) -> Vec<ProcessResult> {
+    let Some(processes) = config.processes.as_ref() else {
+        return Vec::new();
+    };
+    if !processes.auto_start || processes.daemons.is_empty() {
+        return Vec::new();
+    }
+
+    let runtime = match runtime_for_config(config) {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            return vec![ProcessResult {
+                process: "(process-runtime)".to_string(),
+                success: false,
+                message: format!("{e:#}"),
+                required: true,
+                pid: None,
+                ports: Vec::new(),
+            }];
+        }
+    };
+
+    let statuses = match runtime.status(config, project_dir, Some(parent_workspace)) {
+        Ok(statuses) => statuses,
+        Err(e) => {
+            return vec![ProcessResult {
+                process: "(process-runtime)".to_string(),
+                success: false,
+                message: format!("failed to inspect parent process state: {e:#}"),
+                required: true,
+                pid: None,
+                ports: Vec::new(),
+            }];
+        }
+    };
+
+    let names: Vec<String> = statuses
+        .into_iter()
+        .filter(|status| status.configured)
+        .filter(|status| {
+            status.desired_state.as_deref() == Some("running")
+                || matches!(status.status.as_str(), "pending" | "running" | "ready")
+        })
+        .map(|status| status.process)
+        .collect();
+
+    if names.is_empty() {
+        return Vec::new();
+    }
+
+    match runtime
+        .start_with_approval(config, project_dir, workspace, &names, false, approval_mode)
         .await
     {
         Ok(results) => results,
@@ -1059,6 +1145,27 @@ pub fn list_workspace_processes(
     runtime_for_config(config)?.status(config, project_dir, workspace)
 }
 
+/// Forget one persisted process state record without stopping any OS process.
+///
+/// This is intended for stale GUI/runtime records left behind after process
+/// definitions were removed from `.devflow.yml` or Pitchfork state was cleaned
+/// up externally.
+pub fn forget_workspace_process_record(
+    config: &Config,
+    project_dir: &Path,
+    workspace: &str,
+    name: &str,
+) -> Result<bool> {
+    let paths = runtime_paths(config, project_dir, workspace)?;
+    let path = record_path(&paths, name);
+    if path.exists() {
+        fs::remove_file(path)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 fn list_workspace_processes_native(
     config: &Config,
     project_dir: &Path,
@@ -1068,63 +1175,94 @@ fn list_workspace_processes_native(
     let project_dir = paths.project_root;
     let project_hash = project_hash(&project_dir);
     let state_root = state_root()?.join(project_hash).join("workspaces");
-    if !state_root.exists() {
-        return Ok(Vec::new());
-    }
 
     let mut out = Vec::new();
+    let configured_names: HashSet<String> = config
+        .processes
+        .as_ref()
+        .map(|processes| processes.daemons.keys().cloned().collect())
+        .unwrap_or_default();
     let workspace_filter = workspace.map(|w| config.get_normalized_workspace_name(w));
-    for ws_entry in fs::read_dir(state_root)? {
-        let ws_entry = ws_entry?;
-        if !ws_entry.file_type()?.is_dir() {
-            continue;
-        }
-        let ws_name = ws_entry.file_name().to_string_lossy().to_string();
-        if workspace_filter.as_deref().is_some_and(|f| f != ws_name) {
-            continue;
-        }
-        let processes_dir = ws_entry.path().join("processes");
-        if !processes_dir.exists() {
-            continue;
-        }
-        for entry in fs::read_dir(processes_dir)? {
-            let entry = entry?;
-            if entry.path().extension().and_then(|e| e.to_str()) != Some("json") {
+    if state_root.exists() {
+        for ws_entry in fs::read_dir(state_root)? {
+            let ws_entry = ws_entry?;
+            if !ws_entry.file_type()?.is_dir() {
                 continue;
             }
-            let content = fs::read_to_string(entry.path())?;
-            let mut record: ProcessStateRecord = serde_json::from_str(&content)?;
-            let alive = record.pid.is_some_and(process_alive);
-            if !alive && matches!(record.status.as_str(), "running" | "ready") {
-                record.status = "stopped".to_string();
-                record.pid = None;
-                if record.last_error.is_none() {
-                    record.last_error = Some("process is not running".to_string());
-                }
-                if let Ok(content) = serde_json::to_string_pretty(&record) {
-                    let _ = fs::write(entry.path(), content);
-                }
+            let ws_name = ws_entry.file_name().to_string_lossy().to_string();
+            if workspace_filter.as_deref().is_some_and(|f| f != ws_name) {
+                continue;
             }
-            let required = daemon_required(config, &record.process).unwrap_or(record.required);
-            let urls = process_urls(config, &record);
-            out.push(ProcessStatus {
-                process: record.process,
-                workspace: record.workspace,
-                pid: record.pid,
-                status: record.status,
-                required,
-                ports: record.ports,
-                urls,
-                command: record.command,
-                workdir: record.workdir,
-                log_path: record.log_path,
-                retry_count: record.retry_count,
-                last_error: record.last_error,
-                started_at: Some(record.started_at),
-                desired_state: record.desired_state,
-                runtime: record.runtime,
-                pitchfork_id: record.pitchfork_id,
-            });
+            let processes_dir = ws_entry.path().join("processes");
+            if !processes_dir.exists() {
+                continue;
+            }
+            for entry in fs::read_dir(processes_dir)? {
+                let entry = entry?;
+                if entry.path().extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let content = fs::read_to_string(entry.path())?;
+                let mut record: ProcessStateRecord = serde_json::from_str(&content)?;
+                if record.pid.is_none()
+                    && record.desired_state.as_deref() == Some("running")
+                    && matches!(record.status.as_str(), "pending" | "running" | "ready")
+                {
+                    if let Some(pid) = listening_pid_for_ports(&record.ports) {
+                        record.pid = Some(pid);
+                        record.status = "ready".to_string();
+                        record.last_error = None;
+                        if let Ok(content) = serde_json::to_string_pretty(&record) {
+                            let _ = fs::write(entry.path(), content);
+                        }
+                    }
+                }
+                let alive = record.pid.is_some_and(process_alive);
+                if !alive && matches!(record.status.as_str(), "running" | "ready") {
+                    record.status = "stopped".to_string();
+                    record.pid = None;
+                    if record.last_error.is_none() {
+                        record.last_error = Some("process is not running".to_string());
+                    }
+                    if let Ok(content) = serde_json::to_string_pretty(&record) {
+                        let _ = fs::write(entry.path(), content);
+                    }
+                }
+                let daemon = config
+                    .processes
+                    .as_ref()
+                    .and_then(|processes| processes.daemons.get(&record.process));
+                let required = daemon_required(config, &record.process).unwrap_or(record.required);
+                let urls = process_urls(config, &record);
+                let configured = configured_names.contains(&record.process);
+                let command = daemon
+                    .map(|daemon| daemon.run.clone())
+                    .unwrap_or_else(|| record.command.clone());
+                out.push(ProcessStatus {
+                    process: record.process,
+                    workspace: record.workspace,
+                    pid: record.pid,
+                    status: record.status,
+                    required,
+                    ports: record.ports,
+                    urls,
+                    command,
+                    workdir: record.workdir,
+                    log_path: record.log_path,
+                    retry_count: record.retry_count,
+                    last_error: record.last_error,
+                    started_at: Some(record.started_at),
+                    desired_state: record.desired_state,
+                    runtime: record.runtime,
+                    pitchfork_id: record.pitchfork_id,
+                    configured,
+                    source: if configured {
+                        "config+runtime".to_string()
+                    } else {
+                        "runtime_state".to_string()
+                    },
+                });
+            }
         }
     }
     if let Some(workspace_name) = workspace_filter.as_deref() {
@@ -1178,6 +1316,8 @@ fn list_workspace_processes_native(
                     } else {
                         None
                     },
+                    configured: true,
+                    source: "config".to_string(),
                 });
             }
         }
@@ -1242,7 +1382,11 @@ fn process_logs_pitchfork(
         .unwrap_or(pitchfork_daemon_id(config, project_dir, workspace, name)?);
     let logs = pitchfork_logs_for_id(&daemon_id, tail)?;
     let _ = sync_pitchfork_logs_to_file(&daemon_id, Path::new(&record.log_path));
-    Ok(logs)
+    if logs.trim().is_empty() {
+        read_tail(Path::new(&record.log_path), tail)
+    } else {
+        Ok(logs)
+    }
 }
 
 /// Remove process records/logs for a deleted workspace.
@@ -1738,8 +1882,15 @@ async fn start_one_pitchfork(
         .logs_dir
         .join(format!("{}.pitchfork.log", sanitize_component(name)));
     append_log_header(&log_path, name, &rendered.command)?;
-    let run_options =
-        pitchfork_run_options(config, project_dir, workspace, name, &rendered, force)?;
+    let run_options = pitchfork_run_options(
+        config,
+        project_dir,
+        workspace,
+        name,
+        &rendered,
+        &log_path,
+        force,
+    )?;
 
     let response = pitchfork_cli::supervisor::SUPERVISOR
         .run(run_options)
@@ -1805,13 +1956,41 @@ async fn start_one_pitchfork(
         }
         pitchfork_cli::ipc::IpcResponse::DaemonAlreadyRunning => {
             let existing = read_record(&paths, name)?;
+            let ports = existing
+                .as_ref()
+                .map(|r| r.ports.clone())
+                .filter(|ports| !ports.is_empty())
+                .unwrap_or_else(|| rendered.ports.clone());
+            let pid = existing
+                .as_ref()
+                .and_then(|r| r.pid)
+                .or_else(|| listening_pid_for_ports(&ports));
+
+            if let Some(mut record) = existing {
+                record.pid = pid;
+                record.ports = ports.clone();
+                record.command = rendered.command.clone();
+                record.workdir = rendered.workdir.display().to_string();
+                record.log_path = log_path.display().to_string();
+                record.desired_state = Some("running".to_string());
+                record.status = if pid.is_some() {
+                    "ready".to_string()
+                } else {
+                    "pending".to_string()
+                };
+                record.runtime = Some("pitchfork".to_string());
+                record.pitchfork_id = Some(daemon_id.qualified());
+                record.last_error = None;
+                write_record(&paths, &record)?;
+            }
+
             Ok(ProcessResult {
                 process: name.to_string(),
                 success: true,
                 message: format!("pitchfork process '{}' already running", name),
                 required,
-                pid: existing.as_ref().and_then(|r| r.pid),
-                ports: existing.map(|r| r.ports).unwrap_or_default(),
+                pid,
+                ports,
             })
         }
         pitchfork_cli::ipc::IpcResponse::DaemonFailed { error } => {
@@ -1965,11 +2144,18 @@ async fn stop_one_pitchfork(
     let mut stopped_by_pitchfork = false;
     if let Some(id) = daemon_id.as_ref() {
         match pitchfork_cli::supervisor::SUPERVISOR.stop(id).await {
-            Ok(pitchfork_cli::ipc::IpcResponse::Ok)
-            | Ok(pitchfork_cli::ipc::IpcResponse::DaemonWasNotRunning)
+            Ok(pitchfork_cli::ipc::IpcResponse::Ok) => {
+                stopped_by_pitchfork = true;
+            }
+            Ok(pitchfork_cli::ipc::IpcResponse::DaemonWasNotRunning)
             | Ok(pitchfork_cli::ipc::IpcResponse::DaemonNotRunning)
             | Ok(pitchfork_cli::ipc::IpcResponse::DaemonNotFound) => {
-                stopped_by_pitchfork = true;
+                // A fresh CLI/GUI process can have a persisted devflow record
+                // for a process that Pitchfork's in-memory supervisor no
+                // longer knows about. If we still have a live pid, fall back to
+                // devflow's process-group termination below instead of treating
+                // the Pitchfork "not found" response as a successful stop.
+                stopped_by_pitchfork = pid.is_none_or(|pid| !process_alive(pid));
             }
             Ok(pitchfork_cli::ipc::IpcResponse::DaemonStopFailed { error }) => {
                 record.last_error = Some(error.clone());
@@ -2319,12 +2505,43 @@ fn pitchfork_daemon_id(
         .map_err(|e| anyhow::anyhow!("invalid pitchfork daemon id for '{}': {e:#}", name))
 }
 
+fn pitchfork_run_script(rendered: &RenderedProcess, log_path: &Path) -> String {
+    // Directly embedded Pitchfork supervisors live only as long as the devflow
+    // CLI/GUI process that started them. If stdout/stderr are only captured by
+    // Pitchfork's in-memory reader task, logs disappear when a short-lived CLI
+    // command exits. Redirect process output inside the shell command as well,
+    // so devflow's per-process log file remains authoritative and searchable.
+    //
+    // Keep stdout/stderr attached when a ready_output regex is configured;
+    // Pitchfork needs to see those lines to mark the daemon ready.
+    if rendered.ready_output.is_some() {
+        return rendered.command.clone();
+    }
+    format!(
+        "{{ {}; }} >> {} 2>&1",
+        rendered.command,
+        shell_single_quote(&log_path.display().to_string())
+    )
+}
+
+fn shell_single_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn command_looks_pythonish(command: &str) -> bool {
+    command.contains("python") || command.contains("celery") || command.contains("manage.py")
+}
+
 fn pitchfork_run_options(
     config: &Config,
     project_dir: &Path,
     workspace: &str,
     name: &str,
     rendered: &RenderedProcess,
+    log_path: &Path,
     force: bool,
 ) -> Result<pitchfork_cli::daemon::RunOptions> {
     let daemon = config
@@ -2338,10 +2555,16 @@ fn pitchfork_run_options(
         .iter()
         .map(|dep| pitchfork_daemon_id(config, project_dir, workspace, dep))
         .collect::<Result<Vec<_>>>()?;
-    let env = if rendered.env.is_empty() {
+    let mut env_map = rendered.env.clone();
+    if command_looks_pythonish(&rendered.command) {
+        env_map
+            .entry("PYTHONUNBUFFERED".to_string())
+            .or_insert_with(|| "1".to_string());
+    }
+    let env = if env_map.is_empty() {
         None
     } else {
-        Some(rendered.env.clone())
+        Some(env_map)
     };
     let stop_signal = pitchfork_stop_config(daemon)?;
     let port = pitchfork_cli::pitchfork_toml::PortConfig::from_parts(
@@ -2354,11 +2577,15 @@ fn pitchfork_run_options(
         && rendered.ready_http.is_none()
         && rendered.ready_port.is_none()
         && rendered.ready_cmd.is_none();
+    let implicit_ready_port = no_ready_check
+        .then(|| rendered.ports.first().copied())
+        .flatten();
+    let run_script = pitchfork_run_script(rendered, log_path);
 
     Ok(pitchfork_cli::daemon::RunOptions {
         id,
-        cmd: vec![rendered.command.clone()],
-        run: Some(rendered.command.clone()),
+        cmd: vec![run_script.clone()],
+        run: Some(run_script),
         force,
         shell_pid: None,
         dir: pitchfork_cli::pitchfork_toml::Dir(rendered.workdir.clone()),
@@ -2369,16 +2596,19 @@ fn pitchfork_run_options(
         retry: pitchfork_cli::pitchfork_toml::Retry(daemon.retry.unwrap_or(0)),
         retry_count: 0,
         // Pitchfork's direct Supervisor::run waits forever when wait_ready=true
-        // and no readiness signal is configured. A zero-second delay preserves
-        // devflow's native semantics: long-running commands are ready after a
-        // short supervisor round trip unless an explicit check says otherwise.
-        ready_delay: rendered.ready_delay.or_else(|| no_ready_check.then_some(0)),
+        // and no readiness signal is configured. For portless daemons, a
+        // zero-second delay preserves devflow's native semantics. For daemons
+        // with expected ports, use the first resolved port as the readiness
+        // probe so crashed web servers do not appear "ready".
+        ready_delay: rendered
+            .ready_delay
+            .or_else(|| (no_ready_check && implicit_ready_port.is_none()).then_some(0)),
         ready_output: rendered.ready_output.clone(),
         ready_http: rendered
             .ready_http
             .as_ref()
             .map(|url| pitchfork_cli::pitchfork_toml::ReadyHttp::new(url.clone())),
-        ready_port: rendered.ready_port,
+        ready_port: rendered.ready_port.or(implicit_ready_port),
         ready_cmd: rendered.ready_cmd.clone(),
         port,
         wait_ready: true,
@@ -2484,7 +2714,9 @@ fn sync_pitchfork_logs_to_file(
     log_path: &Path,
 ) -> Result<()> {
     let logs = pitchfork_logs_for_id(daemon_id, None)?;
-    fs::write(log_path, logs)?;
+    if !logs.trim().is_empty() {
+        fs::write(log_path, logs)?;
+    }
     Ok(())
 }
 
@@ -3066,6 +3298,42 @@ fn watch_signature(workdir: &Path, patterns: &[String]) -> Result<Option<String>
     Ok(Some(format!("{count}:{latest}")))
 }
 
+fn listening_pid_for_ports(ports: &[u16]) -> Option<u32> {
+    ports.iter().find_map(|port| listening_pid_for_port(*port))
+}
+
+#[cfg(unix)]
+fn listening_pid_for_port(port: u16) -> Option<u32> {
+    let output = std::process::Command::new("lsof")
+        .args(["-nP", &format!("-tiTCP:{port}"), "-sTCP:LISTEN"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.trim().parse::<u32>().ok())
+        .map(|pid| process_group_for_pid(pid).unwrap_or(pid))
+}
+
+#[cfg(unix)]
+fn process_group_for_pid(pid: u32) -> Option<u32> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+#[cfg(not(unix))]
+fn listening_pid_for_port(_port: u16) -> Option<u32> {
+    None
+}
+
 #[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
     use nix::sys::signal::kill;
@@ -3173,6 +3441,36 @@ processes:
         assert!(runtime_for_config(&config).is_ok());
         config.processes.as_mut().unwrap().provider = "unknown".to_string();
         assert!(runtime_for_config(&config).is_err());
+    }
+
+    #[test]
+    fn pitchfork_run_script_redirects_output_when_no_output_readiness() {
+        let rendered = RenderedProcess {
+            command: "python manage.py runserver 127.0.0.1:$PORT".to_string(),
+            workdir: PathBuf::from("/tmp/project"),
+            env: IndexMap::new(),
+            ports: vec![8000],
+            ready_delay: None,
+            ready_port: None,
+            ready_http: None,
+            ready_cmd: None,
+            ready_output: None,
+            ready_timeout: None,
+        };
+        let script = pitchfork_run_script(&rendered, Path::new("/tmp/log's/app.log"));
+        assert_eq!(
+            script,
+            "{ python manage.py runserver 127.0.0.1:$PORT; } >> '/tmp/log'\\''s/app.log' 2>&1"
+        );
+
+        let with_output_readiness = RenderedProcess {
+            ready_output: Some("ready".to_string()),
+            ..rendered
+        };
+        assert_eq!(
+            pitchfork_run_script(&with_output_readiness, Path::new("/tmp/app.log")),
+            "python manage.py runserver 127.0.0.1:$PORT"
+        );
     }
 
     #[test]

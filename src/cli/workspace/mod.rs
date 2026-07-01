@@ -525,6 +525,7 @@ pub(super) async fn handle_switch_command(
             vcs_event: vcs_event.map(String::from),
         },
         create_if_missing: create,
+        creation_mode: devflow_core::workspace::WorkspaceCreationMode::Default,
         from_workspace,
         copy_files: None,
         copy_ignored: copy_ignored_override,

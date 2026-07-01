@@ -6,12 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 fn load_config(project_dir: &Path) -> Result<Config, String> {
-    let config_path = project_dir.join(".devflow.yml");
-    if config_path.exists() {
-        Config::from_file(&config_path).map_err(crate::commands::format_error)
-    } else {
-        Ok(Config::default())
-    }
+    crate::commands::project_config::load_project_config_with_local_state(project_dir)
 }
 
 fn current_workspace(config: &Config, workspace: Option<String>) -> String {
@@ -160,5 +155,17 @@ pub fn get_process_logs(
     let project_dir = PathBuf::from(&project_path);
     let config = load_config(&project_dir)?;
     processes::process_logs(&config, &project_dir, &workspace_name, &name, tail)
+        .map_err(crate::commands::format_error)
+}
+
+#[tauri::command]
+pub fn forget_process_record(
+    project_path: String,
+    workspace_name: String,
+    name: String,
+) -> Result<bool, String> {
+    let project_dir = PathBuf::from(&project_path);
+    let config = load_config(&project_dir)?;
+    processes::forget_workspace_process_record(&config, &project_dir, &workspace_name, &name)
         .map_err(crate::commands::format_error)
 }
