@@ -148,6 +148,31 @@ pub async fn collect_container_logs(
         .join(""))
 }
 
+/// Ports handed out by the `pick_available_port*` helpers in this process
+/// whose containers may not be listening yet. Service providers run
+/// concurrently during orchestration; between picking a port and starting the
+/// container (data cloning happens in between) the port looks free to every
+/// other picker, so a purely probe-based check would let two services choose
+/// the same port.
+fn claimed_ports() -> &'static std::sync::Mutex<std::collections::HashSet<u16>> {
+    static CLAIMED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u16>>> =
+        std::sync::OnceLock::new();
+    CLAIMED.get_or_init(Default::default)
+}
+
+/// Atomically claim all given ports. Returns false (claiming none) if any of
+/// them was already claimed by another picker in this process.
+pub(crate) fn try_claim_ports(ports: &[u16]) -> bool {
+    let mut claimed = claimed_ports()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if ports.iter().any(|p| claimed.contains(p)) {
+        return false;
+    }
+    claimed.extend(ports.iter().copied());
+    true
+}
+
 pub async fn pick_available_port(client: &Docker, start_port: u16) -> Result<u16> {
     let options = ListContainersOptions {
         all: false,
@@ -172,7 +197,9 @@ pub async fn pick_available_port(client: &Docker, start_port: u16) -> Result<u16
         if !docker_ports.contains(&port) {
             if let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
                 drop(listener);
-                return Ok(port);
+                if try_claim_ports(&[port]) {
+                    return Ok(port);
+                }
             }
         }
         port = port.saturating_add(1);
@@ -213,7 +240,9 @@ pub async fn pick_available_port_pair(client: &Docker, start_port: u16) -> Resul
                 if let Ok(listener2) = tokio::net::TcpListener::bind(("127.0.0.1", port + 1)).await
                 {
                     drop(listener2);
-                    return Ok(port);
+                    if try_claim_ports(&[port, port + 1]) {
+                        return Ok(port);
+                    }
                 }
             }
         }
@@ -226,4 +255,28 @@ pub async fn pick_available_port_pair(client: &Docker, start_port: u16) -> Resul
     Err(anyhow!(
         "failed to find two available consecutive ports starting from {start_port}"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn try_claim_ports_rejects_already_claimed() {
+        // Use a high, unlikely-to-collide range: the registry is process-wide
+        // and shared with other tests.
+        assert!(try_claim_ports(&[64901, 64902]));
+        assert!(!try_claim_ports(&[64902]));
+        assert!(!try_claim_ports(&[64900, 64901]));
+        assert!(try_claim_ports(&[64903]));
+    }
+
+    #[test]
+    fn try_claim_ports_is_all_or_nothing() {
+        assert!(try_claim_ports(&[64910]));
+        // 64911 must remain claimable: the failed batch below must not
+        // have claimed it on the way to rejecting 64910.
+        assert!(!try_claim_ports(&[64911, 64910]));
+        assert!(try_claim_ports(&[64911]));
+    }
 }

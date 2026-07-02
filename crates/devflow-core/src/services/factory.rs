@@ -511,9 +511,12 @@ pub async fn orchestrate_create(
     from_workspace: Option<&str>,
 ) -> Result<Vec<OrchestrationResult>> {
     let providers = create_auto_branch_providers(config).await?;
-    let mut results = Vec::with_capacity(providers.len());
 
-    for named in &providers {
+    // Services are independent (separate containers, ports, state rows), so
+    // create them concurrently — total wall-clock becomes the slowest service
+    // instead of the sum of all of them.
+    let results = futures_util::future::join_all(providers.iter().map(|named| async move {
+        let started = std::time::Instant::now();
         let result = match named
             .provider
             .create_workspace(workspace_name, from_workspace)
@@ -532,8 +535,14 @@ pub async fn orchestrate_create(
                 branch_info: None,
             },
         };
-        results.push(result);
-    }
+        log::debug!(
+            "Service '{}' workspace creation took {:.2?}",
+            named.name,
+            started.elapsed()
+        );
+        result
+    }))
+    .await;
 
     Ok(results)
 }
@@ -613,14 +622,18 @@ pub async fn orchestrate_switch(
     from_workspace: Option<&str>,
 ) -> Result<Vec<OrchestrationResult>> {
     let providers = create_auto_branch_providers(config).await?;
-    let mut results = Vec::with_capacity(providers.len());
 
-    for named in &providers {
+    // Services are independent (separate containers, ports, state rows), so
+    // switch them concurrently — total wall-clock becomes the slowest service
+    // instead of the sum of all of them.
+    let results = futures_util::future::join_all(providers.iter().map(|named| async move {
+        let started = std::time::Instant::now();
+
         // Check if workspace already exists
         let exists = match named.provider.workspace_exists(workspace_name).await {
             Ok(v) => v,
             Err(e) => {
-                results.push(OrchestrationResult {
+                return OrchestrationResult {
                     service_name: named.name.clone(),
                     success: false,
                     message: format!(
@@ -628,8 +641,7 @@ pub async fn orchestrate_switch(
                         named.name, e
                     ),
                     branch_info: None,
-                });
-                continue;
+                };
             }
         };
 
@@ -676,8 +688,14 @@ pub async fn orchestrate_switch(
                 },
             }
         };
-        results.push(result);
-    }
+        log::debug!(
+            "Service '{}' workspace switch took {:.2?}",
+            named.name,
+            started.elapsed()
+        );
+        result
+    }))
+    .await;
 
     Ok(results)
 }

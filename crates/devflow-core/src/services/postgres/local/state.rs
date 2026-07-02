@@ -36,6 +36,12 @@ impl Store {
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open SQLite db at {}", path.display()))?;
 
+        // Several providers (one per configured service) open this database
+        // concurrently when services are orchestrated in parallel. Without a
+        // busy timeout a second writer gets SQLITE_BUSY immediately.
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .context("failed to set SQLite busy timeout")?;
+
         let store = Self { conn };
         store.init_schema()?;
         Ok(store)

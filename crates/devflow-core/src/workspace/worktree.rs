@@ -82,7 +82,9 @@ pub fn create_worktree_with_files(
     // Resolve target path
     let wt_path = resolve_worktree_path(config, project_dir, workspace_name);
 
-    // Create the worktree via git2 (instant checkout of tracked files only)
+    // Create the worktree via git2 (checkout of tracked files only; libgit2's
+    // single-threaded checkout can still take a while on large repos)
+    let checkout_started = std::time::Instant::now();
     vcs.create_worktree(workspace_name, &wt_path)
         .with_context(|| {
             format!(
@@ -90,6 +92,11 @@ pub fn create_worktree_with_files(
                 workspace_name
             )
         })?;
+    log::debug!(
+        "Created worktree checkout at '{}' in {:.2?}",
+        wt_path.display(),
+        checkout_started.elapsed()
+    );
 
     // Copy configured files from main worktree
     if let Some(ref wt_config) = config.worktree {
@@ -103,7 +110,13 @@ pub fn create_worktree_with_files(
         let files_to_copy = copy_files_override.unwrap_or(&wt_config.copy_files);
         let copy_ignored = copy_ignored_override.unwrap_or(wt_config.copy_ignored);
 
+        let will_copy = !files_to_copy.is_empty() || copy_ignored || wt_config.copy_ai_configs;
+        if will_copy {
+            check_cow_support(&main_dir, &wt_path, copy_ignored);
+        }
+
         // Copy explicitly listed files/directories using parallel reflink.
+        let copy_started = std::time::Instant::now();
         files_to_copy.par_iter().for_each(|entry| {
             let src = main_dir.join(entry);
             let dst = wt_path.join(entry);
@@ -118,9 +131,17 @@ pub fn create_worktree_with_files(
                 }
             }
         });
+        if !files_to_copy.is_empty() {
+            log::debug!(
+                "Copied {} configured file(s) into worktree in {:.2?}",
+                files_to_copy.len(),
+                copy_started.elapsed()
+            );
+        }
 
         // Copy AI tool config directories (.claude, .cursor, etc.) if enabled.
         if wt_config.copy_ai_configs {
+            let ai_copy_started = std::time::Instant::now();
             let ai_dirs: Vec<&str> = crate::config::AI_TOOL_DIRS.to_vec();
             let extra: Vec<&str> = wt_config.extra_ai_dirs.iter().map(|s| s.as_str()).collect();
             let all_ai_dirs: Vec<&str> = ai_dirs.into_iter().chain(extra).collect();
@@ -132,6 +153,10 @@ pub fn create_worktree_with_files(
                     reflink_copy_dir(&src, &dst);
                 }
             });
+            log::debug!(
+                "Copied AI tool config dirs into worktree in {:.2?}",
+                ai_copy_started.elapsed()
+            );
         }
 
         // Copy gitignored entries (node_modules, .venv, target, etc.) from the
@@ -142,7 +167,9 @@ pub fn create_worktree_with_files(
         // list_ignored_files() which would recurse and enumerate every file
         // inside each ignored directory.
         if copy_ignored {
+            let ignored_copy_started = std::time::Instant::now();
             if let Ok(ignored_entries) = vcs.list_ignored_entries() {
+                let entry_count = ignored_entries.len();
                 ignored_entries.par_iter().for_each(|rel_path| {
                     let src = main_dir.join(rel_path);
                     let dst = wt_path.join(rel_path);
@@ -164,6 +191,11 @@ pub fn create_worktree_with_files(
                         }
                     }
                 });
+                log::debug!(
+                    "Copied {} gitignored entrie(s) into worktree in {:.2?}",
+                    entry_count,
+                    ignored_copy_started.elapsed()
+                );
             }
         }
     }
@@ -175,6 +207,42 @@ pub fn create_worktree_with_files(
         path: resolved,
         created: true,
     })
+}
+
+/// Probe copy-on-write support between the main worktree and the new worktree
+/// and warn when file copies will degrade to full byte copies.
+///
+/// The copy helpers below use `cp --reflink=auto` (Linux) which silently falls
+/// back to a full copy on filesystems without reflink support (e.g. ext4), so
+/// without this probe the user never learns why worktree creation is slow.
+fn check_cow_support(main_dir: &Path, wt_path: &Path, copy_ignored: bool) {
+    use crate::vcs::cow_worktree::{detect_cow_capability_cross, CowCapability};
+
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        return;
+    }
+
+    match detect_cow_capability_cross(main_dir, wt_path) {
+        CowCapability::None => {
+            let hint = if copy_ignored {
+                " Large gitignored directories (node_modules, target, .venv) are copied in full; \
+                 consider setting 'worktree.copy_ignored: false' or using a CoW filesystem \
+                 (Btrfs/XFS on Linux, APFS on macOS)."
+            } else {
+                " Consider a CoW filesystem (Btrfs/XFS on Linux, APFS on macOS)."
+            };
+            log::warn!(
+                "No copy-on-write support between '{}' and '{}': worktree file copies will be \
+                 full copies.{}",
+                main_dir.display(),
+                wt_path.display(),
+                hint
+            );
+        }
+        capability => {
+            log::debug!("Worktree file copies will use CoW ({:?})", capability);
+        }
+    }
 }
 
 /// Copy a directory using the platform's bulk CoW-capable copy first.

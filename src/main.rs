@@ -150,7 +150,9 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
+    // Default to warn so degradation notices (e.g. copy-on-write unavailable,
+    // full copies happening) reach users; RUST_LOG still overrides.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
     let cli = Cli::parse();
 

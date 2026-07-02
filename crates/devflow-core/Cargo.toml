@@ -8,7 +8,7 @@ license = "MIT"
 
 [features]
 default = ["service-local", "service-neon", "service-dblab", "service-xata", "llm"]
-service-local = ["dep:bollard", "dep:rusqlite", "dep:rust-s3", "dep:tar", "dep:bytes", "dep:futures-util", "dep:tempfile", "dep:url"]
+service-local = ["dep:bollard", "dep:rusqlite", "dep:rust-s3", "dep:tar", "dep:bytes", "dep:tempfile", "dep:url"]
 service-neon = []
 service-dblab = []
 service-xata = []
@@ -71,7 +71,7 @@ tempfile = { version = "3.27", optional = true }
 # Docker Engine API client
 bollard = { version = "0.20", default-features = false, features = ["ssl", "pipe"], optional = true }
 bytes = { version = "1", optional = true }
-futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 # Tar archive creation (for bollard upload_to_container)
 tar = { version = "0.4", default-features = false, optional = true }

@@ -105,29 +105,51 @@ impl StorageCoordinator {
     }
 
     pub async fn select_for_new_project(&self) -> StorageSelection {
-        let report = self.doctor().await;
-
-        match report.default_driver {
-            StorageDriver::Zfs => {
-                let zfs_report = self.zfs.detect(&self.projects_root).await;
-                if let Some(root_dataset) = zfs_report.root_dataset {
-                    let config = ZfsProjectConfig { root_dataset };
-                    return StorageSelection {
-                        driver: StorageDriver::Zfs,
-                        config: Some(
-                            serde_json::to_string(&config).unwrap_or_else(|_| "{}".to_string()),
-                        ),
-                    };
-                }
-                StorageSelection {
-                    driver: StorageDriver::Copy,
-                    config: None,
-                }
+        // Probe in preference order and short-circuit: unlike doctor(), which
+        // reports on every driver, project creation only needs the first
+        // available one, and each probe costs a process spawn.
+        let zfs_report = self.zfs.detect(&self.projects_root).await;
+        if zfs_report.available {
+            if let Some(root_dataset) = zfs_report.root_dataset {
+                let config = ZfsProjectConfig { root_dataset };
+                return StorageSelection {
+                    driver: StorageDriver::Zfs,
+                    config: Some(
+                        serde_json::to_string(&config).unwrap_or_else(|_| "{}".to_string()),
+                    ),
+                };
             }
-            other => StorageSelection {
-                driver: other,
+        }
+
+        if self.local.detect_apfs(&self.projects_root).await.available {
+            return StorageSelection {
+                driver: StorageDriver::ApfsClone,
                 config: None,
-            },
+            };
+        }
+
+        if self
+            .local
+            .detect_reflink(&self.projects_root)
+            .await
+            .available
+        {
+            return StorageSelection {
+                driver: StorageDriver::Reflink,
+                config: None,
+            };
+        }
+
+        log::warn!(
+            "No copy-on-write storage support detected at '{}' (ZFS, APFS clone, or reflink); \
+             workspace databases will be cloned with full copies, which is slow for large data. \
+             On Linux, Btrfs or XFS enables instant reflink clones.",
+            self.projects_root.display()
+        );
+
+        StorageSelection {
+            driver: StorageDriver::Copy,
+            config: None,
         }
     }
 
@@ -200,6 +222,13 @@ impl StorageCoordinator {
                 Ok(None)
             }
             StorageDriver::Copy => {
+                log::warn!(
+                    "Project '{}' uses full-copy storage (no copy-on-write support was detected \
+                     when the project was created); cloning workspace data from '{}' may be slow. \
+                     Run 'devflow doctor' to inspect storage drivers.",
+                    project.name,
+                    parent.name
+                );
                 self.local
                     .clone_dir(
                         std::path::PathBuf::from(&parent.data_dir).as_path(),

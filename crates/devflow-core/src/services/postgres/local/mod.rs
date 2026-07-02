@@ -273,11 +273,17 @@ impl ServiceProvider for LocalProvider {
         let parent = if let Some(from_name) = from_workspace {
             self.store().get_workspace_by_name(&project.id, from_name)?
         } else {
-            // Try to clone from most recent workspace
+            // No explicit parent: clone from an existing workspace, preferring
+            // the most recent *stopped* one — its PGDATA is already quiesced,
+            // so we skip the stop/restart cycle a running parent requires
+            // (postgres shutdown checkpoint + restart, easily several seconds
+            // of both latency and parent downtime).
             let workspaces = self.store().list_workspaces(&project.id)?;
             workspaces
-                .into_iter()
-                .find(|b| b.state == BranchState::Running || b.state == BranchState::Stopped)
+                .iter()
+                .find(|b| b.state == BranchState::Stopped)
+                .or_else(|| workspaces.iter().find(|b| b.state == BranchState::Running))
+                .cloned()
         };
 
         let storage_metadata = if let Some(ref parent_workspace) = parent {
@@ -292,15 +298,30 @@ impl ServiceProvider for LocalProvider {
                 == docker::ContainerStatus::Running;
 
             if parent_running {
+                let stop_started = std::time::Instant::now();
                 self.runtime
                     .stop_branch_for_clone(&parent_workspace.container_name)
                     .await?;
+                log::debug!(
+                    "[{}] stopped parent '{}' for clone in {:.2?}",
+                    self.service_name,
+                    parent_workspace.name,
+                    stop_started.elapsed()
+                );
             }
 
+            let clone_started = std::time::Instant::now();
             let result = self
                 .storage
                 .clone_branch_from_parent(&project, parent_workspace, &branch_id, &data_dir)
                 .await;
+            log::debug!(
+                "[{}] cloned data dir from parent '{}' ({} storage) in {:.2?}",
+                self.service_name,
+                parent_workspace.name,
+                project.storage_driver.as_str(),
+                clone_started.elapsed()
+            );
 
             if parent_running {
                 // Restart even when the clone failed — never leave the
@@ -339,6 +360,7 @@ impl ServiceProvider for LocalProvider {
         })?;
 
         // Start container
+        let start_started = std::time::Instant::now();
         self.runtime
             .start_workspace(&StartBranchSpec {
                 image: project.image.clone(),
@@ -364,6 +386,12 @@ impl ServiceProvider for LocalProvider {
                 STARTUP_TIMEOUT,
             )
             .await?;
+        log::debug!(
+            "[{}] container '{}' started and ready in {:.2?}",
+            self.service_name,
+            reserved.container_name,
+            start_started.elapsed()
+        );
 
         // Update state
         self.store()

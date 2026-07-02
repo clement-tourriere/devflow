@@ -518,7 +518,11 @@ pub async fn pick_available_port(client: &Docker, start_port: u16) -> anyhow::Re
             continue;
         }
 
-        if is_port_available(port).await {
+        // Claim the port process-wide: concurrent providers pick ports before
+        // their containers start, so a bind probe alone can hand the same
+        // port to two services.
+        if is_port_available(port).await && crate::services::local_docker::try_claim_ports(&[port])
+        {
             return Ok(port);
         }
 

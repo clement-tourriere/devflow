@@ -63,6 +63,7 @@ pub async fn switch_workspace(
 
     // 1. Pre-switch hooks
     if !opts.skip_hooks {
+        let phase_started = std::time::Instant::now();
         run_lifecycle_hooks(
             config,
             project_dir,
@@ -71,6 +72,10 @@ pub async fn switch_workspace(
             opts,
         )
         .await?;
+        log::debug!(
+            "Phase pre-switch hooks took {:.2?}",
+            phase_started.elapsed()
+        );
     }
 
     let mut branch_created = false;
@@ -78,6 +83,7 @@ pub async fn switch_workspace(
     let mut worktree_result: Option<WorktreeSetupResult> = None;
 
     // 2. VCS workspace creation / checkout
+    let vcs_phase_started = std::time::Instant::now();
     if worktree_enabled {
         // Worktree mode: check for existing worktree, create if needed
         let existing_path = vcs_provider.worktree_path(workspace_name)?;
@@ -134,6 +140,10 @@ pub async fn switch_workspace(
         }
         vcs_provider.checkout_workspace(workspace_name)?;
     }
+    log::debug!(
+        "Phase VCS checkout/worktree setup took {:.2?}",
+        vcs_phase_started.elapsed()
+    );
 
     // 3. Register workspace in state (before services, independent of their success)
     let normalized_parent = if branch_created {
@@ -169,6 +179,7 @@ pub async fn switch_workspace(
     // 4. Service orchestration
     let services_skipped = opts.skip_services || config.resolve_services().is_empty();
     let service_results: Vec<ServiceResult> = if !services_skipped {
+        let services_phase_started = std::time::Instant::now();
         let service_results: Vec<ServiceResult> = match services::factory::orchestrate_switch(
             config,
             &normalized_name,
@@ -188,6 +199,10 @@ pub async fn switch_workspace(
                 }]
             }
         };
+        log::debug!(
+            "Phase service orchestration took {:.2?}",
+            services_phase_started.elapsed()
+        );
 
         // Post-service-switch hooks (only if any service succeeded)
         let any_success = service_results.iter().any(|r| r.success);
@@ -229,6 +244,7 @@ pub async fn switch_workspace(
 
     // 5. Post-create hooks (branch or worktree newly created)
     if (branch_created || worktree_created) && !opts.skip_hooks {
+        let phase_started = std::time::Instant::now();
         if let Some(summary) = run_lifecycle_hooks_best_effort(
             config,
             project_dir,
@@ -240,10 +256,15 @@ pub async fn switch_workspace(
         {
             hook_results.push(summary);
         }
+        log::debug!(
+            "Phase post-create hooks took {:.2?}",
+            phase_started.elapsed()
+        );
     }
 
     // 6. Post-switch hooks (always)
     if !opts.skip_hooks {
+        let phase_started = std::time::Instant::now();
         if let Some(summary) = run_lifecycle_hooks_best_effort(
             config,
             project_dir,
@@ -255,9 +276,14 @@ pub async fn switch_workspace(
         {
             hook_results.push(summary);
         }
+        log::debug!(
+            "Phase post-switch hooks took {:.2?}",
+            phase_started.elapsed()
+        );
     }
 
     // 7. Process orchestration (after hooks so generated .env files exist).
+    let process_phase_started = std::time::Instant::now();
     let process_results = if !opts.skip_processes {
         let clone_parent_processes = workspace_created
             || workspace_parent.as_deref().is_some_and(|_| {
@@ -289,6 +315,12 @@ pub async fn switch_workspace(
     } else {
         Vec::new()
     };
+    if !opts.skip_processes {
+        log::debug!(
+            "Phase process orchestration took {:.2?}",
+            process_phase_started.elapsed()
+        );
+    }
 
     Ok(SwitchWorkspaceResult {
         workspace: normalized_name,
