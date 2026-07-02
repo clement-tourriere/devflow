@@ -1,3 +1,11 @@
+[env]
+# `cargo tauri build` exports MACOSX_DEPLOYMENT_TARGET=10.13 (its default
+# bundle.macOS.minimumSystemVersion) while plain cargo commands leave it unset.
+# The C-sys build scripts (ring, aws-lc-sys, libgit2-sys, ...) rerun whenever
+# this var changes, so alternating `install` and `gui:build` used to rebuild
+# the whole dependency tree every time. Pin it so every build agrees.
+MACOSX_DEPLOYMENT_TARGET = "10.13"
+
 [tools]
 # Pin Rust to the same channel as rust-toolchain.toml for reproducible
 # builds across contributors and CI. (rust-toolchain.toml still governs the
@@ -94,7 +102,7 @@ cargo test --workspace
 
 [tasks.install]
 description = "Build release and install the CLI to ~/.cargo/bin"
-run = "cargo install --path ."
+run = "cargo install --path . --locked"
 
 [tasks."release:dry-run"]
 description = "Preview next Commitizen release bump"

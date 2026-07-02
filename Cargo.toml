@@ -89,15 +89,23 @@ ratatui = { version = "0.29", default-features = false, features = ["crossterm"]
 crossterm = { version = "0.28", default-features = false, features = ["events", "use-dev-tty"], optional = true }
 
 [profile.release]
-# Aggressive size optimization
+# Day-to-day optimized builds (local `mise run install`, `cargo tauri build`).
+# Thin LTO keeps rebuilds minutes faster than fat LTO for a few % binary size;
+# shipped binaries use the `dist` profile below.
 opt-level = "s"        # Optimize for size with better runtime performance than "z"
-lto = "fat"            # Fat Link Time Optimization for maximum size reduction
-codegen-units = 1      # Reduce parallel code generation units
+lto = "thin"
+codegen-units = 16
 panic = "abort"        # Abort on panic instead of unwinding
 strip = true           # Strip symbols and debug info
 overflow-checks = false # Disable overflow checks for smaller binary
 debug-assertions = false # Disable debug assertions
 incremental = false    # Disable incremental compilation
+
+# Shipping profile (CI release builds): aggressive size optimization
+[profile.dist]
+inherits = "release"
+lto = "fat"            # Fat Link Time Optimization for maximum size reduction
+codegen-units = 1      # Reduce parallel code generation units
 
 [profile.dev]
 # Keep development builds fast
