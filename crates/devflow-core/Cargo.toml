@@ -85,7 +85,7 @@ inquire = { version = "0.9", default-features = false, features = ["crossterm"] 
 indexmap = { version = "2", default-features = false, features = ["serde"] }
 
 # Direct Rust embedding of Pitchfork's supervisor/log APIs for process runtime
-pitchfork-cli = { version = "=2.14.0", default-features = false }
+pitchfork-cli = { version = "=2.15.0", default-features = false }
 
 # Cross-platform Copy-on-Write file copies (APFS clonefile, ioctl FICLONE, ReFS)
 reflink-copy = "0.1"
