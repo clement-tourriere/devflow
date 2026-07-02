@@ -2902,13 +2902,24 @@ async fn resolve_ports(port_config: Option<&ProcessPortConfig>) -> Result<Vec<u1
 }
 
 async fn port_available(port: u16) -> bool {
-    tokio::net::TcpListener::bind(("127.0.0.1", port))
-        .await
-        .map(|listener| {
+    // Probe the v4 wildcard as well as loopback: dev servers commonly bind
+    // 0.0.0.0 (vite/node), and on BSD/macOS a loopback-only probe still
+    // succeeds while the wildcard is taken — defeating bump-on-conflict.
+    // The v6 wildcard is probed separately (tokio sockets are v6-only
+    // there); environments without IPv6 support are ignored.
+    for addr in ["0.0.0.0", "127.0.0.1"] {
+        if tokio::net::TcpListener::bind((addr, port)).await.is_err() {
+            return false;
+        }
+    }
+    match tokio::net::TcpListener::bind(("::", port)).await {
+        Ok(listener) => {
             drop(listener);
             true
-        })
-        .unwrap_or(false)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => false,
+        Err(_) => true,
+    }
 }
 
 fn remap_port(port: u16, config: Option<&ProcessPortConfig>, ports: &[u16]) -> u16 {
