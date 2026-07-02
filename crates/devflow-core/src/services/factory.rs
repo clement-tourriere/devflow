@@ -712,11 +712,15 @@ pub async fn get_all_connection_info(
     config: &Config,
     workspace_name: &str,
 ) -> Result<Vec<(String, super::ConnectionInfo)>> {
+    // Backends key workspaces by the normalized name (as used during
+    // orchestration); accept raw VCS names so callers building hook/template
+    // contexts don't have to normalize themselves.
+    let workspace_name = config.get_normalized_workspace_name(workspace_name);
     let providers = create_all_providers(config).await?;
     let mut results = Vec::with_capacity(providers.len());
 
     for named in &providers {
-        match named.provider.get_connection_info(workspace_name).await {
+        match named.provider.get_connection_info(&workspace_name).await {
             Ok(info) => results.push((named.name.clone(), info)),
             Err(e) => {
                 log::debug!(

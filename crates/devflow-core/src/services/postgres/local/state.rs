@@ -191,6 +191,9 @@ impl Store {
         project_id: &str,
         workspace_name: &str,
     ) -> anyhow::Result<Option<Workspace>> {
+        // Rows are stored under the normalized name; accept raw VCS names
+        // (e.g. `feature/foo-bar`) from any caller.
+        let workspace_name = crate::config::normalize_workspace_name(workspace_name);
         let mut stmt = self.conn.prepare(
             r#"
             SELECT id, project_id, name, parent_workspace_id, state, data_dir, container_name, port, storage_metadata, created_at
@@ -209,6 +212,8 @@ impl Store {
 
     pub fn create_workspace(&self, input: NewBranch) -> anyhow::Result<Workspace> {
         let created_at = now_epoch_millis();
+        // Store under the normalized name so lookups by raw VCS names match.
+        let name = crate::config::normalize_workspace_name(&input.name);
 
         self.conn.execute(
             r#"
@@ -216,7 +221,7 @@ impl Store {
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             "#,
             rusqlite::params![
-                input.id, input.project_id, input.name, input.parent_workspace_id,
+                input.id, input.project_id, name, input.parent_workspace_id,
                 input.state.as_str(), input.data_dir, input.container_name, input.port,
                 input.storage_metadata, created_at,
             ],
@@ -225,7 +230,7 @@ impl Store {
         Ok(Workspace {
             id: input.id,
             project_id: input.project_id,
-            name: input.name,
+            name,
             parent_workspace_id: input.parent_workspace_id,
             state: input.state,
             data_dir: input.data_dir,

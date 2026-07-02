@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 mod loading;
 
+pub(crate) use loading::normalize_workspace_name;
+
 /// Default AI tool configuration directories to copy into new worktrees.
 pub const AI_TOOL_DIRS: &[&str] = &[".claude", ".cursor", ".opencode", ".agents"];
 

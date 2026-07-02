@@ -111,34 +111,7 @@ impl Config {
     }
 
     fn sanitize_workspace_name(workspace_name: &str) -> String {
-        // Convert to lowercase and replace invalid characters with underscores
-        let mut sanitized = String::new();
-
-        for ch in workspace_name.to_lowercase().chars() {
-            match ch {
-                'a'..='z' | '0'..='9' | '_' | '$' => sanitized.push(ch),
-                _ => sanitized.push('_'),
-            }
-        }
-
-        // Ensure it starts with letter or underscore (not digit)
-        if sanitized.starts_with(|c: char| c.is_ascii_digit()) {
-            sanitized = format!("_{}", sanitized);
-        }
-
-        // Remove consecutive underscores for cleaner names
-        while sanitized.contains("__") {
-            sanitized = sanitized.replace("__", "_");
-        }
-
-        // Remove trailing underscore
-        sanitized = sanitized.trim_end_matches('_').to_string();
-
-        if sanitized.is_empty() {
-            sanitized = "workspace".to_string();
-        }
-
-        sanitized
+        normalize_workspace_name(workspace_name)
     }
 
     pub fn should_create_workspace(&self, workspace_name: &str) -> bool {
@@ -399,4 +372,41 @@ impl Config {
 
         Ok((effective_config, config_path))
     }
+}
+
+/// Canonical service-workspace name for a raw VCS branch/workspace name.
+///
+/// Service backends key their per-workspace state by this normalized form
+/// (the switch pipeline normalizes before orchestration). Lookups must apply
+/// the same normalization so raw branch names like `feature/foo-bar` resolve
+/// to the stored workspace.
+pub(crate) fn normalize_workspace_name(workspace_name: &str) -> String {
+    // Convert to lowercase and replace invalid characters with underscores
+    let mut sanitized = String::new();
+
+    for ch in workspace_name.to_lowercase().chars() {
+        match ch {
+            'a'..='z' | '0'..='9' | '_' | '$' => sanitized.push(ch),
+            _ => sanitized.push('_'),
+        }
+    }
+
+    // Ensure it starts with letter or underscore (not digit)
+    if sanitized.starts_with(|c: char| c.is_ascii_digit()) {
+        sanitized = format!("_{}", sanitized);
+    }
+
+    // Remove consecutive underscores for cleaner names
+    while sanitized.contains("__") {
+        sanitized = sanitized.replace("__", "_");
+    }
+
+    // Remove trailing underscore
+    sanitized = sanitized.trim_end_matches('_').to_string();
+
+    if sanitized.is_empty() {
+        sanitized = "workspace".to_string();
+    }
+
+    sanitized
 }
