@@ -1,5 +1,5 @@
-use devflow_core::hooks;
-use serde::Serialize;
+use devflow_core::hooks::{self, detect::DetectContext, recipes};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 fn is_sensitive_key(key: &str) -> bool {
@@ -650,130 +650,137 @@ pub async fn run_hook(
 
 // ── Hook recipes ───────────────────────────────────────────────────────
 
-#[derive(Serialize)]
-pub struct RecipeInfo {
-    pub name: String,
-    pub description: String,
-    pub category: String,
-    pub hooks_preview: Vec<RecipeHookPreview>,
-}
-
-#[derive(Serialize)]
-pub struct RecipeHookPreview {
-    pub phase: String,
-    pub hook_name: String,
-    pub command_summary: String,
-}
-
-#[derive(Serialize)]
-pub struct InstallRecipeResult {
-    pub hooks_added: usize,
-    pub hooks_skipped: usize,
-}
-
+/// Static recipe catalog (params metadata, no project probing).
 #[tauri::command]
-pub async fn get_recipes() -> Result<Vec<RecipeInfo>, String> {
-    let recipes = devflow_core::hooks::recipes::builtin_recipes();
-    Ok(recipes
+pub async fn get_recipes() -> Result<Vec<recipes::RecipeInfo>, String> {
+    Ok(recipes::RecipeId::ALL
         .iter()
-        .map(|r| {
-            let info = r.to_info();
-            RecipeInfo {
-                name: info.name,
-                description: info.description,
-                category: info.category,
-                hooks_preview: info
-                    .hooks_preview
-                    .into_iter()
-                    .map(|h| RecipeHookPreview {
-                        phase: h.phase,
-                        hook_name: h.hook_name,
-                        command_summary: h.command_summary,
-                    })
-                    .collect(),
-            }
-        })
+        .map(|id| id.to_info())
         .collect())
+}
+
+/// Probe a project: applicability, evidence, suggested params, install state.
+#[tauri::command]
+pub async fn detect_recipes(
+    project_path: String,
+) -> Result<Vec<recipes::RecipeDetectionInfo>, String> {
+    let project_dir = std::path::PathBuf::from(&project_path);
+    let config =
+        crate::commands::project_config::load_project_config_with_local_state(&project_dir)?;
+    let ctx = DetectContext::new(&config, &project_dir);
+    Ok(recipes::RecipeId::ALL
+        .iter()
+        .map(|id| id.detect_info(&ctx, config.hooks.as_ref()))
+        .collect())
+}
+
+/// Preview the hooks a recipe would generate for the given params.
+#[tauri::command]
+pub async fn preview_recipe(
+    project_path: String,
+    recipe_name: String,
+    params: recipes::RecipeParams,
+) -> Result<Vec<recipes::RecipeHookPreview>, String> {
+    let id = recipes::RecipeId::from_name(&recipe_name)
+        .ok_or_else(|| format!("Recipe '{}' not found", recipe_name))?;
+    let project_dir = std::path::PathBuf::from(&project_path);
+    let config =
+        crate::commands::project_config::load_project_config_with_local_state(&project_dir)?;
+    let ctx = DetectContext::new(&config, &project_dir);
+    let detection = id.detect(&ctx);
+    let resolved =
+        recipes::resolve_params(id, Some(&detection), &params).map_err(|e| e.to_string())?;
+    let generated = id.build(&resolved).map_err(|e| e.to_string())?;
+    Ok(recipes::hooks_preview_of(&generated))
+}
+
+#[derive(Deserialize)]
+pub struct RecipeSelection {
+    pub name: String,
+    #[serde(default)]
+    pub params: recipes::RecipeParams,
 }
 
 #[tauri::command]
 pub async fn install_recipe(
     project_path: String,
     recipe_name: String,
-) -> Result<InstallRecipeResult, String> {
-    let recipe = devflow_core::hooks::recipes::find_recipe(&recipe_name)
-        .ok_or_else(|| format!("Recipe '{}' not found", recipe_name))?;
-
-    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(crate::commands::format_error)?;
-
-    let mut hooks_config = config.hooks.unwrap_or_default();
-    let result = devflow_core::hooks::recipes::merge_recipe_into_config(&mut hooks_config, &recipe);
-
-    if result.hooks_added > 0 {
-        // Write back to config
-        let content = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
-        let mut doc: serde_yaml_ng::Value =
-            serde_yaml_ng::from_str(&content).map_err(|e| e.to_string())?;
-        let hooks_yaml = serde_yaml_ng::to_value(&hooks_config).map_err(|e| e.to_string())?;
-        if let serde_yaml_ng::Value::Mapping(ref mut map) = doc {
-            map.insert(
-                serde_yaml_ng::Value::String("hooks".to_string()),
-                hooks_yaml,
-            );
-        }
-        let output = serde_yaml_ng::to_string(&doc).map_err(|e| e.to_string())?;
-        std::fs::write(&config_path, output).map_err(|e| e.to_string())?;
-    }
-
-    Ok(InstallRecipeResult {
-        hooks_added: result.hooks_added,
-        hooks_skipped: result.hooks_skipped,
-    })
+    params: recipes::RecipeParams,
+) -> Result<recipes::InstallRecipeResult, String> {
+    install_recipes(
+        project_path,
+        vec![RecipeSelection {
+            name: recipe_name,
+            params,
+        }],
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn install_recipes(
     project_path: String,
-    recipe_names: Vec<String>,
-) -> Result<InstallRecipeResult, String> {
-    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
+    selections: Vec<RecipeSelection>,
+) -> Result<recipes::InstallRecipeResult, String> {
+    let project_dir = std::path::PathBuf::from(&project_path);
+    let effective =
+        crate::commands::project_config::load_project_config_with_local_state(&project_dir)?;
+    let ctx = DetectContext::new(&effective, &project_dir);
+
+    // Merge against the raw committed config (the write-back target), not
+    // the merged view that may contain local-state overlays.
+    let config_path = project_dir.join(".devflow.yml");
+    let file_config = devflow_core::config::Config::from_file(&config_path)
         .map_err(crate::commands::format_error)?;
+    let mut hooks_config = file_config.hooks.unwrap_or_default();
 
-    let mut hooks_config = config.hooks.unwrap_or_default();
-    let mut total_added = 0;
-    let mut total_skipped = 0;
-
-    for name in &recipe_names {
-        let recipe = devflow_core::hooks::recipes::find_recipe(name)
-            .ok_or_else(|| format!("Recipe '{}' not found", name))?;
-        let result =
-            devflow_core::hooks::recipes::merge_recipe_into_config(&mut hooks_config, &recipe);
-        total_added += result.hooks_added;
-        total_skipped += result.hooks_skipped;
-    }
-
-    if total_added > 0 {
-        let content = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
-        let mut doc: serde_yaml_ng::Value =
-            serde_yaml_ng::from_str(&content).map_err(|e| e.to_string())?;
-        let hooks_yaml = serde_yaml_ng::to_value(&hooks_config).map_err(|e| e.to_string())?;
-        if let serde_yaml_ng::Value::Mapping(ref mut map) = doc {
-            map.insert(
-                serde_yaml_ng::Value::String("hooks".to_string()),
-                hooks_yaml,
-            );
+    let mut total = recipes::InstallRecipeResult {
+        hooks_added: 0,
+        hooks_skipped: 0,
+    };
+    for selection in selections {
+        if let Some(message) = recipes::removed_recipe_message(&selection.name) {
+            return Err(message);
         }
-        let output = serde_yaml_ng::to_string(&doc).map_err(|e| e.to_string())?;
-        std::fs::write(&config_path, output).map_err(|e| e.to_string())?;
+        let id = recipes::RecipeId::from_name(&selection.name)
+            .ok_or_else(|| format!("Recipe '{}' not found", selection.name))?;
+        let detection = id.detect(&ctx);
+        let resolved = recipes::resolve_params(id, Some(&detection), &selection.params)
+            .map_err(|e| e.to_string())?;
+        let generated = id.build(&resolved).map_err(|e| e.to_string())?;
+        let result = recipes::merge_hooks_into_config(&mut hooks_config, &generated);
+        total.hooks_added += result.hooks_added;
+        total.hooks_skipped += result.hooks_skipped;
     }
 
-    Ok(InstallRecipeResult {
-        hooks_added: total_added,
-        hooks_skipped: total_skipped,
-    })
+    if total.hooks_added > 0 {
+        write_hooks_yaml(&config_path, &hooks_config)?;
+    }
+    Ok(total)
+}
+
+/// Rewrite only the top-level `hooks:` key of `.devflow.yml`.
+fn write_hooks_yaml(config_path: &Path, hooks_config: &hooks::HooksConfig) -> Result<(), String> {
+    let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
+    let mut doc: serde_yaml_ng::Value = if content.trim().is_empty() {
+        serde_yaml_ng::Value::Mapping(Default::default())
+    } else {
+        serde_yaml_ng::from_str(&content).map_err(|e| e.to_string())?
+    };
+    if doc.is_null() {
+        // A comments-only config parses to null; still a valid empty config.
+        doc = serde_yaml_ng::Value::Mapping(Default::default());
+    }
+    let serde_yaml_ng::Value::Mapping(map) = &mut doc else {
+        return Err(format!("{} is not a YAML mapping", config_path.display()));
+    };
+    map.insert(
+        serde_yaml_ng::Value::String("hooks".to_string()),
+        serde_yaml_ng::to_value(hooks_config).map_err(|e| e.to_string())?,
+    );
+    let output = serde_yaml_ng::to_string(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(config_path, output).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Get VCS trigger mappings.

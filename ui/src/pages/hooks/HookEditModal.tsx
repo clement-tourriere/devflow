@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import type { ActionTypeInfo, ActionFieldInfo, HookInfo, RecipeInfo } from "../../types";
+import type { ActionTypeInfo, ActionFieldInfo, HookInfo, RecipeDetectionInfo } from "../../types";
 import { saveHooks, listHooks, installRecipe } from "../../utils/invoke";
 
 interface ConditionPreset {
@@ -42,7 +42,7 @@ interface Props {
   editingHook?: HookInfo;
   onClose: () => void;
   onSaved: () => void;
-  recipes?: RecipeInfo[];
+  detections?: RecipeDetectionInfo[];
 }
 
 type Step = "pick-type" | "configure";
@@ -144,7 +144,7 @@ export default function HookEditModal({
   editingHook,
   onClose,
   onSaved,
-  recipes,
+  detections,
 }: Props) {
   const isEditing = !!editingHook;
   const editState = editingHook
@@ -407,8 +407,9 @@ export default function HookEditModal({
 
             {/* From Recipe section */}
             {(() => {
-              const phaseRecipes = (recipes || []).filter((r) =>
-                r.hooks_preview.some((h) => h.phase === phase)
+              const phaseRecipes = (detections || []).filter(
+                (d) =>
+                  d.recipe.phases.includes(phase) && d.applicable && !d.installed
               );
               if (phaseRecipes.length === 0) return null;
               return (
@@ -425,9 +426,9 @@ export default function HookEditModal({
                     From Recipe
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    {phaseRecipes.map((recipe) => (
+                    {phaseRecipes.map((detection) => (
                       <div
-                        key={recipe.name}
+                        key={detection.recipe.name}
                         style={{
                           padding: "10px 16px",
                           border: "1px solid var(--border)",
@@ -439,9 +440,16 @@ export default function HookEditModal({
                         }}
                       >
                         <div>
-                          <div style={{ fontWeight: 600, fontSize: 13 }}>{recipe.name}</div>
+                          <div style={{ fontWeight: 600, fontSize: 13 }}>
+                            {detection.recipe.name}
+                            {detection.suggested && (
+                              <span className="badge badge-info" style={{ fontSize: 9, marginLeft: 6 }}>
+                                suggested
+                              </span>
+                            )}
+                          </div>
                           <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
-                            {recipe.description}
+                            {detection.recipe.description}
                           </div>
                         </div>
                         <button
@@ -449,9 +457,13 @@ export default function HookEditModal({
                           style={{ fontSize: 11, padding: "4px 12px", flexShrink: 0, marginLeft: 12 }}
                           disabled={installingRecipeName !== null}
                           onClick={async () => {
-                            setInstallingRecipeName(recipe.name);
+                            setInstallingRecipeName(detection.recipe.name);
                             try {
-                              await installRecipe(projectPath, recipe.name);
+                              await installRecipe(
+                                projectPath,
+                                detection.recipe.name,
+                                detection.suggested_params
+                              );
                               onSaved();
                             } catch (e) {
                               setError(String(e));
@@ -460,7 +472,9 @@ export default function HookEditModal({
                             }
                           }}
                         >
-                          {installingRecipeName === recipe.name ? "Installing..." : "Install Recipe"}
+                          {installingRecipeName === detection.recipe.name
+                            ? "Installing..."
+                            : "Install Recipe"}
                         </button>
                       </div>
                     ))}

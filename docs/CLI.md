@@ -435,19 +435,39 @@ Current built-in action types include:
 
 ### `devflow hook recipes`
 
-List available pre-built hook recipes.
+List built-in hook recipes. Inside a project, each recipe is probed against
+the codebase (files present, tools actually installed) and shown with its
+evidence, suggested parameter values, and install state.
 
 ```bash
 devflow hook recipes
 devflow --json hook recipes
 ```
 
+Available: `env-file`, `patch-config`, `db-migrate`, `install-deps`,
+`workspace-setup`, `sync-ai-configs`, `multiplexer-session`.
+
 ### `devflow hook install <recipe>`
 
-Install a built-in hook recipe into `.devflow.yml` without overwriting existing entries.
+Install a recipe into `.devflow.yml` without overwriting existing entries.
+Detection proposes parameter values matching this project; adjust them
+interactively or via `--param`. The generated hooks are plain entries —
+edit them like any other hook.
 
 ```bash
-devflow hook install sync-ai-configs
+devflow hook install env-file                                    # interactive params
+devflow hook install db-migrate --param command="sqlx migrate run" --yes
+devflow --json --non-interactive hook install install-deps --yes # CI/agents
+```
+
+### `devflow hook setup`
+
+Interactive wizard: probes the project for applicable recipes (services,
+lockfiles, migration tools, mise/direnv, ...), lets you multi-select and
+confirm parameters, then writes all generated hooks in one go.
+
+```bash
+devflow hook setup
 ```
 
 ## AI and Automation

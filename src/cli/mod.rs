@@ -657,18 +657,31 @@ pub enum HookCommands {
     )]
     Actions,
     #[command(
-        about = "List available hook recipes",
-        long_about = "Show all available pre-built hook recipes.\n\nRecipes are curated sets of hooks that can be installed into your project\nwith a single command.\n\nExamples:\n  devflow hook recipes"
+        about = "List hook recipes with per-project detection",
+        long_about = "Show the built-in hook recipes. Inside a project, each recipe is probed\nagainst the codebase (files present, tools actually installed) and shown\nwith its evidence, suggested parameter values, and install state.\n\nExamples:\n  devflow hook recipes\n  devflow --json hook recipes"
     )]
     Recipes,
     #[command(
         about = "Install a hook recipe into .devflow.yml",
-        long_about = "Install a pre-built hook recipe into your project configuration.\n\nMerges the recipe's hooks into .devflow.yml without overwriting existing hooks.\n\nExamples:\n  devflow hook install sync-ai-configs"
+        long_about = "Install a recipe into your project configuration.\n\nDetection proposes parameter values (commands, file paths) matching this\nproject; adjust them interactively or via --param. The generated hooks are\nplain entries in .devflow.yml — edit them like any other hook.\n\nExamples:\n  devflow hook install env-file\n  devflow hook install db-migrate --param command='sqlx migrate run' --yes\n  devflow hook install install-deps --yes"
     )]
     Install {
         #[arg(help = "Name of the recipe to install")]
         recipe: String,
+        #[arg(
+            long = "param",
+            value_name = "KEY=VALUE",
+            help = "Set a recipe parameter (repeatable)"
+        )]
+        param: Vec<String>,
+        #[arg(long, help = "Accept detected values and defaults without prompting")]
+        yes: bool,
     },
+    #[command(
+        about = "Detect applicable recipes and install them interactively",
+        long_about = "Probe the project for applicable recipes (services, lockfiles, migration\ntools, mise/direnv, ...), pick the ones to install, confirm their\nparameters, and write all generated hooks in one go.\n\nExamples:\n  devflow hook setup"
+    )]
+    Setup,
 }
 
 #[derive(Subcommand)]
@@ -1307,18 +1320,17 @@ pub async fn handle_command(
                         .unwrap_or(false);
 
                         if install_recipe {
-                            if let Some(recipe) = recipes::find_recipe("sync-ai-configs") {
-                                let mut hooks_config =
-                                    init_config.hooks.clone().unwrap_or_default();
-                                let result =
-                                    recipes::merge_recipe_into_config(&mut hooks_config, &recipe);
-                                init_config.hooks = Some(hooks_config);
-                                init_config.save_to_file(&init_config_path)?;
-                                println!(
-                                    "Installed recipe 'sync-ai-configs': {} hook(s) added",
-                                    result.hooks_added
-                                );
-                            }
+                            let generated = recipes::RecipeId::SyncAiConfigs
+                                .build(&recipes::RecipeParams::new())?;
+                            let mut hooks_config = init_config.hooks.clone().unwrap_or_default();
+                            let result =
+                                recipes::merge_hooks_into_config(&mut hooks_config, &generated);
+                            init_config.hooks = Some(hooks_config);
+                            init_config.save_to_file(&init_config_path)?;
+                            println!(
+                                "Installed recipe 'sync-ai-configs': {} hook(s) added",
+                                result.hooks_added
+                            );
                         }
                     }
 

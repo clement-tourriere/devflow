@@ -14,6 +14,8 @@ import type {
   HookRunResult,
   TriggerMapping,
   RecipeInfo,
+  RecipeDetectionInfo,
+  RecipeHookPreview,
   InstallRecipeResult,
   ProxyStatus,
   ContainerEntry,
@@ -261,10 +263,32 @@ export const getTriggerMappings = (projectPath: string) =>
   invoke<TriggerMapping[]>("get_trigger_mappings", { projectPath });
 export const getRecipes = () =>
   invoke<RecipeInfo[]>("get_recipes");
-export const installRecipe = (projectPath: string, recipeName: string) =>
-  invoke<InstallRecipeResult>("install_recipe", { projectPath, recipeName });
-export const installRecipes = (projectPath: string, recipeNames: string[]) =>
-  invoke<InstallRecipeResult>("install_recipes", { projectPath, recipeNames });
+export const detectRecipes = (projectPath: string) =>
+  invoke<RecipeDetectionInfo[]>("detect_recipes", { projectPath });
+export const previewRecipe = (
+  projectPath: string,
+  recipeName: string,
+  params: Record<string, string>
+) =>
+  invoke<RecipeHookPreview[]>("preview_recipe", {
+    projectPath,
+    recipeName,
+    params,
+  });
+export const installRecipe = (
+  projectPath: string,
+  recipeName: string,
+  params: Record<string, string>
+) =>
+  invoke<InstallRecipeResult>("install_recipe", {
+    projectPath,
+    recipeName,
+    params,
+  });
+export const installRecipes = (
+  projectPath: string,
+  selections: { name: string; params: Record<string, string> }[]
+) => invoke<InstallRecipeResult>("install_recipes", { projectPath, selections });
 
 // Proxy
 export const startProxy = () => invoke<ProxyStatus>("start_proxy");

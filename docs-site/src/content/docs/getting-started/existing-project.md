@@ -230,10 +230,10 @@ hooks:
       continue_on_error: true
 ```
 
-Or install the pre-built recipe, which covers mise, direnv, and common setups:
+Or install the recipe, which detects which of mise / direnv / `.env.example` actually apply:
 
 ```bash
-devflow hook install local-dev-setup
+devflow hook install workspace-setup
 ```
 
 In non-interactive automation, approve trusted hook/process command templates once:

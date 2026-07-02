@@ -94,7 +94,8 @@ Conditions are template-rendered first, then evaluated. Built-ins:
 
 | Condition | True when |
 | --- | --- |
-| `file_exists:<path>` / `dir_exists:<path>` | path exists (relative to the hook working dir) |
+| `file_exists:<path>` / `dir_exists:<path>` | path exists (relative to the hook working dir; comma-separated alternatives = any) |
+| `command_exists:<bin>` | binary found on PATH or in mise shims (comma-separated alternatives = any) |
 | `workspace_is:<name>` / `workspace_not:<name>` | workspace equals / differs |
 | `workspace_matches:<regex>` | workspace matches the regex |
 | `is_default_workspace` / `not_default_workspace` | workspace is / isn't the main workspace |
@@ -122,11 +123,13 @@ Conditions are template-rendered first, then evaluated. Built-ins:
 ## Recipes
 
 ```bash
-devflow hook recipes              # list
-devflow hook install <name>      # add to .devflow.yml (never overwrites your entries)
+devflow hook recipes                        # list + per-project detection (files, installed tools)
+devflow hook setup                          # wizard: multi-select detected recipes, install in one go
+devflow hook install <name>                 # interactive params (detected values prefilled)
+devflow hook install <name> --param k=v --yes   # non-interactive; never overwrites your entries
 ```
 
-`sync-ai-configs` · `install-deps` · `docker-compose` · `local-dev-setup` · `db-migrate` · `multiplexer-session` — descriptions in the [hooks guide](/devflow/guides/hooks/#recipes).
+`env-file` · `patch-config` · `db-migrate` · `install-deps` · `workspace-setup` · `sync-ai-configs` · `multiplexer-session` — descriptions in the [hooks guide](/devflow/guides/hooks/#recipes). (`docker-compose` was removed in favor of process daemons; `local-dev-setup` is now `workspace-setup`.)
 
 ## VCS trigger mapping
 

@@ -220,10 +220,32 @@ export interface TriggerMapping {
   phases: string[];
 }
 
+export interface RecipeParamInfo {
+  key: string;
+  label: string;
+  help: string;
+  kind: "string" | "text" | "bool";
+  default?: string | null;
+  required: boolean;
+}
+
 export interface RecipeInfo {
   name: string;
   description: string;
   category: string;
+  phases: string[];
+  repeatable: boolean;
+  params: RecipeParamInfo[];
+}
+
+export interface RecipeDetectionInfo {
+  recipe: RecipeInfo;
+  applicable: boolean;
+  suggested: boolean;
+  installed: boolean;
+  reasons: string[];
+  suggested_params: Record<string, string>;
+  param_options: Record<string, string[]>;
   hooks_preview: RecipeHookPreview[];
 }
 

@@ -59,21 +59,29 @@ Conditions keep hooks polyglot-safe (`condition: "file_exists:requirements.txt"`
 
 ## Recipes
 
-Installable bundles of proven hooks (added to `.devflow.yml` without overwriting your entries):
+Recipes are intent-based hook generators. Installing one probes your project — files on disk **and** tools actually installed (PATH + mise shims) — proposes concrete parameter values, and writes one lean set of plain hooks into `.devflow.yml` (never overwriting your entries). Generated hooks are ordinary hooks: edit them freely afterwards.
 
 ```bash
-devflow hook recipes                      # list with descriptions
-devflow hook install local-dev-setup
+devflow hook recipes                      # list + what detection found for THIS project
+devflow hook setup                        # wizard: pick from detected recipes, install in one go
+devflow hook install env-file             # interactive: confirm detected params
+devflow hook install db-migrate --param command="sqlx migrate run" --yes
+devflow hook install install-deps --yes   # accept detected values (CI/agents)
 ```
 
-| Recipe | What it does |
-| --- | --- |
-| `local-dev-setup` | mise trust/install, direnv allow, and friends on workspace creation |
-| `install-deps` | dependency install for detected package managers |
-| `db-migrate` | run migrations after create/switch |
-| `docker-compose` | bring compose services up/down with the workspace |
-| `sync-ai-configs` | sync AI tool configs back to main before workspace removal |
-| `multiplexer-session` | auto-open a tmux/zellij session in the worktree after creation |
+| Recipe | Intent | Detection |
+| --- | --- | --- |
+| `env-file` | write per-workspace service URLs into an env file (approval-free `write-env`, merge mode) | configured services → `DATABASE_URL`/`REDIS_URL`/…, existing `.env*` file |
+| `patch-config` | find-and-replace a value in any config file (repeatable, one hook per file) | none — fully parameterized |
+| `db-migrate` | run migrations after create/switch (one editable command) | prisma, Rails, Django, alembic, sqlx, diesel, dbmate |
+| `install-deps` | install dependencies with *the* package manager the project uses | lockfile **and** binary installed (bun > pnpm > yarn > npm, uv, cargo) |
+| `workspace-setup` | copy `.env.example` → `.env.local`, `mise trust`, `direnv allow` | only the parts that apply (file present + tool installed) |
+| `sync-ai-configs` | sync AI tool configs back to main before workspace removal | `.claude`/`.cursor`/… dirs |
+| `multiplexer-session` | auto-open a tmux/zellij session in the worktree after creation | tmux/zellij installed or `execute` configured |
+
+:::note
+The old `docker-compose` recipe was removed: compose **app** services are imported as [process daemons](/devflow/reference/cli/#devflow-process) by `devflow init`, and database/cache containers are managed as devflow services. `local-dev-setup` was renamed to `workspace-setup`.
+:::
 
 ## Approvals in automation
 

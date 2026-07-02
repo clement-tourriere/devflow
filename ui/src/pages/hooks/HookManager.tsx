@@ -9,11 +9,20 @@ import {
   runHook,
   saveHooks,
   getTriggerMappings,
-  getRecipes,
+  detectRecipes,
+  previewRecipe,
   installRecipe,
   installRecipes,
 } from "../../utils/invoke";
-import type { HookPhaseEntry, HookInfo, ActionTypeInfo, TriggerMapping, RecipeInfo } from "../../types";
+import type {
+  HookPhaseEntry,
+  HookInfo,
+  ActionTypeInfo,
+  TriggerMapping,
+  RecipeDetectionInfo,
+  RecipeParamInfo,
+  RecipeHookPreview,
+} from "../../types";
 import HookEditModal from "./HookEditModal";
 
 const PHASE_CATEGORIES: Record<string, string[]> = {
@@ -43,7 +52,7 @@ function HookManager() {
   const [variables, setVariables] = useState<Record<string, unknown>>({});
   const [actionTypes, setActionTypes] = useState<ActionTypeInfo[]>([]);
   const [triggerMappings, setTriggerMappings] = useState<TriggerMapping[]>([]);
-  const [recipes, setRecipes] = useState<RecipeInfo[]>([]);
+  const [detections, setDetections] = useState<RecipeDetectionInfo[]>([]);
   const [installingRecipe, setInstallingRecipe] = useState<string | null>(null);
   const [selectedPhase, setSelectedPhase] = useState<string | null>(null);
   const [template, setTemplate] = useState("");
@@ -65,7 +74,7 @@ function HookManager() {
       .catch(() => {});
     getActionTypes().then(setActionTypes).catch(console.error);
     getTriggerMappings(projectPath).then(setTriggerMappings).catch(() => {});
-    getRecipes().then(setRecipes).catch(() => {});
+    detectRecipes(projectPath).then(setDetections).catch(() => {});
   }, [projectPath]);
 
   useEffect(() => {
@@ -132,10 +141,13 @@ function HookManager() {
     }
   };
 
-  const handleInstallRecipe = async (recipeName: string) => {
+  const handleInstallRecipe = async (
+    recipeName: string,
+    params: Record<string, string>
+  ) => {
     setInstallingRecipe(recipeName);
     try {
-      const result = await installRecipe(projectPath, recipeName);
+      const result = await installRecipe(projectPath, recipeName, params);
       if (result.hooks_added > 0) {
         setRunResult(`Recipe installed: ${result.hooks_added} hook(s) added, ${result.hooks_skipped} skipped`);
       } else {
@@ -518,16 +530,14 @@ function HookManager() {
 
               {rightTab === "recipes" && (
                 <>
-                  {/* Setup Profiles */}
-                  <RecipeProfiles
+                  <SuggestedRecipes
                     projectPath={projectPath}
-                    recipes={recipes}
-                    phases={phases}
+                    detections={detections}
                     onInstalled={(result) => {
                       if (result.hooks_added > 0) {
-                        setRunResult(`Profile installed: ${result.hooks_added} hook(s) added, ${result.hooks_skipped} skipped`);
+                        setRunResult(`Installed: ${result.hooks_added} hook(s) added, ${result.hooks_skipped} skipped`);
                       } else {
-                        setRunResult(`Profile already installed (${result.hooks_skipped} hook(s) skipped)`);
+                        setRunResult(`Already installed (${result.hooks_skipped} hook(s) skipped)`);
                       }
                       loadData();
                     }}
@@ -535,109 +545,41 @@ function HookManager() {
                   />
 
                   <div style={{ fontSize: 12, marginBottom: 8, color: "var(--text-secondary)" }}>
-                    Pre-built hook configurations you can install with one click.
+                    Recipes are probed against this project — suggested values come
+                    from detected files, services, and installed tools.
                   </div>
-                  {recipes.length === 0 ? (
+                  {detections.length === 0 ? (
                     <p style={{ color: "var(--text-secondary)", fontSize: 13 }}>
                       No recipes available.
                     </p>
                   ) : (
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                      {(() => {
-                        const categories = Array.from(new Set(recipes.map((r) => r.category)));
-                        return categories.map((cat) => (
-                          <div key={cat}>
-                            <div
-                              style={{
-                                fontSize: 10,
-                                textTransform: "uppercase",
-                                color: "var(--text-muted)",
-                                fontWeight: 600,
-                                marginBottom: 4,
-                              }}
-                            >
-                              {cat}
-                            </div>
-                            {recipes
-                              .filter((r) => r.category === cat)
-                              .map((recipe) => {
-                                const isInstalled = recipe.hooks_preview.every((h) =>
-                                  phases.some(
-                                    (p) =>
-                                      p.phase === h.phase &&
-                                      p.hooks.some((hook) => hook.name === h.hook_name)
-                                  )
-                                );
-                                const isInstalling = installingRecipe === recipe.name;
-                                return (
-                                  <div
-                                    key={recipe.name}
-                                    style={{
-                                      padding: "10px 12px",
-                                      border: "1px solid var(--border)",
-                                      borderRadius: 8,
-                                      background: "var(--bg-primary)",
-                                      marginBottom: 4,
-                                    }}
-                                  >
-                                    <div
-                                      style={{
-                                        display: "flex",
-                                        justifyContent: "space-between",
-                                        alignItems: "center",
-                                      }}
-                                    >
-                                      <span style={{ fontWeight: 600, fontSize: 13 }}>
-                                        {recipe.name}
-                                      </span>
-                                      {isInstalled ? (
-                                        <span className="badge badge-success" style={{ fontSize: 10 }}>
-                                          installed
-                                        </span>
-                                      ) : (
-                                        <button
-                                          className="btn btn-primary"
-                                          style={{ fontSize: 11, padding: "2px 10px" }}
-                                          disabled={isInstalling}
-                                          onClick={() => handleInstallRecipe(recipe.name)}
-                                        >
-                                          {isInstalling ? "Installing..." : "Install"}
-                                        </button>
-                                      )}
-                                    </div>
-                                    <div
-                                      style={{
-                                        fontSize: 12,
-                                        color: "var(--text-secondary)",
-                                        marginTop: 4,
-                                      }}
-                                    >
-                                      {recipe.description}
-                                    </div>
-                                    <div style={{ marginTop: 6 }}>
-                                      {recipe.hooks_preview.map((h) => (
-                                        <div
-                                          key={`${h.phase}:${h.hook_name}`}
-                                          className="mono"
-                                          style={{
-                                            fontSize: 11,
-                                            color: "var(--text-muted)",
-                                            padding: "2px 0",
-                                          }}
-                                        >
-                                          <span className="badge badge-info" style={{ fontSize: 9, marginRight: 4 }}>
-                                            {h.phase}
-                                          </span>
-                                          {h.hook_name}
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </div>
-                                );
-                              })}
+                      {Array.from(new Set(detections.map((d) => d.recipe.category))).map((cat) => (
+                        <div key={cat}>
+                          <div
+                            style={{
+                              fontSize: 10,
+                              textTransform: "uppercase",
+                              color: "var(--text-muted)",
+                              fontWeight: 600,
+                              marginBottom: 4,
+                            }}
+                          >
+                            {cat}
                           </div>
-                        ));
-                      })()}
+                          {detections
+                            .filter((d) => d.recipe.category === cat)
+                            .map((detection) => (
+                              <RecipeCard
+                                key={detection.recipe.name}
+                                projectPath={projectPath}
+                                detection={detection}
+                                installing={installingRecipe === detection.recipe.name}
+                                onInstall={handleInstallRecipe}
+                              />
+                            ))}
+                        </div>
+                      ))}
                     </div>
                   )}
                 </>
@@ -733,7 +675,7 @@ function HookManager() {
           phase={selectedPhase || "post-create"}
           actionTypes={actionTypes}
           editingHook={editingHook}
-          recipes={recipes}
+          detections={detections}
           onClose={() => {
             setShowModal(false);
             setEditingHook(undefined);
@@ -1003,59 +945,35 @@ function VariableBrowser({ variables }: { variables: Record<string, unknown> }) 
   );
 }
 
-// ── Recipe Profiles ─────────────────────────────────────────────────
+// ── Suggested Recipes ───────────────────────────────────────────────
 
-const RECIPE_PROFILES = [
-  {
-    name: "Local Dev",
-    description: "Install deps + copy .env + trust mise + run migrations",
-    recipes: ["install-deps", "local-dev-setup", "db-migrate"],
-  },
-  {
-    name: "Docker Dev",
-    description: "Manage Docker Compose lifecycle automatically",
-    recipes: ["docker-compose"],
-  },
-];
-
-function RecipeProfiles({
+function SuggestedRecipes({
   projectPath,
-  recipes,
-  phases,
+  detections,
   onInstalled,
   onError,
 }: {
   projectPath: string;
-  recipes: RecipeInfo[];
-  phases: HookPhaseEntry[];
+  detections: RecipeDetectionInfo[];
   onInstalled: (result: { hooks_added: number; hooks_skipped: number }) => void;
   onError: (e: unknown) => void;
 }) {
-  const [installingProfile, setInstallingProfile] = useState<string | null>(null);
+  const [installing, setInstalling] = useState(false);
+  const suggested = detections.filter((d) => d.suggested && !d.installed);
+  if (suggested.length === 0) return null;
 
-  const isProfileInstalled = (recipeNames: string[]) => {
-    return recipeNames.every((name) => {
-      const recipe = recipes.find((r) => r.name === name);
-      if (!recipe) return false;
-      return recipe.hooks_preview.every((h) =>
-        phases.some(
-          (p) =>
-            p.phase === h.phase &&
-            p.hooks.some((hook) => hook.name === h.hook_name)
-        )
-      );
-    });
-  };
-
-  const handleInstallProfile = async (profileName: string, recipeNames: string[]) => {
-    setInstallingProfile(profileName);
+  const handleInstallAll = async () => {
+    setInstalling(true);
     try {
-      const result = await installRecipes(projectPath, recipeNames);
+      const result = await installRecipes(
+        projectPath,
+        suggested.map((d) => ({ name: d.recipe.name, params: d.suggested_params }))
+      );
       onInstalled(result);
     } catch (e) {
       onError(e);
     } finally {
-      setInstallingProfile(null);
+      setInstalling(false);
     }
   };
 
@@ -1063,65 +981,277 @@ function RecipeProfiles({
     <div style={{ marginBottom: 12 }}>
       <div
         style={{
-          fontSize: 10,
-          textTransform: "uppercase",
-          color: "var(--text-muted)",
-          fontWeight: 600,
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
           marginBottom: 6,
         }}
       >
-        Quick Setup Profiles
+        <div
+          style={{
+            fontSize: 10,
+            textTransform: "uppercase",
+            color: "var(--text-muted)",
+            fontWeight: 600,
+          }}
+        >
+          Suggested for this project
+        </div>
+        <button
+          className="btn btn-primary"
+          style={{ fontSize: 11, padding: "2px 10px" }}
+          disabled={installing}
+          onClick={handleInstallAll}
+        >
+          {installing ? "Installing..." : "Install all suggested"}
+        </button>
       </div>
-      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-        {RECIPE_PROFILES.map((profile) => {
-          const installed = isProfileInstalled(profile.recipes);
-          const isInstalling = installingProfile === profile.name;
-          return (
-            <div
-              key={profile.name}
-              style={{
-                flex: 1,
-                padding: "10px 12px",
-                border: "1px solid var(--border)",
-                borderRadius: 8,
-                background: installed
-                  ? "rgba(63, 185, 80, 0.06)"
-                  : "var(--bg-primary)",
-              }}
-            >
-              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 2 }}>
-                {profile.name}
-              </div>
-              <div
-                style={{
-                  fontSize: 11,
-                  color: "var(--text-secondary)",
-                  marginBottom: 6,
-                }}
-              >
-                {profile.description}
-              </div>
-              {installed ? (
-                <span className="badge badge-success" style={{ fontSize: 10 }}>
-                  installed
-                </span>
-              ) : (
-                <button
-                  className="btn btn-primary"
-                  style={{ fontSize: 11, padding: "2px 10px" }}
-                  disabled={isInstalling}
-                  onClick={() =>
-                    handleInstallProfile(profile.name, profile.recipes)
-                  }
-                >
-                  {isInstalling ? "Installing..." : "Install Profile"}
-                </button>
-              )}
-            </div>
-          );
-        })}
+      <div
+        style={{
+          fontSize: 11,
+          color: "var(--text-secondary)",
+          padding: "6px 10px",
+          border: "1px dashed var(--border)",
+          borderRadius: 8,
+        }}
+      >
+        {suggested.map((d) => (
+          <div key={d.recipe.name} style={{ padding: "2px 0" }}>
+            <span style={{ fontWeight: 600 }}>{d.recipe.name}</span>
+            <span style={{ marginLeft: 6 }}>{d.reasons[0] ?? d.recipe.description}</span>
+          </div>
+        ))}
       </div>
     </div>
+  );
+}
+
+// ── Recipe Card ─────────────────────────────────────────────────────
+
+function initialRecipeParams(detection: RecipeDetectionInfo): Record<string, string> {
+  const params: Record<string, string> = {};
+  for (const p of detection.recipe.params) {
+    const suggested = detection.suggested_params[p.key];
+    if (suggested !== undefined) params[p.key] = suggested;
+    else if (p.default != null) params[p.key] = p.default;
+  }
+  return params;
+}
+
+function RecipeCard({
+  projectPath,
+  detection,
+  installing,
+  onInstall,
+}: {
+  projectPath: string;
+  detection: RecipeDetectionInfo;
+  installing: boolean;
+  onInstall: (name: string, params: Record<string, string>) => void;
+}) {
+  const { recipe } = detection;
+  const [params, setParams] = useState<Record<string, string>>(() =>
+    initialRecipeParams(detection)
+  );
+  const [showConfig, setShowConfig] = useState(false);
+  const [preview, setPreview] = useState<RecipeHookPreview[]>(detection.hooks_preview);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+
+  // Refresh the generated-hooks preview as params change (debounced).
+  useEffect(() => {
+    if (!showConfig) return;
+    const handle = setTimeout(() => {
+      previewRecipe(projectPath, recipe.name, params)
+        .then((p) => {
+          setPreview(p);
+          setPreviewError(null);
+        })
+        .catch((e) => {
+          setPreview([]);
+          setPreviewError(String(e));
+        });
+    }, 400);
+    return () => clearTimeout(handle);
+  }, [projectPath, recipe.name, params, showConfig]);
+
+  const installed = detection.installed && !recipe.repeatable;
+  const setParam = (key: string, value: string) =>
+    setParams((prev) => ({ ...prev, [key]: value }));
+
+  return (
+    <div
+      style={{
+        padding: "10px 12px",
+        border: "1px solid var(--border)",
+        borderRadius: 8,
+        background: "var(--bg-primary)",
+        marginBottom: 4,
+        opacity: detection.applicable || installed ? 1 : 0.55,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 8,
+        }}
+      >
+        <span style={{ fontWeight: 600, fontSize: 13 }}>{recipe.name}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {detection.suggested && !installed && (
+            <span className="badge badge-info" style={{ fontSize: 10 }}>
+              suggested
+            </span>
+          )}
+          {installed ? (
+            <span className="badge badge-success" style={{ fontSize: 10 }}>
+              installed
+            </span>
+          ) : detection.applicable ? (
+            <>
+              {recipe.params.length > 0 && (
+                <button
+                  className="btn"
+                  style={{ fontSize: 11, padding: "2px 10px" }}
+                  onClick={() => setShowConfig((s) => !s)}
+                >
+                  {showConfig ? "Hide" : "Configure"}
+                </button>
+              )}
+              <button
+                className="btn btn-primary"
+                style={{ fontSize: 11, padding: "2px 10px" }}
+                disabled={installing}
+                onClick={() => onInstall(recipe.name, params)}
+              >
+                {installing ? "Installing..." : "Install"}
+              </button>
+            </>
+          ) : (
+            <span className="badge" style={{ fontSize: 10 }}>
+              not applicable
+            </span>
+          )}
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 4 }}>
+        {recipe.description}
+      </div>
+      {detection.reasons.length > 0 && (
+        <div style={{ marginTop: 6 }}>
+          {detection.reasons.map((reason, i) => (
+            <div
+              key={i}
+              style={{ fontSize: 11, color: "var(--text-muted)", padding: "1px 0" }}
+            >
+              {reason}
+            </div>
+          ))}
+        </div>
+      )}
+      {showConfig && !installed && detection.applicable && (
+        <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+          {recipe.params.map((param) => (
+            <RecipeParamField
+              key={param.key}
+              idPrefix={recipe.name}
+              param={param}
+              value={params[param.key] ?? ""}
+              options={detection.param_options[param.key]}
+              onChange={(value) => setParam(param.key, value)}
+            />
+          ))}
+        </div>
+      )}
+      {(showConfig || preview.length > 0) && !installed && (
+        <div style={{ marginTop: 6 }}>
+          {previewError ? (
+            <div style={{ fontSize: 11, color: "var(--danger)" }}>{previewError}</div>
+          ) : (
+            preview.map((h) => (
+              <div
+                key={`${h.phase}:${h.hook_name}`}
+                className="mono"
+                style={{ fontSize: 11, color: "var(--text-muted)", padding: "2px 0" }}
+              >
+                <span className="badge badge-info" style={{ fontSize: 9, marginRight: 4 }}>
+                  {h.phase}
+                </span>
+                {h.hook_name}
+                <span style={{ marginLeft: 6, opacity: 0.8 }}>{h.command_summary}</span>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RecipeParamField({
+  idPrefix,
+  param,
+  value,
+  options,
+  onChange,
+}: {
+  idPrefix: string;
+  param: RecipeParamInfo;
+  value: string;
+  options?: string[];
+  onChange: (value: string) => void;
+}) {
+  if (param.kind === "bool") {
+    return (
+      <label
+        style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}
+        title={param.help}
+      >
+        <input
+          type="checkbox"
+          checked={value === "true"}
+          onChange={(e) => onChange(e.target.checked ? "true" : "false")}
+        />
+        {param.label}
+      </label>
+    );
+  }
+  const listId = `recipe-options-${idPrefix}-${param.key}`;
+  return (
+    <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12 }}>
+      <span>
+        {param.label}
+        {param.required && <span style={{ color: "var(--danger)" }}> *</span>}
+      </span>
+      {param.kind === "text" ? (
+        <textarea
+          className="input mono"
+          rows={Math.max(3, value.split("\n").length)}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          style={{ fontSize: 12 }}
+        />
+      ) : (
+        <>
+          <input
+            className="input mono"
+            list={options && options.length > 0 ? listId : undefined}
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            style={{ fontSize: 12 }}
+          />
+          {options && options.length > 0 && (
+            <datalist id={listId}>
+              {options.map((option) => (
+                <option key={option} value={option} />
+              ))}
+            </datalist>
+          )}
+        </>
+      )}
+      <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{param.help}</span>
+    </label>
   );
 }
 

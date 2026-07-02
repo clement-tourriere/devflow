@@ -85,10 +85,13 @@ pub(super) async fn handle_hook_command(
             handle_hook_actions(json_output)?;
         }
         super::HookCommands::Recipes => {
-            handle_hook_recipes(json_output)?;
+            handle_hook_recipes(config, json_output)?;
         }
-        super::HookCommands::Install { recipe } => {
-            handle_hook_install(&recipe, json_output, non_interactive)?;
+        super::HookCommands::Install { recipe, param, yes } => {
+            handle_hook_install(config, &recipe, &param, yes, json_output, non_interactive)?;
+        }
+        super::HookCommands::Setup => {
+            handle_hook_setup(config, json_output, non_interactive)?;
         }
     }
     Ok(())
@@ -403,6 +406,7 @@ fn print_conditions_reference() {
     println!("  File system:");
     println!("    file_exists:<path>             Only run if a file exists");
     println!("    dir_exists:<path>              Only run if a directory exists");
+    println!("    command_exists:<bin>           Only run if a binary is on PATH (or mise shims)");
     println!();
     println!("  Environment:");
     println!("    env_set:<VAR>                  Only run if an env var is set");
@@ -835,142 +839,486 @@ fn handle_hook_actions(json_output: bool) -> Result<()> {
     Ok(())
 }
 
-/// `devflow hook recipes` — list available hook recipes.
-fn handle_hook_recipes(json_output: bool) -> Result<()> {
-    use devflow_core::hooks::recipes;
+/// `devflow hook recipes` — list recipes, with detection inside a project.
+fn handle_hook_recipes(config: &Config, json_output: bool) -> Result<()> {
+    use devflow_core::hooks::detect::DetectContext;
+    use devflow_core::hooks::recipes::{self, RecipeId};
 
-    let all_recipes = recipes::builtin_recipes();
+    let Some(project_root) = config.project_root.clone() else {
+        // Outside a project: static listing only.
+        return print_static_recipes(json_output);
+    };
+
+    let ctx = DetectContext::new(config, &project_root);
+    let infos: Vec<recipes::RecipeDetectionInfo> = RecipeId::ALL
+        .iter()
+        .map(|id| id.detect_info(&ctx, config.hooks.as_ref()))
+        .collect();
 
     if json_output {
-        let infos: Vec<recipes::RecipeInfo> = all_recipes.iter().map(|r| r.to_info()).collect();
         println!("{}", serde_json::to_string_pretty(&infos)?);
         return Ok(());
     }
 
-    println!("Available Hook Recipes");
+    println!("Hook Recipes");
     println!("{}", "─".repeat(50));
-    println!();
 
-    let mut current_category = "";
-    for recipe in &all_recipes {
-        if recipe.category != current_category {
-            if !current_category.is_empty() {
-                println!();
-            }
-            println!("{}:", recipe.category);
-            current_category = recipe.category;
+    let mut current_category = String::new();
+    for info in &infos {
+        if info.recipe.category != current_category {
+            println!();
+            println!("{}:", info.recipe.category);
+            current_category = info.recipe.category.clone();
         }
 
-        println!("  {} — {}", recipe.name, recipe.description);
-        for (phase, hooks) in &recipe.hooks {
-            for (name, entry) in hooks {
-                let cmd = match entry {
-                    devflow_core::hooks::HookEntry::Simple(c) => c.clone(),
-                    devflow_core::hooks::HookEntry::Extended(e) => e.command.clone(),
-                    devflow_core::hooks::HookEntry::Action(a) => {
-                        format!("action: {}", a.action.type_name())
-                    }
-                };
-                println!("    {} → {} ({})", phase, name, cmd);
-            }
+        let marker = if info.installed {
+            " [installed]"
+        } else if info.suggested {
+            " [suggested]"
+        } else if !info.applicable {
+            " [not applicable]"
+        } else {
+            ""
+        };
+        println!(
+            "  {}{} — {}",
+            info.recipe.name, marker, info.recipe.description
+        );
+        for reason in &info.reasons {
+            println!("      {}", reason);
         }
     }
 
     println!();
-    println!("Install a recipe: devflow hook install <recipe-name>");
-
+    println!("Install one: devflow hook install <name>   Wizard: devflow hook setup");
     Ok(())
 }
 
-/// `devflow hook install <recipe>` — install a recipe into .devflow.yml.
-fn handle_hook_install(recipe_name: &str, json_output: bool, non_interactive: bool) -> Result<()> {
-    use devflow_core::hooks::recipes;
+fn print_static_recipes(json_output: bool) -> Result<()> {
+    use devflow_core::hooks::recipes::{self, RecipeId};
 
-    let recipe = recipes::find_recipe(recipe_name).ok_or_else(|| {
+    let infos: Vec<recipes::RecipeInfo> = RecipeId::ALL.iter().map(|id| id.to_info()).collect();
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&infos)?);
+        return Ok(());
+    }
+
+    println!("Hook Recipes");
+    println!("{}", "─".repeat(50));
+    let mut current_category = String::new();
+    for info in &infos {
+        if info.category != current_category {
+            println!();
+            println!("{}:", info.category);
+            current_category = info.category.clone();
+        }
+        println!("  {} — {}", info.name, info.description);
+    }
+    println!();
+    println!("Run inside a devflow project to see which recipes apply to it.");
+    Ok(())
+}
+
+/// `devflow hook install <recipe>` — detect, parameterize, and install.
+fn handle_hook_install(
+    config: &Config,
+    recipe_name: &str,
+    param_flags: &[String],
+    yes: bool,
+    json_output: bool,
+    non_interactive: bool,
+) -> Result<()> {
+    use devflow_core::hooks::detect::DetectContext;
+    use devflow_core::hooks::recipes::{self, RecipeId};
+
+    if let Some(message) = recipes::removed_recipe_message(recipe_name) {
+        anyhow::bail!("{}", message);
+    }
+    let id = RecipeId::from_name(recipe_name).ok_or_else(|| {
         anyhow::anyhow!(
             "Recipe '{}' not found. Run 'devflow hook recipes' to see available recipes.",
             recipe_name
         )
     })?;
 
-    let config_file = devflow_core::config::Config::find_config_file()?
+    let config_file = Config::find_config_file()?
         .ok_or_else(|| anyhow::anyhow!("No .devflow.yml found. Run 'devflow init' first."))?;
+    let project_root = config
+        .project_root
+        .clone()
+        .or_else(|| config_file.parent().map(|p| p.to_path_buf()))
+        .ok_or_else(|| anyhow::anyhow!("Could not determine the project root"))?;
 
-    let config = devflow_core::config::Config::from_file(&config_file)?;
-    let mut hooks_config = config.hooks.unwrap_or_default();
+    let ctx = DetectContext::new(config, &project_root);
+    let detection = id.detect(&ctx);
+    if !detection.applicable {
+        anyhow::bail!(
+            "Recipe '{}' does not apply to this project:\n  {}",
+            recipe_name,
+            detection.reasons.join("\n  ")
+        );
+    }
 
-    // Preview what will be added
-    if !json_output && !non_interactive {
-        println!("Recipe: {} — {}", recipe.name, recipe.description);
+    let user_params = parse_param_flags(param_flags)?;
+    let params = if yes || non_interactive || json_output {
+        recipes::resolve_params(id, Some(&detection), &user_params)?
+    } else {
+        for reason in &detection.reasons {
+            println!("  {}", reason);
+        }
+        prompt_recipe_params(id, &detection, user_params)?
+    };
+    let generated = id.build(&params)?;
+
+    // Merge against the raw committed config (the write-back target), not
+    // the merged view that may contain local-state overlays.
+    let file_config = Config::from_file(&config_file)?;
+    let mut hooks_config = file_config.hooks.unwrap_or_default();
+
+    if !json_output {
+        println!();
+        println!("Recipe: {} — {}", id.name(), id.meta().description);
         println!();
         println!("This will add the following hooks:");
-        for (phase, phase_hooks) in &recipe.hooks {
-            for (name, entry) in phase_hooks {
-                let existing = hooks_config.get(phase).and_then(|h| h.get(name)).is_some();
-                let cmd = match entry {
-                    devflow_core::hooks::HookEntry::Simple(c) => c.clone(),
-                    devflow_core::hooks::HookEntry::Extended(e) => e.command.clone(),
-                    devflow_core::hooks::HookEntry::Action(a) => {
-                        format!("action: {}", a.action.type_name())
-                    }
-                };
-                if existing {
-                    println!("  {} → {} — SKIP (already exists)", phase, name);
-                } else {
-                    println!("  {} → {} ({})", phase, name, cmd);
-                }
+        for preview in recipes::hooks_preview_of(&generated) {
+            let phase = parse_hook_phase_input(&preview.phase)?;
+            let exists = hooks_config
+                .get(&phase)
+                .is_some_and(|hooks| hooks.contains_key(&preview.hook_name));
+            if exists {
+                println!(
+                    "  {} → {} — SKIP (already exists)",
+                    preview.phase, preview.hook_name
+                );
+            } else {
+                println!(
+                    "  {} → {} ({})",
+                    preview.phase, preview.hook_name, preview.command_summary
+                );
             }
         }
         println!();
 
-        let confirm = inquire::Confirm::new("Install this recipe?")
-            .with_default(true)
-            .prompt()
-            .unwrap_or(false);
-
-        if !confirm {
-            println!("Aborted.");
-            return Ok(());
+        if !yes && !non_interactive {
+            let confirm = inquire::Confirm::new("Install this recipe?")
+                .with_default(true)
+                .prompt()
+                .unwrap_or(false);
+            if !confirm {
+                println!("Aborted.");
+                return Ok(());
+            }
         }
     }
 
-    let result = recipes::merge_recipe_into_config(&mut hooks_config, &recipe);
-
-    if result.hooks_added == 0 {
-        if json_output {
-            println!("{}", serde_json::to_string_pretty(&result)?);
-        } else {
-            println!(
-                "All hooks from recipe '{}' are already installed.",
-                recipe_name
-            );
-        }
-        return Ok(());
+    let result = recipes::merge_hooks_into_config(&mut hooks_config, &generated);
+    if result.hooks_added > 0 {
+        write_hooks_to_config_file(&config_file, &hooks_config)?;
     }
-
-    // Write back to config file — update only hooks section
-    let content = std::fs::read_to_string(&config_file)?;
-    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&content)?;
-
-    let hooks_yaml = serde_yaml_ng::to_value(&hooks_config)?;
-    if let serde_yaml_ng::Value::Mapping(ref mut map) = doc {
-        map.insert(
-            serde_yaml_ng::Value::String("hooks".to_string()),
-            hooks_yaml,
-        );
-    }
-
-    let output = serde_yaml_ng::to_string(&doc)?;
-    std::fs::write(&config_file, output)?;
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "recipe": id.name(),
+                "params": params,
+                "hooks_added": result.hooks_added,
+                "hooks_skipped": result.hooks_skipped,
+            }))?
+        );
+    } else if result.hooks_added == 0 {
+        println!(
+            "All hooks from recipe '{}' are already installed.",
+            recipe_name
+        );
     } else {
         println!(
             "Installed recipe '{}': {} hook(s) added, {} skipped.",
             recipe_name, result.hooks_added, result.hooks_skipped
         );
     }
-
     Ok(())
+}
+
+/// `devflow hook setup` — detect applicable recipes and install a selection.
+fn handle_hook_setup(config: &Config, json_output: bool, non_interactive: bool) -> Result<()> {
+    use devflow_core::hooks::detect::DetectContext;
+    use devflow_core::hooks::recipes::{self, RecipeDetection, RecipeId};
+
+    if json_output || non_interactive {
+        anyhow::bail!(
+            "hook setup is interactive; use 'devflow hook install <name> --yes' for automated runs"
+        );
+    }
+
+    let config_file = Config::find_config_file()?
+        .ok_or_else(|| anyhow::anyhow!("No .devflow.yml found. Run 'devflow init' first."))?;
+    let project_root = config
+        .project_root
+        .clone()
+        .or_else(|| config_file.parent().map(|p| p.to_path_buf()))
+        .ok_or_else(|| anyhow::anyhow!("Could not determine the project root"))?;
+
+    let ctx = DetectContext::new(config, &project_root);
+    let mut detected: Vec<(RecipeId, RecipeDetection, bool)> = Vec::new();
+    for id in RecipeId::ALL {
+        let info = id.detect_info(&ctx, config.hooks.as_ref());
+        if !info.applicable {
+            continue;
+        }
+        let detection = RecipeDetection {
+            applicable: info.applicable,
+            suggested: info.suggested,
+            reasons: info.reasons,
+            suggested_params: info.suggested_params,
+            param_options: info.param_options,
+        };
+        detected.push((id, detection, info.installed));
+    }
+
+    if detected.is_empty() {
+        println!("No applicable recipes detected for this project.");
+        return Ok(());
+    }
+
+    let labels: Vec<String> = detected
+        .iter()
+        .map(|(id, _, installed)| {
+            let mut label = format!("{} — {}", id.name(), id.meta().description);
+            if *installed {
+                label.push_str(" [installed]");
+            }
+            label
+        })
+        .collect();
+    let preselected: Vec<usize> = detected
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, detection, installed))| detection.suggested && !installed)
+        .map(|(index, _)| index)
+        .collect();
+
+    let picked = inquire::MultiSelect::new("Install which recipes?", labels.clone())
+        .with_default(&preselected)
+        .prompt()?;
+    if picked.is_empty() {
+        println!("Nothing selected.");
+        return Ok(());
+    }
+
+    let file_config = Config::from_file(&config_file)?;
+    let mut hooks_config = file_config.hooks.unwrap_or_default();
+    let mut total_added = 0;
+    let mut total_skipped = 0;
+
+    for label in &picked {
+        let index = labels
+            .iter()
+            .position(|l| l == label)
+            .expect("picked label comes from the list");
+        let (id, detection, _) = &detected[index];
+
+        println!();
+        println!("── {} ──", id.name());
+        for reason in &detection.reasons {
+            println!("   {}", reason);
+        }
+
+        let params = prompt_recipe_params(*id, detection, Default::default())?;
+        match id.build(&params) {
+            Ok(generated) => {
+                let result = recipes::merge_hooks_into_config(&mut hooks_config, &generated);
+                total_added += result.hooks_added;
+                total_skipped += result.hooks_skipped;
+            }
+            Err(e) => eprintln!("   Skipping {}: {}", id.name(), e),
+        }
+    }
+
+    if total_added > 0 {
+        write_hooks_to_config_file(&config_file, &hooks_config)?;
+    }
+    println!();
+    println!(
+        "Setup complete: {} hook(s) added, {} skipped (already present).",
+        total_added, total_skipped
+    );
+    Ok(())
+}
+
+const CUSTOM_CHOICE: &str = "custom…";
+
+/// Prompt for each declared param not already set via `--param`, seeded
+/// with detection suggestions, then validate the full set.
+fn prompt_recipe_params(
+    id: devflow_core::hooks::recipes::RecipeId,
+    detection: &devflow_core::hooks::recipes::RecipeDetection,
+    user_params: devflow_core::hooks::recipes::RecipeParams,
+) -> Result<devflow_core::hooks::recipes::RecipeParams> {
+    use devflow_core::hooks::recipes::{self, ParamKind, RecipeParams};
+
+    let mut resolved = RecipeParams::new();
+    for param in id.params() {
+        // --param flags are authoritative; don't prompt for those.
+        if let Some(value) = user_params.get(param.key) {
+            resolved.insert(param.key.to_string(), value.clone());
+            continue;
+        }
+
+        let current = detection
+            .suggested_params
+            .get(param.key)
+            .cloned()
+            .or_else(|| param.default.map(String::from));
+
+        let value = match param.kind {
+            ParamKind::Bool => inquire::Confirm::new(param.label)
+                .with_default(current.as_deref() == Some("true"))
+                .with_help_message(param.help)
+                .prompt()?
+                .to_string(),
+            ParamKind::Text => prompt_text_lines(&param, current.as_deref())?,
+            ParamKind::String => {
+                let options = detection
+                    .param_options
+                    .get(param.key)
+                    .filter(|options| options.len() > 1);
+                if let Some(options) = options {
+                    // Several detected candidates → pick one or customize.
+                    let mut choices: Vec<String> = Vec::new();
+                    if let Some(current) = &current {
+                        if !options.contains(current) {
+                            choices.push(current.clone());
+                        }
+                    }
+                    choices.extend(options.iter().cloned());
+                    choices.push(CUSTOM_CHOICE.to_string());
+                    let picked = inquire::Select::new(param.label, choices)
+                        .with_help_message(param.help)
+                        .prompt()?;
+                    if picked == CUSTOM_CHOICE {
+                        inquire::Text::new(param.label)
+                            .with_initial_value(current.as_deref().unwrap_or(""))
+                            .with_help_message(param.help)
+                            .prompt()?
+                    } else {
+                        picked
+                    }
+                } else {
+                    inquire::Text::new(param.label)
+                        .with_initial_value(current.as_deref().unwrap_or(""))
+                        .with_help_message(param.help)
+                        .prompt()?
+                }
+            }
+        };
+        if !value.trim().is_empty() {
+            resolved.insert(param.key.to_string(), value);
+        }
+    }
+
+    recipes::resolve_params(id, Some(detection), &resolved)
+}
+
+/// Multi-line param prompt: one Text prompt per suggested line (Enter to
+/// keep, edit to change, clear to drop), then extra lines until empty.
+fn prompt_text_lines(
+    param: &devflow_core::hooks::recipes::RecipeParam,
+    current: Option<&str>,
+) -> Result<String> {
+    println!("{} — {}", param.label, param.help);
+    let mut lines: Vec<String> = Vec::new();
+    for line in current
+        .unwrap_or("")
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+    {
+        let edited = inquire::Text::new("entry:")
+            .with_initial_value(line)
+            .with_help_message("Enter to keep, edit to change, clear to drop")
+            .prompt()?;
+        if !edited.trim().is_empty() {
+            lines.push(edited.trim().to_string());
+        }
+    }
+    loop {
+        let extra = inquire::Text::new("add entry:")
+            .with_help_message("KEY=VALUE, leave empty to finish")
+            .prompt()?;
+        if extra.trim().is_empty() {
+            break;
+        }
+        lines.push(extra.trim().to_string());
+    }
+    Ok(lines.join("\n"))
+}
+
+fn parse_param_flags(flags: &[String]) -> Result<devflow_core::hooks::recipes::RecipeParams> {
+    let mut params = devflow_core::hooks::recipes::RecipeParams::new();
+    for flag in flags {
+        let (key, value) = flag
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("invalid --param '{}' (expected KEY=VALUE)", flag))?;
+        params.insert(key.trim().to_string(), value.to_string());
+    }
+    Ok(params)
+}
+
+/// Rewrite only the top-level `hooks:` key of the config file.
+fn write_hooks_to_config_file(
+    config_file: &std::path::Path,
+    hooks_config: &devflow_core::hooks::HooksConfig,
+) -> Result<()> {
+    if config_file.extension().and_then(|e| e.to_str()) == Some("toml") {
+        anyhow::bail!(
+            "Recipe install writes YAML and this project uses a TOML config ({}). \
+             Add the hooks manually or migrate to .devflow.yml.",
+            config_file.display()
+        );
+    }
+    let content = std::fs::read_to_string(config_file)?;
+    let mut doc: serde_yaml_ng::Value = if content.trim().is_empty() {
+        serde_yaml_ng::Value::Mapping(Default::default())
+    } else {
+        serde_yaml_ng::from_str(&content)?
+    };
+    if doc.is_null() {
+        // A comments-only config parses to null; still a valid empty config.
+        doc = serde_yaml_ng::Value::Mapping(Default::default());
+    }
+    let serde_yaml_ng::Value::Mapping(ref mut map) = doc else {
+        anyhow::bail!(
+            "{} is not a YAML mapping — cannot insert the hooks section",
+            config_file.display()
+        );
+    };
+    map.insert(
+        serde_yaml_ng::Value::String("hooks".to_string()),
+        serde_yaml_ng::to_value(hooks_config)?,
+    );
+    std::fs::write(config_file, serde_yaml_ng::to_string(&doc)?)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_param_flags() {
+        let params = parse_param_flags(&[
+            "command=sqlx migrate run".to_string(),
+            "file=.env.local".to_string(),
+            // last one wins on duplicates
+            "file=.env".to_string(),
+            // values may contain '='
+            "vars=A=1".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(params.get("command").unwrap(), "sqlx migrate run");
+        assert_eq!(params.get("file").unwrap(), ".env");
+        assert_eq!(params.get("vars").unwrap(), "A=1");
+
+        assert!(parse_param_flags(&["no-equals".to_string()]).is_err());
+    }
 }

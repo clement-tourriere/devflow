@@ -78,4 +78,4 @@ Shell hooks from the (committed, hence attacker-writable) config require a one-t
 
 ## Recipes
 
-Pre-built hook bundles installable with one command (`devflow hook install <name>`): `sync-ai-configs`, `install-deps`, `docker-compose`, `local-dev-setup`, `db-migrate`, `multiplexer-session`. List them with `devflow hook recipes`. Details in the [hooks guide](/devflow/guides/hooks/#recipes).
+Intent-based hook generators: installing one probes the project (files present, tools actually installed), proposes parameter values, and writes plain editable hooks into `.devflow.yml`. Available: `env-file`, `patch-config`, `db-migrate`, `install-deps`, `workspace-setup`, `sync-ai-configs`, `multiplexer-session`. List them with `devflow hook recipes` (shows what detection found for your project) or run the `devflow hook setup` wizard. Details in the [hooks guide](/devflow/guides/hooks/#recipes).

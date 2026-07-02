@@ -43,7 +43,7 @@ Every workspace's app is reachable at a predictable HTTPS URL, every workspace's
 - **Multi-service** — PostgreSQL, ClickHouse, MySQL, Redis, RustFS object storage, any Docker image, or custom plugin providers; cloud branching via Neon/DBLab/Xata (experimental)
 - **Project processes** — workspace-scoped web servers, workers, and schedulers with native or direct Pitchfork start/stop/status/logs, ready checks, dependency ordering, port bumping, and service env interpolation
 - **Managed worktrees** — per-workspace directories from a path template, with env files, gitignored caches, and AI tool configs (`.claude/`, `.cursor/`, …) copied in automatically
-- **Lifecycle hooks** — MiniJinja-templated commands and built-in actions at every phase, with conditions, an approval system, and installable recipes
+- **Lifecycle hooks** — MiniJinja-templated commands and built-in actions at every phase, with conditions, an approval system, and recipes that detect your project's stack
 - **Auto-HTTPS proxy** — every Docker container and port-backed devflow process gets a trusted `https://name.local` URL that resolves the same from the host and from inside containers; no `/etc/hosts` edits, no certificate warnings
 - **Controller daemon** — `devflow daemon start` keeps every registered project's shared engines and process desired state reconciled
 - **Seeding** — initialize databases from a PostgreSQL URL, a local dump file, or S3
@@ -158,7 +158,7 @@ When `processes.auto_start: true`, `devflow switch` starts configured processes 
 
 ## Hooks and automation
 
-Hooks run during workspace lifecycle phases such as creation and switching. They can write env files, run migrations, or execute project-specific commands — templated with MiniJinja, gated by an approval system, and available as installable recipes.
+Hooks run during workspace lifecycle phases such as creation and switching. They can write env files, run migrations, or execute project-specific commands — templated with MiniJinja, gated by an approval system, and installable via recipes that detect your project's stack (`devflow hook setup`).
 
 ```bash
 devflow hook show

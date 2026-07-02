@@ -175,6 +175,8 @@ fn main() {
             commands::hooks::run_hook,
             commands::hooks::get_trigger_mappings,
             commands::hooks::get_recipes,
+            commands::hooks::detect_recipes,
+            commands::hooks::preview_recipe,
             commands::hooks::install_recipe,
             commands::hooks::install_recipes,
             // Proxy

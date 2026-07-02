@@ -122,8 +122,9 @@ devflow hook render "<template>"
 devflow hook approvals [list|add <template>|clear]
 devflow hook triggers                  # VCS event → phase mapping
 devflow hook actions                   # built-in action types
-devflow hook recipes
-devflow hook install <recipe>
+devflow hook recipes                   # list + per-project detection
+devflow hook setup                     # wizard: install detected recipes
+devflow hook install <recipe> [--param KEY=VALUE]... [--yes]
 ```
 
 ## AI & automation

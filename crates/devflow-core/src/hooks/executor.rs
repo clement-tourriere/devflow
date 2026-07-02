@@ -616,6 +616,15 @@ impl HookEngine {
                 .filter(|p| !p.is_empty())
                 .any(|p| self.working_dir.join(p).is_dir()));
         }
+        // Comma-separated alternatives: true when ANY binary is installed
+        // (resolves via PATH or the mise shims dir, like hook execution does).
+        if let Some(binaries) = rendered.strip_prefix("command_exists:") {
+            return Ok(binaries
+                .split(',')
+                .map(str::trim)
+                .filter(|b| !b.is_empty())
+                .any(super::detect::binary_exists));
+        }
 
         // ── Boolean literals ──
         if rendered == "always" || rendered == "true" {
@@ -692,6 +701,7 @@ impl HookEngine {
     pub fn is_builtin_condition(rendered: &str) -> bool {
         rendered.starts_with("file_exists:")
             || rendered.starts_with("dir_exists:")
+            || rendered.starts_with("command_exists:")
             || rendered.starts_with("trigger_is:")
             || rendered.starts_with("trigger_not:")
             || rendered.starts_with("workspace_matches:")
@@ -1049,6 +1059,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_command_exists_condition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = HookEngine::new_no_approval(IndexMap::new(), tmp.path().to_path_buf());
+        let ctx = basic_context();
+
+        assert!(engine
+            .evaluate_condition("command_exists:sh", &ctx)
+            .unwrap());
+        assert!(!engine
+            .evaluate_condition("command_exists:definitely-missing-bin-devflow-xyz", &ctx)
+            .unwrap());
+        // Comma-separated alternatives: any installed binary satisfies it
+        assert!(engine
+            .evaluate_condition("command_exists:definitely-missing-bin-devflow-xyz,sh", &ctx)
+            .unwrap());
+    }
+
+    #[tokio::test]
     async fn test_background_hooks_complete_via_wait() {
         let tmp = tempfile::tempdir().unwrap();
         let mut hooks: HooksConfig = IndexMap::new();
@@ -1096,6 +1124,7 @@ mod tests {
         assert!(HookEngine::is_builtin_condition("not_default_workspace"));
         assert!(HookEngine::is_builtin_condition("file_exists:foo.txt"));
         assert!(HookEngine::is_builtin_condition("dir_exists:src"));
+        assert!(HookEngine::is_builtin_condition("command_exists:mise"));
         assert!(HookEngine::is_builtin_condition("always"));
         assert!(HookEngine::is_builtin_condition("never"));
         assert!(HookEngine::is_builtin_condition("true"));
