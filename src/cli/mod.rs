@@ -26,8 +26,7 @@ use devflow_core::vcs;
 
 // Re-export workspace types used by service.rs
 pub(crate) use workspace::{
-    collect_list_workspace_names, context_matches_branch, ensure_default_workspace_registered,
-    load_registry_branches_for_list, resolve_branch_context, BranchContextSource,
+    ensure_default_workspace_registered, resolve_branch_context, BranchContextSource,
 };
 
 #[derive(Subcommand)]
@@ -886,17 +885,11 @@ pub async fn handle_command(
     // Get the merged configuration for normal operations
     let mut config_merged = effective_config.get_merged_config();
 
-    // Inject services from state (state services take precedence over committed)
-    let local_state_for_services = if uses_service {
-        LocalStateManager::new().ok()
-    } else {
-        None
-    };
-    if let Some(ref state_manager) = local_state_for_services {
+    // Overlay CLI-managed local-state services (merged by name with committed
+    // services — same semantics as the GUI, via the shared core helper).
+    if uses_service {
         if let Some(ref path) = config_path {
-            if let Some(state_services) = state_manager.get_services(path) {
-                config_merged.services = Some(state_services);
-            }
+            config_merged.overlay_local_state_services(path);
         }
     }
 

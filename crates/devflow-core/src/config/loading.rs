@@ -15,8 +15,11 @@ impl Config {
         // a worktree's directory basename (e.g. `repo.feature-x`) would
         // otherwise become a different project identity than the main repo,
         // spawning a parallel empty project and cross-cloning data.
-        std::env::current_dir()
-            .ok()
+        // Prefer the directory the config was loaded from — GUI/daemon
+        // processes have an arbitrary cwd (e.g. "/" when launched by Finder).
+        self.project_root
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
             .map(|d| crate::vcs::resolve_project_root(&d))
             .and_then(|d| d.file_name().map(|n| n.to_string_lossy().to_string()))
             .unwrap_or_else(|| "default".to_string())
@@ -43,13 +46,24 @@ impl Config {
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("toml"));
 
-        let config: Config = if is_toml {
+        let mut config: Config = if is_toml {
             toml::from_str(&content)
                 .with_context(|| format!("Failed to parse TOML config file: {}", path.display()))?
         } else {
             serde_yaml_ng::from_str(&content)
                 .with_context(|| format!("Failed to parse YAML config file: {}", path.display()))?
         };
+
+        // Remember where this project lives. `parent()` of a relative path
+        // like ".devflow.yml" is "", which must not shadow the cwd fallback.
+        config.project_root = path
+            .canonicalize()
+            .ok()
+            .as_deref()
+            .unwrap_or(path)
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map(Path::to_path_buf);
 
         Ok(config)
     }
@@ -201,26 +215,6 @@ impl Config {
         }
     }
 
-    /// Return the name of the default service (the one with `default: true`, or the first).
-    #[allow(dead_code)]
-    pub fn default_service_name(&self) -> Option<String> {
-        let services = self.resolve_services();
-        if services.is_empty() {
-            return None;
-        }
-        services
-            .iter()
-            .find(|b| b.default)
-            .or(services.first())
-            .map(|b| b.name.clone())
-    }
-
-    /// Look up a named service config by name.
-    #[allow(dead_code)]
-    pub fn get_service_config(&self, name: &str) -> Option<NamedServiceConfig> {
-        self.resolve_services().into_iter().find(|b| b.name == name)
-    }
-
     /// Validate the services configuration (no duplicates, at most one default).
     pub fn validate_services(&self) -> Result<()> {
         if let Some(ref services) = self.services {
@@ -245,35 +239,127 @@ impl Config {
         Ok(())
     }
 
-    /// Add a named service. Errors if name exists unless force=true.
-    #[allow(dead_code)]
-    pub fn add_service(&mut self, named: NamedServiceConfig, force: bool) -> Result<()> {
-        let services = self.services.get_or_insert_with(Vec::new);
-
-        if let Some(pos) = services.iter().position(|b| b.name == named.name) {
-            if force {
-                services[pos] = named;
-            } else {
-                anyhow::bail!(
-                    "Service '{}' already exists. Use --force to overwrite.",
-                    services[pos].name
-                );
-            }
-        } else {
-            // Set default if it's the first entry
-            let mut named = named;
-            if services.is_empty() {
-                named.default = true;
-            }
-            services.push(named);
-        }
-
-        Ok(())
-    }
-
     pub fn remove_service(&mut self, name: &str) {
         if let Some(ref mut services) = self.services {
             services.retain(|b| b.name != name);
+        }
+    }
+
+    /// Locate a committed project config file inside `dir` (YAML or TOML).
+    pub fn find_config_file_in(dir: &Path) -> Option<PathBuf> {
+        [
+            ".devflow.yml",
+            ".devflow.yaml",
+            ".devflow.toml",
+            "devflow.toml",
+        ]
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|path| path.exists())
+    }
+
+    /// Load the full effective configuration for a specific project directory:
+    /// committed config + global config + local overrides + env overrides,
+    /// with local-state services overlaid (merged by name).
+    ///
+    /// This is the one entry point every frontend that addresses a project by
+    /// path (GUI, daemon, controller) must use, so they cannot drift from the
+    /// cwd-discovering CLI/TUI path in `load_effective_config_with_path_info`.
+    pub fn load_effective_for_dir(project_dir: &Path) -> Result<Config> {
+        let config_path = Self::find_config_file_in(project_dir);
+        let config = match config_path.as_deref() {
+            Some(path) => Self::from_file(path)?,
+            None => Config {
+                project_root: Some(
+                    project_dir
+                        .canonicalize()
+                        .unwrap_or_else(|_| project_dir.to_path_buf()),
+                ),
+                ..Default::default()
+            },
+        };
+
+        let global_config = GlobalConfig::load()?;
+
+        // Local config lives next to the committed config; in a worktree it
+        // falls back to the main worktree (mirrors the cwd-based loader).
+        let mut local_config = LocalConfig::load_from_project_dir(project_dir)?;
+        if local_config.is_none() {
+            if let Ok(vcs_repo) = crate::vcs::detect_vcs_provider(project_dir) {
+                if vcs_repo.is_worktree() {
+                    if let Some(main_dir) = vcs_repo.main_worktree_dir() {
+                        local_config = LocalConfig::load_from_project_dir(&main_dir)?;
+                    }
+                }
+            }
+        }
+
+        let env_config = EnvConfig::load_from_env()?;
+        let effective = EffectiveConfig::new(config, global_config, local_config, env_config)?;
+        let mut merged = effective.get_merged_config();
+
+        let overlay_key = config_path.unwrap_or_else(|| project_dir.join(".devflow.yml"));
+        merged.overlay_local_state_services(&overlay_key);
+        Ok(merged)
+    }
+
+    /// Committed + local-state services, each tagged with its origin.
+    ///
+    /// Local-state entries (CLI-managed) override committed entries with the
+    /// same name; committed entries without an override are kept. At most one
+    /// service keeps `default = true`.
+    pub fn services_with_sources(&self, config_path: &Path) -> Vec<super::ServiceWithSource> {
+        let mut services: Vec<super::ServiceWithSource> = self
+            .resolve_services()
+            .into_iter()
+            .map(|service| super::ServiceWithSource {
+                service,
+                source: super::ServiceSource::Config,
+            })
+            .collect();
+
+        if let Ok(state) = crate::state::LocalStateManager::new() {
+            if let Some(state_services) = state.get_services(config_path) {
+                for service in state_services {
+                    if let Some(existing) = services
+                        .iter_mut()
+                        .find(|entry| entry.service.name == service.name)
+                    {
+                        existing.service = service;
+                        existing.source = super::ServiceSource::LocalState;
+                    } else {
+                        services.push(super::ServiceWithSource {
+                            service,
+                            source: super::ServiceSource::LocalState,
+                        });
+                    }
+                }
+            }
+        }
+
+        let mut seen_default = false;
+        for entry in &mut services {
+            if entry.service.default {
+                if seen_default {
+                    entry.service.default = false;
+                } else {
+                    seen_default = true;
+                }
+            }
+        }
+        services
+    }
+
+    /// Merge local-state services into `self.services` (see
+    /// [`Config::services_with_sources`] for the semantics).
+    pub fn overlay_local_state_services(&mut self, config_path: &Path) {
+        let services: Vec<NamedServiceConfig> = self
+            .services_with_sources(config_path)
+            .into_iter()
+            .map(|entry| entry.service)
+            .collect();
+        if !services.is_empty() {
+            self.services = Some(services);
         }
     }
 

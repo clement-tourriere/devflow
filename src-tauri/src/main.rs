@@ -128,10 +128,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             // Projects
             commands::projects::list_projects,
-            commands::projects::add_project,
             commands::projects::remove_project,
             commands::projects::get_project_detail,
-            commands::projects::init_project,
             commands::projects::add_or_init_project,
             commands::projects::destroy_project,
             commands::projects::detect_orphan_projects,
@@ -162,7 +160,6 @@ fn main() {
             commands::services::run_doctor,
             commands::services::get_service_logs,
             commands::services::reset_service,
-            commands::services::get_service_status,
             commands::services::delete_service_workspace,
             commands::services::destroy_service,
             commands::services::discover_docker_containers,
@@ -175,8 +172,6 @@ fn main() {
             commands::hooks::uninstall_vcs_hooks,
             commands::hooks::get_action_types,
             commands::hooks::save_hooks,
-            commands::hooks::validate_hook,
-            commands::hooks::preview_hook,
             commands::hooks::run_hook,
             commands::hooks::get_trigger_mappings,
             commands::hooks::get_recipes,
@@ -671,7 +666,12 @@ pub fn update_tray_menu(app: &tauri::AppHandle) {
             "devflow — Proxy: Stopped".to_string()
         };
 
-        if let Some(tray) = state.tray.lock().unwrap().as_ref() {
+        // Clone the handle out of the mutex before touching the tray:
+        // set_menu/set_tooltip dispatch to the main thread, and holding the
+        // guard across that dispatch would block every other tray update
+        // (each on its own tokio worker) if the main thread is busy.
+        let tray = state.tray.lock().unwrap().clone();
+        if let Some(tray) = tray {
             let _ = tray.set_menu(Some(menu));
             let _ = tray.set_tooltip(Some(&tooltip));
         }

@@ -12,25 +12,9 @@ pub(super) async fn handle_remove_command(
     json_output: bool,
     non_interactive: bool,
 ) -> Result<()> {
-    // ── CLI-specific safety checks ──────────────────────────────────
+    // Safety checks (main workspace / currently checked out) live in the
+    // shared core `delete_workspace`.
     let vcs_repo = vcs::detect_vcs_provider(".").ok();
-
-    // Safety check: don't remove main workspace
-    if workspace_name == config.git.main_workspace {
-        anyhow::bail!("Cannot remove the main workspace '{}'", workspace_name);
-    }
-
-    // Safety check: don't remove the currently checked-out workspace
-    if let Some(ref repo) = vcs_repo {
-        if let Ok(Some(current)) = repo.current_workspace() {
-            if current == workspace_name {
-                anyhow::bail!(
-                    "Cannot remove workspace '{}' because it is currently checked out. Switch to another workspace first.",
-                    workspace_name
-                );
-            }
-        }
-    }
 
     // Confirm unless --force (skip prompt in JSON/non-interactive mode — require --force)
     if !force {

@@ -28,10 +28,9 @@ pub struct DeleteOptions {
 /// worktree removal, service deletion, VCS branch deletion, state
 /// cleanup, and post-remove hooks.
 ///
-/// **Safety checks are NOT included** — callers must verify:
-/// - The workspace is not the main workspace
-/// - The workspace is not currently checked out
-/// - The user has confirmed the operation (if interactive)
+/// Refuses to delete the main workspace or the currently checked-out
+/// workspace, for every frontend. Interactive confirmation (if any) remains
+/// the caller's responsibility.
 ///
 /// Hook phase ordering:
 ///   PreRemove → worktree remove → PreServiceDelete → services →
@@ -46,6 +45,24 @@ pub async fn delete_workspace(
     // VCS is optional — `remove` must work even without a git/jj repo
     let vcs_provider = vcs::detect_vcs_provider(project_dir).ok();
     let normalized = config.get_normalized_workspace_name(workspace_name);
+
+    // Safety checks — shared by CLI, TUI, and GUI so no frontend can drift.
+    if normalized == config.get_normalized_workspace_name(&config.git.main_workspace) {
+        anyhow::bail!("Cannot remove the main workspace '{}'", workspace_name);
+    }
+    if let Some(ref repo) = vcs_provider {
+        if let Ok(Some(current)) = repo.current_workspace() {
+            if current == workspace_name
+                || config.get_normalized_workspace_name(&current) == normalized
+            {
+                anyhow::bail!(
+                    "Cannot remove workspace '{}' because it is currently checked out. \
+                     Switch to another workspace first.",
+                    workspace_name
+                );
+            }
+        }
+    }
     let registered_workspace = LocalStateManager::new()
         .ok()
         .and_then(|state| state.get_workspace_by_dir(project_dir, &normalized));

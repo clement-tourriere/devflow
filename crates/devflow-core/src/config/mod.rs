@@ -46,6 +46,13 @@ pub struct Config {
     /// Execute configuration (detach command template, etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execute: Option<ExecuteConfig>,
+    /// Directory the config file was loaded from (set by `from_file`).
+    ///
+    /// Long-lived frontends (GUI, daemon) run with an arbitrary process cwd,
+    /// so anything identity-related (project name, project path for orphan
+    /// detection) must derive from this instead of `std::env::current_dir()`.
+    #[serde(skip)]
+    pub project_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +100,31 @@ pub struct NamedServiceConfig {
     pub docker: Option<DockerCustomSettings>,
 }
 
+/// Where a resolved service definition came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceSource {
+    /// Committed project config (`.devflow.yml` / `devflow.toml`).
+    Config,
+    /// CLI-managed local state (`devflow service add` etc.).
+    LocalState,
+}
+
+impl ServiceSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ServiceSource::Config => "config",
+            ServiceSource::LocalState => "local_state",
+        }
+    }
+}
+
+/// A service definition tagged with its origin.
+#[derive(Debug, Clone)]
+pub struct ServiceWithSource {
+    pub service: NamedServiceConfig,
+    pub source: ServiceSource,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DockerCustomSettings {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -113,7 +145,7 @@ fn default_provider_type() -> String {
     "local".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LocalServiceConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
@@ -581,21 +613,6 @@ impl GlobalConfig {
         Ok(Some(global))
     }
 
-    /// Save the global config to `~/.config/devflow/config.yml`.
-    #[allow(dead_code)]
-    pub fn save(&self) -> Result<()> {
-        let path = Self::path()?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create dir: {}", parent.display()))?;
-        }
-        let content =
-            serde_yaml_ng::to_string(self).context("Failed to serialize global config")?;
-        fs::write(&path, content)
-            .with_context(|| format!("Failed to write global config: {}", path.display()))?;
-        Ok(())
-    }
-
     /// The canonical path for the global config file.
     pub fn path() -> Result<PathBuf> {
         let config_dir = dirs::config_dir()
@@ -641,6 +658,7 @@ impl Default for Config {
             agent: None,
             commit: None,
             execute: None,
+            project_root: None,
         }
     }
 }

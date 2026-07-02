@@ -42,9 +42,6 @@ log = { version = "0.4", features = ["release_max_level_off"] }
 # File system paths
 dirs = "6.0"
 
-# Date/time
-chrono = { version = "0.4", features = ["serde"] }
-
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 

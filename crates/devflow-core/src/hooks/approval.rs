@@ -108,41 +108,11 @@ impl ApprovalStore {
         self.save()
     }
 
-    /// Approve all commands for a project at once.
-    #[allow(dead_code)]
-    pub fn approve_all(&mut self, project_key: &str, commands: &[String]) -> Result<()> {
-        self.refresh_from_disk()?;
-
-        let project_approvals = self.projects.entry(project_key.to_string()).or_default();
-
-        for command in commands {
-            let hash = Self::hash_command(command);
-            project_approvals.insert(
-                hash,
-                ApprovalRecord {
-                    command: command.to_string(),
-                    approved_at: chrono::Utc::now(),
-                },
-            );
-        }
-
-        self.save()
-    }
-
     /// Clear all approvals for a project.
     pub fn clear_project(&mut self, project_key: &str) -> Result<()> {
         self.refresh_from_disk()?;
 
         self.projects.remove(project_key);
-        self.save()
-    }
-
-    /// Clear all approvals globally.
-    #[allow(dead_code)]
-    pub fn clear_all(&mut self) -> Result<()> {
-        self.refresh_from_disk()?;
-
-        self.projects.clear();
         self.save()
     }
 

@@ -1439,12 +1439,12 @@ pub async fn reconcile_all_projects_processes() -> Vec<ProcessReconcileStatus> {
         if !project_dir.exists() {
             continue;
         }
-        let Some(mut config) = load_project_config(&project_dir) else {
+        if Config::find_config_file_in(&project_dir).is_none() {
+            continue;
+        }
+        let Ok(config) = Config::load_effective_for_dir(&project_dir) else {
             continue;
         };
-        if let Some(services) = state.get_services(&project_dir.join(".devflow.yml")) {
-            config.services = Some(services);
-        }
         if !is_configured(&config) {
             continue;
         }
@@ -1623,21 +1623,6 @@ async fn reconcile_project_processes(
         }
     }
     Ok(out)
-}
-
-fn load_project_config(dir: &Path) -> Option<Config> {
-    for name in [
-        ".devflow.yml",
-        ".devflow.yaml",
-        ".devflow.toml",
-        "devflow.toml",
-    ] {
-        let path = dir.join(name);
-        if path.exists() {
-            return Config::from_file(&path).ok();
-        }
-    }
-    None
 }
 
 async fn check_process_approval(
@@ -3375,14 +3360,9 @@ fn listening_pid_for_port(port: u16) -> Option<u32> {
 
 #[cfg(unix)]
 fn process_group_for_pid(pid: u32) -> Option<u32> {
-    let output = std::process::Command::new("ps")
-        .args(["-o", "pgid=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+    nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(pid as i32)))
+        .ok()
+        .map(|pgid| pgid.as_raw() as u32)
 }
 
 #[cfg(not(unix))]

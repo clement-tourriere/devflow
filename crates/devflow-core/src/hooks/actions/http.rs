@@ -5,8 +5,7 @@ use super::ActionResult;
 use crate::hooks::template::TemplateEngine;
 use crate::hooks::HookContext;
 
-/// Make an HTTP request. Uses a simple blocking approach via std::process
-/// calling curl, since reqwest is an optional dependency.
+/// Make an HTTP request (in-process via reqwest).
 pub async fn execute(
     url_template: &str,
     method_template: &str,
@@ -16,44 +15,52 @@ pub async fn execute(
     template_engine: &TemplateEngine,
 ) -> Result<ActionResult> {
     let url = template_engine.render(url_template, context)?;
-    let method = template_engine.render(method_template, context)?;
+    let method = template_engine
+        .render(method_template, context)?
+        .to_uppercase();
 
-    let mut cmd = std::process::Command::new("curl");
-    cmd.args(["-sS", "-X", &method.to_uppercase()]);
+    let http_method: reqwest::Method = method
+        .parse()
+        .with_context(|| format!("Invalid HTTP method: {}", method))?;
 
-    // Add headers
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("Failed to build HTTP client")?;
+
+    let mut request = client.request(http_method, &url);
+
     if let Some(hdrs) = headers {
         for (key, value_template) in hdrs {
             let rendered_key = template_engine.render(key, context)?;
             let rendered_value = template_engine.render(value_template, context)?;
-            cmd.args(["-H", &format!("{}: {}", rendered_key, rendered_value)]);
+            request = request.header(rendered_key, rendered_value);
         }
     }
 
-    // Add body
     if let Some(body_tmpl) = body_template {
         let rendered_body = template_engine.render(body_tmpl, context)?;
-        cmd.args(["-d", &rendered_body]);
+        request = request.body(rendered_body);
     }
 
-    cmd.arg(&url);
-
-    let output = cmd
-        .output()
+    let response = request
+        .send()
+        .await
         .with_context(|| format!("Failed to execute HTTP request to: {}", url))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
         anyhow::bail!(
-            "HTTP request failed (exit {}): {} {}\nstderr: {}",
-            output.status.code().unwrap_or(-1),
-            method.to_uppercase(),
+            "HTTP request failed ({}): {} {}\nbody: {}",
+            status,
+            method,
             url,
-            stderr.trim()
+            body.chars().take(500).collect::<String>()
         );
     }
 
     Ok(ActionResult {
-        summary: format!("http: {} {}", method.to_uppercase(), url),
+        summary: format!("http: {} {}", method, url),
     })
 }

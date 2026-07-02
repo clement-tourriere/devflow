@@ -9,12 +9,11 @@ mod context;
 mod exec;
 mod interactive;
 mod link;
-mod list;
+pub(crate) mod list;
 mod remove;
 
 pub(crate) use context::{
-    collect_list_workspace_names, context_matches_branch, ensure_default_workspace_registered,
-    load_registry_branches_for_list, resolve_branch_context, BranchContextSource,
+    ensure_default_workspace_registered, resolve_branch_context, BranchContextSource,
 };
 use interactive::handle_interactive_switch;
 use link::{handle_link_command, resolve_parent_for_branch_creation};

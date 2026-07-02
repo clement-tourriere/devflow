@@ -81,13 +81,9 @@ impl DevflowContext {
         let (effective_config, config_path) = Config::load_effective_config_with_path_info()?;
         let mut config = effective_config.get_merged_config();
 
-        // Inject services from local state
-        if let Ok(state_manager) = LocalStateManager::new() {
-            if let Some(ref path) = config_path {
-                if let Some(state_services) = state_manager.get_services(path) {
-                    config.services = Some(state_services);
-                }
-            }
+        // Overlay CLI-managed local-state services (shared core helper).
+        if let Some(ref path) = config_path {
+            config.overlay_local_state_services(path);
         }
 
         let vcs = vcs::detect_vcs_provider(".")?;
@@ -442,16 +438,15 @@ impl DevflowContext {
         from: Option<&str>,
         project_dir: &std::path::Path,
     ) -> Result<String> {
-        let options = devflow_core::workspace::switch::SwitchOptions {
+        let options = devflow_core::workspace::create::CreateOptions {
             lifecycle: devflow_core::workspace::LifecycleOptions::default(),
-            create_if_missing: true,
             creation_mode: devflow_core::workspace::WorkspaceCreationMode::Default,
             from_workspace: from.map(ToString::to_string),
             copy_files: None,
             copy_ignored: None,
         };
         let result =
-            devflow_core::workspace::switch::switch_workspace(config, project_dir, name, &options)
+            devflow_core::workspace::create::create_workspace(config, project_dir, name, &options)
                 .await?;
         summarize_workspace_switch(
             "Created",

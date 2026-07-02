@@ -366,22 +366,6 @@ pub struct ProjectReconcile {
     pub engines: Vec<SharedEngineStatus>,
 }
 
-/// Load a project's committed config from its directory (YAML or TOML).
-fn load_project_config(dir: &std::path::Path) -> Option<Config> {
-    for name in [
-        ".devflow.yml",
-        ".devflow.yaml",
-        ".devflow.toml",
-        "devflow.toml",
-    ] {
-        let p = dir.join(name);
-        if p.exists() {
-            return Config::from_file(&p).ok();
-        }
-    }
-    None
-}
-
 /// Reconcile shared global engines for **every registered project** on the
 /// machine — the controller daemon's loop body. Loads each project's config
 /// and ensures its shared engines' containers are running. Projects whose
@@ -400,7 +384,10 @@ pub async fn reconcile_all_projects() -> Vec<ProjectReconcile> {
         if !dir.exists() {
             continue;
         }
-        let Some(config) = load_project_config(dir) else {
+        if Config::find_config_file_in(dir).is_none() {
+            continue;
+        }
+        let Ok(config) = Config::load_effective_for_dir(dir) else {
             continue;
         };
         if let Ok(engines) = reconcile_shared_engines(&config).await {

@@ -1,8 +1,7 @@
 use devflow_core::processes::ProcessResult;
-use devflow_core::state::LocalStateManager;
+use devflow_core::vcs;
 use devflow_core::workspace::hooks::HookApprovalMode;
 use devflow_core::workspace::{self, LifecycleOptions, WorkspaceCreationMode};
-use devflow_core::{config, vcs};
 use serde::Serialize;
 use tauri::Emitter;
 
@@ -40,73 +39,20 @@ pub struct WorkspaceSwitchedEvent {
 #[tauri::command]
 pub async fn list_workspaces(project_path: String) -> Result<WorkspacesResponse, String> {
     let project_dir = std::path::Path::new(&project_path);
-    let config_path = project_dir.join(".devflow.yml");
+    let cfg = crate::commands::project_config::load_project_config(project_dir)?;
 
-    // Load config for main_workspace / normalization
-    let cfg = if config_path.exists() {
-        config::Config::from_file(&config_path).ok()
-    } else {
-        None
-    };
-
-    let main_workspace = cfg
-        .as_ref()
-        .map(|c| c.git.main_workspace.clone())
-        .unwrap_or_else(|| "main".to_string());
-
-    // Read devflow workspace registry
-    let mut state_mgr = LocalStateManager::new().map_err(crate::commands::format_error)?;
-
-    let devflow_branches = state_mgr
-        .get_or_init_workspaces_by_dir(project_dir, &main_workspace)
-        .map_err(crate::commands::format_error)?;
-
-    // Determine current git workspace to find active devflow workspace
-    let vcs_provider = vcs::detect_vcs_provider(&project_path).ok();
-    let current_vcs_branch = vcs_provider
-        .as_ref()
-        .and_then(|v| v.current_workspace().ok().flatten());
-
-    // Normalize the VCS workspace name for matching
-    let normalized_current = current_vcs_branch.as_deref().map(|b| {
-        cfg.as_ref()
-            .map(|c| c.get_normalized_workspace_name(b))
-            .unwrap_or_else(|| b.to_string())
-    });
-
-    // Get worktrees for enrichment
-    let worktrees = vcs_provider
-        .as_ref()
-        .and_then(|v| v.list_worktrees().ok())
-        .unwrap_or_default();
-
-    let entries: Vec<WorkspaceEntry> = devflow_branches
+    let entries: Vec<WorkspaceEntry> = workspace::list::enriched_workspaces(&cfg, project_dir)
+        .map_err(crate::commands::format_error)?
         .into_iter()
-        .map(|b| {
-            let is_current = normalized_current
-                .as_deref()
-                .map(|cur| cur == b.name)
-                .unwrap_or(false);
-
-            let is_default = b.name == main_workspace;
-
-            // Prefer worktree_path from VCS if available, fall back to registry
-            let worktree_path = worktrees
-                .iter()
-                .find(|w| w.workspace.as_deref() == Some(&b.name))
-                .map(|w| w.path.display().to_string())
-                .or(b.worktree_path);
-
-            WorkspaceEntry {
-                name: b.name,
-                is_current,
-                is_default,
-                worktree_path,
-                parent: b.parent,
-                created_at: Some(b.created_at.format("%Y-%m-%d %H:%M").to_string()),
-                executed_command: b.executed_command,
-                execution_status: b.execution_status,
-            }
+        .map(|w| WorkspaceEntry {
+            name: w.name,
+            is_current: w.is_current,
+            is_default: w.is_default,
+            worktree_path: w.worktree_path,
+            parent: w.parent,
+            created_at: Some(w.created_at.format("%Y-%m-%d %H:%M").to_string()),
+            executed_command: w.executed_command,
+            execution_status: w.execution_status,
         })
         .collect();
 
@@ -209,18 +155,28 @@ pub async fn create_workspace(
     let creation_mode =
         WorkspaceCreationMode::parse(creation_mode.as_deref()).map_err(|e| e.to_string())?;
 
-    let options = workspace::switch::SwitchOptions {
+    let options = workspace::create::CreateOptions {
         lifecycle: gui_lifecycle_options(),
-        create_if_missing: true,
         creation_mode,
         from_workspace,
         copy_files,
         copy_ignored,
     };
 
-    let result = workspace::switch::switch_workspace(&cfg, project_dir, &workspace_name, &options)
-        .await
-        .map_err(crate::commands::format_error)?;
+    // Hard upper bound so a wedged service/process backend surfaces as an
+    // error instead of leaving the GUI on "Creating..." forever. Creation can
+    // legitimately take minutes (CoW seed clone, image pull, per-process
+    // readiness), hence the generous limit.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        workspace::create::create_workspace(&cfg, project_dir, &workspace_name, &options),
+    )
+    .await
+    .map_err(|_| {
+        "Timed out creating workspace after 5 minutes; parts of it may exist. Refresh and retry."
+            .to_string()
+    })?
+    .map_err(crate::commands::format_error)?;
 
     let response = CreateWorkspaceResult {
         workspace: result.workspace.clone(),
@@ -274,9 +230,13 @@ pub async fn switch_workspace(
         copy_ignored: None,
     };
 
-    let result = workspace::switch::switch_workspace(&cfg, project_dir, &workspace_name, &options)
-        .await
-        .map_err(crate::commands::format_error)?;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        workspace::switch::switch_workspace(&cfg, project_dir, &workspace_name, &options),
+    )
+    .await
+    .map_err(|_| "Timed out switching workspace after 5 minutes. Refresh and retry.".to_string())?
+    .map_err(crate::commands::format_error)?;
 
     let response = SwitchWorkspaceResult {
         services: result
@@ -404,17 +364,10 @@ pub async fn prune_worktrees(project_path: String) -> Result<PruneResult, String
         });
     }
 
-    // Use `git worktree prune` to clean up all stale entries at once
-    let output = std::process::Command::new("git")
-        .args(["worktree", "prune"])
-        .current_dir(&project_path)
-        .output()
-        .map_err(|e| format!("Failed to run git worktree prune: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git worktree prune failed: {}", stderr));
-    }
+    // Clean up all stale entries via the shared VCS abstraction.
+    vcs_provider
+        .prune_worktrees()
+        .map_err(crate::commands::format_error)?;
 
     let details: Vec<String> = stale
         .iter()

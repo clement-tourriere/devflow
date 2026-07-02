@@ -72,7 +72,6 @@ pub struct DoctorCheck {
 /// ServiceProvider is the core trait for all service providers.
 /// (Renamed from DatabaseBranchingBackend as part of the devflow evolution.)
 #[async_trait]
-#[allow(dead_code)]
 pub trait ServiceProvider: Send + Sync {
     // Core branching operations
     async fn create_workspace(

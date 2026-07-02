@@ -88,7 +88,6 @@ impl Store {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn list_projects(&self) -> anyhow::Result<Vec<Project>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, image, storage_driver, storage_config, project_path, created_at FROM projects ORDER BY created_at DESC"
@@ -179,21 +178,6 @@ impl Store {
         let rows = stmt.query_map([project_id], map_branch_row)?;
         rows.collect::<Result<Vec<_>, _>>()
             .context("failed to list workspaces")
-    }
-
-    #[allow(dead_code)]
-    pub fn list_all_branches(&self) -> anyhow::Result<Vec<Workspace>> {
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT id, project_id, name, parent_workspace_id, state, data_dir, container_name, port, storage_metadata, created_at
-            FROM workspaces
-            ORDER BY created_at DESC
-            "#,
-        )?;
-
-        let rows = stmt.query_map([], map_branch_row)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .context("failed to list all workspaces")
     }
 
     pub fn get_workspace_by_name(

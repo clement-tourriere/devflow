@@ -35,15 +35,6 @@ impl TemplateEngine {
             .render_str(template_str, ctx_value)
             .with_context(|| format!("Failed to render template: {}", template_str))
     }
-
-    /// Render a template string with raw minijinja Value context.
-    /// Useful when building context manually.
-    #[allow(dead_code)] // Public API for advanced template usage
-    pub fn render_with_value(&self, template_str: &str, ctx: Value) -> Result<String> {
-        self.env
-            .render_str(template_str, ctx)
-            .with_context(|| format!("Failed to render template: {}", template_str))
-    }
 }
 
 impl Default for TemplateEngine {

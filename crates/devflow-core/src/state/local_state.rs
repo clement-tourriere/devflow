@@ -179,36 +179,6 @@ impl LocalStateManager {
             })
     }
 
-    #[allow(dead_code)]
-    pub fn set_services(
-        &mut self,
-        project_path: &Path,
-        mut services: Vec<NamedServiceConfig>,
-    ) -> Result<()> {
-        self.refresh_state()?;
-
-        let project_key = self.get_project_key(project_path).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Failed to get project key for path: {}",
-                project_path.display()
-            )
-        })?;
-
-        let existing = self.state.projects.get(&project_key);
-        let existing_branches = existing.and_then(|p| p.workspaces.clone());
-        normalize_service_defaults(&mut services);
-
-        let project_state = ProjectState {
-            last_updated: chrono::Utc::now(),
-            services: Some(services),
-            workspaces: existing_branches,
-        };
-
-        self.state.projects.insert(project_key, project_state);
-        self.save_state()?;
-        Ok(())
-    }
-
     pub fn add_service(
         &mut self,
         project_path: &Path,
@@ -494,43 +464,6 @@ impl LocalStateManager {
             .into_iter()
             .filter(|w| w.parent == parent && w.name != workspace)
             .collect()
-    }
-
-    #[allow(dead_code)]
-    pub fn cleanup_old_projects(&mut self, max_age_days: u32) -> Result<()> {
-        self.refresh_state()?;
-
-        let cutoff = chrono::Utc::now() - chrono::Duration::days(max_age_days as i64);
-
-        let old_projects: Vec<String> = self
-            .state
-            .projects
-            .iter()
-            .filter(|(_, project)| project.last_updated < cutoff)
-            .map(|(key, _)| key.clone())
-            .collect();
-
-        let mut projects_removed = false;
-        for project_key in &old_projects {
-            // Check if project still exists before removing
-            if let Ok(path) = PathBuf::from(&project_key).canonicalize() {
-                if !path.exists() {
-                    log::debug!("Removing state for non-existent project: {}", project_key);
-                    self.state.projects.remove(project_key);
-                    projects_removed = true;
-                }
-            } else {
-                log::debug!("Removing state for inaccessible project: {}", project_key);
-                self.state.projects.remove(project_key);
-                projects_removed = true;
-            }
-        }
-
-        if projects_removed {
-            self.save_state()?;
-        }
-
-        Ok(())
     }
 
     fn get_project_key(&self, project_path: &Path) -> Option<String> {

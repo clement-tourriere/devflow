@@ -107,15 +107,18 @@ pub async fn execute_action(
             container,
             command,
             user,
-        } => docker_exec::execute(
-            container,
-            command,
-            user.as_deref(),
-            context,
-            template_engine,
-            working_dir,
-            print_output,
-        ),
+        } => {
+            docker_exec::execute(
+                container,
+                command,
+                user.as_deref(),
+                context,
+                template_engine,
+                working_dir,
+                print_output,
+            )
+            .await
+        }
         super::HookAction::Http {
             url,
             method,

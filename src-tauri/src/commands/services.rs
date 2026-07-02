@@ -18,13 +18,6 @@ pub struct ServiceEntry {
     pub source: String,
 }
 
-#[derive(Serialize)]
-pub struct ServiceWorkspaceStatus {
-    pub service_name: String,
-    pub workspace_name: String,
-    pub state: Option<String>,
-}
-
 #[derive(Deserialize)]
 pub struct AddServiceRequest {
     pub name: String,
@@ -222,7 +215,7 @@ pub async fn list_services(project_path: String) -> Result<Vec<ServiceEntry>, St
     Ok(
         crate::commands::project_config::list_services_with_sources(project_dir)?
             .into_iter()
-            .map(|entry| service_entry(&entry.service, entry.source))
+            .map(|entry| service_entry(&entry.service, entry.source.as_str()))
             .collect(),
     )
 }
@@ -708,43 +701,6 @@ pub async fn list_service_workspaces(
             state: b.state,
         })
         .collect())
-}
-
-#[tauri::command]
-pub async fn get_service_status(
-    project_path: String,
-    service_name: String,
-    workspace_name: String,
-) -> Result<ServiceWorkspaceStatus, String> {
-    let project_dir = std::path::Path::new(&project_path);
-    let config =
-        crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
-
-    let named_services = config.resolve_services();
-    let svc = named_services
-        .iter()
-        .find(|s| s.name == service_name)
-        .ok_or("Service not found")?;
-
-    let provider = services::factory::create_provider_from_named_config(&config, svc)
-        .await
-        .map_err(crate::commands::format_error)?;
-
-    let workspaces = provider
-        .list_workspaces()
-        .await
-        .map_err(crate::commands::format_error)?;
-
-    let state = workspaces
-        .iter()
-        .find(|b| b.name == workspace_name)
-        .and_then(|b| b.state.clone());
-
-    Ok(ServiceWorkspaceStatus {
-        service_name,
-        workspace_name,
-        state,
-    })
 }
 
 #[derive(Serialize)]

@@ -4,7 +4,6 @@ import type {
   ProjectDetail,
   WorkspacesResponse,
   ServiceEntry,
-  ServiceWorkspaceStatus,
   ServiceWorkspaceInfo,
   AddServiceRequest,
   DiscoveredContainer,
@@ -13,7 +12,6 @@ import type {
   VcsHooksActionResult,
   ActionTypeInfo,
   HookRunResult,
-  HookPreview,
   TriggerMapping,
   RecipeInfo,
   InstallRecipeResult,
@@ -40,14 +38,10 @@ import type {
 
 // Projects
 export const listProjects = () => invoke<ProjectEntry[]>("list_projects");
-export const addProject = (path: string, name?: string) =>
-  invoke<ProjectEntry>("add_project", { path, name });
 export const removeProject = (path: string) =>
   invoke<void>("remove_project", { path });
 export const getProjectDetail = (projectPath: string) =>
   invoke<ProjectDetail>("get_project_detail", { projectPath });
-export const initProject = (path: string, name?: string, vcsPreference?: string, worktreeEnabled?: boolean) =>
-  invoke<ProjectEntry>("init_project", { path, name, vcsPreference, worktreeEnabled });
 export const addOrInitProject = (path: string, name?: string, vcsPreference?: string, worktreeEnabled?: boolean, mainBranch?: string) =>
   invoke<ProjectEntry>("add_or_init_project", { path, name, vcsPreference, worktreeEnabled, mainBranch });
 
@@ -192,16 +186,6 @@ export const resetService = (
   workspaceName: string
 ) =>
   invoke<void>("reset_service", { projectPath, serviceName, workspaceName });
-export const getServiceStatus = (
-  projectPath: string,
-  serviceName: string,
-  workspaceName: string
-) =>
-  invoke<ServiceWorkspaceStatus>("get_service_status", {
-    projectPath,
-    serviceName,
-    workspaceName,
-  });
 export const listServiceWorkspaces = (
   projectPath: string,
   serviceName: string
@@ -261,26 +245,6 @@ export const getActionTypes = () =>
   invoke<ActionTypeInfo[]>("get_action_types");
 export const saveHooks = (projectPath: string, hooks: unknown) =>
   invoke<void>("save_hooks", { projectPath, hooks });
-export const validateHook = (
-  projectPath: string,
-  hook: unknown,
-  workspaceName?: string
-) =>
-  invoke<{ valid: boolean }>("validate_hook", {
-    projectPath,
-    hook,
-    workspaceName,
-  });
-export const previewHook = (
-  projectPath: string,
-  hook: unknown,
-  workspaceName?: string
-) =>
-  invoke<HookPreview>("preview_hook", {
-    projectPath,
-    hook,
-    workspaceName,
-  });
 export const runHook = (
   projectPath: string,
   phase: string,

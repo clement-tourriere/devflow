@@ -321,13 +321,17 @@ function ProjectDetail() {
     if (!requestedWorkspace || isCreatingWorkspace) return;
     setActionLoading("create");
     try {
-      const result = await createWorkspace(
-        projectPath,
-        requestedWorkspace,
-        fromWorkspace || undefined,
-        creationMode,
-        creationMode === "worktree" ? copyFiles : undefined,
-        creationMode === "worktree" ? copyIgnored : undefined
+      const result = await withTimeout(
+        createWorkspace(
+          projectPath,
+          requestedWorkspace,
+          fromWorkspace || undefined,
+          creationMode,
+          creationMode === "worktree" ? copyFiles : undefined,
+          creationMode === "worktree" ? copyIgnored : undefined
+        ),
+        310000,
+        "Workspace creation timed out. Refreshing state; parts of it may exist — retry if needed."
       );
       const createdWorkspace = result.workspace || requestedWorkspace;
       reportWorkspaceResult(`Workspace "${requestedWorkspace}"`, result);
@@ -350,7 +354,11 @@ function ProjectDetail() {
   const handleSwitchWorkspace = async (workspaceName: string) => {
     setActionLoading(`switch:${workspaceName}`);
     try {
-      const result = await switchWorkspace(projectPath, workspaceName);
+      const result = await withTimeout(
+        switchWorkspace(projectPath, workspaceName),
+        310000,
+        "Workspace switch timed out. Refreshing state; retry if needed."
+      );
       reportWorkspaceResult(`Switched to "${workspaceName}"`, result);
       setProcessWorkspace(workspaceName);
       await reload();

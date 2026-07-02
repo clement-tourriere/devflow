@@ -109,11 +109,18 @@ impl LocalProvider {
         // Capture the canonical MAIN-repo root for orphan detection, so a
         // worktree and its main repo resolve to the same project_path (and
         // don't ping-pong the stored value or trigger false orphan GC).
-        let project_path = std::env::current_dir().ok().map(|p| {
-            crate::vcs::resolve_project_root(&p)
-                .to_string_lossy()
-                .to_string()
-        });
+        // The config's load directory takes precedence: GUI/daemon processes
+        // run with an unrelated cwd (Finder launches apps with cwd "/"), and
+        // syncing that into the store would corrupt orphan detection.
+        let project_path = config
+            .project_root
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .map(|p| {
+                crate::vcs::resolve_project_root(&p)
+                    .to_string_lossy()
+                    .to_string()
+            });
 
         Ok(Self {
             project_name,
@@ -144,7 +151,14 @@ impl LocalProvider {
     }
 
     async fn ensure_project(&self) -> Result<model::Project> {
-        if let Some(mut project) = self.store().get_project_by_name(&self.project_name)? {
+        // Bind the lookup to a statement so the store() MutexGuard drops
+        // immediately. Keeping it in an `if let` scrutinee extends the guard
+        // over the whole block, and the second store() call below would then
+        // self-deadlock (std::sync::Mutex is not reentrant). That exact bug
+        // froze every provider operation in the GUI, whose cwd never matches
+        // the stored project_path.
+        let existing = self.store().get_project_by_name(&self.project_name)?;
+        if let Some(mut project) = existing {
             // Keep project_path in sync with where the project actually lives;
             // a stale path (after `mv`/rename) would make orphan detection
             // declare a live project orphaned and GC its data.
@@ -828,4 +842,71 @@ fn shellexpand(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn provider_for(
+        data_root: &std::path::Path,
+        project_root: &std::path::Path,
+    ) -> LocalProvider {
+        let config = Config {
+            name: Some("deadlock-regression".to_string()),
+            project_root: Some(project_root.to_path_buf()),
+            ..Default::default()
+        };
+        let local = LocalServiceConfig {
+            data_root: Some(data_root.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        LocalProvider::new("db", &config, Some(&local), None)
+            .await
+            .expect("provider construction must not require a running Docker daemon")
+    }
+
+    /// Regression test: `ensure_project` used to hold the store MutexGuard in
+    /// its `if let` scrutinee and lock the store again in the
+    /// project_path-mismatch branch — a guaranteed self-deadlock that froze
+    /// every workspace/service operation in the GUI (whose cwd never matches
+    /// the stored project path).
+    #[tokio::test]
+    async fn ensure_project_path_resync_does_not_deadlock() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let root_a = tempfile::tempdir().unwrap();
+        let root_b = tempfile::tempdir().unwrap();
+
+        // First provider auto-creates the project with root A as its path.
+        let provider_a = provider_for(data_dir.path(), root_a.path()).await;
+        let project = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            provider_a.ensure_project(),
+        )
+        .await
+        .expect("ensure_project must not hang")
+        .unwrap();
+        assert_eq!(project.name, "deadlock-regression");
+
+        // Second provider sees a different project root → hits the
+        // project_path-mismatch branch that used to self-deadlock.
+        let provider_b = provider_for(data_dir.path(), root_b.path()).await;
+        let project = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            provider_b.ensure_project(),
+        )
+        .await
+        .expect("ensure_project must not deadlock on project_path resync")
+        .unwrap();
+
+        let expected = root_b
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| root_b.path().to_path_buf());
+        assert_eq!(
+            project.project_path.as_deref(),
+            Some(expected.to_string_lossy().as_ref()),
+            "project_path must be resynced to the new root"
+        );
+    }
 }

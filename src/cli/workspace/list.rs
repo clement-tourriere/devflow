@@ -10,7 +10,7 @@ use super::context::{
     resolve_branch_context, BranchContextSource,
 };
 
-pub(super) fn print_enriched_branch_list(
+pub(crate) fn print_enriched_branch_list(
     service_branches: &[services::WorkspaceInfo],
     config: &Config,
     config_path: &Option<PathBuf>,
@@ -628,7 +628,7 @@ pub(super) async fn handle_environment_graph(
 }
 
 /// Build enriched JSON for the list command, merging git + worktree + service info.
-pub(super) fn enrich_branch_list_json(
+pub(crate) fn enrich_branch_list_json(
     service_branches: &[services::WorkspaceInfo],
     config: &Config,
     config_path: &Option<PathBuf>,

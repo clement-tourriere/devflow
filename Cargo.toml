@@ -44,9 +44,6 @@ tokio = { version = "1.46", default-features = false, features = ["rt", "rt-mult
 # Error handling
 anyhow = "1.0"
 
-# Async trait support
-async-trait = "0.1"
-
 # Text matching
 # Full default features: workspace matching patterns use \b/\s,
 # which require the unicode feature to compile.
@@ -58,9 +55,6 @@ env_logger = { version = "0.11", default-features = false, features = ["humantim
 
 # Tool detection on PATH
 which = "8.0.0"
-
-# Password input
-rpassword = { version = "7.5", default-features = false }
 
 # Terminal UI for interactive selection
 inquire = { version = "0.9", default-features = false, features = ["crossterm"] }

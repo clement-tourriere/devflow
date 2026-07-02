@@ -2,6 +2,7 @@ pub mod create;
 pub mod delete;
 pub mod hooks;
 pub mod link;
+pub mod list;
 pub mod switch;
 pub mod worktree;
 

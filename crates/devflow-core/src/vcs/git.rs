@@ -253,24 +253,6 @@ impl GitRepository {
         Ok(None)
     }
 
-    #[allow(dead_code)]
-    pub fn get_all_branches(&self) -> Result<Vec<String>> {
-        let workspaces = self
-            .repo
-            .branches(Some(git2::BranchType::Local))
-            .context("Failed to get workspaces")?;
-
-        let mut workspace_names = Vec::new();
-        for workspace in workspaces {
-            let (workspace, _) = workspace.context("Failed to get workspace")?;
-            if let Some(name) = workspace.name()? {
-                workspace_names.push(name.to_string());
-            }
-        }
-
-        Ok(workspace_names)
-    }
-
     fn generate_hook_script(&self) -> String {
         r#"#!/bin/sh
 # devflow auto-generated hook
@@ -329,22 +311,21 @@ fi
         .to_string()
     }
 
-    #[allow(dead_code)]
     pub fn get_repo_root(&self) -> &Path {
         self.repo.workdir().unwrap_or_else(|| self.repo.path())
     }
 
-    #[allow(dead_code)]
-    pub fn is_worktree(&self) -> bool {
-        self.repo.is_worktree()
-    }
-
-    #[allow(dead_code)]
-    pub fn get_main_worktree_dir(&self) -> Option<PathBuf> {
-        if !self.repo.is_worktree() {
-            return None;
-        }
-        self.repo.commondir().parent().map(|p| p.to_path_buf())
+    /// Diff of the index against HEAD (staged changes). HEAD may be unborn,
+    /// in which case the whole index is the diff.
+    fn staged_diff_internal(&self) -> Result<git2::Diff<'_>> {
+        let head_tree = self
+            .repo
+            .head()
+            .ok()
+            .and_then(|head| head.peel_to_tree().ok());
+        self.repo
+            .diff_tree_to_index(head_tree.as_ref(), None, None)
+            .context("Failed to diff index against HEAD")
     }
 
     /// Sanitize a workspace name into a valid worktree name for git.
@@ -831,36 +812,27 @@ impl VcsProvider for GitRepository {
     }
 
     fn staged_diff(&self) -> Result<String> {
-        // Use git CLI for diff output — git2's diff API is verbose to format.
-        let root = self.get_repo_root();
-        let output = std::process::Command::new("git")
-            .args(["diff", "--cached"])
-            .current_dir(root)
-            .output()
-            .context("Failed to run 'git diff --cached'")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("git diff --cached failed: {}", stderr);
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        let diff = self.staged_diff_internal()?;
+        let mut out = String::new();
+        diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
+            match line.origin() {
+                '+' | '-' | ' ' => out.push(line.origin()),
+                _ => {}
+            }
+            out.push_str(&String::from_utf8_lossy(line.content()));
+            true
+        })
+        .context("Failed to format staged diff")?;
+        Ok(out)
     }
 
     fn staged_summary(&self) -> Result<String> {
-        let root = self.get_repo_root();
-        let output = std::process::Command::new("git")
-            .args(["diff", "--cached", "--stat"])
-            .current_dir(root)
-            .output()
-            .context("Failed to run 'git diff --cached --stat'")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("git diff --cached --stat failed: {}", stderr);
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        let diff = self.staged_diff_internal()?;
+        let stats = diff.stats().context("Failed to compute diff stats")?;
+        let buf = stats
+            .to_buf(git2::DiffStatsFormat::FULL, 80)
+            .context("Failed to format diff stats")?;
+        Ok(String::from_utf8_lossy(&buf).to_string())
     }
 
     fn has_staged_changes(&self) -> Result<bool> {
@@ -914,16 +886,24 @@ impl VcsProvider for GitRepository {
     }
 
     fn prune_worktrees(&self) -> Result<()> {
-        // git2 doesn't expose worktree pruning directly, use git CLI
-        let root = self.get_repo_root();
-        let output = std::process::Command::new("git")
-            .args(["worktree", "prune"])
-            .current_dir(root)
-            .output()
-            .context("Failed to prune worktrees")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("git worktree prune failed: {}", stderr);
+        // Mirror `git worktree prune`: drop admin entries whose working
+        // directory no longer exists (or that are otherwise invalid).
+        let names = self
+            .repo
+            .worktrees()
+            .context("Failed to list worktrees for pruning")?;
+        for name in names.iter().flatten().flatten() {
+            let Ok(wt) = self.repo.find_worktree(name) else {
+                continue;
+            };
+            if wt.validate().is_ok() && wt.path().exists() {
+                continue;
+            }
+            let mut opts = git2::WorktreePruneOptions::new();
+            opts.working_tree(true);
+            if let Err(e) = wt.prune(Some(&mut opts)) {
+                log::debug!("Failed to prune worktree '{}': {}", name, e);
+            }
         }
         Ok(())
     }

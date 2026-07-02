@@ -23,7 +23,6 @@ pub struct JjRepository {
 
 impl JjRepository {
     /// Open the jj repository at `path` (or a parent containing `.jj/`).
-    #[allow(dead_code)]
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let root = Self::find_repo_root(path.as_ref())
             .context("Failed to find jj repository (no .jj/ directory)")?;
@@ -82,12 +81,6 @@ impl JjRepository {
     /// so the caller can handle it gracefully.
     fn jj_try(&self, args: &[&str]) -> Result<String> {
         self.jj(args)
-    }
-
-    /// Check whether this repository is colocated (has both .jj/ and .git/).
-    #[allow(dead_code)]
-    pub fn is_colocated(&self) -> bool {
-        self.root.join(".git").exists()
     }
 
     /// Get the current bookmark (if the working-copy commit has exactly one).

@@ -571,15 +571,11 @@ async fn docker_published_ports(client: &Docker) -> HashSet<u16> {
 /// allowing `cp` operations on the bind-mounted pgdata directory to succeed.
 #[cfg(unix)]
 fn get_host_uid_gid() -> Option<String> {
-    let uid = std::process::Command::new("id").arg("-u").output().ok()?;
-    let gid = std::process::Command::new("id").arg("-g").output().ok()?;
-    if uid.status.success() && gid.status.success() {
-        let u = String::from_utf8_lossy(&uid.stdout).trim().to_string();
-        let g = String::from_utf8_lossy(&gid.stdout).trim().to_string();
-        Some(format!("{}:{}", u, g))
-    } else {
-        None
-    }
+    Some(format!(
+        "{}:{}",
+        nix::unistd::getuid().as_raw(),
+        nix::unistd::getgid().as_raw()
+    ))
 }
 
 #[cfg(not(unix))]
