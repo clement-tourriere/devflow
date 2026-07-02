@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
-    KeyPair, KeyUsagePurpose, SanType,
+    Issuer, KeyPair, KeyUsagePurpose, SanType,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -30,8 +30,7 @@ pub fn default_ca_key_path() -> PathBuf {
 
 /// Certificate Authority for signing server certificates.
 pub struct CertificateAuthority {
-    ca_cert: rcgen::Certificate,
-    key_pair: KeyPair,
+    issuer: Issuer<'static, KeyPair>,
     ca_cert_pem: String,
     ca_key_pem: String,
 }
@@ -67,9 +66,10 @@ impl CertificateAuthority {
         let ca_cert_pem = ca_cert.pem();
         let ca_key_pem = key_pair.serialize_pem();
 
+        let issuer = Issuer::new(params, key_pair);
+
         Ok(Self {
-            ca_cert,
-            key_pair,
+            issuer,
             ca_cert_pem,
             ca_key_pem,
         })
@@ -84,16 +84,11 @@ impl CertificateAuthority {
 
         let key_pair = KeyPair::from_pem(&ca_key_pem).context("Failed to parse CA private key")?;
 
-        let params = CertificateParams::from_ca_cert_pem(&ca_cert_pem)
+        let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, key_pair)
             .context("Failed to parse CA certificate parameters")?;
 
-        let ca_cert = params
-            .self_signed(&key_pair)
-            .context("Failed to recreate CA certificate")?;
-
         Ok(Self {
-            ca_cert,
-            key_pair,
+            issuer,
             ca_cert_pem,
             ca_key_pem,
         })
@@ -166,7 +161,7 @@ impl CertificateAuthority {
         let server_key = KeyPair::generate().context("Failed to generate server key pair")?;
 
         let server_cert = params
-            .signed_by(&server_key, &self.ca_cert, &self.key_pair)
+            .signed_by(&server_key, &self.issuer)
             .context("Failed to sign server certificate")?;
 
         Ok(SignedCertificate {
