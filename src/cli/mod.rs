@@ -1471,14 +1471,7 @@ pub async fn handle_command(
             }
         }
         Commands::Destroy { force } => {
-            init::handle_destroy_project(
-                &mut config_merged,
-                &config_path,
-                force,
-                json_output,
-                non_interactive,
-            )
-            .await?;
+            init::handle_destroy_project(force, json_output, non_interactive).await?;
         }
         Commands::SetupZfs { pool_name, size } => {
             if !cfg!(target_os = "linux") {

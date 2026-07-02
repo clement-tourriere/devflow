@@ -16,9 +16,7 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_INTERVAL_SECS: u64 = 30;
 
 fn devflow_config_dir() -> Result<PathBuf> {
-    let dir = dirs::config_dir()
-        .context("Failed to resolve user config directory")?
-        .join("devflow");
+    let dir = devflow_core::paths::devflow_config_dir()?;
     std::fs::create_dir_all(&dir).ok();
     Ok(dir)
 }

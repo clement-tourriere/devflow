@@ -615,10 +615,7 @@ impl GlobalConfig {
 
     /// The canonical path for the global config file.
     pub fn path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .context("Failed to get user config directory")?
-            .join("devflow");
-        Ok(config_dir.join("config.yml"))
+        Ok(crate::paths::devflow_config_dir()?.join("config.yml"))
     }
 }
 

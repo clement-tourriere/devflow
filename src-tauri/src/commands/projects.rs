@@ -1,5 +1,4 @@
 use crate::state::{AppState, ProjectEntry};
-use devflow_core::services;
 use devflow_core::services::orphan::{self, OrphanSource};
 use serde::Serialize;
 use tauri::State;
@@ -353,164 +352,19 @@ pub async fn get_project_detail(
     })
 }
 
-#[derive(Serialize)]
-pub struct ServiceDestroyResult {
-    pub name: String,
-    pub success: bool,
-    pub workspaces_destroyed: Vec<String>,
-    pub error: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct DestroyResult {
-    pub services_destroyed: Vec<ServiceDestroyResult>,
-    pub worktrees_removed: usize,
-    pub hooks_uninstalled: bool,
-    pub config_deleted: bool,
-}
-
+/// Destroy a devflow project and all associated resources.
+///
+/// The teardown itself lives in [`devflow_core::project::destroy`] and is
+/// shared with the CLI (and any future frontend); this command only exposes
+/// the outcome to the UI.
 #[tauri::command]
-pub async fn destroy_project(project_path: String) -> Result<DestroyResult, String> {
+pub async fn destroy_project(
+    project_path: String,
+) -> Result<devflow_core::project::DestroyOutcome, String> {
     let path = std::path::Path::new(&project_path);
-    let config_path = path.join(".devflow.yml");
-    let local_config_path = path.join(".devflow.local.yml");
-
-    let mut config = if config_path.exists() {
-        devflow_core::config::Config::from_file(&config_path)
-            .map_err(crate::commands::format_error)?
-    } else {
-        devflow_core::config::Config::default()
-    };
-
-    // Inject services from local state
-    if let Ok(state_mgr) = devflow_core::state::LocalStateManager::new() {
-        if let Some(state_services) = state_mgr.get_services(&config_path) {
-            config.services = Some(state_services);
-        }
-    }
-
-    let service_configs = config.resolve_services();
-    let vcs_repo = devflow_core::vcs::detect_vcs_provider(&project_path).ok();
-
-    let mut services_destroyed = Vec::new();
-    let mut worktrees_removed = 0usize;
-    let mut hooks_uninstalled = false;
-    let mut config_deleted = false;
-
-    // 1. Destroy all service data
-    for svc_config in &service_configs {
-        match services::factory::create_provider_from_named_config(&config, svc_config).await {
-            Ok(provider) => {
-                if provider.supports_destroy() {
-                    match provider.destroy_project().await {
-                        Ok(workspaces) => {
-                            services_destroyed.push(ServiceDestroyResult {
-                                name: svc_config.name.clone(),
-                                success: true,
-                                workspaces_destroyed: workspaces,
-                                error: None,
-                            });
-                        }
-                        Err(e) => {
-                            services_destroyed.push(ServiceDestroyResult {
-                                name: svc_config.name.clone(),
-                                success: false,
-                                workspaces_destroyed: Vec::new(),
-                                error: Some(e.to_string()),
-                            });
-                        }
-                    }
-                } else {
-                    // Fallback: delete all workspaces individually
-                    match provider.list_workspaces().await {
-                        Ok(workspaces) => {
-                            let mut deleted = Vec::new();
-                            for workspace in &workspaces {
-                                if provider.delete_workspace(&workspace.name).await.is_ok() {
-                                    deleted.push(workspace.name.clone());
-                                }
-                            }
-                            services_destroyed.push(ServiceDestroyResult {
-                                name: svc_config.name.clone(),
-                                success: true,
-                                workspaces_destroyed: deleted,
-                                error: None,
-                            });
-                        }
-                        Err(e) => {
-                            services_destroyed.push(ServiceDestroyResult {
-                                name: svc_config.name.clone(),
-                                success: false,
-                                workspaces_destroyed: Vec::new(),
-                                error: Some(e.to_string()),
-                            });
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                services_destroyed.push(ServiceDestroyResult {
-                    name: svc_config.name.clone(),
-                    success: false,
-                    workspaces_destroyed: Vec::new(),
-                    error: Some(e.to_string()),
-                });
-            }
-        }
-    }
-
-    // 2. Remove worktrees — skip (never rm -rf) any with uncommitted work,
-    // including non-devflow worktrees the user created by hand.
-    if let Some(ref repo) = vcs_repo {
-        if let Ok(worktrees) = repo.list_worktrees() {
-            for wt in worktrees.iter().filter(|wt| !wt.is_main) {
-                match repo.remove_worktree(&wt.path, false) {
-                    Ok(()) => worktrees_removed += 1,
-                    Err(e) => log::warn!(
-                        "Skipping worktree '{}' during project destroy: {}",
-                        wt.path.display(),
-                        e
-                    ),
-                }
-            }
-        }
-    }
-
-    // 3. Uninstall VCS hooks
-    if let Some(ref repo) = vcs_repo {
-        if repo.uninstall_hooks().is_ok() {
-            hooks_uninstalled = true;
-        }
-    }
-
-    // 4. Clear local state
-    if let Ok(mut state_mgr) = devflow_core::state::LocalStateManager::new() {
-        let _ = state_mgr.remove_project(&config_path);
-    }
-
-    // 5. Clear hook approvals
-    if let Ok(state_mgr) = devflow_core::state::LocalStateManager::new() {
-        if let Some(project_key) = state_mgr.get_project_key_for(&config_path) {
-            if let Ok(mut store) = devflow_core::hooks::approval::ApprovalStore::load() {
-                let _ = store.clear_project(&project_key);
-            }
-        }
-    }
-
-    // 6. Delete config files
-    if config_path.exists() && std::fs::remove_file(&config_path).is_ok() {
-        config_deleted = true;
-    }
-    if local_config_path.exists() {
-        let _ = std::fs::remove_file(&local_config_path);
-    }
-
-    Ok(DestroyResult {
-        services_destroyed,
-        worktrees_removed,
-        hooks_uninstalled,
-        config_deleted,
-    })
+    devflow_core::project::destroy(path, devflow_core::project::DestroyOptions::default(), None)
+        .await
+        .map_err(crate::commands::format_error)
 }
 
 // ── Orphan detection and cleanup ────────────────────────────────────

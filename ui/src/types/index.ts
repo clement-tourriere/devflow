@@ -313,10 +313,15 @@ export interface AppSettings {
 export type TerminalRenderer = "auto" | "webgpu" | "webgl2";
 
 export interface DestroyResult {
+  project_name: string;
+  processes_stopped: number;
+  process_results: ProcessResult[];
   services_destroyed: ServiceDestroyResult[];
   worktrees_removed: number;
   hooks_uninstalled: boolean;
+  state_cleared: boolean;
   config_deleted: boolean;
+  local_config_deleted: boolean;
 }
 
 export interface ServiceDestroyResult {

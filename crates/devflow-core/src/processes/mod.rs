@@ -869,6 +869,105 @@ pub async fn auto_stop_workspace_processes(
     }
 }
 
+/// Stop every recorded workspace process and delete all persisted process
+/// state for a project. Used by project destroy (CLI and GUI).
+///
+/// Unlike [`auto_stop_workspace_processes`], this does not depend on the
+/// current `processes` config section: records left behind by an earlier
+/// config (surfaced as runtime-only processes) are stopped from their
+/// persisted state, then the project's process-state directory is removed.
+pub async fn destroy_project_process_state(
+    config: &Config,
+    project_dir: &Path,
+) -> Vec<ProcessResult> {
+    let mut results = Vec::new();
+    let records = match read_all_records(config, project_dir) {
+        Ok(records) => records,
+        Err(e) => {
+            return vec![ProcessResult {
+                process: "(process-runtime)".to_string(),
+                success: false,
+                message: format!("failed to read process state: {e:#}"),
+                required: false,
+                pid: None,
+                ports: Vec::new(),
+            }];
+        }
+    };
+
+    for record in records {
+        let was_alive = record.pid.is_some_and(process_alive);
+        let is_pitchfork = record.runtime.as_deref() == Some("pitchfork");
+        // Dead pitchfork records are still stopped through the supervisor so
+        // its own daemon state does not outlive the project.
+        if !was_alive && !is_pitchfork {
+            continue;
+        }
+        let stop = async {
+            if is_pitchfork {
+                stop_one_pitchfork(config, project_dir, &record.workspace, &record.process).await
+            } else {
+                stop_one(config, project_dir, &record.workspace, &record.process).await
+            }
+        };
+        match tokio::time::timeout(Duration::from_secs(15), stop).await {
+            Ok(Ok(result)) => {
+                if was_alive {
+                    results.push(result);
+                }
+            }
+            Ok(Err(e)) => results.push(ProcessResult {
+                process: record.process.clone(),
+                success: false,
+                message: format!("{e:#}"),
+                required: false,
+                pid: record.pid,
+                ports: record.ports.clone(),
+            }),
+            Err(_) => results.push(ProcessResult {
+                process: record.process.clone(),
+                success: false,
+                message: "timed out stopping process; continuing cleanup".to_string(),
+                required: false,
+                pid: record.pid,
+                ports: record.ports.clone(),
+            }),
+        }
+    }
+
+    let project_root = vcs::resolve_project_root(project_dir)
+        .canonicalize()
+        .unwrap_or_else(|_| vcs::resolve_project_root(project_dir));
+    let state_dir = state_root().map(|root| root.join(project_hash(&project_root)));
+    match state_dir {
+        Ok(dir) if dir.exists() => {
+            if let Err(e) = fs::remove_dir_all(&dir) {
+                results.push(ProcessResult {
+                    process: "(process-runtime)".to_string(),
+                    success: false,
+                    message: format!(
+                        "failed to remove process state directory {}: {e:#}",
+                        dir.display()
+                    ),
+                    required: false,
+                    pid: None,
+                    ports: Vec::new(),
+                });
+            }
+        }
+        Ok(_) => {}
+        Err(e) => results.push(ProcessResult {
+            process: "(process-runtime)".to_string(),
+            success: false,
+            message: format!("failed to resolve process state directory: {e:#}"),
+            required: false,
+            pid: None,
+            ports: Vec::new(),
+        }),
+    }
+    results
+}
+
 /// Start selected processes, or all configured processes when `names` is empty.
 pub async fn start_workspace_processes(
     config: &Config,
@@ -3371,14 +3470,14 @@ fn listening_pid_for_port(_port: u16) -> Option<u32> {
 }
 
 #[cfg(unix)]
-fn process_alive(pid: u32) -> bool {
+pub(crate) fn process_alive(pid: u32) -> bool {
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
     kill(Pid::from_raw(pid as i32), None).is_ok()
 }
 
 #[cfg(not(unix))]
-fn process_alive(_pid: u32) -> bool {
+pub(crate) fn process_alive(_pid: u32) -> bool {
     true
 }
 
@@ -3424,12 +3523,16 @@ async fn terminate_process(_pid: u32, _timeout: Duration, _signal: Option<&str>)
     anyhow::bail!("process stop is not supported on this platform")
 }
 
+/// Serializes tests that set process/config env vars (`DEVFLOW_PROCESS_STATE_DIR`,
+/// `DEVFLOW_CONFIG_DIR`). Shared across test modules in this crate — env vars
+/// are process-global, so tests in other modules must hold this lock too.
+#[cfg(test)]
+pub(crate) static PROCESS_TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
-
-    static PROCESS_TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn test_config() -> Config {
         let yaml = r#"
@@ -3522,6 +3625,65 @@ processes:
         let second = watch_signature(dir.path(), &patterns).unwrap();
         assert!(first.is_some());
         assert_ne!(first, second);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    async fn destroy_project_process_state_stops_runtime_only_records() {
+        let _guard = PROCESS_TEST_ENV_LOCK.lock().unwrap();
+        let project = TempDir::new().unwrap();
+        let state = TempDir::new().unwrap();
+        std::env::set_var("DEVFLOW_PROCESS_STATE_DIR", state.path());
+        // No `processes` section: mirrors a project whose config lost its
+        // daemons while per-workspace runtime records remained.
+        let config: Config = serde_yaml_ng::from_str("name: ghost-app").unwrap();
+
+        let mut child = {
+            use std::os::unix::process::CommandExt;
+            std::process::Command::new("sleep")
+                .arg("30")
+                .process_group(0)
+                .spawn()
+                .unwrap()
+        };
+        let pid = child.id();
+        // Reap the child as soon as it dies so process_alive() flips promptly.
+        let reaper = std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+
+        let paths = runtime_paths(&config, project.path(), "main").unwrap();
+        let record = ProcessStateRecord {
+            process: "ghost".to_string(),
+            workspace: paths.workspace.clone(),
+            project_key: paths.project_root.display().to_string(),
+            project_name: config.project_name(),
+            pid: Some(pid),
+            command: "sleep 30".to_string(),
+            workdir: project.path().display().to_string(),
+            log_path: paths.logs_dir.join("ghost.log").display().to_string(),
+            ports: Vec::new(),
+            status: "running".to_string(),
+            desired_state: Some("running".to_string()),
+            runtime: Some("native".to_string()),
+            pitchfork_id: None,
+            required: true,
+            started_at: chrono::Utc::now().to_rfc3339(),
+            watch_signature: None,
+            retry_count: 0,
+            last_error: None,
+        };
+        write_record(&paths, &record).unwrap();
+
+        let results = destroy_project_process_state(&config, project.path()).await;
+        assert_eq!(results.len(), 1, "{:?}", results);
+        assert!(results[0].success, "{:?}", results);
+        reaper.join().unwrap();
+        assert!(!process_alive(pid));
+        let project_state_dir = state.path().join(project_hash(&paths.project_root));
+        assert!(!project_state_dir.exists());
+        std::env::remove_var("DEVFLOW_PROCESS_STATE_DIR");
     }
 
     #[tokio::test]

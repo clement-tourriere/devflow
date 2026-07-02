@@ -2035,8 +2035,8 @@ function ProjectDetail() {
               Destroy project
             </div>
             <div style={{ color: "var(--text-muted)", fontSize: 13 }}>
-              Tear down all devflow services, worktrees, hooks, and config
-              files. This is irreversible.
+              Tear down all devflow processes, services, worktrees, hooks, and
+              config files. This is irreversible.
             </div>
           </div>
           <button

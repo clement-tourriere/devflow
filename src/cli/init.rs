@@ -1,13 +1,10 @@
 use anyhow::Result;
 use devflow_core::config::Config;
-use devflow_core::hooks::approval::ApprovalStore;
 use devflow_core::processes::{
     PitchforkProcessConfig, ProcessDaemonConfig, ProcessPortBump, ProcessPortConfig,
     ProcessesConfig,
 };
 use devflow_core::services::{self};
-use devflow_core::state::LocalStateManager;
-use devflow_core::vcs;
 use indexmap::IndexMap;
 use serde_yaml_ng::Value;
 use std::collections::{HashMap, HashSet};
@@ -502,52 +499,16 @@ fn extract_port_from_command(command: &str) -> Option<u16> {
 
 /// Destroy a devflow project and all associated resources.
 ///
-/// This is the inverse of `devflow init`. It removes:
-///   1. All service data (containers, databases, workspaces) via destroy_project()
-///   2. Git worktrees created by devflow
-///   3. VCS hooks installed by devflow
-///   4. Workspace registry and local state for this project
-///   5. Hook approvals for this project
-///   6. Configuration files (.devflow.yml, .devflow.local.yml)
+/// The teardown itself lives in [`devflow_core::project::destroy`] and is
+/// shared with the GUI (and any future frontend); this handler only renders
+/// the confirmation preview and the outcome.
 pub(super) async fn handle_destroy_project(
-    config: &mut Config,
-    config_path: &Option<std::path::PathBuf>,
     force: bool,
     json_output: bool,
     non_interactive: bool,
 ) -> Result<()> {
     let project_dir = std::env::current_dir()?;
-    let project_name = config.name.clone().unwrap_or_else(|| {
-        project_dir
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string())
-    });
-
-    // Gather preview info
-    let vcs_repo = vcs::detect_vcs_provider(".").ok();
-
-    // Inject services from local state so we can destroy them
-    if let Some(ref path) = config_path {
-        if let Ok(state_mgr) = LocalStateManager::new() {
-            if let Some(state_services) = state_mgr.get_services(path) {
-                config.services = Some(state_services);
-            }
-        }
-    }
-
-    let service_configs = config.resolve_services();
-    let config_file_path = project_dir.join(".devflow.yml");
-    let local_config_path = project_dir.join(".devflow.local.yml");
-
-    // Count worktrees
-    let worktrees: Vec<vcs::WorktreeInfo> = vcs_repo
-        .as_ref()
-        .and_then(|repo| repo.list_worktrees().ok())
-        .unwrap_or_default();
-    // Filter to non-main worktrees (those that devflow would have created)
-    let removable_worktrees: Vec<&vcs::WorktreeInfo> =
-        worktrees.iter().filter(|wt| !wt.is_main).collect();
+    let plan = devflow_core::project::destroy_plan(&project_dir)?;
 
     // Confirm unless --force
     if !force {
@@ -559,40 +520,38 @@ pub(super) async fn handle_destroy_project(
 
         println!(
             "This will permanently destroy the devflow project '{}':",
-            project_name
+            plan.project_name
         );
         println!();
 
-        if !service_configs.is_empty() {
-            println!("  Services ({}):", service_configs.len());
-            for svc in &service_configs {
-                println!("    - {} (all workspaces and data)", svc.name);
+        if !plan.services.is_empty() {
+            println!("  Services ({}):", plan.services.len());
+            for name in &plan.services {
+                println!("    - {} (all workspaces and data)", name);
             }
         } else {
             println!("  Services: none configured");
         }
 
-        if !removable_worktrees.is_empty() {
-            println!("  Worktrees ({}):", removable_worktrees.len());
-            for wt in &removable_worktrees {
-                println!("    - {}", wt.path.display());
+        if !plan.worktrees.is_empty() {
+            println!("  Worktrees ({}):", plan.worktrees.len());
+            for path in &plan.worktrees {
+                println!("    - {}", path.display());
             }
         }
 
-        if vcs_repo.is_some() {
+        if plan.has_vcs {
             println!("  VCS hooks: will be uninstalled");
         }
 
+        println!("  Workspace processes: will be stopped, runtime state cleared");
         println!("  Workspace registry: will be cleared");
 
-        if config_file_path.exists() {
-            println!("  Config: {} (will be deleted)", config_file_path.display());
+        if let Some(ref path) = plan.config_path {
+            println!("  Config: {} (will be deleted)", path.display());
         }
-        if local_config_path.exists() {
-            println!(
-                "  Local config: {} (will be deleted)",
-                local_config_path.display()
-            );
+        if let Some(ref path) = plan.local_config_path {
+            println!("  Local config: {} (will be deleted)", path.display());
         }
 
         println!();
@@ -608,255 +567,32 @@ pub(super) async fn handle_destroy_project(
         }
     }
 
-    let mut destroyed_services: Vec<serde_json::Value> = Vec::new();
-    let mut worktrees_removed = 0usize;
-    let mut hooks_uninstalled = false;
-    let mut state_cleared = false;
-    let mut config_deleted = false;
-    let mut local_config_deleted = false;
-
-    // 1. Destroy all service data
-    for svc_config in &service_configs {
-        if !json_output {
-            println!("Destroying service '{}'...", svc_config.name);
-        }
-        match services::factory::create_provider_from_named_config(config, svc_config).await {
-            Ok(provider) => {
-                if provider.supports_destroy() {
-                    match provider.destroy_project().await {
-                        Ok(workspaces) => {
-                            if !json_output {
-                                println!(
-                                    "  Destroyed '{}': {} workspace(es) removed",
-                                    svc_config.name,
-                                    workspaces.len()
-                                );
-                            }
-                            destroyed_services.push(serde_json::json!({
-                                "service": svc_config.name,
-                                "success": true,
-                                "workspaces_destroyed": workspaces,
-                            }));
-                        }
-                        Err(e) => {
-                            log::warn!("Failed to destroy service '{}': {}", svc_config.name, e);
-                            if !json_output {
-                                println!(
-                                    "  Warning: Failed to destroy '{}': {}",
-                                    svc_config.name, e
-                                );
-                            }
-                            destroyed_services.push(serde_json::json!({
-                                "service": svc_config.name,
-                                "success": false,
-                                "error": e.to_string(),
-                            }));
-                        }
-                    }
-                } else {
-                    // Provider doesn't support destroy — try deleting all workspaces individually
-                    match provider.list_workspaces().await {
-                        Ok(workspaces) => {
-                            let mut deleted = 0;
-                            for workspace in &workspaces {
-                                if let Err(e) = provider.delete_workspace(&workspace.name).await {
-                                    log::warn!(
-                                        "Failed to delete workspace '{}' on '{}': {}",
-                                        workspace.name,
-                                        svc_config.name,
-                                        e
-                                    );
-                                } else {
-                                    deleted += 1;
-                                }
-                            }
-                            if !json_output {
-                                println!(
-                                    "  Deleted {}/{} workspace(es) from '{}'",
-                                    deleted,
-                                    workspaces.len(),
-                                    svc_config.name
-                                );
-                            }
-                            destroyed_services.push(serde_json::json!({
-                                "service": svc_config.name,
-                                "success": true,
-                                "branches_deleted": deleted,
-                            }));
-                        }
-                        Err(e) => {
-                            log::warn!(
-                                "Failed to list workspaces for service '{}': {}",
-                                svc_config.name,
-                                e
-                            );
-                            if !json_output {
-                                println!(
-                                    "  Warning: Could not clean up '{}': {}",
-                                    svc_config.name, e
-                                );
-                            }
-                            destroyed_services.push(serde_json::json!({
-                                "service": svc_config.name,
-                                "success": false,
-                                "error": e.to_string(),
-                            }));
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                log::warn!(
-                    "Failed to create provider for service '{}': {}",
-                    svc_config.name,
-                    e
-                );
-                if !json_output {
-                    println!(
-                        "  Warning: Could not initialize '{}': {}",
-                        svc_config.name, e
-                    );
-                }
-                destroyed_services.push(serde_json::json!({
-                    "service": svc_config.name,
-                    "success": false,
-                    "error": e.to_string(),
-                }));
-            }
-        }
-    }
-
-    // 2. Remove worktrees (if VCS available)
-    if let Some(ref repo) = vcs_repo {
-        for wt in &removable_worktrees {
-            if !json_output {
-                println!("Removing worktree: {}", wt.path.display());
-            }
-            if let Err(e) = repo.remove_worktree(&wt.path, force) {
-                if !force {
-                    log::warn!("Skipping worktree: {}", e);
-                    if !json_output {
-                        println!("  Skipping {}: {}", wt.path.display(), e);
-                    }
-                    continue;
-                }
-                log::warn!("Failed to remove worktree via VCS: {}", e);
-                // Forced: fall back to filesystem removal
-                if wt.path.exists() {
-                    if let Err(e2) = std::fs::remove_dir_all(&wt.path) {
-                        log::warn!("Failed to remove worktree directory: {}", e2);
-                        if !json_output {
-                            println!("  Warning: Could not remove {}: {}", wt.path.display(), e2);
-                        }
-                        continue;
-                    }
-                }
-            }
-            worktrees_removed += 1;
-        }
-    }
-
-    // 3. Uninstall VCS hooks
-    if let Some(ref repo) = vcs_repo {
-        match repo.uninstall_hooks() {
-            Ok(_) => {
-                hooks_uninstalled = true;
-                if !json_output {
-                    println!("Uninstalled VCS hooks.");
-                }
-            }
-            Err(e) => {
-                log::warn!("Failed to uninstall hooks: {}", e);
-                if !json_output {
-                    println!("Warning: Could not uninstall hooks: {}", e);
-                }
-            }
-        }
-    }
-
-    // 4. Clear local state (workspace registry, services, current workspace)
-    if let Some(ref path) = config_path {
-        if let Ok(mut state_mgr) = LocalStateManager::new() {
-            if let Err(e) = state_mgr.remove_project(path) {
-                log::warn!("Failed to clear project state: {}", e);
-                if !json_output {
-                    println!("Warning: Could not clear project state: {}", e);
-                }
-            } else {
-                state_cleared = true;
-                if !json_output {
-                    println!("Cleared project state and workspace registry.");
-                }
-            }
-        }
-    }
-
-    // 5. Clear hook approvals
-    if let Some(ref path) = config_path {
-        if let Ok(state_mgr) = LocalStateManager::new() {
-            if let Some(project_key) = state_mgr.get_project_key_for(path) {
-                if let Ok(mut store) = ApprovalStore::load() {
-                    if let Err(e) = store.clear_project(&project_key) {
-                        log::warn!("Failed to clear hook approvals: {}", e);
-                    }
-                }
-            }
-        }
-    }
-
-    // 6. Delete config files
-    if config_file_path.exists() {
-        if let Err(e) = std::fs::remove_file(&config_file_path) {
-            log::warn!("Failed to delete config file: {}", e);
-            if !json_output {
-                println!(
-                    "Warning: Could not delete {}: {}",
-                    config_file_path.display(),
-                    e
-                );
-            }
-        } else {
-            config_deleted = true;
-            if !json_output {
-                println!("Deleted {}", config_file_path.display());
-            }
-        }
-    }
-    if local_config_path.exists() {
-        if let Err(e) = std::fs::remove_file(&local_config_path) {
-            log::warn!("Failed to delete local config file: {}", e);
-            if !json_output {
-                println!(
-                    "Warning: Could not delete {}: {}",
-                    local_config_path.display(),
-                    e
-                );
-            }
-        } else {
-            local_config_deleted = true;
-            if !json_output {
-                println!("Deleted {}", local_config_path.display());
-            }
-        }
-    }
+    let options = devflow_core::project::DestroyOptions {
+        force_worktrees: force,
+    };
+    let print_line = |line: &str| println!("{line}");
+    let progress: devflow_core::project::DestroyProgress =
+        if json_output { None } else { Some(&print_line) };
+    let outcome = devflow_core::project::destroy(&project_dir, options, progress).await?;
 
     if json_output {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "status": "ok",
-                "project": project_name,
-                "services": destroyed_services,
-                "worktrees_removed": worktrees_removed,
-                "hooks_uninstalled": hooks_uninstalled,
-                "state_cleared": state_cleared,
-                "config_deleted": config_deleted,
-                "local_config_deleted": local_config_deleted,
+                "project": outcome.project_name,
+                "processes_stopped": outcome.processes_stopped,
+                "services": outcome.services_destroyed,
+                "worktrees_removed": outcome.worktrees_removed,
+                "hooks_uninstalled": outcome.hooks_uninstalled,
+                "state_cleared": outcome.state_cleared,
+                "config_deleted": outcome.config_deleted,
+                "local_config_deleted": outcome.local_config_deleted,
             }))?
         );
     } else {
         println!();
-        println!("Project '{}' destroyed.", project_name);
+        println!("Project '{}' destroyed.", outcome.project_name);
     }
 
     Ok(())

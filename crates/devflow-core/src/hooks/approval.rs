@@ -125,10 +125,7 @@ impl ApprovalStore {
     }
 
     fn store_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .context("Failed to get user config directory")?
-            .join("devflow");
-        Ok(config_dir.join("hook_approvals.yml"))
+        Ok(crate::paths::devflow_config_dir()?.join("hook_approvals.yml"))
     }
 
     fn hash_command(command: &str) -> String {

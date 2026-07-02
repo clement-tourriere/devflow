@@ -484,9 +484,7 @@ impl LocalStateManager {
     }
 
     fn get_state_file_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .context("Failed to get user config directory")?
-            .join("devflow");
+        let config_dir = crate::paths::devflow_config_dir()?;
 
         // Ensure the config directory exists
         fs::create_dir_all(&config_dir).with_context(|| {
