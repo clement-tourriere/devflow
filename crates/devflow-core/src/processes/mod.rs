@@ -2765,6 +2765,7 @@ fn pitchfork_run_options(
         cpu_limit: None,
         stop_signal,
         on_output_hook: None,
+        archive_hook: None,
         pty: None,
     })
 }
