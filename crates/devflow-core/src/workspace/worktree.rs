@@ -328,7 +328,7 @@ fn copy_dir_bulk(src: &Path, dst: &Path) -> Result<()> {
         }
         run_cp(&["-a"], &source_dot, dst)
             .with_context(|| format!("failed to copy '{}'", src.display()))?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
