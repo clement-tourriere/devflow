@@ -20,12 +20,7 @@ pub(super) async fn link_branch_internal(
     from: Option<&str>,
     non_interactive: bool,
 ) -> Result<LinkBranchResult> {
-    let project_dir = config_path
-        .as_ref()
-        .and_then(|p| p.parent())
-        .map(|d| d.to_path_buf())
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
+    let project_dir = super::super::operation_project_dir(config_path);
 
     let options = LinkOptions {
         lifecycle: devflow_core::workspace::LifecycleOptions {
@@ -76,6 +71,7 @@ pub(super) async fn handle_link_command(
             serde_json::to_string_pretty(&serde_json::json!({
                 "status": if failed == 0 { "ok" } else { "error" },
                 "workspace": linked.workspace,
+                "service_key": linked.service_key,
                 "parent": linked.parent,
                 "worktree_path": linked.worktree_path,
                 "services_failed": failed,
@@ -128,17 +124,15 @@ pub(super) async fn resolve_parent_for_branch_creation(
 ) -> Result<Option<String>> {
     let mut parent = requested_parent
         .map(|p| p.to_string())
-        .or_else(|| context.context_branch_raw.clone());
+        .or_else(|| context.context_branch.clone());
 
     let Some(parent_name) = parent.as_deref() else {
         return Ok(None);
     };
 
-    let target_normalized = config.get_normalized_workspace_name(target_workspace);
-    let parent_normalized = config.get_normalized_workspace_name(parent_name);
-    if parent_normalized == target_normalized {
+    if parent_name == target_workspace {
         anyhow::bail!(
-            "Parent workspace '{}' resolves to the target workspace '{}'. Choose a different --from value.",
+            "Parent workspace '{}' is the target workspace '{}'. Choose a different --from value.",
             parent_name,
             target_workspace
         );
@@ -149,7 +143,7 @@ pub(super) async fn resolve_parent_for_branch_creation(
         return Ok(parent);
     }
 
-    if linked_workspace_exists(config, config_path, parent_name) {
+    if linked_workspace_exists(config_path, parent_name) {
         return Ok(parent);
     }
 
@@ -190,7 +184,7 @@ pub(super) async fn resolve_parent_for_branch_creation(
     }
 
     if choice.starts_with("Use default workspace") {
-        if !linked_workspace_exists(config, config_path, &default_workspace) {
+        if !linked_workspace_exists(config_path, &default_workspace) {
             match link_branch_internal(config, config_path, &default_workspace, None, false).await {
                 Ok(linked) if services_failed(&linked) == 0 => {}
                 Ok(linked) => {

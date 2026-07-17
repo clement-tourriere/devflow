@@ -74,11 +74,7 @@ pub(super) async fn handle_agent_command(
             };
 
             let fmt = if json_output { "json" } else { format.as_str() };
-            let project_dir = config_path
-                .as_ref()
-                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-                .or_else(|| std::env::current_dir().ok())
-                .unwrap_or_else(|| PathBuf::from("."));
+            let project_dir = super::operation_project_dir(config_path);
             let output = devflow_core::agent::generate_agent_context(
                 config,
                 &project_dir,

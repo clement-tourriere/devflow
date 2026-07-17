@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Style, Stylize},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Tabs},
     Frame,
@@ -127,19 +127,10 @@ impl App {
     /// Spawn a background task to fetch workspaces.
     fn spawn_fetch_branches(&self) {
         let config = self.context.config.clone();
-        let vcs_data = self.context.snapshot_vcs_data();
-        let branch_registry = self.context.snapshot_branch_registry();
-        let context_branch = self.context.snapshot_context_branch();
+        let project_dir = self.context.project_dir.clone();
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
-            match DevflowContext::fetch_branches_bg(
-                &config,
-                vcs_data,
-                branch_registry,
-                context_branch,
-            )
-            .await
-            {
+            match DevflowContext::fetch_branches_bg(&config, &project_dir).await {
                 Ok(data) => {
                     let _ = tx.send(Action::DataLoaded(DataPayload::Branches(data)));
                 }
@@ -153,9 +144,10 @@ impl App {
     /// Spawn a background task to fetch services.
     fn spawn_fetch_services(&self) {
         let config = self.context.config.clone();
+        let project_dir = self.context.project_dir.clone();
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
-            match DevflowContext::fetch_services_bg(&config).await {
+            match DevflowContext::fetch_services_bg(&config, &project_dir).await {
                 Ok(data) => {
                     let _ = tx.send(Action::DataLoaded(DataPayload::Services(data)));
                 }
@@ -210,9 +202,10 @@ impl App {
     /// Spawn a background task to fetch logs.
     fn spawn_fetch_logs(&self, service: String, workspace: String) {
         let config = self.context.config.clone();
+        let project_dir = self.context.project_dir.clone();
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
-            match DevflowContext::fetch_logs_bg(&config, &service, &workspace).await {
+            match DevflowContext::fetch_logs_bg(&config, &service, &workspace, &project_dir).await {
                 Ok(content) => {
                     let _ = tx.send(Action::DataLoaded(DataPayload::Logs { service, content }));
                 }
@@ -246,14 +239,7 @@ impl App {
     /// Spawn a background task to align services to a workspace.
     fn spawn_switch_services(&self, workspace_name: String) {
         let config = self.context.config.clone();
-        let project_dir = self
-            .context
-            .config_path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .map(|d| d.to_path_buf())
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let project_dir = self.context.project_dir.clone();
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
             match DevflowContext::switch_services_bg(&config, &workspace_name, &project_dir).await {
@@ -275,14 +261,7 @@ impl App {
     /// Spawn a background task for creating a workspace via the shared core lifecycle.
     fn spawn_create_workspace(&self, name: String, from: Option<String>) {
         let config = self.context.config.clone();
-        let project_dir = self
-            .context
-            .config_path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .map(|d| d.to_path_buf())
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let project_dir = self.context.project_dir.clone();
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
             match DevflowContext::create_workspace_bg(&config, &name, from.as_deref(), &project_dir)
@@ -303,19 +282,53 @@ impl App {
     }
 
     /// Spawn a background task for deleting a workspace via the shared core lifecycle.
-    fn spawn_delete_workspace(&self, name: String) {
+    fn spawn_delete_workspace(&self, name: String, force: bool) {
         let config = self.context.config.clone();
-        let project_dir = self
-            .context
-            .config_path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .map(|d| d.to_path_buf())
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let project_dir = self.context.project_dir.clone();
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
-            match DevflowContext::delete_workspace_bg(&config, &name, &project_dir).await {
+            let preflight =
+                match DevflowContext::preflight_delete_workspace_bg(&config, &name, &project_dir) {
+                    Ok(preflight) => preflight,
+                    Err(error) => {
+                        let _ = tx.send(Action::Error(format!(
+                            "Delete preflight failed for '{}': {}",
+                            name, error
+                        )));
+                        return;
+                    }
+                };
+
+            if !preflight.can_delete(force) {
+                let details = preflight
+                    .issues
+                    .iter()
+                    .map(|issue| format!("- {}", issue.message))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                if !force && preflight.can_delete(true) {
+                    let _ = tx.send(Action::ShowConfirm {
+                        title: "Force Delete Workspace".to_string(),
+                        message: format!(
+                            "Safe deletion of '{}' was blocked:\n\n{}\n\nForce deletion? This may discard uncommitted work or continue after partial cleanup failures.",
+                            name, details
+                        ),
+                        on_confirm: Box::new(Action::DeleteBranch {
+                            name,
+                            force: true,
+                        }),
+                    });
+                } else {
+                    let _ = tx.send(Action::Error(format!(
+                        "Cannot delete workspace '{}':\n{}",
+                        name, details
+                    )));
+                }
+                return;
+            }
+
+            match DevflowContext::delete_workspace_bg(&config, &name, &project_dir, force).await {
                 Ok(msg) => {
                     let _ = tx.send(Action::OperationComplete {
                         success: true,
@@ -323,8 +336,18 @@ impl App {
                     });
                     let _ = tx.send(Action::Refresh);
                 }
-                Err(e) => {
-                    let _ = tx.send(Action::Error(format!("Delete failed: {}", e)));
+                Err(error) if !force && error.to_string().contains("--force") => {
+                    let _ = tx.send(Action::ShowConfirm {
+                        title: "Force Cleanup After Delete Failure".to_string(),
+                        message: format!(
+                            "Safe deletion of '{}' stopped before removing its worktree/reference:\n\n{}\n\nForce cleanup now? Some service or process cleanup may remain incomplete.",
+                            name, error
+                        ),
+                        on_confirm: Box::new(Action::DeleteBranch { name, force: true }),
+                    });
+                }
+                Err(error) => {
+                    let _ = tx.send(Action::Error(format!("Delete failed: {}", error)));
                 }
             }
         });
@@ -333,17 +356,21 @@ impl App {
     /// Spawn a background task for a service operation (start/stop/reset/delete).
     fn spawn_service_op(&self, service: String, workspace: String, op: ServiceOp) {
         let config = self.context.config.clone();
+        let project_dir = self.context.project_dir.clone();
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
             let result = match op {
                 ServiceOp::Start => {
-                    DevflowContext::start_service_bg(&config, &service, &workspace).await
+                    DevflowContext::start_service_bg(&config, &service, &workspace, &project_dir)
+                        .await
                 }
                 ServiceOp::Stop => {
-                    DevflowContext::stop_service_bg(&config, &service, &workspace).await
+                    DevflowContext::stop_service_bg(&config, &service, &workspace, &project_dir)
+                        .await
                 }
                 ServiceOp::Reset => {
-                    DevflowContext::reset_service_bg(&config, &service, &workspace).await
+                    DevflowContext::reset_service_bg(&config, &service, &workspace, &project_dir)
+                        .await
                 }
             };
             match result {
@@ -353,7 +380,8 @@ impl App {
                         message: msg,
                     });
                     // Reload services after any service operation
-                    if let Ok(data) = DevflowContext::fetch_services_bg(&config).await {
+                    if let Ok(data) = DevflowContext::fetch_services_bg(&config, &project_dir).await
+                    {
                         let _ = tx.send(Action::DataLoaded(DataPayload::Services(data)));
                     }
                 }
@@ -367,10 +395,11 @@ impl App {
     // ── Main event loop ─────────────────────────────────────────────
 
     /// Main event loop.
-    pub async fn run(
-        &mut self,
-        terminal: &mut ratatui::Terminal<impl ratatui::backend::Backend>,
-    ) -> Result<()> {
+    pub async fn run<B>(&mut self, terminal: &mut ratatui::Terminal<B>) -> Result<()>
+    where
+        B: ratatui::backend::Backend,
+        B::Error: Send + Sync + 'static,
+    {
         let mut events = EventHandler::new(Duration::from_millis(250));
 
         self.load_initial_data();
@@ -590,9 +619,11 @@ impl App {
             }
             Action::Refresh => {
                 self.set_status("Refreshing...".to_string(), false);
-                // Re-snapshot VCS data (sync, fast) and spawn async fetches
-                self.context.refresh_vcs_snapshot();
-                self.load_initial_data();
+                if let Err(error) = self.context.reload_config() {
+                    self.set_status(format!("Failed to reload configuration: {error}"), true);
+                } else {
+                    self.load_initial_data();
+                }
             }
             Action::SwitchServices(ref name) => {
                 self.set_status(format!("Switching to workspace '{}'...", name), false);
@@ -606,9 +637,16 @@ impl App {
                 self.set_status(format!("Creating workspace '{}'...", name), false);
                 self.spawn_create_workspace(name.clone(), from.clone());
             }
-            Action::DeleteBranch(ref name) => {
-                self.set_status(format!("Deleting workspace '{}'...", name), false);
-                self.spawn_delete_workspace(name.clone());
+            Action::DeleteBranch { ref name, force } => {
+                self.set_status(
+                    format!(
+                        "{} workspace '{}'...",
+                        if force { "Force deleting" } else { "Deleting" },
+                        name
+                    ),
+                    false,
+                );
+                self.spawn_delete_workspace(name.clone(), force);
             }
             Action::AddServiceConfig {
                 ref service_type,
@@ -682,7 +720,7 @@ impl App {
                         let mut state = devflow_core::state::LocalStateManager::new()?;
                         state.add_service(&config_path, named_cfg.clone(), false)?;
 
-                        // Create main workspace for local providers
+                        // Create the configured default workspace for local providers.
                         if is_local {
                             let mut config_with_service = config.clone();
                             if let Some(state_services) = state.get_services(&config_path) {
@@ -695,8 +733,24 @@ impl App {
                             .await
                             {
                                 Ok(be) => {
-                                    if let Err(e) = be.create_workspace("main", None).await {
-                                        log::warn!("Could not create main workspace: {}", e);
+                                    let default_workspace =
+                                        config_with_service.git.main_workspace.clone();
+                                    let project_dir = config_path
+                                        .parent()
+                                        .unwrap_or_else(|| std::path::Path::new("."));
+                                    let default_service_key = state
+                                        .resolve_workspace_service_key_by_dir(
+                                            project_dir,
+                                            &default_workspace,
+                                        )?;
+                                    if let Err(e) =
+                                        be.create_workspace(&default_service_key, None).await
+                                    {
+                                        log::warn!(
+                                            "Could not create default workspace '{}': {}",
+                                            default_workspace,
+                                            e
+                                        );
                                     }
                                 }
                                 Err(e) => {
@@ -733,8 +787,14 @@ impl App {
                     Ok(mut state) => match state.remove_service(&config_path, name) {
                         Ok(()) => {
                             self.set_status(format!("Removed service '{}'", name), false);
-                            self.context.refresh_vcs_snapshot();
-                            self.load_initial_data();
+                            if let Err(error) = self.context.reload_config() {
+                                self.set_status(
+                                    format!("Service removed, but config reload failed: {error}"),
+                                    true,
+                                );
+                            } else {
+                                self.load_initial_data();
+                            }
                         }
                         Err(e) => {
                             self.set_status(format!("Failed to remove service: {}", e), true);
@@ -748,18 +808,21 @@ impl App {
             Action::StartService {
                 ref service,
                 ref workspace,
+                ..
             } => {
                 self.spawn_service_op(service.clone(), workspace.clone(), ServiceOp::Start);
             }
             Action::StopService {
                 ref service,
                 ref workspace,
+                ..
             } => {
                 self.spawn_service_op(service.clone(), workspace.clone(), ServiceOp::Stop);
             }
             Action::ResetService {
                 ref service,
                 ref workspace,
+                ..
             } => {
                 self.spawn_service_op(service.clone(), workspace.clone(), ServiceOp::Reset);
             }
@@ -968,14 +1031,7 @@ impl App {
             }
             Action::InstallAgentSkills => {
                 self.set_status("Installing agent skills...".to_string(), false);
-                let project_dir = self
-                    .context
-                    .config_path
-                    .as_ref()
-                    .and_then(|p| p.parent())
-                    .map(|d| d.to_path_buf())
-                    .or_else(|| std::env::current_dir().ok())
-                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                let project_dir = self.context.project_dir.clone();
                 let config = self.context.config.clone();
                 let tx = self.bg_tx.clone();
                 tokio::spawn(async move {

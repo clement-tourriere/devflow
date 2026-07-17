@@ -12,7 +12,6 @@ pub struct ProjectDetail {
     pub service_count: usize,
     pub workspace_count: usize,
     pub hook_count: usize,
-    pub worktree_enabled: bool,
     pub worktree_copy_files: Vec<String>,
     pub worktree_copy_ignored: bool,
     pub vcs_type: Option<String>,
@@ -67,13 +66,13 @@ pub async fn detect_vcs_info(path: String) -> Result<VcsInfo, String> {
 }
 
 #[derive(Serialize)]
-pub struct GitBranchInfo {
-    pub branches: Vec<String>,
-    pub default_branch: Option<String>,
+pub struct VcsWorkspaceInfo {
+    pub workspaces: Vec<String>,
+    pub default_workspace: Option<String>,
 }
 
 #[tauri::command]
-pub async fn detect_git_branches(path: String) -> Result<GitBranchInfo, String> {
+pub async fn detect_vcs_workspaces(path: String) -> Result<VcsWorkspaceInfo, String> {
     let abs_path = std::path::Path::new(&path)
         .canonicalize()
         .map_err(|e| format!("Invalid path: {}", e))?;
@@ -81,16 +80,16 @@ pub async fn detect_git_branches(path: String) -> Result<GitBranchInfo, String> 
     let vcs = devflow_core::vcs::detect_vcs_provider(&abs_path)
         .map_err(|e| format!("No VCS detected: {}", e))?;
 
-    let default_branch = vcs.default_workspace().ok().flatten();
+    let default_workspace = vcs.default_workspace().ok().flatten();
 
-    let branches: Vec<String> = vcs
+    let workspaces: Vec<String> = vcs
         .list_workspaces()
         .map(|ws| ws.into_iter().map(|w| w.name).collect())
         .unwrap_or_default();
 
-    Ok(GitBranchInfo {
-        branches,
-        default_branch,
+    Ok(VcsWorkspaceInfo {
+        workspaces,
+        default_workspace,
     })
 }
 
@@ -98,8 +97,8 @@ pub async fn detect_git_branches(path: String) -> Result<GitBranchInfo, String> 
 ///
 /// Works for both new and existing projects:
 /// 1. Initializes VCS if missing
-/// 2. Creates `.devflow.yml` if missing (with optional worktree config)
-/// 3. Adds worktree config to existing `.devflow.yml` if requested and missing
+/// 2. Creates `.devflow.yml` if missing
+/// 3. Preserves an existing `.devflow.yml`
 /// 4. Registers default devflow workspace
 /// 5. Registers project in GUI settings
 #[tauri::command]
@@ -109,8 +108,7 @@ pub async fn add_or_init_project(
     path: String,
     name: Option<String>,
     vcs_preference: Option<String>,
-    worktree_enabled: Option<bool>,
-    main_branch: Option<String>,
+    main_workspace: Option<String>,
 ) -> Result<ProjectEntry, String> {
     let dir = std::path::Path::new(&path);
     if !dir.is_dir() {
@@ -163,8 +161,7 @@ pub async fn add_or_init_project(
         .unwrap_or(fallback_name);
 
     let config_path = abs_path.join(".devflow.yml");
-    let wt_enabled = worktree_enabled.unwrap_or(true);
-    let resolved_main_branch = main_branch.clone().or_else(|| {
+    let resolved_main_workspace = main_workspace.clone().or_else(|| {
         devflow_core::vcs::detect_vcs_provider(&abs_path)
             .ok()
             .and_then(|vcs| vcs.default_workspace().ok().flatten())
@@ -176,24 +173,18 @@ pub async fn add_or_init_project(
             name: Some(project_name.clone()),
             ..Default::default()
         };
-        if let Some(ref branch) = resolved_main_branch {
-            config.git.main_workspace = branch.clone();
-        }
-        if wt_enabled {
-            config.worktree = Some(devflow_core::config::WorktreeConfig::recommended_default());
+        if let Some(ref workspace) = resolved_main_workspace {
+            config.git.main_workspace = workspace.clone();
         }
         config
             .save_to_file(&config_path)
             .map_err(|e| format!("Failed to create config: {}", e))?;
     } else if let Ok(mut config) = devflow_core::config::Config::from_file(&config_path) {
-        // Config exists — keep name canonical and optionally add worktree settings.
+        // Config exists — keep the project name canonical. Worktree settings
+        // are always present through Config defaults.
         let mut changed = false;
         if explicit_name.is_some() || config.name.as_ref().is_none_or(|n| n.trim().is_empty()) {
             config.name = Some(project_name.clone());
-            changed = true;
-        }
-        if wt_enabled && config.worktree.is_none() {
-            config.worktree = Some(devflow_core::config::WorktreeConfig::recommended_default());
             changed = true;
         }
         if changed {
@@ -207,7 +198,7 @@ pub async fn add_or_init_project(
     let main_workspace = devflow_core::config::Config::from_file(&config_path)
         .ok()
         .map(|c| c.git.main_workspace.clone())
-        .or(resolved_main_branch)
+        .or(resolved_main_workspace)
         .unwrap_or_else(|| "main".to_string());
 
     if let Ok(mut state_mgr) = devflow_core::state::LocalStateManager::new() {
@@ -250,17 +241,11 @@ pub async fn get_project_detail(
         None
     };
 
-    // Derive current devflow workspace: VCS workspace → normalize → look up in registry
-    let vcs_branch = vcs
+    // The VCS name is the canonical workspace identity. Service-safe keys are
+    // exposed separately by workspace inventory and must never replace it.
+    let current_workspace = vcs
         .as_ref()
         .and_then(|v| v.current_workspace().ok().flatten());
-
-    let normalized_branch = vcs_branch.as_deref().map(|b| {
-        config
-            .as_ref()
-            .map(|c| c.get_normalized_workspace_name(b))
-            .unwrap_or_else(|| b.to_string())
-    });
 
     // Use devflow registry for workspace count
     let workspace_count = if let Ok(state_mgr) = devflow_core::state::LocalStateManager::new() {
@@ -269,8 +254,6 @@ pub async fn get_project_detail(
     } else {
         0
     };
-
-    let current_workspace = normalized_branch;
 
     let service_count = crate::commands::project_config::list_services_with_sources(path)
         .map(|services| services.len())
@@ -287,22 +270,14 @@ pub async fn get_project_detail(
         .map(|h| h.values().map(|phase| phase.len()).sum())
         .unwrap_or(0);
 
-    let worktree_enabled = config
-        .as_ref()
-        .and_then(|c| c.worktree.as_ref())
-        .map(|w| w.enabled)
-        .unwrap_or(false);
-
     let worktree_copy_files: Vec<String> = config
         .as_ref()
-        .and_then(|c| c.worktree.as_ref())
-        .map(|w| w.copy_files.clone())
+        .map(|c| c.worktree.copy_files.clone())
         .unwrap_or_default();
 
     let worktree_copy_ignored: bool = config
         .as_ref()
-        .and_then(|c| c.worktree.as_ref())
-        .map(|w| w.copy_ignored)
+        .map(|c| c.worktree.copy_ignored)
         .unwrap_or(false);
 
     let config_name = config
@@ -345,7 +320,6 @@ pub async fn get_project_detail(
         service_count,
         workspace_count,
         hook_count,
-        worktree_enabled,
         worktree_copy_files,
         worktree_copy_ignored,
         vcs_type,

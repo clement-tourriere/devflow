@@ -53,30 +53,47 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mold libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Create frontend stub for Tauri build
-        run: mkdir -p ui/dist && touch ui/dist/index.html
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.2'
+
+      - name: Build frontend
+        working-directory: ui
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Build documentation
+        working-directory: docs-site
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Check generated LLM documentation
+        run: ./scripts/generate-llms-txt.sh --check
 
       - name: Check formatting
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Build
-        run: cargo build --workspace
+        run: cargo build --locked --workspace
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
       - name: Security audit
         run: |
-          cargo install cargo-audit --quiet
+          cargo install cargo-audit --quiet --locked
           cargo audit
 
   docker-integration-tests:
@@ -91,15 +108,18 @@ jobs:
       - name: Install mold linker
         run: sudo apt-get install -y mold
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Build devflow-core
-        run: cargo build -p devflow-core
+        run: cargo build --locked -p devflow-core
 
       - name: Run shared-provider integration tests (requires Docker)
-        run: cargo test -p devflow-core --test shared_integration -- --ignored --test-threads=1
+        run: cargo test --locked -p devflow-core --test shared_integration -- --ignored --test-threads=1
 
   coverage:
     name: Coverage
@@ -108,9 +128,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+          rustup component add llvm-tools-preview
 
       - uses: Swatinem/rust-cache@v2
 
@@ -118,7 +140,7 @@ jobs:
         run: cargo install cargo-llvm-cov --locked
 
       - name: Generate coverage report
-        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov --locked --workspace --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -140,7 +162,13 @@ jobs:
 
       - name: Lint with shellcheck
         if: runner.os == 'Linux'
-        run: shellcheck scripts/install.sh
+        run: >-
+          shellcheck
+          scripts/install.sh
+          scripts/integration-test.sh
+          scripts/generate-llms-txt.sh
+          examples/agent-bootstrap.sh
+          examples/agent-task.sh
 
       - name: Install latest release
         run: sh scripts/install.sh
@@ -171,12 +199,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build
+        run: cargo build --locked
 
       - name: Set up Docker
         run: |
@@ -213,12 +244,15 @@ jobs:
       - name: Install mold linker
         run: sudo apt-get install -y mold
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build
+        run: cargo build --locked
 
       - name: Install ZFS
         run: |
@@ -264,12 +298,15 @@ jobs:
       - name: Install mold linker
         run: sudo apt-get install -y mold
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build
+        run: cargo build --locked
 
       - name: Set up XFS with reflink
         run: |
@@ -307,12 +344,15 @@ jobs:
       - name: Install mold linker
         run: sudo apt-get install -y mold
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build
+        run: cargo build --locked
 
       - name: Set up Btrfs
         run: |
@@ -368,7 +408,10 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get install -y mold
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
 
       - uses: Swatinem/rust-cache@v2
 
@@ -388,7 +431,7 @@ jobs:
         run: mkdir -p ui/dist && touch ui/dist/index.html
 
       - name: Build release binary
-        run: cargo build --profile dist
+        run: cargo build --locked --profile dist
         env:
           RUSTFLAGS: ${{ runner.os == 'Linux' && '-C link-arg=-fuse-ld=mold' || '' }}
 

@@ -16,7 +16,7 @@ A **service** is a named, stateful dependency of your project — a database, ca
 | Cloud (experimental) | `type: neon` / `dblab` / `xata` | provider-managed branching | PostgreSQL |
 | Plugin | `service_type: plugin` | up to the plugin | anything — JSON-over-stdio protocol |
 
-Multiple services coexist in one project (e.g. CoW Postgres + shared Redis + RustFS), and each declares `auto_workspace` — whether it follows Git branching automatically (default `true`) or stays global.
+Multiple services coexist in one project (e.g. CoW Postgres + shared Redis + RustFS), and each declares `auto_workspace` — whether it follows devflow workspace creation automatically (default `true`) or stays global.
 
 ```yaml
 services:
@@ -35,21 +35,22 @@ services:
 ## How branching propagates
 
 ```
-git checkout -b feature/x        (or: devflow switch -c feature/x)
+devflow switch -c feature/x
         │
         ▼
-post-checkout hook → devflow git-hook
+materialize Git worktree / jj workspace
         │
         ▼
 for each service with auto_workspace:
   local:   clone parent's data dir (CoW) → start container on its own port
-  shared:  CREATE DATABASE feature_x TEMPLATE main   (or bucket / DB index)
+  shared:  CREATE DATABASE <service_key> TEMPLATE <parent_service_key>
+           (or create an isolated bucket / DB index)
         │
         ▼
 lifecycle hooks fire → .env.local updated, migrations run
 ```
 
-Branch filtering (`git.workspace_filter_regex`, `exclude_workspaces`) and env toggles (`DEVFLOW_AUTO_CREATE=false`, …) control when this fires — see [configuration](/devflow/reference/configuration/#git).
+Workspace filtering (`git.workspace_filter_regex`, `exclude_workspaces`) and env toggles (`DEVFLOW_AUTO_CREATE=false`, …) control when this fires. An ordinary in-place `git checkout` does not provision a devflow workspace; installed hooks still adopt manually created linked worktrees. See [configuration](/devflow/reference/configuration/#git).
 
 ## Copy-on-Write cloning
 

@@ -13,14 +13,14 @@ devflow [--json] [--non-interactive] [-s <service-name>] <command>
 | Flag | Description |
 |---|---|
 | `--json` | Print structured JSON to stdout when supported |
-| `--non-interactive` | Skip prompts and use defaults or fail when approval is required |
+| `--non-interactive` | Disable prompts; unapproved hooks are skipped with a warning, while destructive commands still require explicit `--force` |
 | `-s <name>` | Target a specific configured service |
 
 ## Daily Workspace Flow
 
 ### `devflow switch [workspace]`
 
-Create or switch a workspace, align services, optionally move into a worktree, and run lifecycle hooks.
+Create or switch a materialized workspace, align services, move into its directory, and run lifecycle hooks. Git uses the primary checkout for the default workspace and linked worktrees for every additional workspace; jj uses native workspaces.
 
 ```bash
 devflow switch
@@ -44,8 +44,10 @@ Important flags:
 - `--no-services` skip service branching/switching
 - `--no-processes` skip process auto-start during switch
 - `--no-verify` skip hooks
-- `--template` switch to the main/template workspace
+- `--template` select the configured default workspace and its services
 - `--no-respect-gitignore` include gitignored files in worktree copy
+
+With `--json`, switch emits exactly one document. It includes the raw `workspace`, backend `service_key`, and `worktree_path`; when `-x`, `--detach`, or `--open` is used, the same document gains an `execution` object with the command/session result and captured output.
 
 ### Multiplexer Integration
 
@@ -97,21 +99,14 @@ devflow connection feature/auth --format json
 
 ### `devflow list`
 
-List known workspaces and their service/worktree state.
+Render the workspace parent tree with paths, lineage, health, services, and processes.
 
 ```bash
 devflow list
 devflow --json list
 ```
 
-### `devflow graph`
-
-Render the full environment graph: workspace tree, services, worktree paths, and provider info.
-
-```bash
-devflow graph
-devflow --json graph
-```
+JSON has one versioned shape for zero, one, or many services: `schema_version`, project/VCS metadata, `context_workspace`, `default_workspace`, `roots`, workspace nodes, and `warnings`. Nodes include raw `name`, effective `service_key`, newly-derived `canonical_service_key`, `identity_status`, immutable `parent`, `children`, `worktree_path`, health, services, processes, `created_at`, `executed_command`, and `execution_status`. New keys are collision-safe; unambiguously migrated workspaces may retain a legacy key for data continuity, while `legacy_unresolved` blocks service/process operations until ownership is repaired. Use raw names for VCS commands and the reported service key only for generated identifiers.
 
 ### `devflow link <workspace>`
 
@@ -124,7 +119,7 @@ devflow link feature/auth --from main
 
 ### `devflow remove <workspace>`
 
-Delete the workspace, worktree, and associated service instances.
+Delete the workspace, worktree/VCS ref, and associated service instances. A read-only preflight protects dirty/default/current workspaces. Removal hooks run while the directory exists, then processes and services are cleaned up; the worktree/ref and registry entry are removed last. A service failure leaves code intact for retry. `--force` explicitly accepts dirty-worktree or partial-cleanup risk.
 
 ```bash
 devflow remove feature/auth
@@ -145,7 +140,11 @@ devflow cleanup --max-count 5
 
 ### `devflow service add [name]`
 
-Add and configure a service provider. With no flags, opens an interactive wizard.
+Add and configure a complete local/shared service definition. With no flags,
+opens an interactive wizard. The scaffolder supports PostgreSQL and ClickHouse
+(local/shared), MySQL (local), Redis and RustFS (shared). Credentialed cloud,
+generic, and plugin providers remain supported through explicit `services:`
+configuration in `.devflow.yml`, where their required fields can be supplied.
 
 ```bash
 devflow service add
@@ -319,7 +318,7 @@ Print logs captured from stdout/stderr. Use `--follow`/`-f` to stream appended o
 
 Set `required: false` on optional processes so readiness failures are reported but do not fail `switch`/`process start`.
 
-When `processes.auto_start: true`, `devflow switch` starts configured processes after services and hooks are aligned. Auto-started shell commands use the same approval store as hooks: unapproved commands are skipped in `--json`/`--non-interactive` mode unless pre-approved with `devflow hook approvals add "npm run dev"` or `DEVFLOW_APPROVE_HOOKS=1`. Use `processes.provider: pitchfork` to embed Pitchfork's Rust supervisor directly without shelling out to the `pitchfork` CLI. Running processes with resolved ports are exposed by `devflow proxy` as `https://<process>.<workspace>.<project>.<suffix>` (default suffix: `.local`). `devflow remove` stops processes before deleting the worktree and service workspaces. Run `devflow daemon start` to keep desired-state, `watch` restart-on-change, and `retry` reconciliation active in the background. See `docs-site/src/content/docs/guides/processes.md` and `examples/migrate-existing-app.devflow.yml` for migration examples.
+When `processes.auto_start: true`, `devflow switch` starts configured processes after services and hooks are aligned. Auto-started shell commands use the same approval store as hooks: unapproved commands are skipped in `--json`/`--non-interactive` mode unless pre-approved with `devflow hook approvals add "npm run dev"` or `DEVFLOW_APPROVE_HOOKS=1`. Use `processes.provider: pitchfork` to embed Pitchfork's Rust supervisor directly without shelling out to the `pitchfork` CLI. Running processes with resolved ports are exposed by `devflow proxy` as `https://<process>.<workspace>.<project>.<suffix>` (default suffix: `.local`). Run `devflow daemon start` to keep desired-state, `watch` restart-on-change, and `retry` reconciliation active in the background. See `docs-site/src/content/docs/guides/processes.md` and `examples/migrate-existing-app.devflow.yml` for migration examples.
 
 ## Controller Daemon
 
@@ -389,6 +388,8 @@ devflow hook explain post-switch
 ### `devflow hook vars`
 
 Show the current hook template context.
+
+`workspace` is the raw VCS name. `workspace_key` is the reported backend database/path key (collision-safe for new workspaces; possibly retained from an unambiguous legacy migration), and `workspace_sanitized` is its compatibility alias.
 
 ```bash
 devflow hook vars
@@ -694,7 +695,6 @@ The current tabs are:
 | `DEVFLOW_DISABLED=true` | Completely disable devflow |
 | `DEVFLOW_SKIP_HOOKS=true` | Skip hook execution |
 | `DEVFLOW_AUTO_CREATE=false` | Override `auto_create_on_workspace` |
-| `DEVFLOW_AUTO_SWITCH=false` | Override `auto_switch_on_workspace` |
 | `DEVFLOW_BRANCH_FILTER_REGEX=...` | Override workspace filtering |
 | `DEVFLOW_DISABLED_BRANCHES=main,release/*` | Disable devflow for specific workspaces |
 | `DEVFLOW_CURRENT_BRANCH_DISABLED=true` | Disable devflow for the current workspace only |

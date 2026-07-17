@@ -157,7 +157,7 @@ function ProjectSetup() {
         <div className="card" style={{ padding: 24 }}>
           <h2 style={{ fontSize: 18, marginBottom: 8 }}>Setup Integration</h2>
           <p style={{ color: "var(--text-secondary)", fontSize: 13, marginBottom: 20 }}>
-            Configure Git hooks and shell integration for automatic workspace management.
+            Configure VCS hooks and shell integration for automatic workspace management.
           </p>
 
           {/* Git Hooks */}
@@ -174,7 +174,7 @@ function ProjectSetup() {
               <div>
                 <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 2 }}>Git Hooks</div>
                 <div style={{ color: "var(--text-secondary)", fontSize: 12 }}>
-                  Auto-sync services when you checkout a branch
+                  Auto-sync services when workspace context changes
                 </div>
               </div>
               {hooksInstalled ? (
@@ -198,38 +198,36 @@ function ProjectSetup() {
           </div>
 
           {/* Shell Integration */}
-          {detail?.worktree_enabled && (
+          <div
+            style={{
+              padding: "12px 16px",
+              background: "var(--bg-primary)",
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              marginBottom: 12,
+            }}
+          >
+            <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 2 }}>Shell Integration</div>
+            <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 8 }}>
+              Auto-cd into workspace directories when switching context
+            </div>
             <div
+              className="mono"
               style={{
-                padding: "12px 16px",
-                background: "var(--bg-primary)",
-                border: "1px solid var(--border)",
-                borderRadius: 8,
-                marginBottom: 12,
+                padding: "8px 12px",
+                background: "var(--bg-secondary)",
+                borderRadius: 4,
+                fontSize: 12,
+                userSelect: "all",
+                cursor: "text",
               }}
             >
-              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 2 }}>Shell Integration</div>
-              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 8 }}>
-                Auto-cd into worktree directories when switching workspaces
-              </div>
-              <div
-                className="mono"
-                style={{
-                  padding: "8px 12px",
-                  background: "var(--bg-secondary)",
-                  borderRadius: 4,
-                  fontSize: 12,
-                  userSelect: "all",
-                  cursor: "text",
-                }}
-              >
-                {shellCommand}
-              </div>
-              <div style={{ color: "var(--text-muted)", fontSize: 11, marginTop: 4 }}>
-                Add this to your shell profile (~/.zshrc or ~/.bashrc)
-              </div>
+              {shellCommand}
             </div>
-          )}
+            <div style={{ color: "var(--text-muted)", fontSize: 11, marginTop: 4 }}>
+              Add this to your shell profile (~/.zshrc or ~/.bashrc)
+            </div>
+          </div>
 
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 24 }}>
             <button className="btn" onClick={() => setStep("services")}>
@@ -277,12 +275,10 @@ function ProjectSetup() {
                 {hooksInstalled ? "installed" : "not installed"}
               </span>
             </div>
-            {detail?.worktree_enabled && (
-              <div>
-                <strong>Worktrees:</strong>{" "}
-                <span style={{ color: "var(--text-secondary)" }}>enabled</span>
-              </div>
-            )}
+            <div>
+              <strong>Workspace isolation:</strong>{" "}
+              <span style={{ color: "var(--text-secondary)" }}>enabled</span>
+            </div>
           </div>
 
           <button className="btn btn-primary" onClick={goToProject} style={{ padding: "8px 24px" }}>

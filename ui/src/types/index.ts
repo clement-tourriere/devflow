@@ -13,26 +13,54 @@ export interface ProjectDetail {
   service_count: number;
   workspace_count: number;
   hook_count: number;
-  worktree_enabled: boolean;
   worktree_copy_files: string[];
   worktree_copy_ignored: boolean;
   vcs_type: string | null;
 }
 
+export interface WorkspaceInventoryProject {
+  name: string;
+  root: string;
+  vcs_provider: string;
+}
+
+export interface WorkspaceServiceStatus {
+  name: string;
+  provider: string;
+  state: string | null;
+  database_name: string | null;
+  parent_workspace: string | null;
+  provisioned: boolean;
+  supports_lifecycle: boolean;
+}
+
 export interface WorkspaceEntry {
   name: string;
-  is_current: boolean;
-  is_default: boolean;
-  worktree_path: string | null;
+  service_key: string;
+  canonical_service_key: string;
+  identity_status: "canonical" | "legacy_adopted" | "legacy_unresolved";
   parent: string | null;
-  created_at: string | null;
+  parent_state: string | null;
+  children: string[];
+  is_default: boolean;
+  is_context: boolean;
+  worktree_path: string | null;
+  health: string;
+  created_at: string;
   executed_command: string | null;
   execution_status: string | null;
+  services: WorkspaceServiceStatus[];
+  processes: ProcessStatus[];
 }
 
 export interface WorkspacesResponse {
+  schema_version: number;
+  project: WorkspaceInventoryProject;
+  context_workspace: string | null;
+  default_workspace: string;
+  roots: string[];
   workspaces: WorkspaceEntry[];
-  current: string | null;
+  warnings: string[];
 }
 
 export interface ServiceEntry {
@@ -114,8 +142,8 @@ export interface ProcessStatus {
   workdir: string;
   log_path: string;
   retry_count: number;
-  last_error: string | null;
-  started_at: string | null;
+  last_error?: string | null;
+  started_at?: string | null;
   desired_state?: string | null;
   runtime?: string | null;
   pitchfork_id?: string | null;
@@ -142,6 +170,9 @@ export interface PitchforkBridgeInfo {
 
 export interface CreateWorkspaceResult {
   workspace: string;
+  service_key: string;
+  parent: string | null;
+  vcs_ref_created: boolean;
   services: OrchestrationResult[];
   processes: ProcessResult[];
   worktree_path: string | null;
@@ -149,18 +180,40 @@ export interface CreateWorkspaceResult {
 }
 
 export interface SwitchWorkspaceResult {
+  workspace: string;
+  service_key: string;
+  parent: string | null;
+  worktree_path: string | null;
+  vcs_ref_created: boolean;
   services: OrchestrationResult[];
   processes: ProcessResult[];
   hooks: HookRunResult[];
 }
 
 export interface DeleteWorkspaceResult {
+  workspace: string;
+  service_key: string;
+  worktree_removed: boolean;
+  worktree_path: string | null;
+  vcs_ref_deleted: boolean;
   services: OrchestrationResult[];
   processes: ProcessResult[];
   hooks: HookRunResult[];
 }
 
-export type WorkspaceCreationMode = "default" | "worktree" | "branch";
+export interface DeleteWorkspacePreflightIssue {
+  code: string;
+  message: string;
+  force_overridable: boolean;
+}
+
+export interface DeleteWorkspacePreflight {
+  workspace: string;
+  service_key: string;
+  worktree_path: string | null;
+  vcs_ref_exists: boolean;
+  issues: DeleteWorkspacePreflightIssue[];
+}
 
 export interface HookPhaseEntry {
   phase: string;
@@ -383,9 +436,9 @@ export interface VcsInfo {
   available_tools: string[];
 }
 
-export interface GitBranchInfo {
-  branches: string[];
-  default_branch: string | null;
+export interface VcsWorkspaceInfo {
+  workspaces: string[];
+  default_workspace: string | null;
 }
 
 export interface TerminalSessionInfo {

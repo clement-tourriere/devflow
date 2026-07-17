@@ -106,12 +106,7 @@ impl DockerRuntime {
             sanitize(&spec.service_name),
             sanitize(&spec.workspace_name)
         );
-        // Docker container names must be <= 128 chars
-        let container_name = if raw.len() > 128 {
-            raw[..128].trim_end_matches('-').to_string()
-        } else {
-            raw
-        };
+        let container_name = crate::services::local_docker::bounded_container_name(&raw);
 
         Ok(ReservedBranchRuntime { container_name })
     }

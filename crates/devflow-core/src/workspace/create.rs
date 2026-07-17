@@ -1,34 +1,20 @@
 use anyhow::Result;
 use std::path::Path;
 
-use super::{CreateWorkspaceResult, LifecycleOptions, WorkspaceCreationMode};
+use super::{CreateWorkspaceResult, LifecycleOptions};
 use crate::config::Config;
 
 /// Options specific to workspace creation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CreateOptions {
     /// Shared lifecycle options.
     pub lifecycle: LifecycleOptions,
-    /// How to create the workspace (worktree, branch, or default from config).
-    pub creation_mode: WorkspaceCreationMode,
     /// Parent workspace to branch from (like `--from`).
     pub from_workspace: Option<String>,
     /// Override the config `worktree.copy_files` for this creation.
     pub copy_files: Option<Vec<String>>,
     /// Override the config `worktree.copy_ignored` for this creation.
     pub copy_ignored: Option<bool>,
-}
-
-impl Default for CreateOptions {
-    fn default() -> Self {
-        Self {
-            lifecycle: LifecycleOptions::default(),
-            creation_mode: WorkspaceCreationMode::Default,
-            from_workspace: None,
-            copy_files: None,
-            copy_ignored: None,
-        }
-    }
 }
 
 /// Create a new workspace using the same core lifecycle as switching with
@@ -50,7 +36,6 @@ pub async fn create_workspace(
         &super::switch::SwitchOptions {
             lifecycle: options.lifecycle.clone(),
             create_if_missing: true,
-            creation_mode: options.creation_mode,
             from_workspace: options.from_workspace.clone(),
             copy_files: options.copy_files.clone(),
             copy_ignored: options.copy_ignored,
@@ -60,9 +45,10 @@ pub async fn create_workspace(
 
     Ok(CreateWorkspaceResult {
         workspace: result.workspace,
+        service_key: result.service_key,
         parent: result.parent,
         worktree: result.worktree,
-        branch_created: result.branch_created,
+        vcs_ref_created: result.vcs_ref_created,
         services: result.services,
         processes: result.processes,
         hooks: result.hooks,

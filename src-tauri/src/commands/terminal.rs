@@ -1,5 +1,7 @@
 use crate::state::AppState;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use devflow_core::config::Config;
+use devflow_core::state::LocalStateManager;
 use devflow_terminal::{SessionMetadata, TerminalSessionConfig, TerminalSessionInfo};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -19,16 +21,10 @@ struct TerminalExitEvent {
 
 /// Build environment variables for a terminal session by gathering
 /// connection info from all configured services.
-async fn build_service_env(project_path: &str, workspace_name: &str) -> HashMap<String, String> {
+async fn build_service_env(config: &Config, workspace_key: &str) -> HashMap<String, String> {
     let mut env = HashMap::new();
 
-    let config_path = Path::new(project_path).join(".devflow.yml");
-    let cfg = match devflow_core::config::Config::from_file(&config_path) {
-        Ok(c) => c,
-        Err(_) => return env,
-    };
-
-    let named_services = cfg.resolve_services();
+    let named_services = config.resolve_services();
     let default_service = named_services
         .iter()
         .find(|s| s.default)
@@ -36,14 +32,14 @@ async fn build_service_env(project_path: &str, workspace_name: &str) -> HashMap<
 
     for svc in &named_services {
         let provider =
-            match devflow_core::services::factory::create_provider_from_named_config(&cfg, svc)
+            match devflow_core::services::factory::create_provider_from_named_config(config, svc)
                 .await
             {
                 Ok(p) => p,
                 Err(_) => continue,
             };
 
-        let info = match provider.get_connection_info(workspace_name).await {
+        let info = match provider.get_connection_info(workspace_key).await {
             Ok(i) => i,
             Err(_) => continue,
         };
@@ -125,6 +121,9 @@ pub async fn create_terminal(
     // Build environment
     let mut env = HashMap::new();
     if let Some(ref workspace) = workspace_name {
+        env.insert("DEVFLOW_WORKSPACE".to_string(), workspace.clone());
+        // Compatibility for scripts written before workspace terminology was
+        // adopted. New integrations should use DEVFLOW_WORKSPACE.
         env.insert("DEVFLOW_BRANCH".to_string(), workspace.clone());
     }
     if let Some(ref pp) = project_path {
@@ -133,8 +132,31 @@ pub async fn create_terminal(
 
     // Inject service connection info
     if let (Some(ref pp), Some(ref workspace)) = (&project_path, &workspace_name) {
-        let service_env = build_service_env(pp, workspace).await;
-        env.extend(service_env);
+        let project_dir = Path::new(pp);
+        match crate::commands::project_config::load_project_config_with_local_state(project_dir) {
+            Ok(config) => {
+                let workspace_key = LocalStateManager::new()
+                    .map_err(crate::commands::format_error)?
+                    .resolve_workspace_service_key_by_dir(project_dir, workspace)
+                    .map_err(crate::commands::format_error)?;
+                env.insert("DEVFLOW_WORKSPACE_KEY".to_string(), workspace_key.clone());
+                env.extend(build_service_env(&config, &workspace_key).await);
+            }
+            Err(error) => {
+                // A broken .devflow.yml must not make the terminal
+                // unavailable — the shell is exactly what the user needs to
+                // fix the config. Open it WITHOUT DEVFLOW_WORKSPACE_KEY or
+                // service env (never synthesize a fresh key: that can hide
+                // an adopted legacy namespace); ambiguous-identity failures
+                // above still fail closed because there a key WOULD be
+                // injected.
+                log::warn!(
+                    "Opening terminal for '{}' without service environment: failed to load effective config: {}",
+                    workspace,
+                    error
+                );
+            }
+        }
     }
 
     // Build label

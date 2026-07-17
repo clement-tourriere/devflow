@@ -5,14 +5,14 @@ devflow is a Rust-based tool that provides per-workspace isolation for developme
 
 ## Core Concepts
 - **Workspace isolation**: Each workspace gets its own isolated set of services (databases, caches, etc.)
-- **Git worktree integration**: Optionally creates worktree directories per workspace for true parallel development
+- **Git worktree integration**: Materializes every non-default workspace in its own working directory for true parallel development
 - **Multi-provider**: Per-workspace CoW containers (`type: local`), shared global containers with logical isolation (`type: shared` — one container, a database per workspace), Neon, DBLab, Xata, or custom plugins
 - **Multi-service**: A single project can manage multiple services (e.g., PostgreSQL + ClickHouse + Redis)
 - **Lifecycle hooks**: MiniJinja-templated commands that run at specific phases (post-create, post-switch, pre-commit, etc.)
 - **Copy-on-Write storage**: Uses APFS clones (macOS), ZFS snapshots, Btrfs/XFS reflinks for near-instant workspace creation
 
 ## Key Features
-- **Automatic Git integration**: Creates/switches service workspaces on `git checkout` via Git hooks
+- **Automatic Git integration**: Adopts manually-created linked worktrees and provisions their services via Git hooks
 - **Git worktree management**: Creates worktree directories with configurable path templates and file copying
 - **Multi-service support**: PostgreSQL, ClickHouse, MySQL, generic Docker, RustFS object storage, and plugin providers
 - **Hook engine**: MiniJinja templates with custom filters (`sanitize`, `sanitize_db`, `hash_port`) + installable hook recipes
@@ -41,7 +41,6 @@ A lightweight `devflow.toml` / `.devflow.toml` is also supported and parsed by e
 - `DEVFLOW_DISABLED=true` — Completely disable devflow
 - `DEVFLOW_SKIP_HOOKS=true` — Skip Git hook execution
 - `DEVFLOW_AUTO_CREATE=false` — Override auto_create_on_workspace
-- `DEVFLOW_AUTO_SWITCH=false` — Override auto_switch_on_workspace
 - `DEVFLOW_BRANCH_FILTER_REGEX=...` — Override workspace filtering
 - `DEVFLOW_DISABLED_BRANCHES=main,release/*` — Disable for specific workspaces
 - `DEVFLOW_CURRENT_BRANCH_DISABLED=true` — Disable for current workspace only
@@ -57,8 +56,7 @@ A lightweight `devflow.toml` / `.devflow.toml` is also supported and parsed by e
 ```yaml
 # All sections are optional — an empty file is valid
 git:
-  auto_create_on_workspace: true       # Auto-create service workspace on git checkout
-  auto_switch_on_workspace: true       # Auto-switch services on git checkout
+  auto_create_on_workspace: true       # Provision services when adopting a linked worktree
   main_workspace: main                 # Main git workspace
   workspace_filter_regex: "^feature/.*"  # Only workspace for matching patterns
   exclude_workspaces: [main, master]  # Never create workspaces for these
@@ -127,7 +125,6 @@ services:
 
 # Worktree configuration
 worktree:
-  enabled: true
   path_template: "../{repo}.{workspace}"
   copy_files: [".env.local", ".env"]
   copy_ignored: true
@@ -189,7 +186,7 @@ The project is organized as a Cargo workspace with four crates:
 ### Root crate (`devflow`) — CLI binary
 - `src/main.rs` — CLI entry point with custom help template
 - `src/cli/mod.rs` — Command enum and dispatch
-- `src/cli/workspace/` — Workspace operations (switch, list, graph, link, remove, cleanup)
+- `src/cli/workspace/` — Workspace operations (switch, list, link, remove, cleanup)
 - `src/cli/service.rs` — Service operations (add, create, delete, start, stop, reset, seed, logs, discover)
 - `src/cli/agent.rs` — AI agent commands (start, status, context, skill, docs)
 - `src/cli/proxy.rs` — Proxy commands (start, stop, status, list, trust)

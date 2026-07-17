@@ -6,10 +6,7 @@ use devflow_core::config::Config;
 use devflow_core::vcs;
 
 pub(super) fn copy_worktree_files(config: &Config, main_worktree_dir: &str) -> Result<()> {
-    let wt_config = match config.worktree {
-        Some(ref wt) => wt,
-        None => return Ok(()),
-    };
+    let wt_config = &config.worktree;
 
     let main_dir = std::path::Path::new(main_worktree_dir);
     let current_dir = std::env::current_dir()?;
@@ -108,13 +105,15 @@ pub(super) async fn handle_worktree_setup(
         .main_worktree_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not determine main worktree directory"))?;
 
-    // Copy files from main worktree
-    copy_worktree_files(config, main_dir.to_str().unwrap_or(""))?;
-
-    // Run normal git-hook logic to create/switch service workspaces
-    handle_git_hook(config, config_path, false, None).await?;
-
-    Ok(())
+    // Same composition as the generated hook's
+    // `devflow git-hook --worktree --main-worktree-dir <dir>` invocation.
+    handle_git_hook(
+        config,
+        config_path,
+        true,
+        Some(main_dir.to_string_lossy().into_owned()),
+    )
+    .await
 }
 
 pub(super) async fn handle_git_hook(
@@ -132,54 +131,46 @@ pub(super) async fn handle_git_hook(
 
     let vcs_repo = vcs::detect_vcs_provider(".")?;
 
+    // Hook scripts installed by pre-worktree-only releases invoke plain
+    // `devflow git-hook` on every in-place checkout in the PRIMARY checkout
+    // (the new script exits early there instead). Routing those into the
+    // switch flow would hard-fail the primary/default invariant on every
+    // non-main checkout after a binary upgrade — mirror the new script's
+    // primary-checkout guard here so old installed hooks stay silent no-ops.
+    if !worktree && !vcs_repo.is_worktree() {
+        log::info!(
+            "Primary checkout post-checkout hook: no lifecycle action (re-run `devflow install-hooks` to refresh the installed hook script)"
+        );
+        return Ok(());
+    }
+
     if let Some(current_git_branch) = vcs_repo.current_workspace()? {
         log::info!("Git hook triggered for workspace: {}", current_git_branch);
 
-        // Check if this workspace should trigger a switch
-        if config.should_switch_on_workspace(&current_git_branch) {
-            // If switching to main git workspace, use main database
-            if current_git_branch == config.git.main_workspace {
-                super::workspace::handle_switch_to_main(
-                    config,
-                    config_path,
-                    false,
-                    false,
-                    false,
-                    false,
-                    true,
-                    Some("vcs"),
-                    Some("post-checkout"),
-                )
-                .await?;
-            } else {
-                // For other workspaces, check if we should create them and switch
-                if config.should_create_workspace(&current_git_branch) {
-                    super::workspace::handle_switch_command(
-                        config,
-                        &current_git_branch,
-                        config_path,
-                        false, // create — workspace already exists from git
-                        None,  // from
-                        false, // no_services
-                        false, // no_processes
-                        false, // no_verify
-                        false, // json_output — git hooks are non-interactive
-                        true,  // non_interactive
-                        Some("vcs"),
-                        Some("post-checkout"),
-                        None, // copy_ignored — use config default
-                    )
-                    .await?;
-                } else {
-                    log::info!(
-                        "Git workspace {} configured not to create service workspaces",
-                        current_git_branch
-                    );
-                }
-            }
+        // Worktree-only model: the hook's sole job is adopting a linked
+        // worktree by provisioning services for its workspace. In-place
+        // checkout switching is gone; the default workspace needs no
+        // provisioning here.
+        if config.should_create_workspace(&current_git_branch) {
+            super::workspace::handle_switch_command(
+                config,
+                &current_git_branch,
+                config_path,
+                false, // create — workspace already exists from git
+                None,  // from
+                false, // no_services
+                false, // no_processes
+                false, // no_verify
+                false, // json_output — git hooks are non-interactive
+                true,  // non_interactive
+                Some("vcs"),
+                Some("post-checkout"),
+                None, // copy_ignored — use config default
+            )
+            .await?;
         } else {
             log::info!(
-                "Git workspace {} filtered out by auto_switch configuration",
+                "Git workspace {} configured not to create service workspaces",
                 current_git_branch
             );
         }

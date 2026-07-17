@@ -7,70 +7,20 @@ interface Props {
   onChange: (config: FilledConfig) => void;
 }
 
-const DEFAULT_WORKTREE: WorktreeConfig = {
-  enabled: true,
-  path_template: "../{repo}.{workspace}",
-  copy_files: [".env", ".env.local"],
-  copy_ignored: false,
-  respect_gitignore: true,
-};
-
 function WorktreeSection({ config, onChange }: Props) {
   const wt = config.worktree;
 
-  const enableWorktree = () => {
-    onChange({ ...config, worktree: { ...DEFAULT_WORKTREE } });
-  };
-
-  const disableWorktree = () => {
-    onChange({ ...config, worktree: null });
-  };
-
   const updateWt = (patch: Partial<WorktreeConfig>) => {
-    if (!wt) return;
     onChange({ ...config, worktree: { ...wt, ...patch } });
   };
-
-  if (!wt) {
-    return (
-      <div>
-        <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>Worktrees</h2>
-        <div
-          style={{
-            padding: 24,
-            textAlign: "center",
-            border: "1px dashed var(--border)",
-            borderRadius: 8,
-            color: "var(--text-secondary)",
-          }}
-        >
-          <p style={{ marginBottom: 12 }}>Worktree management is not configured.</p>
-          <button className="btn btn-primary" onClick={enableWorktree}>
-            Enable Worktrees
-          </button>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div>
       <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>Worktrees</h2>
 
-      <FormField label="Enabled" description="Create git worktrees instead of switching branches">
-        <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-          <input
-            type="checkbox"
-            checked={wt.enabled}
-            onChange={(e) => updateWt({ enabled: e.target.checked })}
-          />
-          <span style={{ fontSize: 13 }}>Enabled</span>
-        </label>
-      </FormField>
-
       <FormField
         label="Path template"
-        description="Template for worktree directory paths. Supports {repo} and {workspace} placeholders."
+        description="Template for workspace directory paths. Supports {repo} and {workspace} placeholders."
       >
         <input
           type="text"
@@ -119,15 +69,31 @@ function WorktreeSection({ config, onChange }: Props) {
         </label>
       </FormField>
 
-      <div style={{ marginTop: 16 }}>
-        <button
-          className="btn btn-danger"
-          onClick={disableWorktree}
-          style={{ fontSize: 12 }}
-        >
-          Remove Worktree Config
-        </button>
-      </div>
+      <FormField
+        label="Copy AI configuration"
+        description="Copy supported agent configuration directories into new workspaces"
+      >
+        <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={wt.copy_ai_configs}
+            onChange={(e) => updateWt({ copy_ai_configs: e.target.checked })}
+          />
+          <span style={{ fontSize: 13 }}>Copy .claude, .cursor, .opencode, and .agents</span>
+        </label>
+      </FormField>
+
+      <FormField
+        label="Additional AI directories"
+        description="Extra repository-relative agent configuration directories to copy"
+      >
+        <TagList
+          values={wt.extra_ai_dirs}
+          onChange={(extra_ai_dirs) => updateWt({ extra_ai_dirs })}
+          placeholder="e.g. .my-agent"
+        />
+      </FormField>
+
     </div>
   );
 }

@@ -17,7 +17,7 @@ Run the TUI **without** the shell-integration wrapper (`command devflow tui`) â€
 
 | Tab | Shows | Key actions |
 | --- | --- | --- |
-| **Workspaces** | workspace tree with parent/child relationships, service states, worktree paths | switch workspace, start/stop services, `o` to open a workspace |
+| **Workspaces** | shared inventory tree with raw names, paths, missing-parent state, and service/process health | switch workspace, start/stop services, `o` to open a workspace |
 | **Services** | configured services, provider state, capability matrix | inspect inventory and provider support |
 | **Proxy** | proxy status, CA trust state, discovered endpoints | check proxy health and routes |
 | **System** | config overview, hook list with template-variable reference and scaffold snippets, doctor diagnostics | browse hooks, view template context, health check |

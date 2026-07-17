@@ -1,27 +1,13 @@
 use devflow_core::processes::ProcessResult;
+use devflow_core::state::LocalStateManager;
 use devflow_core::vcs;
 use devflow_core::workspace::hooks::HookApprovalMode;
-use devflow_core::workspace::{self, LifecycleOptions, WorkspaceCreationMode};
+use devflow_core::workspace::{self, LifecycleOptions};
 use serde::Serialize;
 use tauri::Emitter;
 
-#[derive(Serialize)]
-pub struct WorkspaceEntry {
-    pub name: String,
-    pub is_current: bool,
-    pub is_default: bool,
-    pub worktree_path: Option<String>,
-    pub parent: Option<String>,
-    pub created_at: Option<String>,
-    pub executed_command: Option<String>,
-    pub execution_status: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct WorkspacesResponse {
-    pub workspaces: Vec<WorkspaceEntry>,
-    pub current: Option<String>,
-}
+pub use devflow_core::workspace::inventory::WorkspaceNode as WorkspaceEntry;
+pub type WorkspacesResponse = devflow_core::workspace::inventory::WorkspaceInventory;
 
 #[derive(Serialize)]
 pub struct OrchestrationResultDto {
@@ -39,32 +25,10 @@ pub struct WorkspaceSwitchedEvent {
 #[tauri::command]
 pub async fn list_workspaces(project_path: String) -> Result<WorkspacesResponse, String> {
     let project_dir = std::path::Path::new(&project_path);
-    let cfg = crate::commands::project_config::load_project_config(project_dir)?;
-
-    let entries: Vec<WorkspaceEntry> = workspace::list::enriched_workspaces(&cfg, project_dir)
-        .map_err(crate::commands::format_error)?
-        .into_iter()
-        .map(|w| WorkspaceEntry {
-            name: w.name,
-            is_current: w.is_current,
-            is_default: w.is_default,
-            worktree_path: w.worktree_path,
-            parent: w.parent,
-            created_at: Some(w.created_at.format("%Y-%m-%d %H:%M").to_string()),
-            executed_command: w.executed_command,
-            execution_status: w.execution_status,
-        })
-        .collect();
-
-    let current = entries
-        .iter()
-        .find(|e| e.is_current)
-        .map(|e| e.name.clone());
-
-    Ok(WorkspacesResponse {
-        workspaces: entries,
-        current,
-    })
+    let cfg = crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
+    workspace::inventory::build_workspace_inventory(&cfg, project_dir)
+        .await
+        .map_err(crate::commands::format_error)
 }
 
 #[tauri::command]
@@ -90,8 +54,14 @@ pub async fn get_connection_info(
                 .await
                 .map_err(crate::commands::format_error)?;
 
+        // Accepts raw names AND provider-side keys — the UI's service rows
+        // echo keys from list_service_workspaces back into this command.
+        let service_key = LocalStateManager::new()
+            .map_err(crate::commands::format_error)?
+            .resolve_workspace_or_key_by_dir(project_dir, &workspace_name)
+            .map_err(crate::commands::format_error)?;
         let info = provider
-            .get_connection_info(&workspace_name)
+            .get_connection_info(&service_key)
             .await
             .map_err(crate::commands::format_error)?;
 
@@ -108,6 +78,9 @@ pub async fn get_connection_info(
 #[derive(Serialize)]
 pub struct CreateWorkspaceResult {
     pub workspace: String,
+    pub service_key: String,
+    pub parent: Option<String>,
+    pub vcs_ref_created: bool,
     pub services: Vec<OrchestrationResultDto>,
     pub processes: Vec<ProcessResult>,
     pub worktree_path: Option<String>,
@@ -126,6 +99,11 @@ pub struct HookRunResultDto {
 
 #[derive(Serialize)]
 pub struct SwitchWorkspaceResult {
+    pub workspace: String,
+    pub service_key: String,
+    pub parent: Option<String>,
+    pub worktree_path: Option<String>,
+    pub vcs_ref_created: bool,
     pub services: Vec<OrchestrationResultDto>,
     pub processes: Vec<ProcessResult>,
     pub hooks: Vec<HookRunResultDto>,
@@ -133,6 +111,11 @@ pub struct SwitchWorkspaceResult {
 
 #[derive(Serialize)]
 pub struct DeleteWorkspaceResult {
+    pub workspace: String,
+    pub service_key: String,
+    pub worktree_removed: bool,
+    pub worktree_path: Option<String>,
+    pub vcs_ref_deleted: bool,
     pub services: Vec<OrchestrationResultDto>,
     pub processes: Vec<ProcessResult>,
     pub hooks: Vec<HookRunResultDto>,
@@ -145,19 +128,14 @@ pub async fn create_workspace(
     project_path: String,
     workspace_name: String,
     from_workspace: Option<String>,
-    creation_mode: Option<String>,
     copy_files: Option<Vec<String>>,
     copy_ignored: Option<bool>,
 ) -> Result<CreateWorkspaceResult, String> {
     let project_dir = std::path::Path::new(&project_path);
     let cfg = crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
 
-    let creation_mode =
-        WorkspaceCreationMode::parse(creation_mode.as_deref()).map_err(|e| e.to_string())?;
-
     let options = workspace::create::CreateOptions {
         lifecycle: gui_lifecycle_options(),
-        creation_mode,
         from_workspace,
         copy_files,
         copy_ignored,
@@ -180,6 +158,9 @@ pub async fn create_workspace(
 
     let response = CreateWorkspaceResult {
         workspace: result.workspace.clone(),
+        service_key: result.service_key.clone(),
+        parent: result.parent.clone(),
+        vcs_ref_created: result.vcs_ref_created,
         services: result
             .services
             .into_iter()
@@ -224,7 +205,6 @@ pub async fn switch_workspace(
     let options = workspace::switch::SwitchOptions {
         lifecycle: gui_lifecycle_options(),
         create_if_missing: false,
-        creation_mode: WorkspaceCreationMode::Default,
         from_workspace: None,
         copy_files: None,
         copy_ignored: None,
@@ -239,6 +219,14 @@ pub async fn switch_workspace(
     .map_err(crate::commands::format_error)?;
 
     let response = SwitchWorkspaceResult {
+        workspace: result.workspace.clone(),
+        service_key: result.service_key.clone(),
+        parent: result.parent.clone(),
+        worktree_path: result
+            .worktree
+            .as_ref()
+            .map(|worktree| worktree.path.display().to_string()),
+        vcs_ref_created: result.vcs_ref_created,
         services: result
             .services
             .into_iter()
@@ -276,10 +264,22 @@ pub async fn switch_workspace(
 }
 
 #[tauri::command]
+pub async fn preflight_delete_workspace(
+    project_path: String,
+    workspace_name: String,
+) -> Result<workspace::delete::DeleteWorkspacePreflight, String> {
+    let project_dir = std::path::Path::new(&project_path);
+    let cfg = crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
+    workspace::delete::preflight_delete_workspace(&cfg, project_dir, &workspace_name)
+        .map_err(crate::commands::format_error)
+}
+
+#[tauri::command]
 pub async fn delete_workspace(
     app: tauri::AppHandle,
     project_path: String,
     workspace_name: String,
+    force: Option<bool>,
 ) -> Result<DeleteWorkspaceResult, String> {
     let project_dir = std::path::Path::new(&project_path);
     let cfg = crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
@@ -287,10 +287,9 @@ pub async fn delete_workspace(
     let options = workspace::delete::DeleteOptions {
         lifecycle: gui_lifecycle_options(),
         keep_services: false,
-        // The GUI has already shown a destructive confirmation dialog. Use the
-        // confirmed/force path so stale worktree metadata or manually-deleted
-        // directories can still be cleaned up instead of leaving phantom rows.
-        force: true,
+        // A normal GUI confirmation still uses the safe path. Force is only
+        // sent after a failed safe deletion and a second explicit warning.
+        force: force.unwrap_or(false),
     };
 
     let result = tokio::time::timeout(
@@ -305,6 +304,11 @@ pub async fn delete_workspace(
     .map_err(crate::commands::format_error)?;
 
     let response = DeleteWorkspaceResult {
+        workspace: result.workspace.clone(),
+        service_key: result.service_key.clone(),
+        worktree_removed: result.worktree_removed,
+        worktree_path: result.worktree_path.clone(),
+        vcs_ref_deleted: result.vcs_ref_deleted,
         services: result
             .services
             .into_iter()

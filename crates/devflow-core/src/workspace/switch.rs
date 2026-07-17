@@ -10,10 +10,7 @@ use crate::vcs;
 
 use super::hooks::{run_lifecycle_hooks, run_lifecycle_hooks_best_effort};
 use super::worktree::create_worktree_with_files;
-use super::{
-    LifecycleOptions, ServiceResult, SwitchWorkspaceResult, WorkspaceCreationMode,
-    WorktreeSetupResult,
-};
+use super::{LifecycleOptions, ServiceResult, SwitchWorkspaceResult, WorktreeSetupResult};
 
 /// Options specific to workspace switching.
 #[derive(Debug, Clone, Default)]
@@ -22,8 +19,6 @@ pub struct SwitchOptions {
     pub lifecycle: LifecycleOptions,
     /// Allow creating the workspace if it doesn't exist.
     pub create_if_missing: bool,
-    /// How to materialize a newly-created workspace.
-    pub creation_mode: WorkspaceCreationMode,
     /// Parent workspace to branch from when creating.
     pub from_workspace: Option<String>,
     /// Override the config `worktree.copy_files` for worktree creation.
@@ -33,11 +28,11 @@ pub struct SwitchOptions {
 }
 
 /// Switch to a workspace with the full lifecycle: pre-switch hooks,
-/// VCS checkout (with optional creation), worktree setup, service
+/// VCS reference creation (when requested), worktree setup, service
 /// orchestration, and post-switch hooks.
 ///
 /// Hook phase ordering:
-///   PreSwitch → VCS checkout → services → PostServiceSwitch →
+///   PreSwitch → VCS materialization → services → PostServiceSwitch →
 ///   PostCreate (if new) → PostSwitch
 pub async fn switch_workspace(
     config: &Config,
@@ -45,21 +40,28 @@ pub async fn switch_workspace(
     workspace_name: &str,
     options: &SwitchOptions,
 ) -> Result<SwitchWorkspaceResult> {
+    super::validate_workspace_name(workspace_name).map_err(anyhow::Error::msg)?;
     let opts = &options.lifecycle;
     let vcs_provider =
         vcs::detect_vcs_provider(project_dir).context("Failed to open VCS repository")?;
 
-    let normalized_name = config.get_normalized_workspace_name(workspace_name);
-    let config_prefers_worktree = config.worktree.as_ref().is_some_and(|wt| wt.enabled);
-    let worktree_enabled = match options.creation_mode {
-        WorkspaceCreationMode::Default => config_prefers_worktree,
-        WorkspaceCreationMode::Worktree => true,
-        WorkspaceCreationMode::Branch => false,
-    };
+    if !vcs_provider.supports_worktrees() {
+        anyhow::bail!(
+            "{} does not support materialized workspaces",
+            vcs_provider.provider_name()
+        );
+    }
+    super::invariant::ensure_git_primary_workspace_matches_config(config, vcs_provider.as_ref())?;
+
     let mut hook_results = Vec::new();
 
     // Ensure main workspace is registered in state
-    ensure_default_workspace_registered(config, project_dir);
+    ensure_default_workspace_registered(config, project_dir)?;
+    // Resolve before hooks or VCS mutation. This preserves an unambiguously
+    // adopted legacy namespace and fails closed when old lossy state could
+    // refer to more than one raw workspace.
+    let service_key = LocalStateManager::new()?
+        .resolve_workspace_service_key_by_dir(project_dir, workspace_name)?;
 
     // 1. Pre-switch hooks
     if !opts.skip_hooks {
@@ -78,53 +80,20 @@ pub async fn switch_workspace(
         );
     }
 
-    let mut branch_created = false;
+    let mut vcs_ref_created = false;
     let mut parent_for_new: Option<String> = None;
-    let mut worktree_result: Option<WorktreeSetupResult> = None;
+    let worktree_result: Option<WorktreeSetupResult>;
 
-    // 2. VCS workspace creation / checkout
+    // 2. VCS reference creation / worktree materialization
     let vcs_phase_started = std::time::Instant::now();
-    if worktree_enabled {
-        // Worktree mode: check for existing worktree, create if needed
-        let existing_path = vcs_provider.worktree_path(workspace_name)?;
-
-        if let Some(wt_path) = existing_path {
-            // Existing worktree — just use it
-            let resolved = std::fs::canonicalize(&wt_path).unwrap_or(wt_path);
-            worktree_result = Some(WorktreeSetupResult {
-                path: resolved,
-                created: false,
-            });
-        } else {
-            // Need to create workspace + worktree
-            let workspace_exists = vcs_provider.workspace_exists(workspace_name)?;
-            if !workspace_exists {
-                if !options.create_if_missing {
-                    anyhow::bail!(
-                        "Workspace '{}' does not exist. Use the create flag to create it.",
-                        workspace_name
-                    );
-                }
-
-                super::validate_workspace_name(workspace_name).map_err(|e| anyhow::anyhow!(e))?;
-                vcs_provider.create_workspace(workspace_name, options.from_workspace.as_deref())?;
-                branch_created = true;
-                parent_for_new = options.from_workspace.clone();
-            }
-
-            // Create worktree with file copying
-            let wt = create_worktree_with_files(
-                vcs_provider.as_ref(),
-                config,
-                project_dir,
-                workspace_name,
-                options.copy_files.as_deref(),
-                options.copy_ignored,
-            )?;
-            worktree_result = Some(wt);
-        }
+    let existing_path = vcs_provider.worktree_path(workspace_name)?;
+    if let Some(wt_path) = existing_path {
+        let resolved = std::fs::canonicalize(&wt_path).unwrap_or(wt_path);
+        worktree_result = Some(WorktreeSetupResult {
+            path: resolved,
+            created: false,
+        });
     } else {
-        // Classic mode (no worktrees)
         let workspace_exists = vcs_provider.workspace_exists(workspace_name)?;
         if !workspace_exists {
             if !options.create_if_missing {
@@ -133,48 +102,57 @@ pub async fn switch_workspace(
                     workspace_name
                 );
             }
-            super::validate_workspace_name(workspace_name).map_err(|e| anyhow::anyhow!(e))?;
-            vcs_provider.create_workspace(workspace_name, options.from_workspace.as_deref())?;
-            branch_created = true;
-            parent_for_new = options.from_workspace.clone();
+            parent_for_new = options
+                .from_workspace
+                .clone()
+                .or(vcs_provider.current_workspace()?);
+            vcs_provider.create_workspace(workspace_name, parent_for_new.as_deref())?;
+            vcs_ref_created = true;
         }
-        vcs_provider.checkout_workspace(workspace_name)?;
+
+        worktree_result = Some(create_worktree_with_files(
+            vcs_provider.as_ref(),
+            config,
+            project_dir,
+            workspace_name,
+            options.copy_files.as_deref(),
+            options.copy_ignored,
+        )?);
     }
     log::debug!(
-        "Phase VCS checkout/worktree setup took {:.2?}",
+        "Phase VCS ref/worktree setup took {:.2?}",
         vcs_phase_started.elapsed()
     );
 
     // 3. Register workspace in state (before services, independent of their success)
-    let normalized_parent = if branch_created {
-        parent_for_new
-            .as_deref()
-            .map(|p| config.get_normalized_workspace_name(p))
-    } else {
-        None
-    };
-
     register_workspace_state(
         config,
         project_dir,
-        &normalized_name,
-        normalized_parent.as_deref(),
+        workspace_name,
+        &service_key,
+        parent_for_new.as_deref(),
         worktree_result.as_ref(),
-    );
+    )?;
 
     let worktree_created = worktree_result.as_ref().is_some_and(|wt| wt.created);
-    let workspace_created = branch_created || worktree_created;
-    let workspace_parent = if branch_created {
-        normalized_parent.clone()
+    let workspace_created = vcs_ref_created || worktree_created;
+    let workspace_parent = if vcs_ref_created {
+        parent_for_new.clone()
     } else {
         // Look up stored parent from registry. This covers newly-created
         // worktrees for existing branches and existing workspaces selected from
         // the GUI.
         LocalStateManager::new()
             .ok()
-            .and_then(|state| state.get_workspace_by_dir(project_dir, &normalized_name))
+            .and_then(|state| state.get_workspace_by_dir(project_dir, workspace_name))
             .and_then(|b| b.parent)
     };
+    let parent_service_key = workspace_parent
+        .as_deref()
+        .map(|parent| {
+            LocalStateManager::new()?.resolve_workspace_service_key_by_dir(project_dir, parent)
+        })
+        .transpose()?;
 
     // 4. Service orchestration
     let services_skipped = opts.skip_services || config.resolve_services().is_empty();
@@ -182,8 +160,8 @@ pub async fn switch_workspace(
         let services_phase_started = std::time::Instant::now();
         let service_results: Vec<ServiceResult> = match services::factory::orchestrate_switch(
             config,
-            &normalized_name,
-            workspace_parent.as_deref(),
+            &service_key,
+            parent_service_key.as_deref(),
         )
         .await
         {
@@ -229,21 +207,22 @@ pub async fn switch_workspace(
         if let Err(e) = write_workspace_env_overrides(
             config,
             project_dir,
-            &normalized_name,
+            workspace_name,
+            &service_key,
             worktree_result.as_ref(),
         )
         .await
         {
             log::warn!(
                 "Failed to write workspace environment overrides for '{}': {:#}",
-                normalized_name,
+                workspace_name,
                 e
             );
         }
     }
 
     // 5. Post-create hooks (branch or worktree newly created)
-    if (branch_created || worktree_created) && !opts.skip_hooks {
+    if (vcs_ref_created || worktree_created) && !opts.skip_hooks {
         let phase_started = std::time::Instant::now();
         if let Some(summary) = run_lifecycle_hooks_best_effort(
             config,
@@ -287,7 +266,7 @@ pub async fn switch_workspace(
     let process_results = if !opts.skip_processes {
         let clone_parent_processes = workspace_created
             || workspace_parent.as_deref().is_some_and(|_| {
-                workspace_has_no_runtime_processes(config, project_dir, &normalized_name)
+                workspace_has_no_runtime_processes(config, project_dir, workspace_name)
             });
 
         if clone_parent_processes {
@@ -295,7 +274,7 @@ pub async fn switch_workspace(
                 processes::auto_start_workspace_processes_like_parent(
                     config,
                     project_dir,
-                    &normalized_name,
+                    workspace_name,
                     parent,
                     process_approval_mode(opts.hook_approval),
                 )
@@ -307,7 +286,7 @@ pub async fn switch_workspace(
             processes::auto_start_workspace_processes(
                 config,
                 project_dir,
-                &normalized_name,
+                workspace_name,
                 process_approval_mode(opts.hook_approval),
             )
             .await
@@ -323,10 +302,11 @@ pub async fn switch_workspace(
     }
 
     Ok(SwitchWorkspaceResult {
-        workspace: normalized_name,
-        parent: normalized_parent,
+        workspace: workspace_name.to_string(),
+        service_key,
+        parent: workspace_parent,
         worktree: worktree_result,
-        branch_created,
+        vcs_ref_created,
         services: service_results,
         processes: process_results,
         hooks: hook_results,
@@ -337,6 +317,7 @@ async fn write_workspace_env_overrides(
     config: &Config,
     project_dir: &Path,
     workspace: &str,
+    service_workspace: &str,
     worktree: Option<&WorktreeSetupResult>,
 ) -> Result<()> {
     let target_dir = worktree
@@ -354,7 +335,7 @@ async fn write_workspace_env_overrides(
         else {
             continue;
         };
-        let Ok(info) = provider.get_connection_info(workspace).await else {
+        let Ok(info) = provider.get_connection_info(service_workspace).await else {
             continue;
         };
         let Some(url) = info.connection_string else {
@@ -458,32 +439,32 @@ fn process_approval_mode(mode: super::hooks::HookApprovalMode) -> processes::Pro
     }
 }
 
-fn ensure_default_workspace_registered(config: &Config, project_dir: &Path) {
+fn ensure_default_workspace_registered(config: &Config, project_dir: &Path) -> Result<()> {
     let main = &config.git.main_workspace;
-    if let Ok(mut state_mgr) = LocalStateManager::new() {
-        let _ = state_mgr.ensure_default_workspace(project_dir, main);
-    }
+    LocalStateManager::new()?.ensure_default_workspace(project_dir, main)
 }
 
 fn register_workspace_state(
     _config: &Config,
     project_dir: &Path,
-    normalized_name: &str,
-    normalized_parent: Option<&str>,
+    workspace_name: &str,
+    service_key: &str,
+    parent: Option<&str>,
     worktree: Option<&WorktreeSetupResult>,
-) {
-    let Ok(mut state_mgr) = LocalStateManager::new() else {
-        return;
-    };
+) -> Result<()> {
+    let mut state_mgr = LocalStateManager::new()?;
 
     // Preserve existing metadata on upsert
-    let existing = state_mgr.get_workspace_by_dir(project_dir, normalized_name);
+    let existing = state_mgr.get_workspace_by_dir(project_dir, workspace_name);
 
     let workspace = DevflowWorkspace {
-        name: normalized_name.to_string(),
-        parent: normalized_parent
-            .map(String::from)
-            .or_else(|| existing.as_ref().and_then(|b| b.parent.clone())),
+        name: workspace_name.to_string(),
+        service_key: service_key.to_string(),
+        raw_identity_verified: true,
+        parent: existing
+            .as_ref()
+            .and_then(|workspace| workspace.parent.clone())
+            .or_else(|| parent.map(String::from)),
         worktree_path: worktree
             .map(|w| w.path.display().to_string())
             .or_else(|| existing.as_ref().and_then(|b| b.worktree_path.clone())),
@@ -496,9 +477,7 @@ fn register_workspace_state(
         executed_at: existing.as_ref().and_then(|b| b.executed_at),
     };
 
-    if let Err(e) = state_mgr.register_workspace_by_dir(project_dir, workspace) {
-        log::warn!("Failed to register workspace in devflow state: {}", e);
-    }
+    state_mgr.register_workspace_by_dir(project_dir, workspace)
 }
 
 #[cfg(test)]
@@ -554,15 +533,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         GitRepository::init(temp.path()).unwrap();
         let config = Config {
-            worktree: Some(WorktreeConfig {
-                enabled: true,
+            worktree: WorktreeConfig {
                 path_template: "../{repo}.{workspace}".to_string(),
                 copy_files: Vec::new(),
-                copy_ignored: false,
-                respect_gitignore: true,
                 copy_ai_configs: false,
-                extra_ai_dirs: Vec::new(),
-            }),
+                ..Default::default()
+            },
             ..Default::default()
         };
         (temp, config)
@@ -646,7 +622,7 @@ mod tests {
         .await
         .expect("switch should succeed");
 
-        assert!(!result.branch_created);
+        assert!(!result.vcs_ref_created);
         assert!(result.worktree.as_ref().is_some_and(|wt| wt.created));
         assert!(result.hooks.iter().any(|h| h.phase == "post-create"));
 
@@ -657,5 +633,47 @@ mod tests {
             .path
             .join("post-create-marker.txt");
         assert_eq!(std::fs::read_to_string(marker).unwrap(), "created");
+    }
+
+    #[tokio::test]
+    async fn primary_mismatch_blocks_a_second_default_worktree() {
+        let (project, mut config) = setup_repo();
+        // Enforcement requires a literally-configured default: the serde
+        // default must never hard-fail repos whose primary branch isn't
+        // "main" (see invariant::ensure_git_primary_workspace_matches_config).
+        std::fs::write(
+            project.path().join(".devflow.yml"),
+            "git:\n  main_workspace: main\n",
+        )
+        .unwrap();
+        config.project_root = Some(project.path().to_path_buf());
+        let repo = GitRepository::new(project.path()).unwrap();
+        repo.create_workspace("feature/primary", Some("main"))
+            .unwrap();
+        let raw = git2::Repository::open(project.path()).unwrap();
+        raw.set_head("refs/heads/feature/primary").unwrap();
+
+        let error = switch_workspace(
+            &config,
+            project.path(),
+            "main",
+            &SwitchOptions {
+                lifecycle: LifecycleOptions {
+                    skip_hooks: true,
+                    skip_services: true,
+                    skip_processes: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("Git primary workspace mismatch"));
+        assert!(repo.worktree_path("main").unwrap().is_none());
+        let worktrees = repo.list_worktrees().unwrap();
+        assert_eq!(worktrees.len(), 1);
+        assert_eq!(worktrees[0].workspace.as_deref(), Some("feature/primary"));
     }
 }

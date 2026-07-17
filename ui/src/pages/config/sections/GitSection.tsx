@@ -20,27 +20,13 @@ function GitSection({ config, onChange }: Props) {
 
       <FormField
         label="Auto-create on workspace"
-        description="Automatically create service workspaces when switching git branches"
+        description="Automatically create service resources when workspace context changes"
       >
         <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
           <input
             type="checkbox"
             checked={git.auto_create_on_workspace}
             onChange={(e) => updateGit({ auto_create_on_workspace: e.target.checked })}
-          />
-          <span style={{ fontSize: 13 }}>Enabled</span>
-        </label>
-      </FormField>
-
-      <FormField
-        label="Auto-switch on workspace"
-        description="Automatically switch services when switching git branches"
-      >
-        <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-          <input
-            type="checkbox"
-            checked={git.auto_switch_on_workspace}
-            onChange={(e) => updateGit({ auto_switch_on_workspace: e.target.checked })}
           />
           <span style={{ fontSize: 13 }}>Enabled</span>
         </label>
@@ -57,7 +43,7 @@ function GitSection({ config, onChange }: Props) {
 
       <FormField
         label="Workspace filter regex"
-        description="Only create workspaces for branches matching this regex (optional)"
+        description="Only create resources for workspace names matching this regex (optional)"
       >
         <input
           type="text"
@@ -70,12 +56,12 @@ function GitSection({ config, onChange }: Props) {
 
       <FormField
         label="Exclude workspaces"
-        description="Never create service workspaces for these branch names"
+        description="Never create service resources for these workspace names"
       >
         <TagList
           values={git.exclude_workspaces}
           onChange={(exclude_workspaces) => updateGit({ exclude_workspaces })}
-          placeholder="Add branch name..."
+          placeholder="Add workspace name..."
         />
       </FormField>
     </div>

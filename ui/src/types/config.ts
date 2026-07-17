@@ -8,7 +8,7 @@ export interface DevflowConfig {
   git?: GitConfig;
   behavior?: BehaviorConfig;
   services?: NamedServiceConfig[] | null;
-  worktree?: WorktreeConfig | null;
+  worktree?: WorktreeConfig;
   processes?: ProcessesConfig | null;
   hooks?: Record<string, Record<string, unknown>> | null;
   triggers?: Record<string, unknown> | null;
@@ -19,7 +19,6 @@ export interface DevflowConfig {
 
 export interface GitConfig {
   auto_create_on_workspace: boolean;
-  auto_switch_on_workspace: boolean;
   main_workspace: string;
   auto_create_workspace_filter?: string | null;
   workspace_filter_regex?: string | null;
@@ -31,11 +30,12 @@ export interface BehaviorConfig {
 }
 
 export interface WorktreeConfig {
-  enabled: boolean;
   path_template: string;
   copy_files: string[];
   copy_ignored: boolean;
   respect_gitignore: boolean;
+  copy_ai_configs: boolean;
+  extra_ai_dirs: string[];
 }
 
 export interface NamedServiceConfig {
@@ -195,7 +195,6 @@ export interface CommitGenerationConfig {
 
 const DEFAULT_GIT: GitConfig = {
   auto_create_on_workspace: true,
-  auto_switch_on_workspace: true,
   main_workspace: "main",
   auto_create_workspace_filter: null,
   workspace_filter_regex: null,
@@ -206,10 +205,20 @@ const DEFAULT_BEHAVIOR: BehaviorConfig = {
   max_workspaces: 10,
 };
 
+const DEFAULT_WORKTREE: WorktreeConfig = {
+  path_template: "../{repo}.{workspace}",
+  copy_files: [".env", ".env.local"],
+  copy_ignored: false,
+  respect_gitignore: true,
+  copy_ai_configs: true,
+  extra_ai_dirs: [],
+};
+
 /** DevflowConfig with all required fields filled in */
 export type FilledConfig = DevflowConfig & {
   git: GitConfig;
   behavior: BehaviorConfig;
+  worktree: WorktreeConfig;
 };
 
 /** Fill in defaults for fields that serde may omit via skip_serializing_if */
@@ -220,5 +229,8 @@ export function withDefaults(cfg: DevflowConfig): FilledConfig {
     behavior: cfg.behavior
       ? { ...DEFAULT_BEHAVIOR, ...cfg.behavior }
       : { ...DEFAULT_BEHAVIOR },
+    worktree: cfg.worktree
+      ? { ...DEFAULT_WORKTREE, ...cfg.worktree }
+      : { ...DEFAULT_WORKTREE },
   };
 }

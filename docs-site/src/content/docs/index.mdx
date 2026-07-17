@@ -3,7 +3,7 @@ title: devflow
 description: Isolated development environments for every Git workspace — worktrees, databases, caches, and stateful services that sync with your Git workflow.
 template: splash
 hero:
-  tagline: Create, switch, and clean up isolated development workspaces with matching local services — one command, from branch to running database.
+  tagline: Create, switch, inspect, and clean up isolated development workspaces with matching local services.
   image:
     file: ../../assets/banner.jpg
     alt: devflow
@@ -21,11 +21,11 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 
 ## Why devflow?
 
-devflow is a workspace orchestrator for local development. It connects your Git branch or worktree workflow with per-workspace state: service containers, connection strings, lifecycle hooks, generated env files, and stable HTTPS URLs. Work on multiple features, reviews, migrations, or agent tasks in parallel — without sharing a database or stashing state.
+devflow is a workspace orchestrator for local development. It connects materialized Git worktrees or jj workspaces with per-workspace state: service containers, connection strings, lifecycle hooks, generated env files, and stable HTTPS URLs. Work on multiple features, reviews, migrations, or agent tasks in parallel — without sharing a database or stashing state.
 
 ```bash
 devflow switch -c feature/auth
-# → branch created, worktree at ../myapp.feature_auth
+# → VCS ref created, worktree at ../myapp.feature_auth_fc659bd73585
 # → postgres workspace cloned from main (Copy-on-Write, near-instant)
 # → hooks wrote .env.local with the new DATABASE_URL
 # → your shell is now inside the worktree
@@ -38,7 +38,7 @@ devflow switch -c feature/auth
     workspace). PostgreSQL, ClickHouse, MySQL, Redis, RustFS, or any Docker image.
   </Card>
   <Card title="Git worktrees, managed" icon="seti:git">
-    Optional worktree mode gives every workspace its own directory — env files,
+    Every additional Git workspace gets a linked worktree — env files,
     gitignored caches, and AI tool configs copied in automatically with CoW reflinks.
     Plain `git worktree add` works too: devflow's hooks set it up.
   </Card>
@@ -71,10 +71,10 @@ devflow switch -c feature/auth
 
 ## The core loop
 
-1. `git checkout feature-x` (or `devflow switch feature-x`) triggers the installed Git hook.
+1. `devflow switch -c feature-x` creates a Git worktree or jj workspace from the selected parent; `switch feature-x` reuses or materializes an existing ref.
 2. devflow creates or switches the matching service workspaces across all configured providers.
-3. Lifecycle hooks fire — update `.env.local`, run migrations, trust mise configs.
-4. If configured, workspace processes start in the worktree with service URLs injected.
-5. With worktrees enabled, the shell wrapper `cd`s you into the right directory.
+3. Lifecycle hooks fire in the target directory — update `.env.local`, run migrations, trust mise configs.
+4. If configured, workspace processes start there with service URLs injected.
+5. The shell wrapper `cd`s you into that directory.
 
 Every workspace's app is reachable at a predictable HTTPS URL, every workspace's database at its own connection string — and `devflow remove` cleans all of it up.

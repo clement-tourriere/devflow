@@ -12,13 +12,24 @@ if [ -z "$TASK_ID" ]; then
   exit 2
 fi
 
-BRANCH="agent/${TASK_ID}"
+WORKSPACE="agent/${TASK_ID}"
 
 # --non-interactive runs hooks but skips interactive prompts.
 # Hooks requiring approval must be pre-approved: devflow hook approvals add "<cmd>"
-OUTPUT=$(devflow --json --non-interactive switch -c "$BRANCH")
+OUTPUT=$(devflow --json --non-interactive switch -c "$WORKSPACE")
 
-# If worktrees are enabled, capture the path and use it as the workdir for subsequent agent tool calls
+# Capture the materialized path and use it as the workdir for subsequent agent tool calls.
 WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
+if [ -z "$WORKTREE" ] || [ ! -d "$WORKTREE" ]; then
+  echo "devflow switch did not return a materialized worktree_path" >&2
+  exit 1
+fi
 
-devflow --json service connection "$BRANCH"
+CONNECTION=$(devflow --json service connection "$WORKSPACE")
+
+# Emit one machine-readable document containing everything the caller needs.
+jq -n \
+  --arg worktree_path "$WORKTREE" \
+  --argjson switch "$OUTPUT" \
+  --argjson connection "$CONNECTION" \
+  '{worktree_path: $worktree_path, switch: $switch, connection: $connection}'

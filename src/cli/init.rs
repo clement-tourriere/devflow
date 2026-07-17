@@ -121,12 +121,28 @@ pub(super) async fn init_local_service_main(
 ) {
     match services::factory::create_provider_from_named_config(config, named_cfg).await {
         Ok(be) => {
-            match be.create_workspace("main", None).await {
+            let default_workspace = config.git.main_workspace.as_str();
+            let fallback_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+            let project_dir = config.project_root.as_deref().unwrap_or(&fallback_dir);
+            let service_key =
+                match devflow_core::state::LocalStateManager::new().and_then(|state| {
+                    state.resolve_workspace_service_key_by_dir(project_dir, default_workspace)
+                }) {
+                    Ok(service_key) => service_key,
+                    Err(error) => {
+                        eprintln!(
+                            "Warning: refusing to initialize service workspace '{}': {}",
+                            default_workspace, error
+                        );
+                        return;
+                    }
+                };
+            match be.create_workspace(&service_key, None).await {
                 Ok(info) => {
                     if !quiet_output {
-                        println!("Created main workspace");
+                        println!("Created '{}' workspace", default_workspace);
                     }
-                    if let Ok(conn) = be.get_connection_info("main").await {
+                    if let Ok(conn) = be.get_connection_info(&service_key).await {
                         if let Some(ref uri) = conn.connection_string {
                             if !quiet_output {
                                 println!("  Connection: {}", uri);
@@ -142,9 +158,9 @@ pub(super) async fn init_local_service_main(
                     // Seed if --from specified
                     if let Some(source) = from {
                         if !quiet_output {
-                            println!("Seeding main workspace from: {}", source);
+                            println!("Seeding '{}' workspace from: {}", default_workspace, source);
                         }
-                        match be.seed_from_source("main", source).await {
+                        match be.seed_from_source(&service_key, source).await {
                             Ok(_) => {
                                 if !quiet_output {
                                     println!("Seeding completed successfully");
@@ -156,10 +172,13 @@ pub(super) async fn init_local_service_main(
                 }
                 Err(e) => {
                     eprintln!(
-                        "Warning: could not create main workspace for '{}': {}",
-                        named_cfg.name, e
+                        "Warning: could not create default workspace '{}' for '{}': {}",
+                        default_workspace, named_cfg.name, e
                     );
-                    eprintln!("  You can create it later with: devflow service create main");
+                    eprintln!(
+                        "  You can create it later with: devflow service create {}",
+                        default_workspace
+                    );
                 }
             }
         }
@@ -169,7 +188,8 @@ pub(super) async fn init_local_service_main(
                 named_cfg.name, e
             );
             eprintln!(
-                "  You can create the main workspace later with: devflow service create main"
+                "  You can create the default workspace later with: devflow service create {}",
+                config.git.main_workspace
             );
         }
     }

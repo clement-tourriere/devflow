@@ -1,7 +1,6 @@
 use anyhow::Result;
 use devflow_core::config::Config;
 use devflow_core::vcs;
-use std::path::PathBuf;
 
 pub(super) async fn handle_remove_command(
     config: &Config,
@@ -19,6 +18,16 @@ pub(super) async fn handle_remove_command(
     // Confirm unless --force (skip prompt in JSON/non-interactive mode — require --force)
     if !force {
         if json_output || non_interactive {
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "error",
+                        "workspace": workspace_name,
+                        "error": "Use --force to confirm removal in non-interactive or JSON output mode",
+                    }))?
+                );
+            }
             anyhow::bail!("Use --force to confirm removal in non-interactive or JSON output mode");
         }
         println!("This will remove:");
@@ -51,12 +60,7 @@ pub(super) async fn handle_remove_command(
         devflow_core::workspace::hooks::HookApprovalMode::Interactive
     };
 
-    let project_dir = config_path
-        .as_ref()
-        .and_then(|p| p.parent())
-        .map(|d| d.to_path_buf())
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
+    let project_dir = super::super::operation_project_dir(config_path);
 
     let options = devflow_core::workspace::delete::DeleteOptions {
         lifecycle: devflow_core::workspace::LifecycleOptions {
@@ -70,13 +74,29 @@ pub(super) async fn handle_remove_command(
         force,
     };
 
-    let result = devflow_core::workspace::delete::delete_workspace(
+    let result = match devflow_core::workspace::delete::delete_workspace(
         config,
         &project_dir,
         workspace_name,
         &options,
     )
-    .await?;
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "error",
+                        "workspace": workspace_name,
+                        "error": error.to_string(),
+                    }))?
+                );
+            }
+            return Err(error);
+        }
+    };
 
     // ── CLI-specific output ──────────────────────────────────────────
     let service_failures = result.services.iter().filter(|r| !r.success).count();
@@ -115,9 +135,10 @@ pub(super) async fn handle_remove_command(
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "status": if service_failures == 0 && process_failures == 0 && result.branch_deleted { "ok" } else { "error" },
+                "status": if service_failures == 0 && process_failures == 0 && result.vcs_ref_deleted { "ok" } else { "error" },
                 "workspace": workspace_name,
-                "branch_deleted": result.branch_deleted,
+                "service_key": result.service_key,
+                "vcs_ref_deleted": result.vcs_ref_deleted,
                 "worktree_removed": result.worktree_removed,
                 "worktree_path": result.worktree_path,
                 "services_skipped": keep_services,
@@ -152,10 +173,10 @@ pub(super) async fn handle_remove_command(
                 println!("  [{}] Warning: {}", r.service_name, r.message);
             }
         }
-        if result.branch_deleted {
+        if result.vcs_ref_deleted {
             println!("Workspace deleted: {}", workspace_name);
         }
-        if service_failures == 0 && result.branch_deleted {
+        if service_failures == 0 && result.vcs_ref_deleted {
             println!("Workspace '{}' removed successfully.", workspace_name);
         } else {
             println!(
@@ -181,7 +202,7 @@ pub(super) async fn handle_remove_command(
         );
     }
 
-    if !result.branch_deleted {
+    if !result.vcs_ref_deleted {
         anyhow::bail!("Failed to delete VCS workspace '{}'", workspace_name);
     }
 

@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Style, Stylize},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
@@ -111,6 +111,12 @@ impl Component for ServicesTabComponent {
             KeyCode::Char('S') => {
                 if let Some(svc) = self.selected_entry() {
                     if let Some(ws) = svc.workspaces.get(self.selected_workspace) {
+                        if !ws.supports_lifecycle {
+                            return Action::Error(format!(
+                                "Service '{}' does not support lifecycle operations",
+                                svc.name
+                            ));
+                        }
                         return Action::StartService {
                             service: svc.name.clone(),
                             workspace: ws.name.clone(),
@@ -123,6 +129,12 @@ impl Component for ServicesTabComponent {
             KeyCode::Char('x') => {
                 if let Some(svc) = self.selected_entry() {
                     if let Some(ws) = svc.workspaces.get(self.selected_workspace) {
+                        if !ws.supports_lifecycle {
+                            return Action::Error(format!(
+                                "Service '{}' does not support lifecycle operations",
+                                svc.name
+                            ));
+                        }
                         return Action::StopService {
                             service: svc.name.clone(),
                             workspace: ws.name.clone(),
@@ -135,6 +147,12 @@ impl Component for ServicesTabComponent {
             KeyCode::Char('l') => {
                 if let Some(svc) = self.selected_entry() {
                     if let Some(ws) = svc.workspaces.get(self.selected_workspace) {
+                        if !ws.supports_lifecycle {
+                            return Action::Error(format!(
+                                "Service '{}' does not support logs",
+                                svc.name
+                            ));
+                        }
                         return Action::ViewLogs {
                             service: svc.name.clone(),
                             workspace: ws.name.clone(),

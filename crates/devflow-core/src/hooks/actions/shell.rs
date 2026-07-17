@@ -49,6 +49,10 @@ pub fn run_shell_command(
     };
 
     cmd.current_dir(working_dir);
+    cmd.env("DEVFLOW_WORKSPACE", &context.workspace)
+        .env("DEVFLOW_WORKSPACE_KEY", &context.workspace_key)
+        // Compatibility for scripts written before workspace terminology.
+        .env("DEVFLOW_BRANCH", &context.workspace);
 
     // Hooks run via plain `sh -c`, so `mise activate` (a shell hook) never
     // applies. Prepending the mise shims dir makes mise-managed tools
@@ -97,4 +101,39 @@ pub fn run_shell_command(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_hooks_receive_raw_and_effective_workspace_identities() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("identity.txt");
+        let context = HookContext {
+            workspace: "feature/auth".to_string(),
+            workspace_key: "feature_auth".to_string(),
+            workspace_sanitized: "feature_auth".to_string(),
+            ..Default::default()
+        };
+
+        run_shell_command(
+            &format!(
+                "printf '%s\\n%s\\n%s\\n' \"$DEVFLOW_WORKSPACE\" \"$DEVFLOW_WORKSPACE_KEY\" \"$DEVFLOW_BRANCH\" > '{}'",
+                output.display()
+            ),
+            dir.path(),
+            None,
+            &context,
+            &TemplateEngine::new(),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap(),
+            "feature/auth\nfeature_auth\nfeature/auth\n"
+        );
+    }
 }

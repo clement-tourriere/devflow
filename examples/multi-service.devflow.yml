@@ -3,7 +3,6 @@
 
 git:
   auto_create_on_workspace: true
-  auto_switch_on_workspace: true
   main_workspace: main
   exclude_workspaces:
     - main
@@ -38,9 +37,8 @@ services:
       image: redis:7-alpine
       port_mapping: "6379:6379"
 
-# Worktree support — each workspace gets its own directory
+# Worktree layout — each workspace gets its own directory
 worktree:
-  enabled: true
   path_template: "../{repo}.{workspace}"
   copy_files:
     - .env.local

@@ -4,7 +4,7 @@
 
 <h1 align="center">devflow</h1>
 
-<p align="center">Create, switch, and clean up isolated development workspaces with matching local services — one command, from branch to running database.</p>
+<p align="center">Create, switch, inspect, and clean up isolated development workspaces with matching local services.</p>
 
 <p align="center">
   <a href="https://clement-tourriere.github.io/devflow/">Documentation</a> ·
@@ -15,11 +15,11 @@
 
 ## What is devflow?
 
-devflow is a workspace orchestrator for local development. Every workspace — a Git branch, a worktree, or a Jujutsu change — gets its own complete environment: service containers, connection strings, generated env files, an optional worktree directory, and stable HTTPS URLs. Created in seconds, removed with one command.
+devflow is a workspace orchestrator for local development. Every workspace is a materialized directory — a Git worktree or Jujutsu workspace — with its own service containers, connection strings, generated env files, processes, and stable HTTPS URLs. The primary checkout is the default workspace; every additional Git workspace is a linked worktree.
 
 ```bash
 devflow switch -c feature/auth
-# → branch created, worktree at ../myapp.feature_auth
+# → VCS ref created, worktree at ../myapp.feature_auth_fc659bd73585
 # → postgres workspace cloned from main (Copy-on-Write, near-instant)
 # → hooks wrote .env.local with the new DATABASE_URL
 # → your shell is now inside the worktree
@@ -29,16 +29,16 @@ Work on multiple features, reviews, migrations, or AI-agent tasks in parallel �
 
 ## How it works
 
-1. `git checkout feature-x` (or `devflow switch feature-x`) triggers the Git hook installed by devflow.
+1. `devflow switch -c feature-x` creates a Git worktree or jj workspace from the selected parent. `devflow switch feature-x` reuses one that already exists.
 2. devflow creates or switches the matching service workspaces for every configured service.
-3. Lifecycle hooks fire — write `.env.local`, run migrations, open a tmux window.
-4. With worktrees enabled, the shell wrapper `cd`s you into the workspace directory.
+3. Lifecycle hooks fire inside the target directory — write `.env.local`, run migrations, open a tmux window.
+4. The shell wrapper `cd`s you into that directory.
 
 Every workspace's app is reachable at a predictable HTTPS URL, every workspace's database at its own connection string — and `devflow remove` cleans all of it up.
 
 ## Highlights
 
-- **Automatic VCS integration** — installed hooks create and switch environments on plain `git checkout`; Jujutsu (jj) is auto-detected and supported alongside Git
+- **Git and jj workspaces** — Git uses linked worktrees, Jujutsu uses native workspaces, and manually created worktrees can be adopted without an in-place checkout mode
 - **Two isolation models, chosen per service** — physical (a Copy-on-Write Docker container per workspace) or logical (one shared global engine with a database, bucket, or DB index per workspace)
 - **Multi-service** — PostgreSQL, ClickHouse, MySQL, Redis, RustFS object storage, any Docker image, or custom plugin providers; cloud branching via Neon/DBLab/Xata (experimental)
 - **Project processes** — workspace-scoped web servers, workers, and schedulers with native or direct Pitchfork start/stop/status/logs, ready checks, dependency ordering, port bumping, and service env interpolation
@@ -68,7 +68,7 @@ devflow update          # or: devflow update --check
 ## Quick start
 
 ```bash
-# 1. Initialize a project (interactive: pick services, worktrees, Git hooks)
+# 1. Initialize a project (interactive: pick services and Git hooks)
 cd ~/my-project
 devflow init
 
@@ -85,7 +85,7 @@ devflow connection feature/auth --format env
 devflow remove feature/auth
 ```
 
-If worktrees are enabled, install shell integration so `devflow switch` can move your shell into the selected worktree:
+Install shell integration so `devflow switch` can move your shell into the selected workspace directory:
 
 ```bash
 eval "$(devflow shell-init)"
@@ -96,7 +96,7 @@ eval "$(devflow shell-init)"
 ```bash
 devflow switch                  # Pick a workspace interactively
 devflow switch -c feature/api    # Create and switch to a workspace
-devflow list                    # List workspaces and service status
+devflow list                    # Parent tree with paths, services, and process health
 devflow status                  # Show current workspace information
 devflow connection feature/api   # Show service connection info
 devflow remove feature/api       # Remove workspace resources
@@ -105,6 +105,8 @@ devflow tui                     # Open the terminal dashboard
 ```
 
 Run `devflow --help-all` to see advanced service, hook, proxy, agent, and config commands.
+
+`devflow --json list` has one stable document shape regardless of service count. It includes `schema_version`, project/VCS context, `context_workspace`, `default_workspace`, `roots`, workspace nodes, and `warnings`. Workspace names remain the raw VCS names users typed; a separate backend `service_key` is used for databases, containers, and generated paths. `identity_status` and `canonical_service_key` distinguish new canonical keys from safely retained or unresolved legacy identities. Parent relationships record immutable creation provenance, so children stay attached to their recorded parent even if that parent is later missing.
 
 ## Services
 
@@ -154,7 +156,7 @@ devflow process logs api --tail 100 --follow
 devflow process stop --all
 ```
 
-When `processes.auto_start: true`, `devflow switch` starts configured processes after services and hooks are aligned. Auto-started commands use the same approval store as hooks, so agents can pre-approve with `devflow hook approvals add "npm run dev"` or set `DEVFLOW_APPROVE_HOOKS=1`. Set `processes.provider: pitchfork` to embed Pitchfork's Rust supervisor directly (no `pitchfork` CLI subprocess) for start/stop/log handling while devflow keeps desired state, proxy records, and GUI status. Running processes with ports are also exposed through the devflow proxy as `https://<process>.<workspace>.<project>.<suffix>` (default suffix: `.local`). `devflow remove` stops workspace processes before deleting the worktree and service workspaces. Run `devflow daemon start` to keep desired-state, `watch` restart-on-change, and `retry` reconciliation active in the background. See [Project processes & Pitchfork](https://clement-tourriere.github.io/devflow/guides/processes/) and [Adding devflow to an existing project](https://clement-tourriere.github.io/devflow/getting-started/existing-project/) for Compose-to-devflow migration examples.
+When `processes.auto_start: true`, `devflow switch` starts configured processes after services and hooks are aligned. Auto-started commands use the same approval store as hooks, so agents can pre-approve with `devflow hook approvals add "npm run dev"` or set `DEVFLOW_APPROVE_HOOKS=1`. Set `processes.provider: pitchfork` to embed Pitchfork's Rust supervisor directly (no `pitchfork` CLI subprocess) for start/stop/log handling while devflow keeps desired state, proxy records, and GUI status. Running processes with ports are also exposed through the devflow proxy as `https://<process>.<workspace>.<project>.<suffix>` (default suffix: `.local`). `devflow remove` preflights the worktree, runs removal hooks while the directory still exists, stops processes, deletes services, and only then removes the worktree and VCS ref. Run `devflow daemon start` to keep desired-state, `watch` restart-on-change, and `retry` reconciliation active in the background. See [Project processes & Pitchfork](https://clement-tourriere.github.io/devflow/guides/processes/) and [Adding devflow to an existing project](https://clement-tourriere.github.io/devflow/getting-started/existing-project/) for Compose-to-devflow migration examples.
 
 ## Hooks and automation
 
@@ -195,7 +197,6 @@ services:
       image: postgres:17
 
 worktree:
-  enabled: true
   path_template: "../{repo}.{workspace}"
 
 hooks:
@@ -217,6 +218,8 @@ processes:
       env:
         DATABASE_URL: "{{ service['app-db'].url }}"
 ```
+
+The `worktree` block controls paths and copy behavior; there is no enable/disable mode. Older `worktree.enabled` keys are ignored with a deprecation warning; they can no longer switch devflow back to an in-place checkout.
 
 A shared-engine service is one stanza — no per-workspace containers, ports, or volumes:
 

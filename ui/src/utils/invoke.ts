@@ -27,12 +27,12 @@ import type {
   OrphanProjectEntry,
   OrphanCleanupResult,
   VcsInfo,
-  GitBranchInfo,
+  VcsWorkspaceInfo,
   TerminalSessionInfo,
-  WorkspaceCreationMode,
   PruneResult,
   SwitchWorkspaceResult,
   DeleteWorkspaceResult,
+  DeleteWorkspacePreflight,
   ProcessStatus,
   ProcessOperationResponse,
   PitchforkBridgeInfo,
@@ -44,14 +44,14 @@ export const removeProject = (path: string) =>
   invoke<void>("remove_project", { path });
 export const getProjectDetail = (projectPath: string) =>
   invoke<ProjectDetail>("get_project_detail", { projectPath });
-export const addOrInitProject = (path: string, name?: string, vcsPreference?: string, worktreeEnabled?: boolean, mainBranch?: string) =>
-  invoke<ProjectEntry>("add_or_init_project", { path, name, vcsPreference, worktreeEnabled, mainBranch });
+export const addOrInitProject = (path: string, name?: string, vcsPreference?: string, mainWorkspace?: string) =>
+  invoke<ProjectEntry>("add_or_init_project", { path, name, vcsPreference, mainWorkspace });
 
 // VCS
 export const detectVcsInfo = (path: string) =>
   invoke<VcsInfo>("detect_vcs_info", { path });
-export const detectGitBranches = (path: string) =>
-  invoke<GitBranchInfo>("detect_git_branches", { path });
+export const detectVcsWorkspaces = (path: string) =>
+  invoke<VcsWorkspaceInfo>("detect_vcs_workspaces", { path });
 
 // Workspaces
 export const listWorkspaces = (projectPath: string) =>
@@ -70,7 +70,6 @@ export const createWorkspace = (
   projectPath: string,
   workspaceName: string,
   fromWorkspace?: string,
-  creationMode?: WorkspaceCreationMode,
   copyFiles?: string[],
   copyIgnored?: boolean
 ) =>
@@ -78,7 +77,6 @@ export const createWorkspace = (
     projectPath,
     workspaceName,
     fromWorkspace,
-    creationMode,
     copyFiles,
     copyIgnored,
   });
@@ -87,10 +85,16 @@ export const switchWorkspace = (projectPath: string, workspaceName: string) =>
     projectPath,
     workspaceName,
   });
-export const deleteWorkspace = (projectPath: string, workspaceName: string) =>
+export const preflightDeleteWorkspace = (projectPath: string, workspaceName: string) =>
+  invoke<DeleteWorkspacePreflight>("preflight_delete_workspace", {
+    projectPath,
+    workspaceName,
+  });
+export const deleteWorkspace = (projectPath: string, workspaceName: string, force = false) =>
   invoke<DeleteWorkspaceResult>("delete_workspace", {
     projectPath,
     workspaceName,
+    force,
   });
 export const pruneWorktrees = (projectPath: string) =>
   invoke<PruneResult>("prune_worktrees", { projectPath });

@@ -39,7 +39,7 @@ Check the per-phase `hooks` summary in the JSON output: `skipped > 0` usually me
 Equivalent manual flow:
 
 ```bash
-devflow --json --non-interactive init "$(basename "$PWD")"
+devflow --json --non-interactive init --name "$(basename "$PWD")"
 devflow --json install-hooks
 devflow --json capabilities
 ```
@@ -57,8 +57,9 @@ Equivalent manual flow:
 WORKSPACE="agent/$TASK_ID"
 OUTPUT=$(devflow --json --non-interactive switch -c "$WORKSPACE")
 
-# If worktrees are enabled, keep this path and use it as the workdir for subsequent agent tool calls
+# Keep the materialized workspace path and use it for subsequent agent tool calls
 WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
+test -d "$WORKTREE"
 
 devflow --json service connection "$WORKSPACE"
 ```
@@ -111,8 +112,9 @@ WORKSPACE="agent/$TASK_ID"
 # 1) Create/switch isolated environment for this task
 OUTPUT=$(devflow --json --non-interactive switch -c "$WORKSPACE")
 
-# 2) If a worktree was created, use it as the workdir for subsequent agent tool calls
+# 2) Use the materialized workspace as the workdir for subsequent agent tool calls
 WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
+test -d "$WORKTREE"
 
 # 3) Read connection info and run the task
 CONN=$(devflow --json service connection "$WORKSPACE" | jq -r '.connection_string')
@@ -120,8 +122,9 @@ CONN=$(devflow --json service connection "$WORKSPACE" | jq -r '.connection_strin
 # 4) Optional reset for retries
 devflow --json --non-interactive service reset "$WORKSPACE"
 
-# 5) Cleanup when done
-devflow --json --non-interactive service delete "$WORKSPACE"
+# 5) Cleanup from the primary checkout; a workspace cannot remove itself
+PROJECT_ROOT=$(devflow --json list | jq -r '.project.root')
+(cd "$PROJECT_ROOT" && devflow --json --non-interactive remove "$WORKSPACE" --force)
 ```
 
 ## AI Commit Messages
@@ -143,6 +146,13 @@ devflow commit --ai
 ## Automation Contract
 
 - Multi-provider `service create`, `service delete`, and `switch` return non-zero exit code when any provider fails.
+- JSON mode emits one document on stdout for supported machine-readable commands; `switch -x`/`--detach`/`--open` nests command or session details under `execution`. Output interfaces (`shell-init`, `completions`, `tui`) reject `--json`.
 - `destroy` and `remove` require `--force` in `--non-interactive` or `--json` mode.
 - Unapproved hooks are skipped with a warning in non-interactive mode (the command completes; the JSON `hooks` summary reports them as `skipped`). Set `DEVFLOW_APPROVE_HOOKS=1` to auto-approve.
+- Git workspaces are always materialized as linked worktrees; the primary checkout is the default workspace. jj uses native workspaces.
+- `devflow --json list` always returns one versioned tree document, including `context_workspace`, `default_workspace`, `roots`, `workspaces`, and `warnings`.
+- Treat `name` as the raw VCS identity. Use `service_key` (also exposed to hooks as `workspace_key` and the `workspace_sanitized` compatibility alias) for database, container, and path identifiers.
+- Read `service_key` from command/inventory output instead of reconstructing it; an unambiguously migrated workspace may retain a legacy key, while ambiguous legacy ownership is blocked.
+- A workspace's `parent` is immutable creation provenance. A missing/deleted parent remains visible in inventory rather than silently changing the child into a root.
+- Removal checks dirty/default/current workspaces before changing anything. `--force` explicitly accepts dirty-worktree or partial-cleanup risk.
 - Use `devflow --json capabilities` for a machine-readable summary of guarantees.

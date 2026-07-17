@@ -40,10 +40,12 @@ pub(super) fn handle_sync_ai_configs(json_output: bool) -> Result<()> {
     }
 
     // Collect AI dirs to sync
-    let wt_config = config.worktree.as_ref();
-    let extra_dirs: Vec<&str> = wt_config
-        .map(|wt| wt.extra_ai_dirs.iter().map(|s| s.as_str()).collect())
-        .unwrap_or_default();
+    let extra_dirs: Vec<&str> = config
+        .worktree
+        .extra_ai_dirs
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
     let all_dirs: Vec<&str> = AI_TOOL_DIRS.iter().copied().chain(extra_dirs).collect();
 
     let mut synced_dirs: Vec<String> = Vec::new();

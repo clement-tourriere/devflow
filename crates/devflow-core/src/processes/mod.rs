@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
@@ -1241,7 +1241,34 @@ pub fn list_workspace_processes(
     project_dir: &Path,
     workspace: Option<&str>,
 ) -> Result<Vec<ProcessStatus>> {
-    runtime_for_config(config)?.status(config, project_dir, workspace)
+    let mut statuses = runtime_for_config(config)?.status(config, project_dir, workspace)?;
+
+    // Runtime directories and persisted records use the collision-safe
+    // service key. Public status DTOs use the raw VCS identity so callers do
+    // not need to reverse backend identifiers themselves.
+    if let Some(raw_name) = workspace {
+        let service_key = resolve_runtime_workspace_key(config, project_dir, raw_name)?;
+        for status in &mut statuses {
+            if status.workspace == service_key {
+                status.workspace = raw_name.to_string();
+            }
+        }
+    } else if let Ok(state) = crate::state::LocalStateManager::new() {
+        let mut raw_by_key: HashMap<String, Option<String>> = HashMap::new();
+        for registered in state.get_workspaces_by_dir(project_dir) {
+            raw_by_key
+                .entry(registered.service_key)
+                .and_modify(|raw| *raw = None)
+                .or_insert_with(|| Some(registered.name));
+        }
+        for status in &mut statuses {
+            if let Some(Some(raw_name)) = raw_by_key.get(&status.workspace) {
+                status.workspace = raw_name.clone();
+            }
+        }
+    }
+
+    Ok(statuses)
 }
 
 /// Forget one persisted process state record without stopping any OS process.
@@ -1281,7 +1308,9 @@ fn list_workspace_processes_native(
         .as_ref()
         .map(|processes| processes.daemons.keys().cloned().collect())
         .unwrap_or_default();
-    let workspace_filter = workspace.map(|w| config.get_normalized_workspace_name(w));
+    let workspace_filter = workspace
+        .map(|workspace| resolve_runtime_workspace_key(config, &project_dir, workspace))
+        .transpose()?;
     if state_root.exists() {
         for ws_entry in fs::read_dir(state_root)? {
             let ws_entry = ws_entry?;
@@ -2631,7 +2660,11 @@ fn pitchfork_daemon_id(
         .canonicalize()
         .unwrap_or_else(|_| vcs::resolve_project_root(project_dir));
     let project_hash = project_hash(&project_root);
-    let workspace = dns_label(&config.get_normalized_workspace_name(workspace));
+    let workspace = dns_label(&resolve_runtime_workspace_key(
+        config,
+        &project_root,
+        workspace,
+    )?);
     let namespace = if workspace.is_empty() {
         format!("df{}", &project_hash[..12.min(project_hash.len())])
     } else {
@@ -3205,7 +3238,7 @@ fn runtime_paths(config: &Config, project_dir: &Path, workspace: &str) -> Result
     let project_root = vcs::resolve_project_root(project_dir)
         .canonicalize()
         .unwrap_or_else(|_| vcs::resolve_project_root(project_dir));
-    let workspace = config.get_normalized_workspace_name(workspace);
+    let workspace = resolve_runtime_workspace_key(config, &project_root, workspace)?;
     let base = state_root()?
         .join(project_hash(&project_root))
         .join("workspaces")
@@ -3216,6 +3249,44 @@ fn runtime_paths(config: &Config, project_dir: &Path, workspace: &str) -> Result
         processes_dir: base.join("processes"),
         logs_dir: base.join("logs"),
     })
+}
+
+fn resolve_runtime_workspace_key(
+    _config: &Config,
+    project_dir: &Path,
+    workspace: &str,
+) -> Result<String> {
+    match crate::state::LocalStateManager::new() {
+        Ok(state) => {
+            let registered = state.get_workspaces_by_dir(project_dir);
+            let is_raw_identity = registered
+                .iter()
+                .any(|candidate| candidate.name == workspace)
+                || crate::vcs::detect_vcs_provider(project_dir)
+                    .ok()
+                    .and_then(|repo| repo.workspace_exists(workspace).ok())
+                    .unwrap_or(false);
+            if !is_raw_identity {
+                let owners = registered
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.raw_identity_verified && candidate.service_key == workspace
+                    })
+                    .collect::<Vec<_>>();
+                if owners.len() == 1 {
+                    return Ok(workspace.to_string());
+                }
+                if owners.len() > 1 {
+                    anyhow::bail!(
+                        "process workspace key '{}' has multiple raw owners; refusing an ambiguous operation",
+                        workspace
+                    );
+                }
+            }
+            state.resolve_workspace_service_key_by_dir(project_dir, workspace)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn state_root() -> Result<PathBuf> {
@@ -3828,8 +3899,7 @@ processes:
         let project = TempDir::new().unwrap();
         let state = TempDir::new().unwrap();
         std::env::set_var("DEVFLOW_PROCESS_STATE_DIR", state.path());
-        let mut config = test_config();
-        config.worktree = None;
+        let config = test_config();
 
         let results = start_workspace_processes(
             &config,
@@ -3847,6 +3917,9 @@ processes:
         let statuses =
             list_workspace_processes(&config, project.path(), Some("feature/test")).unwrap();
         assert_eq!(statuses.len(), 2);
+        assert!(statuses
+            .iter()
+            .all(|status| status.workspace == "feature/test"));
         let web_status = statuses.iter().find(|s| s.process == "web").unwrap();
         assert!(matches!(web_status.status.as_str(), "ready" | "running"));
         let worker_status = statuses.iter().find(|s| s.process == "worker").unwrap();
@@ -3912,7 +3985,10 @@ processes:
             list_workspace_processes(&bump_config, project.path(), Some("feature/bump")).unwrap();
         assert_eq!(
             bump_status[0].urls,
-            vec!["https://api.feature-bump.myapp.local"]
+            vec![format!(
+                "https://api.{}.myapp.local",
+                dns_label(&bump_config.get_service_workspace_key("feature/bump"))
+            )]
         );
         let _ = stop_workspace_processes(
             &bump_config,

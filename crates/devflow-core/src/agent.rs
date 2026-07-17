@@ -151,7 +151,7 @@ description: Create a new devflow workspace with isolated services for a task or
 2. Run `devflow --json --non-interactive switch -c $ARGUMENTS` to create and switch
    - The `-c` flag creates the workspace if it doesn't exist
    - This provisions isolated service instances (databases, caches) automatically
-   - If worktrees are enabled, a new Git worktree directory is created
+   - A new Git worktree or jj workspace is materialized when needed
    - Lifecycle hooks (e.g. `post-create`, `post-switch`) run automatically
 3. **Parse the JSON output** to check for `worktree_path`:
    - If `worktree_path` is present, use it as the working directory/workdir for subsequent tool calls

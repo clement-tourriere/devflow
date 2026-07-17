@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use super::workspace::list::{enrich_branch_list_json, print_enriched_branch_list};
 use anyhow::Result;
 use devflow_core::config::{Config, EffectiveConfig};
 use devflow_core::docker;
@@ -8,10 +7,223 @@ use devflow_core::hooks::HookPhase;
 use devflow_core::services::{self};
 use devflow_core::state::LocalStateManager;
 use devflow_core::vcs;
+use serde::Serialize;
+
+/// Public CLI representation of a provider workspace.
+///
+/// Providers deliberately operate on backend-safe keys. The CLI contract uses
+/// raw VCS identities, while retaining all previous WorkspaceInfo fields and
+/// exposing the provider identity explicitly as `service_key`.
+#[derive(Debug, Clone, Serialize)]
+struct PublicWorkspaceInfo {
+    name: String,
+    workspace: String,
+    service_key: String,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    parent_workspace: Option<String>,
+    parent_service_key: Option<String>,
+    database_name: String,
+    state: Option<String>,
+}
+
+/// Stable machine-readable summary of one configured service definition.
+#[derive(Debug, Clone, Serialize)]
+struct ConfiguredServiceInfo {
+    name: String,
+    service_type: String,
+    provider_type: String,
+    auto_workspace: bool,
+    default: bool,
+    source: String,
+}
+
+fn configured_service_infos(
+    config: &Config,
+    config_path: &Option<PathBuf>,
+) -> Vec<ConfiguredServiceInfo> {
+    let services = if let Some(path) = config_path {
+        config.services_with_sources(path)
+    } else {
+        config
+            .resolve_services()
+            .into_iter()
+            .map(|service| devflow_core::config::ServiceWithSource {
+                service,
+                source: devflow_core::config::ServiceSource::Config,
+            })
+            .collect()
+    };
+
+    services
+        .into_iter()
+        .map(|entry| ConfiguredServiceInfo {
+            name: entry.service.name,
+            service_type: entry.service.service_type,
+            provider_type: entry.service.provider_type,
+            auto_workspace: entry.service.auto_workspace,
+            default: entry.service.default,
+            source: entry.source.as_str().to_string(),
+        })
+        .collect()
+}
+
+fn print_configured_services(
+    config: &Config,
+    config_path: &Option<PathBuf>,
+    json_output: bool,
+) -> Result<()> {
+    let services = configured_service_infos(config, config_path);
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "services": services,
+            }))?
+        );
+    } else if services.is_empty() {
+        println!("No services configured.");
+    } else {
+        println!("Configured services:");
+        for service in services {
+            let mut tags = Vec::new();
+            if service.default {
+                tags.push("default");
+            }
+            if service.auto_workspace {
+                tags.push("auto-workspace");
+            }
+            tags.push(service.source.as_str());
+            println!(
+                "  {} ({} via {}) [{}]",
+                service.name,
+                service.service_type,
+                service.provider_type,
+                tags.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
+fn project_dir_for_config(config_path: &Option<PathBuf>) -> PathBuf {
+    super::operation_project_dir(config_path)
+}
+
+fn provider_uses_local_runtime(provider_type: &str) -> bool {
+    matches!(
+        provider_type.to_ascii_lowercase().as_str(),
+        "local" | "docker" | "shared" | "global"
+    )
+}
+
+fn validate_scaffoldable_service(service_type: &str, provider_type: &str) -> Result<()> {
+    let service_type = service_type.to_ascii_lowercase();
+    let provider_type = provider_type.to_ascii_lowercase();
+    let supported = match provider_type.as_str() {
+        "local" | "docker" => matches!(
+            service_type.as_str(),
+            "postgres" | "clickhouse" | "mysql" | "mariadb"
+        ),
+        "shared" | "global" => matches!(
+            service_type.as_str(),
+            "postgres" | "clickhouse" | "redis" | "rustfs" | "s3" | "objectstorage"
+        ),
+        "neon" | "dblab" | "database_lab" | "xata" | "xata_lite" => {
+            anyhow::bail!(
+                "Provider '{}' requires credentials and provider-specific fields. Define it explicitly under `services:` in .devflow.yml instead of using `service add`.",
+                provider_type
+            );
+        }
+        _ => false,
+    };
+
+    if !supported {
+        anyhow::bail!(
+            "`service add` cannot fully configure service type '{}' with provider '{}'. Supported scaffolds: postgres (local/shared), clickhouse (local/shared), mysql (local), redis (shared), and rustfs (shared). Configure custom/plugin services explicitly in .devflow.yml.",
+            service_type,
+            provider_type
+        );
+    }
+    Ok(())
+}
+
+fn resolve_effective_service_key(
+    config_path: &Option<PathBuf>,
+    raw_workspace: &str,
+) -> Result<String> {
+    LocalStateManager::new()?
+        .resolve_workspace_service_key_by_dir(&project_dir_for_config(config_path), raw_workspace)
+}
+
+fn raw_workspace_for_service_key(
+    config: &Config,
+    config_path: &Option<PathBuf>,
+    service_key: &str,
+) -> Option<String> {
+    if let Some(path) = config_path {
+        if let Ok(state) = LocalStateManager::new() {
+            let mut owners = state
+                .get_workspaces(path)
+                .into_iter()
+                .filter(|workspace| workspace.service_key == service_key);
+            if let Some(workspace) = owners.next() {
+                if owners.next().is_none() {
+                    return Some(workspace.name);
+                }
+                return None;
+            }
+        }
+    }
+
+    let default_workspace = &config.git.main_workspace;
+    let default_key = if config_path.is_some() {
+        resolve_effective_service_key(config_path, default_workspace).ok()?
+    } else {
+        config.get_service_workspace_key(default_workspace)
+    };
+    (default_key == service_key).then(|| default_workspace.clone())
+}
+
+fn public_workspace_info(
+    config: &Config,
+    config_path: &Option<PathBuf>,
+    raw_workspace: &str,
+    raw_parent: Option<&str>,
+    info: &services::WorkspaceInfo,
+) -> PublicWorkspaceInfo {
+    let parent_service_key = info.parent_workspace.clone();
+    let parent_workspace = parent_service_key.as_deref().map(|key| {
+        raw_parent
+            .filter(|parent| {
+                let parent_key = if config_path.is_some() {
+                    resolve_effective_service_key(config_path, parent).ok()
+                } else {
+                    Some(config.get_service_workspace_key(parent))
+                };
+                parent_key.as_deref() == Some(key)
+            })
+            .map(str::to_owned)
+            .or_else(|| raw_workspace_for_service_key(config, config_path, key))
+            // Unknown provider-owned parents retain their previous value for
+            // compatibility; `parent_service_key` makes its identity explicit.
+            .unwrap_or_else(|| key.to_string())
+    });
+
+    PublicWorkspaceInfo {
+        name: raw_workspace.to_string(),
+        workspace: raw_workspace.to_string(),
+        service_key: info.name.clone(),
+        created_at: info.created_at,
+        parent_workspace,
+        parent_service_key,
+        database_name: info.database_name.clone(),
+        state: info.state.clone(),
+    }
+}
 
 /// Internal enum for multi-service aggregation dispatch.
 pub(super) enum ServiceAggregation {
-    List,
     Status,
     Doctor,
     Capabilities,
@@ -39,8 +251,7 @@ pub(crate) async fn run_add_service_wizard(
             "clickhouse  — ClickHouse analytics database",
             "mysql       — MySQL database",
             "redis       — Redis cache (shared DB per workspace)",
-            "generic     — Generic Docker container",
-            "plugin      — External plugin",
+            "rustfs      — S3-compatible object storage (shared buckets)",
         ];
         let selection = Select::new("What type of service?", service_types)
             .with_help_message("Use arrow keys to navigate, Enter to select")
@@ -70,15 +281,11 @@ pub(crate) async fn run_add_service_wizard(
             "postgres" => vec![
                 "local               — Docker container per workspace (CoW)",
                 "shared              — One global container, a database per workspace",
-                "neon                 — Neon serverless Postgres (cloud)",
-                "dblab               — Database Lab Engine (clone-based branching)",
-                "xata                — Xata serverless database (cloud)",
             ],
             "clickhouse" => vec!["local               — Docker container on this machine"],
             "mysql" => vec!["local               — Docker container on this machine"],
             "redis" => vec!["shared              — One global container, DB index per workspace"],
-            "generic" => vec!["local               — Docker container on this machine"],
-            "plugin" => vec!["local               — Managed by plugin"],
+            "rustfs" => vec!["shared              — One global container, bucket per workspace"],
             _ => vec!["local               — Docker container on this machine"],
         };
 
@@ -106,6 +313,7 @@ pub(crate) async fn run_add_service_wizard(
             }
         }
     };
+    validate_scaffoldable_service(&service_type, &provider_type)?;
 
     // 2.5. Docker container discovery
     let discovered = offer_discovered_containers(
@@ -122,8 +330,7 @@ pub(crate) async fn run_add_service_wizard(
             "clickhouse" => "analytics".to_string(),
             "mysql" => "mysql".to_string(),
             "redis" => "redis".to_string(),
-            "generic" => "app".to_string(),
-            "plugin" => "plugin".to_string(),
+            "rustfs" => "storage".to_string(),
             _ => "db".to_string(),
         }
     } else {
@@ -135,8 +342,7 @@ pub(crate) async fn run_add_service_wizard(
                 "clickhouse" => "analytics",
                 "mysql" => "mysql",
                 "redis" => "redis",
-                "generic" => "app",
-                "plugin" => "plugin",
+                "rustfs" => "storage",
                 _ => "db",
             }
         };
@@ -182,11 +388,19 @@ pub(crate) async fn run_add_service_wizard(
         } else {
             None
         },
-        shared: if service_type == "redis" {
+        shared: if matches!(provider_type.as_str(), "shared" | "global")
+            || matches!(
+                service_type.as_str(),
+                "redis" | "rustfs" | "s3" | "objectstorage"
+            ) {
             Some(devflow_core::config::SharedServiceConfig {
-                image: discovered_image
-                    .clone()
-                    .or_else(|| Some("redis:7".to_string())),
+                image: if service_type == "redis" {
+                    discovered_image
+                        .clone()
+                        .or_else(|| Some("redis:7".to_string()))
+                } else {
+                    discovered_image.clone()
+                },
                 ..Default::default()
             })
         } else {
@@ -318,16 +532,16 @@ pub(crate) async fn run_add_service_wizard(
     // Use explicit seed source or discovered container's connection URL
     let effective_seed = from.map(|s| s.to_string()).or(discovered_seed);
 
-    // Create main workspace for local providers
+    // Create the configured default workspace for local providers.
     let is_effective_local = services::factory::ProviderType::is_local(&named_cfg.provider_type);
-    if is_effective_local {
+    if provider_uses_local_runtime(&named_cfg.provider_type) {
         let mut config_with_service = config.clone();
         if let Some(state_services) = state.get_services(config_path) {
             config_with_service.services = Some(state_services);
         }
 
         #[cfg(feature = "service-local")]
-        if cfg!(target_os = "linux") {
+        if cfg!(target_os = "linux") && is_effective_local {
             if let Some(data_root) =
                 super::init::attempt_zfs_auto_setup(non_interactive, json_output).await
             {
@@ -408,15 +622,22 @@ pub(super) async fn handle_service_dispatch(
             // When explicit flags are provided, use them directly; otherwise delegate to wizard
             if name.is_some() || provider.is_some() || service_type.is_some() {
                 // Direct mode with explicit flags — keep existing behavior for CLI power users
-                let service_type =
-                    service_type.unwrap_or_else(devflow_core::config::default_service_type);
-                let provider_type = provider.unwrap_or_else(|| {
-                    if service_type == "redis" {
-                        "shared".to_string()
-                    } else {
-                        "local".to_string()
-                    }
-                });
+                let service_type = service_type
+                    .unwrap_or_else(devflow_core::config::default_service_type)
+                    .to_ascii_lowercase();
+                let provider_type = provider
+                    .unwrap_or_else(|| {
+                        if matches!(
+                            service_type.as_str(),
+                            "redis" | "rustfs" | "s3" | "objectstorage"
+                        ) {
+                            "shared".to_string()
+                        } else {
+                            "local".to_string()
+                        }
+                    })
+                    .to_ascii_lowercase();
+                validate_scaffoldable_service(&service_type, &provider_type)?;
                 let name = if let Some(n) = name {
                     n
                 } else if non_interactive || json_output {
@@ -457,9 +678,13 @@ pub(super) async fn handle_service_dispatch(
                     } else {
                         None
                     },
-                    shared: if service_type == "redis" {
+                    shared: if matches!(provider_type.as_str(), "shared" | "global")
+                        || matches!(
+                            service_type.as_str(),
+                            "redis" | "rustfs" | "s3" | "objectstorage"
+                        ) {
                         Some(devflow_core::config::SharedServiceConfig {
-                            image: Some("redis:7".to_string()),
+                            image: (service_type == "redis").then(|| "redis:7".to_string()),
                             ..Default::default()
                         })
                     } else {
@@ -503,7 +728,7 @@ pub(super) async fn handle_service_dispatch(
                     println!("Added service '{}' to local state", name);
                 }
 
-                if is_local {
+                if provider_uses_local_runtime(&provider_type) {
                     let mut config_with_service = config.clone();
                     if let Some(state_services) = state.get_services(&config_path_buf) {
                         config_with_service.services = Some(state_services);
@@ -578,26 +803,8 @@ pub(super) async fn handle_service_dispatch(
             }
         }
         super::ServiceCommands::List => {
-            // List configured services (not workspaces)
-            let has_multiple_services = config.resolve_services().len() > 1;
-            if database_name.is_none() && has_multiple_services {
-                return handle_multi_service_aggregation(
-                    ServiceAggregation::List,
-                    config,
-                    json_output,
-                    config_path,
-                )
-                .await;
-            }
-            let named = services::factory::resolve_provider(config, database_name).await?;
-            let workspaces = named.provider.list_workspaces().await?;
-            if json_output {
-                let enriched = enrich_branch_list_json(&workspaces, config, config_path);
-                println!("{}", serde_json::to_string_pretty(&enriched)?);
-            } else {
-                println!("Branches ({}):", named.provider.provider_name());
-                print_enriched_branch_list(&workspaces, config, config_path);
-            }
+            let _ = database_name;
+            return print_configured_services(config, config_path, json_output);
         }
         super::ServiceCommands::Up => {
             let statuses = services::factory::reconcile_shared_engines(config).await?;
@@ -834,7 +1041,14 @@ pub(super) async fn handle_service_provider_command(
     // For Create/Delete: if there are multiple services and no --service flag,
     // use orchestration to operate on all auto_workspace services atomically.
     if is_orchestratable_mutation && database_name.is_none() && has_multiple_services {
-        return handle_orchestrated_mutation(cmd, config, json_output, non_interactive).await;
+        return handle_orchestrated_mutation(
+            cmd,
+            config,
+            json_output,
+            non_interactive,
+            config_path,
+        )
+        .await;
     }
 
     let named = services::factory::resolve_provider(config, database_name).await?;
@@ -854,7 +1068,12 @@ pub(super) async fn handle_service_provider_command(
             workspace_name,
             from,
         } => {
-            let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let service_key = resolve_effective_service_key(config_path, &workspace_name)?;
+            let parent_service_key = from
+                .as_deref()
+                .map(|parent| resolve_effective_service_key(config_path, parent))
+                .transpose()?;
+            let project_dir = project_dir_for_config(config_path);
             let hook_opts = devflow_core::workspace::LifecycleOptions {
                 hook_approval: if non_interactive || json_output {
                     devflow_core::workspace::hooks::HookApprovalMode::NonInteractive
@@ -877,7 +1096,7 @@ pub(super) async fn handle_service_provider_command(
 
             // Single-service path (explicit --service or single service)
             let info = provider
-                .create_workspace(&workspace_name, from.as_deref())
+                .create_workspace(&service_key, parent_service_key.as_deref())
                 .await?;
 
             // Fire post-service-create hooks
@@ -891,17 +1110,31 @@ pub(super) async fn handle_service_provider_command(
             .await?;
 
             if json_output {
-                println!("{}", serde_json::to_string_pretty(&info)?);
+                let public_info = public_workspace_info(
+                    config,
+                    config_path,
+                    &workspace_name,
+                    from.as_deref(),
+                    &info,
+                );
+                println!("{}", serde_json::to_string_pretty(&public_info)?);
             } else {
-                println!("Created service workspace: {}", info.name);
+                println!("Created service workspace: {}", workspace_name);
                 if let Some(state) = &info.state {
                     println!("  State: {}", state);
                 }
-                if let Some(parent) = &info.parent_workspace {
+                let public_info = public_workspace_info(
+                    config,
+                    config_path,
+                    &workspace_name,
+                    from.as_deref(),
+                    &info,
+                );
+                if let Some(parent) = &public_info.parent_workspace {
                     println!("  Parent: {}", parent);
                 }
                 // Show connection info
-                if let Ok(conn) = provider.get_connection_info(&workspace_name).await {
+                if let Ok(conn) = provider.get_connection_info(&service_key).await {
                     if let Some(ref uri) = conn.connection_string {
                         println!("  Connection: {}", uri);
                     }
@@ -909,7 +1142,8 @@ pub(super) async fn handle_service_provider_command(
             }
         }
         super::ServiceCommands::Delete { workspace_name } => {
-            let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let service_key = resolve_effective_service_key(config_path, &workspace_name)?;
+            let project_dir = project_dir_for_config(config_path);
             let hook_opts = devflow_core::workspace::LifecycleOptions {
                 hook_approval: if non_interactive || json_output {
                     devflow_core::workspace::hooks::HookApprovalMode::NonInteractive
@@ -931,7 +1165,7 @@ pub(super) async fn handle_service_provider_command(
             .await?;
 
             // Single-service path (explicit --service or single service)
-            provider.delete_workspace(&workspace_name).await?;
+            provider.delete_workspace(&service_key).await?;
 
             // Fire post-service-delete hooks
             devflow_core::workspace::hooks::run_lifecycle_hooks(
@@ -988,13 +1222,14 @@ pub(super) async fn handle_service_provider_command(
             }
         }
         super::ServiceCommands::Start { workspace_name } => {
+            let service_key = resolve_effective_service_key(config_path, &workspace_name)?;
             if !provider.supports_lifecycle() {
                 anyhow::bail!(
                     "Service '{}' does not support start/stop lifecycle",
                     provider.provider_name()
                 );
             }
-            provider.start_workspace(&workspace_name).await?;
+            provider.start_workspace(&service_key).await?;
 
             // Fire post-start hooks
             {
@@ -1031,13 +1266,14 @@ pub(super) async fn handle_service_provider_command(
             }
         }
         super::ServiceCommands::Stop { workspace_name } => {
+            let service_key = resolve_effective_service_key(config_path, &workspace_name)?;
             if !provider.supports_lifecycle() {
                 anyhow::bail!(
                     "Service '{}' does not support start/stop lifecycle",
                     provider.provider_name()
                 );
             }
-            provider.stop_workspace(&workspace_name).await?;
+            provider.stop_workspace(&service_key).await?;
             if json_output {
                 println!(
                     "{}",
@@ -1051,13 +1287,14 @@ pub(super) async fn handle_service_provider_command(
             }
         }
         super::ServiceCommands::Reset { workspace_name } => {
+            let service_key = resolve_effective_service_key(config_path, &workspace_name)?;
             if !provider.supports_lifecycle() {
                 anyhow::bail!(
                     "Service '{}' does not support reset",
                     provider.provider_name()
                 );
             }
-            provider.reset_workspace(&workspace_name).await?;
+            provider.reset_workspace(&service_key).await?;
             if json_output {
                 println!(
                     "{}",
@@ -1074,7 +1311,8 @@ pub(super) async fn handle_service_provider_command(
             workspace_name,
             format,
         } => {
-            let conn = provider.get_connection_info(&workspace_name).await?;
+            let service_key = resolve_effective_service_key(config_path, &workspace_name)?;
+            let conn = provider.get_connection_info(&service_key).await?;
             // Global --json flag overrides --format
             let fmt = if json_output {
                 "json"
@@ -1215,7 +1453,8 @@ pub(super) async fn handle_service_provider_command(
             workspace_name,
             tail,
         } => {
-            let output = provider.logs(&workspace_name, tail).await?;
+            let service_key = resolve_effective_service_key(config_path, &workspace_name)?;
+            let output = provider.logs(&service_key, tail).await?;
             if json_output {
                 println!(
                     "{}",
@@ -1232,10 +1471,11 @@ pub(super) async fn handle_service_provider_command(
             workspace_name,
             from,
         } => {
+            let service_key = resolve_effective_service_key(config_path, &workspace_name)?;
             if !json_output {
                 println!("Seeding workspace '{}' from '{}'...", workspace_name, from);
             }
-            provider.seed_from_source(&workspace_name, &from).await?;
+            provider.seed_from_source(&service_key, &from).await?;
             if json_output {
                 println!(
                     "{}",
@@ -1273,15 +1513,12 @@ pub(super) async fn handle_top_level_status(
         }))
     });
 
-    let context = super::resolve_branch_context(config);
+    let context = super::resolve_branch_context();
     let context_differs_from_cwd = |cwd: &str| {
         let Some(context_branch) = context.context_branch.as_deref() else {
             return false;
         };
-        let normalized_cwd = config.get_normalized_workspace_name(cwd);
-        context.source == super::BranchContextSource::EnvOverride
-            && context_branch != cwd
-            && context_branch != normalized_cwd
+        context.source == super::BranchContextSource::EnvOverride && context_branch != cwd
     };
 
     // Show service info — services are optional; show VCS/project info even without them
@@ -1518,7 +1755,7 @@ pub(super) async fn handle_multi_service_aggregation(
     aggregation: ServiceAggregation,
     config: &Config,
     json_output: bool,
-    config_path: &Option<PathBuf>,
+    _config_path: &Option<PathBuf>,
 ) -> Result<()> {
     let all_providers = match services::factory::create_all_providers(config).await {
         Ok(providers) => providers,
@@ -1526,16 +1763,6 @@ pub(super) async fn handle_multi_service_aggregation(
             // Service providers unavailable — degrade gracefully
             log::warn!("Failed to create service providers: {}", e);
             match aggregation {
-                ServiceAggregation::List => {
-                    // Show workspace registry info without service data
-                    if json_output {
-                        let enriched = enrich_branch_list_json(&[], config, config_path);
-                        println!("{}", serde_json::to_string_pretty(&enriched)?);
-                    } else {
-                        println!("Branches (no service providers available):");
-                        print_enriched_branch_list(&[], config, config_path);
-                    }
-                }
                 ServiceAggregation::Status => {
                     if json_output {
                         println!(
@@ -1582,29 +1809,6 @@ pub(super) async fn handle_multi_service_aggregation(
     };
 
     match aggregation {
-        ServiceAggregation::List => {
-            // Gather all service workspaces from all services
-            let mut all_service_branches: Vec<services::WorkspaceInfo> = Vec::new();
-            if json_output {
-                let mut map = serde_json::Map::new();
-                for named in &all_providers {
-                    let workspaces = named.provider.list_workspaces().await.unwrap_or_default();
-                    map.insert(
-                        named.name.clone(),
-                        enrich_branch_list_json(&workspaces, config, config_path),
-                    );
-                }
-                println!("{}", serde_json::to_string_pretty(&map)?);
-            } else {
-                for named in &all_providers {
-                    let workspaces = named.provider.list_workspaces().await.unwrap_or_default();
-                    all_service_branches.extend(workspaces);
-                    println!("[{}] ({}):", named.name, named.provider.provider_name());
-                }
-                print_enriched_branch_list(&all_service_branches, config, config_path);
-                println!();
-            }
-        }
         ServiceAggregation::Status => {
             if json_output {
                 let mut map = serde_json::Map::new();
@@ -1741,8 +1945,9 @@ async fn handle_orchestrated_mutation(
     config: &Config,
     json_output: bool,
     non_interactive: bool,
+    config_path: &Option<PathBuf>,
 ) -> Result<()> {
-    let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let project_dir = project_dir_for_config(config_path);
     let hook_opts = devflow_core::workspace::LifecycleOptions {
         hook_approval: if non_interactive || json_output {
             devflow_core::workspace::hooks::HookApprovalMode::NonInteractive
@@ -1758,6 +1963,11 @@ async fn handle_orchestrated_mutation(
             workspace_name,
             from,
         } => {
+            let service_key = resolve_effective_service_key(config_path, &workspace_name)?;
+            let parent_service_key = from
+                .as_deref()
+                .map(|parent| resolve_effective_service_key(config_path, parent))
+                .transpose()?;
             // Fire pre-service-create hooks before orchestrated creation
             devflow_core::workspace::hooks::run_lifecycle_hooks(
                 config,
@@ -1768,9 +1978,12 @@ async fn handle_orchestrated_mutation(
             )
             .await?;
 
-            let results =
-                services::factory::orchestrate_create(config, &workspace_name, from.as_deref())
-                    .await?;
+            let results = services::factory::orchestrate_create(
+                config,
+                &service_key,
+                parent_service_key.as_deref(),
+            )
+            .await?;
             let success_count = results.iter().filter(|r| r.success).count();
             let fail_count = results.iter().filter(|r| !r.success).count();
             let mut json_payload: Option<serde_json::Value> = None;
@@ -1779,17 +1992,37 @@ async fn handle_orchestrated_mutation(
                 let json_results: Vec<_> = results
                     .iter()
                     .map(|r| {
+                        let branch_info = r.branch_info.as_ref().map(|info| {
+                            public_workspace_info(
+                                config,
+                                config_path,
+                                &workspace_name,
+                                from.as_deref(),
+                                info,
+                            )
+                        });
+                        let message = if r.success {
+                            format!(
+                                "Created workspace '{}' on {}",
+                                workspace_name, r.service_name
+                            )
+                        } else {
+                            r.message.clone()
+                        };
                         serde_json::json!({
                             "service": r.service_name,
                             "success": r.success,
-                            "message": r.message,
-                            "branch_info": r.branch_info,
+                            "message": message,
+                            "branch_info": branch_info,
                         })
                     })
                     .collect();
                 json_payload = Some(serde_json::json!({
                     "operation": "create",
                     "workspace": workspace_name,
+                    "service_key": service_key,
+                    "parent": from,
+                    "parent_service_key": parent_service_key,
                     "ok": fail_count == 0,
                     "succeeded": success_count,
                     "failed": fail_count,
@@ -1798,7 +2031,10 @@ async fn handle_orchestrated_mutation(
             } else {
                 for r in &results {
                     if r.success {
-                        println!("[{}] {}", r.service_name, r.message);
+                        println!(
+                            "[{}] Created workspace '{}'",
+                            r.service_name, workspace_name
+                        );
                         if let Some(ref info) = r.branch_info {
                             if let Some(ref state) = info.state {
                                 println!("  State: {}", state);
@@ -1846,6 +2082,7 @@ async fn handle_orchestrated_mutation(
             }
         }
         super::ServiceCommands::Delete { workspace_name } => {
+            let service_key = resolve_effective_service_key(config_path, &workspace_name)?;
             // Fire pre-service-delete hooks before orchestrated deletion
             devflow_core::workspace::hooks::run_lifecycle_hooks(
                 config,
@@ -1856,7 +2093,7 @@ async fn handle_orchestrated_mutation(
             )
             .await?;
 
-            let results = services::factory::orchestrate_delete(config, &workspace_name).await?;
+            let results = services::factory::orchestrate_delete(config, &service_key).await?;
             let success_count = results.iter().filter(|r| r.success).count();
             let fail_count = results.iter().filter(|r| !r.success).count();
 
@@ -1876,6 +2113,7 @@ async fn handle_orchestrated_mutation(
                     serde_json::to_string_pretty(&serde_json::json!({
                         "operation": "delete",
                         "workspace": workspace_name,
+                        "service_key": service_key,
                         "ok": fail_count == 0,
                         "succeeded": success_count,
                         "failed": fail_count,
@@ -1925,9 +2163,6 @@ async fn handle_orchestrated_mutation(
 
     Ok(())
 }
-
-// Workspace-list enrichment lives in `crate::cli::workspace::list` and is
-// shared with the `list` command.
 
 /// Handle `devflow service discover` subcommand.
 async fn handle_discover(
@@ -2063,5 +2298,87 @@ pub(super) async fn offer_discovered_containers(
             })
         }
         Err(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{public_workspace_info, validate_scaffoldable_service};
+    use devflow_core::{config::Config, services::WorkspaceInfo};
+
+    #[test]
+    fn public_workspace_info_separates_raw_and_backend_identities() {
+        let config = Config::default();
+        let raw_workspace = "feature/Auth.flow";
+        let raw_parent = "release/2026.07";
+        let service_key = config.get_service_workspace_key(raw_workspace);
+        let parent_service_key = config.get_service_workspace_key(raw_parent);
+        let backend = WorkspaceInfo {
+            name: service_key.clone(),
+            created_at: None,
+            parent_workspace: Some(parent_service_key.clone()),
+            database_name: format!("app_{service_key}"),
+            state: Some("running".into()),
+        };
+
+        let public =
+            public_workspace_info(&config, &None, raw_workspace, Some(raw_parent), &backend);
+        let value = serde_json::to_value(public).unwrap();
+
+        assert_eq!(value["name"], raw_workspace);
+        assert_eq!(value["workspace"], raw_workspace);
+        assert_eq!(value["service_key"], service_key);
+        assert_eq!(value["parent_workspace"], raw_parent);
+        assert_eq!(value["parent_service_key"], parent_service_key);
+        assert_eq!(value["state"], "running");
+        assert!(value.get("database_name").is_some());
+        assert!(value.get("created_at").is_some());
+    }
+
+    #[test]
+    fn public_workspace_info_maps_the_configured_default_parent() {
+        let config = Config::default();
+        let default_workspace = config.git.main_workspace.clone();
+        let default_key = config.get_service_workspace_key(&default_workspace);
+        let backend = WorkspaceInfo {
+            name: "feature_auth-abc123".into(),
+            created_at: None,
+            parent_workspace: Some(default_key.clone()),
+            database_name: "app_feature_auth".into(),
+            state: None,
+        };
+
+        let public = public_workspace_info(&config, &None, "feature/auth", None, &backend);
+        assert_eq!(
+            public.parent_workspace.as_deref(),
+            Some(default_workspace.as_str())
+        );
+        assert_eq!(
+            public.parent_service_key.as_deref(),
+            Some(default_key.as_str())
+        );
+    }
+
+    #[test]
+    fn service_add_only_accepts_complete_scaffolds() {
+        for (service_type, provider) in [
+            ("postgres", "local"),
+            ("postgres", "shared"),
+            ("clickhouse", "local"),
+            ("mysql", "local"),
+            ("redis", "shared"),
+            ("rustfs", "shared"),
+        ] {
+            validate_scaffoldable_service(service_type, provider).unwrap();
+        }
+
+        for (service_type, provider) in [
+            ("postgres", "neon"),
+            ("generic", "local"),
+            ("plugin", "local"),
+            ("mysql", "shared"),
+        ] {
+            assert!(validate_scaffoldable_service(service_type, provider).is_err());
+        }
     }
 }

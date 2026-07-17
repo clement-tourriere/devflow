@@ -32,9 +32,18 @@ fn parse_hook_phase_input(phase: &str) -> Result<HookPhase> {
 }
 
 /// Build a `HookContext` from project config and workspace name.
+/// Inspection-only (vars/render/explain): unresolved identities render a
+/// sentinel key. Execution paths must use [`build_hook_context_strict`].
 async fn build_hook_context(config: &Config, workspace_name: &str) -> HookContext {
     let project_dir = resolve_project_dir_for_hooks();
     devflow_core::hooks::build_hook_context(config, &project_dir, workspace_name).await
+}
+
+/// Fallible variant for paths that EXECUTE hooks: fails closed on an
+/// unresolved workspace identity instead of exporting the sentinel key.
+async fn build_hook_context_strict(config: &Config, workspace_name: &str) -> Result<HookContext> {
+    let project_dir = resolve_project_dir_for_hooks();
+    devflow_core::hooks::build_hook_context_strict(config, &project_dir, workspace_name).await
 }
 
 /// Handle `devflow hook` subcommands.
@@ -602,7 +611,7 @@ async fn handle_hook_run(
         }
     };
 
-    let context = build_hook_context(config, &workspace_name).await;
+    let context = build_hook_context_strict(config, &workspace_name).await?;
 
     // If a specific hook name is given, build a filtered config
     let effective_config = if let Some(name) = name_filter {

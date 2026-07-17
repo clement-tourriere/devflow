@@ -614,8 +614,12 @@ pub async fn run_hook(
             .unwrap_or_else(|| "main".to_string())
     });
 
+    // Strict: this command EXECUTES the hook, so an unresolved workspace
+    // identity must fail closed instead of exporting the sentinel key.
     let mut context =
-        hooks::build_hook_context(&config, std::path::Path::new(&project_path), &workspace).await;
+        hooks::build_hook_context_strict(&config, std::path::Path::new(&project_path), &workspace)
+            .await
+            .map_err(crate::commands::format_error)?;
     context.trigger_source = "gui".to_string();
 
     // Build a mini config with just the one hook

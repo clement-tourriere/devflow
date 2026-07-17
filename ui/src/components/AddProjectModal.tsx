@@ -3,10 +3,10 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   addOrInitProject,
   detectVcsInfo,
-  detectGitBranches,
+  detectVcsWorkspaces,
   getProjectDetail,
 } from "../utils/invoke";
-import type { VcsInfo, GitBranchInfo } from "../types";
+import type { VcsInfo, VcsWorkspaceInfo } from "../types";
 import Modal from "./Modal";
 
 export interface AddProjectModalHandle {
@@ -36,14 +36,12 @@ const AddProjectModal = forwardRef<AddProjectModalHandle, Props>(
 
     const [vcsInfo, setVcsInfo] = useState<VcsInfo | null>(null);
     const [hasExistingConfig, setHasExistingConfig] = useState(false);
-    const [hasWorktreeConfig, setHasWorktreeConfig] = useState(false);
 
-    const [branchInfo, setBranchInfo] = useState<GitBranchInfo | null>(null);
-    const [selectedBranch, setSelectedBranch] = useState<string>("");
-    const [branchSearch, setBranchSearch] = useState("");
+    const [workspaceInfo, setWorkspaceInfo] = useState<VcsWorkspaceInfo | null>(null);
+    const [selectedWorkspace, setSelectedWorkspace] = useState<string>("");
+    const [workspaceSearch, setWorkspaceSearch] = useState("");
 
     const [selectedVcs, setSelectedVcs] = useState<string>("git");
-    const [branchingMode, setBranchingMode] = useState<"worktree" | "workspace">("worktree");
 
     const resetState = () => {
       setModalOpen(false);
@@ -53,12 +51,10 @@ const AddProjectModal = forwardRef<AddProjectModalHandle, Props>(
       setModalLoading(false);
       setVcsInfo(null);
       setSelectedVcs("git");
-      setBranchingMode("worktree");
       setHasExistingConfig(false);
-      setHasWorktreeConfig(false);
-      setBranchInfo(null);
-      setSelectedBranch("");
-      setBranchSearch("");
+      setWorkspaceInfo(null);
+      setSelectedWorkspace("");
+      setWorkspaceSearch("");
     };
 
     const openModal = async () => {
@@ -83,24 +79,19 @@ const AddProjectModal = forwardRef<AddProjectModalHandle, Props>(
 
         if (detectedVcsInfo?.existing_vcs) {
           try {
-            const info = await detectGitBranches(dirPath);
-            setBranchInfo(info);
-            setSelectedBranch(info.default_branch || "");
+            const info = await detectVcsWorkspaces(dirPath);
+            setWorkspaceInfo(info);
+            setSelectedWorkspace(info.default_workspace || "");
           } catch {
-            setBranchInfo(null);
+            setWorkspaceInfo(null);
           }
         }
 
         try {
           const detail = await getProjectDetail(dirPath);
           setHasExistingConfig(detail.has_config);
-          setHasWorktreeConfig(detail.worktree_enabled);
-          if (detail.has_config && detail.worktree_enabled) {
-            setBranchingMode("worktree");
-          }
         } catch {
           setHasExistingConfig(false);
-          setHasWorktreeConfig(false);
         }
 
         setModalOpen(true);
@@ -122,7 +113,12 @@ const AddProjectModal = forwardRef<AddProjectModalHandle, Props>(
       setModalError("");
       try {
         const vcsPref = vcsInfo?.existing_vcs ? undefined : selectedVcs;
-        await addOrInitProject(selectedPath, normalized, vcsPref, branchingMode === "worktree", selectedBranch || undefined);
+        await addOrInitProject(
+          selectedPath,
+          normalized,
+          vcsPref,
+          selectedWorkspace || undefined,
+        );
         window.dispatchEvent(new CustomEvent("devflow:projects-changed"));
         const path = selectedPath;
         resetState();
@@ -136,7 +132,6 @@ const AddProjectModal = forwardRef<AddProjectModalHandle, Props>(
 
     const normalized = sanitizeProjectName(projectName);
     const showVcsSelector = vcsInfo && !vcsInfo.existing_vcs && !hasExistingConfig;
-    const showWorktreeSelector = !hasExistingConfig || (hasExistingConfig && !hasWorktreeConfig);
 
     return (
       <Modal
@@ -278,7 +273,7 @@ const AddProjectModal = forwardRef<AddProjectModalHandle, Props>(
           </div>
         )}
 
-        {vcsInfo?.existing_vcs && branchInfo && (
+        {vcsInfo?.existing_vcs && workspaceInfo && (
           <div style={{ marginBottom: 16 }}>
             <label
               style={{
@@ -289,16 +284,16 @@ const AddProjectModal = forwardRef<AddProjectModalHandle, Props>(
                 fontWeight: 500,
               }}
             >
-              Main Branch
+              Default Workspace
             </label>
-            {branchInfo.branches.length > 0 ? (
+            {workspaceInfo.workspaces.length > 0 ? (
               <>
-                {branchInfo.branches.length > 5 && (
+                {workspaceInfo.workspaces.length > 5 && (
                   <input
                     type="text"
-                    value={branchSearch}
-                    onChange={(e) => setBranchSearch(e.target.value)}
-                    placeholder="Search branches..."
+                    value={workspaceSearch}
+                    onChange={(e) => setWorkspaceSearch(e.target.value)}
+                    placeholder="Search workspaces..."
                     style={{ width: "100%", marginBottom: 6, fontSize: 13 }}
                   />
                 )}
@@ -311,17 +306,17 @@ const AddProjectModal = forwardRef<AddProjectModalHandle, Props>(
                     background: "var(--bg-primary)",
                   }}
                 >
-                  {branchInfo.branches
-                    .filter((b) =>
-                      !branchSearch || b.toLowerCase().includes(branchSearch.toLowerCase())
+                  {workspaceInfo.workspaces
+                    .filter((workspace) =>
+                      !workspaceSearch || workspace.toLowerCase().includes(workspaceSearch.toLowerCase())
                     )
-                    .map((branch) => {
-                      const isDefault = branch === branchInfo.default_branch;
-                      const isSelected = branch === selectedBranch;
+                    .map((workspace) => {
+                      const isDefault = workspace === workspaceInfo.default_workspace;
+                      const isSelected = workspace === selectedWorkspace;
                       return (
                         <div
-                          key={branch}
-                          onClick={() => setSelectedBranch(branch)}
+                          key={workspace}
+                          onClick={() => setSelectedWorkspace(workspace)}
                           style={{
                             padding: "6px 10px",
                             cursor: "pointer",
@@ -344,7 +339,7 @@ const AddProjectModal = forwardRef<AddProjectModalHandle, Props>(
                                 : "var(--text-primary)",
                             }}
                           >
-                            {branch}
+                            {workspace}
                           </span>
                           {isDefault && (
                             <span
@@ -362,8 +357,8 @@ const AddProjectModal = forwardRef<AddProjectModalHandle, Props>(
             ) : (
               <input
                 type="text"
-                value={selectedBranch}
-                onChange={(e) => setSelectedBranch(e.target.value)}
+                value={selectedWorkspace}
+                onChange={(e) => setSelectedWorkspace(e.target.value)}
                 placeholder="e.g. main"
                 style={{ width: "100%", fontSize: 13 }}
               />
@@ -371,52 +366,19 @@ const AddProjectModal = forwardRef<AddProjectModalHandle, Props>(
           </div>
         )}
 
-        {showWorktreeSelector && (
-          <div style={{ marginBottom: 16 }}>
-            <label
-              style={{
-                display: "block",
-                marginBottom: 6,
-                fontSize: 13,
-                color: "var(--text-secondary)",
-                fontWeight: 500,
-              }}
-            >
-              Workspace Mode
-            </label>
-            <div className="flex gap-2">
-              <button
-                className={`btn${branchingMode === "worktree" ? " btn-primary" : ""}`}
-                style={{ padding: "4px 16px", fontSize: 13 }}
-                onClick={() => setBranchingMode("worktree")}
-                type="button"
-              >
-                worktree
-              </button>
-              <button
-                className={`btn${branchingMode === "workspace" ? " btn-primary" : ""}`}
-                style={{ padding: "4px 16px", fontSize: 13 }}
-                onClick={() => setBranchingMode("workspace")}
-                type="button"
-              >
-                checkout
-              </button>
-            </div>
-            <div
-              style={{
-                marginTop: 6,
-                fontSize: 12,
-                color: "var(--text-muted)",
-              }}
-            >
-              {branchingMode === "worktree"
-                ? "Each workspace gets its own directory — parallel work without stashing."
-                : `Branches share a single directory — switches in place like ${
-                    (vcsInfo?.existing_vcs || selectedVcs) === "jj" ? "jj edit" : "git checkout"
-                  }.`}
-            </div>
-          </div>
-        )}
+        <div
+          style={{
+            marginBottom: 16,
+            padding: "8px 12px",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            color: "var(--text-muted)",
+            fontSize: 12,
+          }}
+        >
+          Each workspace gets its own directory so work can run in parallel without
+          changing the project checkout in place.
+        </div>
 
         {modalError && (
           <div

@@ -1,6 +1,6 @@
 ---
 title: Configuration
-description: The complete .devflow.yml schema — git, behavior, services, processes, worktree, hooks, execute, commit, agent — with hierarchy and interpolation rules.
+description: The complete .devflow.yml schema — VCS, behavior, services, processes, worktrees, hooks, execute, commit, and agent settings.
 sidebar:
   order: 2
 ---
@@ -33,14 +33,15 @@ Used as `{repo}` in worktree templates, in container/database naming, and as the
 
 ```yaml
 git:
-  auto_create_on_workspace: true        # create service workspaces on git checkout
-  auto_switch_on_workspace: true        # switch services on git checkout
+  auto_create_on_workspace: true        # provision services for manually added worktrees
   main_workspace: main                  # auto-detected on init
   workspace_filter_regex: "^feature/.*" # only branches matching this pattern
   exclude_workspaces: [main, master]    # never create workspaces for these
 ```
 
-Main-workspace auto-detection priority: `origin/HEAD` → common names (`main`, `master`, `develop`) → tracking branch → current branch.
+For Git, the branch checked out in the physical primary checkout is the default workspace; initialization refuses a detached primary checkout. This keeps the configured root aligned with Git's actual worktree graph instead of guessing from `origin/HEAD` or branch-name conventions.
+
+These toggles apply to installed VCS-hook handling for materialized worktrees. Ordinary in-place `git checkout` no longer provisions devflow environments; use `devflow switch`, or create a linked worktree manually and let the hook adopt it.
 
 ## `behavior`
 
@@ -198,15 +199,14 @@ Manage them with `devflow process start|stop|restart|status|logs`. Auto-started 
 
 ```yaml
 worktree:
-  enabled: true                           # default false (init recommends/defaults true)
-  path_template: "../{repo}.{workspace}"  # {repo}, {workspace} (normalized), {branch} legacy
+  path_template: "../{repo}.{workspace}"  # {repo}, {workspace} (collision-safe key), {branch} legacy
   copy_files: [.env.local, .env]          # files/dirs reflink-copied from main
   copy_ignored: false                     # also copy gitignored entries (collapsed, parallel)
   copy_ai_configs: true                   # copy .claude/, .cursor/, .opencode/, .agents/
   extra_ai_dirs: []                       # additional AI tool dirs
 ```
 
-Full semantics in [Worktrees](/devflow/concepts/worktrees/#configuration). Note `{workspace}` is the **normalized** name: `feature/Auth` → `feature_auth`.
+Full semantics in [Worktrees](/devflow/concepts/worktrees/#configuration). Worktrees are the only Git workspace model; an old `worktree.enabled` key is accepted for compatibility but ignored with a deprecation warning — it can no longer restore in-place checkout behavior. `{workspace}` is the collision-safe `service_key`, while user-facing and VCS operations keep the raw workspace name.
 
 ## `hooks`
 
@@ -267,6 +267,6 @@ neon:
   api_key: ${NEON_API_KEY}
 ```
 
-## Name sanitization
+## Workspace identity
 
-Branch names become identifiers via: lowercase → non-`[a-z0-9_$]` chars to `_` → leading digits stripped → `__` collapsed → truncated to 63 chars with a hash suffix when longer. `feature/Auth-System` → `feature_auth_system`. The same normalized form is used for database names, registry keys, and `{workspace}` in worktree paths.
+The raw VCS name is canonical for display, registry lookup, and VCS operations. Services and generated paths use a separate deterministic `service_key`: already-safe names are preserved, while names requiring normalization include a stable short hash. Consequently names such as `feature/auth`, `feature-auth`, and case variants remain distinct. Hook templates expose the key as `workspace_key`; `workspace_sanitized` is an alias.

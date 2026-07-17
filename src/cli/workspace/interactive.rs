@@ -6,10 +6,13 @@ use devflow_core::vcs;
 
 use super::context::{context_matches_branch, resolve_branch_context};
 
+/// Returns the workspace that was switched to, or `None` when the picker was
+/// cancelled/failed — callers must not run follow-up actions (e.g. `-x`) in
+/// that case.
 pub(super) async fn handle_interactive_switch(
     config: &Config,
     config_path: &Option<std::path::PathBuf>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let mut workspace_names = std::collections::BTreeSet::new();
     let mut vcs_workspace_names = std::collections::HashSet::new();
 
@@ -56,7 +59,7 @@ pub(super) async fn handle_interactive_switch(
         workspace_names.insert(config.git.main_workspace.clone());
     }
 
-    let context = resolve_branch_context(config);
+    let context = resolve_branch_context();
     let current_git = context.cwd_branch.clone();
 
     // Create workspace items with display info
@@ -64,8 +67,7 @@ pub(super) async fn handle_interactive_switch(
         .iter()
         .map(|workspace| {
             let is_cwd = current_git.as_deref() == Some(workspace.as_str());
-            let is_context =
-                context_matches_branch(config, context.context_branch.as_deref(), workspace);
+            let is_context = context_matches_branch(context.context_branch.as_deref(), workspace);
 
             BranchItem {
                 name: workspace.clone(),
@@ -87,7 +89,7 @@ pub(super) async fn handle_interactive_switch(
     // Run interactive selector
     match run_interactive_selector(branch_items) {
         Ok(selected_branch) => {
-            if selected_branch == "__create_new__" {
+            let target = if selected_branch == "__create_new__" {
                 // Prompt for a new workspace name
                 let new_name = inquire::Text::new("New workspace name:")
                     .with_help_message("Enter the name for the new workspace")
@@ -97,69 +99,47 @@ pub(super) async fn handle_interactive_switch(
                 if new_name.is_empty() {
                     anyhow::bail!("Workspace name cannot be empty");
                 }
-                super::handle_switch_command(
-                    config,
-                    &new_name,
-                    config_path,
-                    true,  // create
-                    None,  // from
-                    false, // no_services
-                    false, // no_processes
-                    false, // no_verify
-                    false, // json_output
-                    false, // non_interactive
-                    None,
-                    None,
-                    None, // copy_ignored — use config default
-                )
-                .await?;
-            } else if selected_branch == config.git.main_workspace {
-                super::handle_switch_to_main(
-                    config,
-                    config_path,
-                    false,
-                    false,
-                    false,
-                    false,
-                    false,
-                    None,
-                    None,
-                )
-                .await?;
+                (new_name, true)
             } else {
-                super::handle_switch_command(
-                    config,
-                    &selected_branch,
-                    config_path,
-                    false, // create
-                    None,  // from
-                    false, // no_services
-                    false, // no_processes
-                    false, // no_verify
-                    false, // json_output — interactive mode
-                    false, // non_interactive
-                    None,
-                    None,
-                    None, // copy_ignored — use config default
-                )
-                .await?;
-            }
+                (selected_branch, false)
+            };
+            let (workspace, create) = target;
+            super::handle_switch_command(
+                config,
+                &workspace,
+                config_path,
+                create,
+                None,  // from
+                false, // no_services
+                false, // no_processes
+                false, // no_verify
+                false, // json_output — interactive mode
+                false, // non_interactive
+                None,
+                None,
+                None, // copy_ignored — use config default
+            )
+            .await?;
+            Ok(Some(workspace))
         }
-        Err(e) => match e {
-            inquire::InquireError::OperationCanceled => {
-                println!("Cancelled.");
+        Err(e) => {
+            match e {
+                inquire::InquireError::OperationCanceled => {
+                    println!("Cancelled.");
+                }
+                inquire::InquireError::OperationInterrupted => {
+                    println!("Interrupted.");
+                }
+                _ => {
+                    println!("Interactive mode failed: {}", e);
+                    println!(
+                        "Try using: devflow switch <workspace-name> or devflow switch --template"
+                    );
+                }
             }
-            inquire::InquireError::OperationInterrupted => {
-                println!("Interrupted.");
-            }
-            _ => {
-                println!("Interactive mode failed: {}", e);
-                println!("Try using: devflow switch <workspace-name> or devflow switch --template");
-            }
-        },
+            Ok(None)
+        }
     }
-
-    Ok(())
 }
 
 #[derive(Clone)]

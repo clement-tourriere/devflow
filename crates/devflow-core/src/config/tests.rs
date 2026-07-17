@@ -5,7 +5,6 @@ fn test_hooks_yaml_parsing_simple() {
     let yaml = r#"
 git:
   auto_create_on_workspace: true
-  auto_switch_on_workspace: true
   main_workspace: main
   exclude_workspaces: [main, master]
 behavior: {}
@@ -38,7 +37,6 @@ fn test_hooks_yaml_parsing_extended() {
     let yaml = r#"
 git:
   auto_create_on_workspace: true
-  auto_switch_on_workspace: true
   main_workspace: main
   exclude_workspaces: [main]
 behavior: {}
@@ -83,7 +81,6 @@ fn test_no_hooks_parses_as_none() {
     let yaml = r#"
 git:
   auto_create_on_workspace: true
-  auto_switch_on_workspace: true
   main_workspace: main
   exclude_workspaces: [main]
 behavior: {}
@@ -534,24 +531,20 @@ fn test_should_create_workspace_falls_back_to_auto_create_workspace_filter() {
 fn test_worktree_respect_gitignore_defaults_true() {
     let yaml = r#"
 worktree:
-  enabled: true
   copy_files: [".env"]
 "#;
     let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
-    let wt = config.worktree.expect("worktree should be Some");
-    assert!(wt.respect_gitignore);
+    assert!(config.worktree.respect_gitignore);
 }
 
 #[test]
 fn test_worktree_respect_gitignore_explicit_false() {
     let yaml = r#"
 worktree:
-  enabled: true
   respect_gitignore: false
 "#;
     let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
-    let wt = config.worktree.expect("worktree should be Some");
-    assert!(!wt.respect_gitignore);
+    assert!(!config.worktree.respect_gitignore);
 }
 
 #[test]
@@ -559,4 +552,51 @@ fn test_worktree_recommended_default_includes_respect_gitignore() {
     let wt = WorktreeConfig::recommended_default();
     assert!(wt.respect_gitignore);
     assert!(!wt.copy_ignored);
+}
+
+#[test]
+fn test_worktree_enabled_is_accepted_but_inert_legacy_configuration() {
+    // Every pre-worktree-always-on release (init and the GUI) wrote
+    // `worktree.enabled` into .devflow.yml; upgrading must not hard-break
+    // those configs. The key parses, is ignored, and is never re-serialized.
+    let yaml = r#"
+worktree:
+  enabled: false
+"#;
+    let config: Config = serde_yaml_ng::from_str(yaml).expect("legacy configs must keep parsing");
+    assert_eq!(config.worktree.enabled, Some(false));
+
+    let serialized = serde_yaml_ng::to_string(&config).expect("serialize");
+    assert!(!serialized.contains("enabled"));
+
+    // A truly unknown worktree key is still rejected.
+    let error = serde_yaml_ng::from_str::<Config>("worktree:\n  bogus_key: 1\n").unwrap_err();
+    assert!(error.to_string().contains("unknown field `bogus_key`"));
+}
+
+#[test]
+fn test_partial_worktree_section_keeps_copy_files_default() {
+    // A partial `worktree:` section must behave like an absent one: the
+    // documented copy_files default is [.env, .env.local] either way.
+    let yaml = r#"
+worktree:
+  copy_ignored: true
+"#;
+    let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+    assert_eq!(
+        config.worktree.copy_files,
+        vec![".env".to_string(), ".env.local".to_string()]
+    );
+    assert_eq!(
+        config.worktree.copy_files,
+        WorktreeConfig::default().copy_files
+    );
+
+    // An explicit empty list still disables copying.
+    let yaml = r#"
+worktree:
+  copy_files: []
+"#;
+    let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
+    assert!(config.worktree.copy_files.is_empty());
 }

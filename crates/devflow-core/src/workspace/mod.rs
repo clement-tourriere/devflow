@@ -1,8 +1,9 @@
 pub mod create;
 pub mod delete;
 pub mod hooks;
+pub mod invariant;
+pub mod inventory;
 pub mod link;
-pub mod list;
 pub mod switch;
 pub mod worktree;
 
@@ -47,37 +48,6 @@ pub fn validate_workspace_name(name: &str) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-/// How a workspace was created (worktree vs. classic branch).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WorkspaceCreationMode {
-    /// Use the project's `.devflow.yml` worktree config (worktree if enabled, branch otherwise).
-    #[default]
-    Default,
-    /// Force worktree creation regardless of config.
-    Worktree,
-    /// Force classic branch-only mode (no worktree).
-    Branch,
-}
-
-impl WorkspaceCreationMode {
-    pub fn parse(raw: Option<&str>) -> Result<Self, String> {
-        match raw
-            .unwrap_or("default")
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "default" => Ok(Self::Default),
-            "worktree" => Ok(Self::Worktree),
-            "branch" => Ok(Self::Branch),
-            other => Err(format!(
-                "Invalid workspace creation mode '{}'. Use: default, worktree, branch",
-                other
-            )),
-        }
-    }
 }
 
 /// Result of a worktree setup operation.
@@ -137,14 +107,16 @@ impl LifecycleHookResult {
 /// Result of `create_workspace()`.
 #[derive(Debug, Clone)]
 pub struct CreateWorkspaceResult {
-    /// Normalized workspace name.
+    /// Exact VCS branch/bookmark name.
     pub workspace: String,
-    /// Parent workspace (if this was a newly created branch).
+    /// Collision-resistant service/filesystem identity.
+    pub service_key: String,
+    /// Raw parent workspace provenance (if this was newly created).
     pub parent: Option<String>,
-    /// Worktree details (if worktree mode was used).
+    /// Materialized worktree/workspace details.
     pub worktree: Option<WorktreeSetupResult>,
-    /// Whether the VCS branch was freshly created.
-    pub branch_created: bool,
+    /// Whether the VCS branch/bookmark was freshly created.
+    pub vcs_ref_created: bool,
     /// Per-service results from orchestration.
     pub services: Vec<ServiceResult>,
     /// Per-process results from runtime orchestration.
@@ -156,14 +128,16 @@ pub struct CreateWorkspaceResult {
 /// Result of `switch_workspace()`.
 #[derive(Debug, Clone)]
 pub struct SwitchWorkspaceResult {
-    /// Normalized workspace name.
+    /// Exact VCS branch/bookmark name.
     pub workspace: String,
-    /// Parent workspace (if the branch was freshly created).
+    /// Collision-resistant service/filesystem identity.
+    pub service_key: String,
+    /// Raw parent workspace provenance (if the VCS ref was freshly created).
     pub parent: Option<String>,
-    /// Worktree details (if worktree mode was used).
+    /// Materialized worktree/workspace details.
     pub worktree: Option<WorktreeSetupResult>,
-    /// Whether the VCS branch was freshly created during the switch.
-    pub branch_created: bool,
+    /// Whether the VCS branch/bookmark was freshly created during the switch.
+    pub vcs_ref_created: bool,
     /// Per-service results from orchestration.
     pub services: Vec<ServiceResult>,
     /// Per-process results from runtime orchestration.
@@ -175,14 +149,16 @@ pub struct SwitchWorkspaceResult {
 /// Result of `delete_workspace()`.
 #[derive(Debug, Clone)]
 pub struct DeleteWorkspaceResult {
-    /// Workspace that was deleted.
+    /// Raw VCS workspace that was deleted.
     pub workspace: String,
+    /// Collision-resistant service/filesystem identity.
+    pub service_key: String,
     /// Whether a worktree was removed.
     pub worktree_removed: bool,
     /// Filesystem path of the removed worktree (if any).
     pub worktree_path: Option<String>,
-    /// Whether the VCS branch was deleted.
-    pub branch_deleted: bool,
+    /// Whether the VCS branch/bookmark was deleted.
+    pub vcs_ref_deleted: bool,
     /// Per-service results from orchestration.
     pub services: Vec<ServiceResult>,
     /// Per-process results from runtime orchestration.

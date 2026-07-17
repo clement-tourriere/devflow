@@ -11,7 +11,6 @@ services:
     default: true
 
 worktree:
-  enabled: true
   path_template: ../{repo}.{workspace}
   copy_files: [.env]
   copy_ignored: true

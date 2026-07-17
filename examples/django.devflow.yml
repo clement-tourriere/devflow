@@ -3,7 +3,6 @@
 
 git:
   auto_create_on_workspace: true
-  auto_switch_on_workspace: true
   main_workspace: main
   exclude_workspaces:
     - main

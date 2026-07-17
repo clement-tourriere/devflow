@@ -31,7 +31,10 @@ pub enum Action {
         name: String,
         from: Option<String>,
     },
-    DeleteBranch(String),
+    DeleteBranch {
+        name: String,
+        force: bool,
+    },
     // ── Service config actions ──
     /// Add a new service configuration (triggers wizard flow)
     AddServiceConfig {
@@ -44,6 +47,8 @@ pub enum Action {
     // ── Service actions ──
     StartService {
         service: String,
+        /// Raw VCS workspace name; operations re-resolve the collision-safe
+        /// key fail-closed from state, so no key is carried here.
         workspace: String,
     },
     StopService {
@@ -139,13 +144,20 @@ pub enum DataPayload {
 /// Enriched workspace info combining VCS + service data.
 #[derive(Debug, Clone)]
 pub struct EnrichedBranch {
+    /// Exact VCS branch/bookmark name. Operations re-resolve the
+    /// collision-safe backend key from state fail-closed; no key is carried.
     pub name: String,
     pub is_current: bool,
     pub is_default: bool,
     pub worktree_path: Option<String>,
+    pub health: String,
     pub services: Vec<BranchServiceState>,
+    pub processes: Vec<devflow_core::processes::ProcessStatus>,
     /// Parent workspace name from the devflow workspace registry.
     pub parent: Option<String>,
+    pub parent_state: Option<String>,
+    /// Canonical raw-name children from the workspace inventory.
+    pub children: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -153,7 +165,7 @@ pub struct BranchServiceState {
     pub service_name: String,
     pub state: Option<String>,
     pub database_name: Option<String>,
-    pub parent_workspace: Option<String>,
+    pub provisioned: bool,
     /// Whether this service supports lifecycle operations (start/stop/reset/logs).
     /// Only true for local Docker-based providers.
     pub supports_lifecycle: bool,
@@ -161,7 +173,10 @@ pub struct BranchServiceState {
 
 #[derive(Debug, Clone)]
 pub struct BranchesData {
+    /// Canonical ordered roots from the workspace inventory.
+    pub roots: Vec<String>,
     pub workspaces: Vec<EnrichedBranch>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -175,10 +190,12 @@ pub struct ServiceEntry {
 
 #[derive(Debug, Clone)]
 pub struct ServiceWorkspaceEntry {
+    /// Raw VCS workspace name shown to users.
     pub name: String,
     pub state: Option<String>,
     pub parent_workspace: Option<String>,
     pub database_name: String,
+    pub supports_lifecycle: bool,
 }
 
 #[derive(Debug, Clone)]

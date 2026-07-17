@@ -24,8 +24,8 @@ This defines a `devflow` shell function that wraps the real binary, watches its 
 
 ```bash
 devflow switch -c feature/auth
-# Created worktree for 'feature/auth' at ../myapp.feature_auth
-# Changed directory to: ../myapp.feature_auth      ← the wrapper did this
+# Created worktree for 'feature/auth' at ../myapp.feature_auth_fc659bd73585
+# Changed directory to: ../myapp.feature_auth_fc659bd73585  ← the wrapper did this
 ```
 
 Without the wrapper, devflow prints the worktree path and a manual `cd` hint instead.
@@ -36,7 +36,7 @@ Without the wrapper, devflow prints the worktree path and a manual `cd` hint ins
 The current wrapper captures command output while devflow runs, which interferes with fully interactive commands:
 
 - `devflow tui` should be run **without** the wrapper (call `command devflow tui` or run it from a shell profile that doesn't define the wrapper).
-- Prompts that read from stdin (e.g. the `devflow remove` confirmation) may not display through the wrapper — prefer `devflow remove <ws> --force` in wrapped shells, or run `command devflow remove <ws>`.
+- Prompts that read from stdin (e.g. the `devflow remove` confirmation) may not display through the wrapper — first switch away from the target workspace, then prefer `devflow remove <ws> --force` in wrapped shells, or run `command devflow remove <ws>`.
 
 `command devflow …` always bypasses the wrapper.
 :::

@@ -40,7 +40,6 @@ services:
       port_mapping: "8025:8025"
 
 worktree:
-  enabled: true
   path_template: "../{repo}.{workspace}"
   copy_files:
     - .env

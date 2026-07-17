@@ -40,6 +40,16 @@ pub fn service_workspace_prefix(project_name: &str, service_name: &str) -> Strin
     )
 }
 
+/// Enforce devflow's Docker-name bound without discarding the distinguishing
+/// workspace suffix. Hashing the full name prevents long project/service
+/// prefixes from collapsing otherwise distinct workspace containers.
+/// Delegates to the one shared truncation scheme so container, database, and
+/// bucket naming can never drift apart.
+pub fn bounded_container_name(raw: &str) -> String {
+    const MAX_LEN: usize = 128;
+    crate::services::shared::naming::stable_truncate(raw, MAX_LEN, '-')
+}
+
 pub async fn inspect_container_status(
     client: &Docker,
     container_name: &str,
@@ -73,6 +83,7 @@ pub async fn inspect_container_status(
 
 pub async fn list_managed_service_containers(
     client: &Docker,
+    project_name: &str,
     service_name: &str,
     prefix: &str,
 ) -> Result<Vec<(String, String, bool)>> {
@@ -106,22 +117,70 @@ pub async fn list_managed_service_containers(
             continue;
         }
 
-        if let Some(names) = &container.names {
-            for name in names {
-                let clean_name = name.trim_start_matches('/');
-                if let Some(branch_part) = clean_name.strip_prefix(prefix) {
-                    let is_running = container
-                        .state
-                        .as_ref()
-                        .map(|s| matches!(s, bollard::models::ContainerSummaryStateEnum::RUNNING))
-                        .unwrap_or(false);
-                    result.push((branch_part.to_string(), clean_name.to_string(), is_running));
-                }
-            }
-        }
+        let Some((workspace, container_name)) = managed_container_identity(
+            container.labels.as_ref(),
+            container.names.as_deref().unwrap_or_default(),
+            project_name,
+            prefix,
+        ) else {
+            continue;
+        };
+
+        let is_running = container
+            .state
+            .as_ref()
+            .map(|s| matches!(s, bollard::models::ContainerSummaryStateEnum::RUNNING))
+            .unwrap_or(false);
+        result.push((workspace, container_name, is_running));
     }
 
     Ok(result)
+}
+
+/// Resolve the exact workspace identity and usable Docker name for a managed
+/// container. Current containers carry authoritative project/workspace labels;
+/// name parsing remains only for containers created by older devflow releases.
+fn managed_container_identity(
+    labels: Option<&std::collections::HashMap<String, String>>,
+    names: &[String],
+    project_name: &str,
+    legacy_prefix: &str,
+) -> Option<(String, String)> {
+    let labels = labels?;
+    let labeled_project = labels
+        .get("devflow.project")
+        .filter(|value| !value.is_empty());
+
+    if labeled_project.is_some_and(|project| project != project_name) {
+        return None;
+    }
+
+    let labeled_workspace = labels
+        .get("devflow.workspace")
+        .filter(|workspace| !workspace.is_empty());
+
+    if labeled_project.is_some() {
+        let container_name = names.first()?.trim_start_matches('/').to_string();
+        let workspace = labeled_workspace.cloned().or_else(|| {
+            container_name
+                .strip_prefix(legacy_prefix)
+                .map(ToOwned::to_owned)
+        })?;
+        return Some((workspace, container_name));
+    }
+
+    // Without a project label, the old unbounded name prefix is the only safe
+    // way to distinguish same-named services belonging to different projects.
+    names.iter().find_map(|name| {
+        let container_name = name.trim_start_matches('/');
+        let legacy_workspace = container_name.strip_prefix(legacy_prefix)?;
+        Some((
+            labeled_workspace
+                .cloned()
+                .unwrap_or_else(|| legacy_workspace.to_string()),
+            container_name.to_string(),
+        ))
+    })
 }
 
 pub async fn collect_container_logs(
@@ -278,5 +337,64 @@ mod tests {
         // have claimed it on the way to rejecting 64910.
         assert!(!try_claim_ports(&[64911, 64910]));
         assert!(try_claim_ports(&[64911]));
+    }
+
+    #[test]
+    fn bounded_container_names_retain_long_identity() {
+        let prefix = format!("devflow-{}-service-", "project".repeat(20));
+        let first = bounded_container_name(&format!("{prefix}workspace-a"));
+        let second = bounded_container_name(&format!("{prefix}workspace-b"));
+
+        assert_eq!(first.len(), 128);
+        assert_eq!(second.len(), 128);
+        assert_ne!(first, second);
+        assert_eq!(first.rsplit('-').next().unwrap().len(), 12);
+    }
+
+    #[test]
+    fn managed_container_uses_labels_for_bounded_names() {
+        let project = "project".repeat(20);
+        let prefix = service_workspace_prefix(&project, "database");
+        let raw_name = format!("{prefix}feature-auth");
+        let bounded_name = bounded_container_name(&raw_name);
+        assert!(!bounded_name.starts_with(&prefix));
+
+        let labels = std::collections::HashMap::from([
+            ("devflow.project".to_string(), project.clone()),
+            ("devflow.workspace".to_string(), "feature/auth".to_string()),
+        ]);
+        let names = vec![format!("/{bounded_name}")];
+
+        assert_eq!(
+            managed_container_identity(Some(&labels), &names, &project, &prefix),
+            Some(("feature/auth".to_string(), bounded_name))
+        );
+    }
+
+    #[test]
+    fn managed_container_falls_back_to_legacy_name_parsing() {
+        let prefix = service_workspace_prefix("legacy-project", "database");
+        let labels = std::collections::HashMap::new();
+        let names = vec![format!("/{prefix}feature-auth")];
+
+        assert_eq!(
+            managed_container_identity(Some(&labels), &names, "legacy-project", &prefix),
+            Some(("feature-auth".to_string(), format!("{prefix}feature-auth")))
+        );
+    }
+
+    #[test]
+    fn managed_container_rejects_another_project_label() {
+        let prefix = service_workspace_prefix("project-a", "database");
+        let labels = std::collections::HashMap::from([
+            ("devflow.project".to_string(), "project-b".to_string()),
+            ("devflow.workspace".to_string(), "main".to_string()),
+        ]);
+        let names = vec![format!("/{prefix}main")];
+
+        assert_eq!(
+            managed_container_identity(Some(&labels), &names, "project-a", &prefix),
+            None
+        );
     }
 }

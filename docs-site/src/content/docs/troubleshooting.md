@@ -17,23 +17,23 @@ devflow capabilities    # CoW method, automation guarantees
 
 1. **Approval missing** — in `--non-interactive`/`--json` mode unapproved hooks are *skipped with a warning* (check `hooks[].skipped` in JSON). Fix: `devflow hook approvals add "<template>"` or `DEVFLOW_APPROVE_HOOKS=1`. Interactive runs prompt instead.
 2. **`--no-verify`** skips all hooks entirely — including in Git-hook-triggered switches it wraps.
-3. **Wrong phase** — `post-create` fires only when a branch/worktree was actually created; recurring setup belongs in `post-switch`. `devflow hook explain <phase>` documents each one.
+3. **Wrong phase** — `post-create` fires only when a worktree/jj workspace was actually created; recurring setup belongs in `post-switch`. `devflow hook explain <phase>` documents each one.
 4. **Condition false** — conditions resolve against the hook's working dir (the worktree). `devflow hook vars` + `devflow hook render "<condition>"` to debug.
 5. **Background hook cut off** — raise `DEVFLOW_BACKGROUND_HOOK_TIMEOUT` (default 30s).
 6. **devflow disabled** — `DEVFLOW_DISABLED`, `DEVFLOW_SKIP_HOOKS`, branch filters (`workspace_filter_regex`, `exclude_workspaces`, `DEVFLOW_DISABLED_BRANCHES`).
 
 ## Worktrees
 
-- **“Failed to create worktree”** — name collision (two branches normalizing to the same `feature_x` directory — see [sanitization](/devflow/concepts/workspaces/#workspace-names)) or a leftover directory at the target path.
+- **“Failed to create worktree”** — usually a leftover directory at the target path or stale VCS metadata. Generated `service_key` values are collision-safe across separator/case variants.
 - **Stale metadata after deleting a directory by hand** — devflow auto-prunes when recreating the same name; otherwise `git worktree prune` (or the GUI's *Prune worktrees*).
 - **Switch didn't `cd`** — [shell integration](/devflow/getting-started/shell-integration/) isn't installed in this shell. The path is printed either way.
-- **Removal refused** — the worktree has uncommitted/untracked changes. Commit, stash, or `--force`.
+- **Removal refused** — the worktree is dirty, is the default/current workspace, or failed another preflight check. Move to another workspace before removal; commit/stash dirty changes, or use `--force` only for the reported dirty/resource risk.
 - **`.env.local` missing in a new worktree** — list it in `worktree.copy_files`, or better, generate it with a `post-switch` `write-env` hook so values stay per-workspace.
 - **Worktree exists but no `.claude/` dir** — it was created via plain `git worktree add` (the hook path doesn't copy AI dirs yet); run `devflow switch <branch>` once or copy manually.
 
 ## Services
 
-- **Docker not running** — `switch` still completes (branch + worktree created; the service failure is reported per-service). Start Docker, then `devflow service create <ws>` or re-`switch`.
+- **Docker not running** — the worktree can be created while the command reports a service failure and exits non-zero. Start Docker, then run `devflow service create <ws>` or re-`switch`.
 - **Container failed** — `devflow service logs <ws>`, then `devflow service reset <ws>` to re-clone from the parent.
 - **Shared engine down** — `devflow service up` (one-shot) or `devflow daemon start` (keep-alive).
 - **Port conflicts** — local providers allocate from `port_range_start`; adjust it per service. Never hardcode ports — template them (`{{ service['app-db'].port }}`).
@@ -50,6 +50,15 @@ devflow capabilities    # CoW method, automation guarantees
 
 - **A command appears to hang in a wrapped shell** — the wrapper captures stdout, hiding interactive prompts (e.g. `devflow remove` confirmation). Use `command devflow …` to bypass, or `--force`/`--non-interactive` flags.
 - **`devflow tui` shows a blank screen** — same cause; run `command devflow tui`.
+
+## Workspace identity after upgrading
+
+Older devflow releases keyed services by a normalized workspace name (`feature/auth` → `feature_auth`); current releases record the raw VCS name plus a collision-resistant `service_key`. On first run after upgrading, devflow migrates the registry automatically. Two situations can surface:
+
+- **`identity_status: legacy_adopted` in `devflow --json list`** — the workspace was migrated unambiguously and keeps its old key so existing databases/containers stay visible. Nothing to do.
+- **"legacy workspace key … has unresolved ownership" / `identity_status: legacy_unresolved`** — two or more live workspaces normalize to the same legacy key (e.g. `feature/auth` and `feature-auth`), so devflow cannot tell which one owns the old database/container namespace. Service and process operations for those workspaces are blocked (fail-closed) to avoid exposing one workspace's data to another.
+
+To resolve an unresolved key: run `devflow --json list` and read the `warnings` for the candidate list, then rename or `devflow remove` the colliding workspace so only one owner remains — the next command re-runs the migration and adopts the key. If you know which workspace owns the legacy resources, you can instead edit its entry in the workspace registry (`~/.config/devflow/local_state.yml`): set its `service_key` to the legacy key and `raw_identity_verified: true`. Stop any running devflow processes first and keep a copy of the file before editing.
 
 ## Recovery & cleanup
 

@@ -9,11 +9,15 @@ devflow is designed for autonomous agents as much as humans: every agent task ca
 
 ## The contract
 
-- `--json` — structured output on stdout.
+- `--json` — exactly one structured document on stdout for supported
+  machine-readable commands; `switch -x` nests command output under
+  `execution`. Output interfaces (`shell-init`, `completions`, and `tui`)
+  reject this flag.
 - `--non-interactive` — no prompts. Unapproved hooks are **skipped with a visible warning** (never block); the JSON `hooks` summary reports them as `skipped`.
 - `destroy` and `remove` require `--force` in `--json`/`--non-interactive` mode.
 - Multi-provider `service create`/`service delete`/`switch` exit non-zero if **any** provider fails.
-- `devflow --json capabilities` returns a machine-readable summary of these guarantees (plus CoW support, worktree mode, …) — detect at runtime instead of assuming.
+- `devflow --json capabilities` returns a machine-readable summary of these guarantees (plus CoW and VCS support) — detect at runtime instead of assuming.
+- `devflow --json list` always returns a versioned tree document. Use a node's raw `name` for commands, its reported `service_key` for generated identifiers, and `worktree_path` for the agent workdir. Never reconstruct the key: a migrated workspace may retain a legacy value, while unresolved legacy ownership is blocked.
 
 :::caution
 `--no-verify` skips **all** hooks. Agents usually want hooks (they write `.env.local`, run migrations, trust mise) — use `--non-interactive` plus pre-approval instead.
@@ -24,12 +28,13 @@ devflow is designed for autonomous agents as much as humans: every agent task ca
 ```bash
 WORKSPACE="agent/$TASK_ID"
 
-# 1) Isolated environment (branch + worktree + cloned DB + hooks)
+# 1) Isolated environment (worktree/jj workspace + cloned DB + hooks)
 OUTPUT=$(devflow --json --non-interactive switch -c "$WORKSPACE")
 
 # 2) Worktree path = the agent's workdir for every subsequent tool call
 WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
-[ -n "$WORKTREE" ] && cd "$WORKTREE"
+test -d "$WORKTREE"
+cd "$WORKTREE"
 
 # 3) Connection info
 CONN=$(devflow --json service connection "$WORKSPACE" | jq -r '.connection_string')
@@ -38,8 +43,9 @@ export DATABASE_URL="$CONN"
 # 4) Work …  then reset for retries:
 devflow --json --non-interactive service reset "$WORKSPACE"
 
-# 5) Cleanup
-devflow --json --non-interactive remove "$WORKSPACE" --force
+# 5) Cleanup from the primary checkout; a workspace cannot remove itself
+PROJECT_ROOT=$(devflow --json list | jq -r '.project.root')
+(cd "$PROJECT_ROOT" && devflow --json --non-interactive remove "$WORKSPACE" --force)
 ```
 
 Ready-made versions: `examples/agent-bootstrap.sh` (idempotent repo setup) and `examples/agent-task.sh` (task-scoped environment).
@@ -113,18 +119,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: cargo install --path .
+        with:
+          # devflow requires the primary checkout to have a named workspace.
+          ref: ${{ github.head_ref }}
+      - name: Install devflow
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/clement-tourriere/devflow/main/scripts/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Create preview environment
         run: |
-          devflow --json --non-interactive init myapp
-          devflow --json --non-interactive switch -c pr-${{ github.event.number }} --no-verify
+          devflow --json --non-interactive init --name myapp
+          devflow --json --non-interactive service add app-db --provider local --service-type postgres
+          OUTPUT=$(DEVFLOW_APPROVE_HOOKS=1 devflow --json --non-interactive switch -c pr-${{ github.event.number }})
+          WORKTREE=$(echo "$OUTPUT" | jq -r '.worktree_path // empty')
+          test -d "$WORKTREE"
+          echo "DEVFLOW_WORKTREE=$WORKTREE" >> "$GITHUB_ENV"
       - name: Migrate + test
         run: |
-          CONN=$(devflow --json connection pr-${{ github.event.number }} | jq -r '.connection_string')
-          DATABASE_URL="$CONN" npm run migrate && DATABASE_URL="$CONN" npm test
+          CONN=$(devflow --json service connection pr-${{ github.event.number }} | jq -r '.connection_string')
+          cd "$DEVFLOW_WORKTREE"
+          DATABASE_URL="$CONN" npm run migrate
+          DATABASE_URL="$CONN" npm test
       - name: Cleanup
         if: always()
         run: devflow --non-interactive remove pr-${{ github.event.number }} --force
 ```
 
-(`--no-verify` is appropriate in CI when hooks aren't pre-approved; use `DEVFLOW_APPROVE_HOOKS=1` if you want them to run.)
+Use `DEVFLOW_APPROVE_HOOKS=1` when CI should run configured lifecycle hooks. Without it, unapproved shell hooks are reported as skipped; `--no-verify` would skip every lifecycle hook, including non-shell setup actions.

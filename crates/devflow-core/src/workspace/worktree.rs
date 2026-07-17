@@ -35,24 +35,44 @@ pub fn apply_worktree_path_template(
     path_template
         .replace("{repo}", repo_name)
         .replace("{workspace}", workspace_name)
-        // Backward compatibility with legacy templates.
         .replace("{branch}", workspace_name)
 }
 
 /// Resolve the full worktree path for a workspace.
 ///
-/// Applies the config path template (or the default `../{repo}.{workspace}`)
-/// and joins it relative to the project directory.
+/// Applies the configured path template with a collision-resistant workspace
+/// key and joins it relative to the project directory.
 pub fn resolve_worktree_path(config: &Config, project_dir: &Path, workspace_name: &str) -> PathBuf {
-    let repo_name = resolve_repo_name(config, project_dir);
-    let normalized = config.get_normalized_workspace_name(workspace_name);
-    let path_template = config
-        .worktree
-        .as_ref()
-        .map(|wt| wt.path_template.as_str())
-        .unwrap_or("../{repo}.{workspace}");
-    let wt_path_str = apply_worktree_path_template(path_template, &repo_name, &normalized);
-    project_dir.join(wt_path_str)
+    let main_dir = crate::vcs::detect_vcs_provider(project_dir)
+        .ok()
+        .and_then(|provider| provider.main_worktree_dir())
+        .unwrap_or_else(|| project_dir.to_path_buf());
+    let repo_name = resolve_repo_name(config, &main_dir);
+    let service_key = crate::state::LocalStateManager::new()
+        .and_then(|state| state.resolve_workspace_service_key_by_dir(&main_dir, workspace_name))
+        .unwrap_or_else(|_| config.get_service_workspace_key(workspace_name));
+    let wt_path_str =
+        apply_worktree_path_template(&config.worktree.path_template, &repo_name, &service_key);
+    main_dir.join(wt_path_str)
+}
+
+/// Resolve the path a workspace selection would use without materializing it.
+///
+/// Existing materialized workspaces (including Git's primary checkout) take
+/// precedence over the configured path template. Missing workspaces retain the
+/// deterministic planned path used during creation.
+pub fn resolve_existing_or_planned_worktree_path(
+    config: &Config,
+    project_dir: &Path,
+    workspace_name: &str,
+) -> PathBuf {
+    if let Ok(provider) = crate::vcs::detect_vcs_provider(project_dir) {
+        if let Ok(Some(existing)) = provider.worktree_path(workspace_name) {
+            return existing.canonicalize().unwrap_or(existing);
+        }
+    }
+
+    resolve_worktree_path(config, project_dir, workspace_name)
 }
 
 /// Create a worktree for the given workspace and copy configured files.
@@ -99,7 +119,8 @@ pub fn create_worktree_with_files(
     );
 
     // Copy configured files from main worktree
-    if let Some(ref wt_config) = config.worktree {
+    {
+        let wt_config = &config.worktree;
         use rayon::prelude::*;
 
         let main_dir = vcs
@@ -415,6 +436,7 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vcs::{GitRepository, VcsProvider};
 
     #[test]
     fn test_apply_worktree_path_template() {
@@ -422,13 +444,51 @@ mod tests {
             apply_worktree_path_template("../{repo}.{workspace}", "myapp", "feature-auth"),
             "../myapp.feature-auth"
         );
-    }
-
-    #[test]
-    fn test_apply_worktree_path_template_legacy_branch() {
         assert_eq!(
             apply_worktree_path_template("../{repo}.{branch}", "myapp", "feature-auth"),
             "../myapp.feature-auth"
+        );
+    }
+
+    #[test]
+    fn resolved_paths_do_not_collide_for_lossy_legacy_names() {
+        let project = tempfile::tempdir().unwrap();
+        let config = Config::default();
+
+        let slash = resolve_worktree_path(&config, project.path(), "feature/auth");
+        let dash = resolve_worktree_path(&config, project.path(), "feature-auth");
+
+        assert_ne!(slash, dash);
+        assert!(slash
+            .to_string_lossy()
+            .contains(&config.get_service_workspace_key("feature/auth")));
+    }
+
+    #[test]
+    fn selection_path_prefers_materialized_worktrees_and_primary_checkout() {
+        let container = tempfile::tempdir().unwrap();
+        let primary = container.path().join("project");
+        std::fs::create_dir_all(&primary).unwrap();
+        let repo = GitRepository::init(&primary).unwrap();
+        let actual_feature = container.path().join("manually-placed-feature");
+        repo.create_worktree("feature/existing", &actual_feature)
+            .unwrap();
+        let config = Config {
+            name: Some("different-template-name".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_existing_or_planned_worktree_path(&config, &primary, "feature/existing"),
+            actual_feature.canonicalize().unwrap()
+        );
+        assert_eq!(
+            resolve_existing_or_planned_worktree_path(&config, &primary, "main"),
+            primary.canonicalize().unwrap()
+        );
+        assert_eq!(
+            resolve_existing_or_planned_worktree_path(&config, &primary, "feature/missing"),
+            resolve_worktree_path(&config, &primary, "feature/missing")
         );
     }
 

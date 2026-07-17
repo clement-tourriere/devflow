@@ -5,16 +5,16 @@ sidebar:
   order: 1
 ---
 
-This guide assumes `worktree.enabled: true` and [shell integration](/devflow/getting-started/shell-integration/) installed. Concepts and configuration are covered in [Worktrees](/devflow/concepts/worktrees/).
+Git projects always use linked worktrees for additional workspaces; jj projects use native workspaces. This guide assumes [shell integration](/devflow/getting-started/shell-integration/) is installed. Concepts and configuration are covered in [Worktrees](/devflow/concepts/worktrees/).
 
 ## The daily flow
 
 ```bash
 # Start a new feature — worktree + isolated services + hooks, then auto-cd
 devflow switch -c feature/auth
-# → Created worktree for 'feature/auth' at ../my-project.feature_auth
+# → Created worktree for 'feature/auth' at ../my-project.feature_auth_fc659bd73585
 # → service workspace cloned from main
-# → Changed directory to: ../my-project.feature_auth
+# → Changed directory to: ../my-project.feature_auth_fc659bd73585
 
 npm run migrate && npm test          # work normally
 
@@ -33,7 +33,7 @@ Each worktree keeps its own build artifacts, env files, and database. Nothing is
 ## Useful switch flags
 
 ```bash
-devflow switch -c feature/x --from develop      # explicit parent (branch + database)
+devflow switch -c feature/x --from develop      # explicit code + data parent
 devflow switch feature/x -x "npm run dev"       # run a command in the worktree after switching
 devflow switch feature/x -x "npm run dev" -d    # …in a detached tmux/zellij session
 devflow switch feature/x -o                     # open an interactive multiplexer session
@@ -56,12 +56,11 @@ To open a session automatically on every new workspace: `devflow hook install mu
 ## Seeing your worktrees
 
 ```bash
-devflow list      # workspaces with services + worktree paths
-devflow graph     # parent/child tree with worktree paths and service states
+devflow list      # parent tree with paths, services, processes, and health
 devflow status    # current workspace details
 ```
 
-`devflow --json list` includes a `worktree_path` per entry — that's what agents use to find their workdir.
+`devflow --json list` returns one versioned tree document with `roots` and workspace nodes. Each node includes its raw `name`, backend `service_key` (collision-safe for new workspaces), immutable parent, children, `worktree_path`, and health; agents use the path as their workdir.
 
 ## Adopting worktrees you made by hand
 
@@ -72,7 +71,7 @@ cd ../myapp.hotfix
 devflow worktree-setup
 ```
 
-For branches created outside devflow (no worktree yet), `devflow link <branch>` registers them and can materialize services.
+For VCS refs created outside devflow (without a worktree yet), `devflow switch <name>` materializes the worktree. `devflow link <name>` adopts an already materialized VCS workspace and can provision services.
 
 :::note
 Hook-driven setup currently skips AI config dirs (`.claude/` etc.) — see the [worktrees concept page](/devflow/concepts/worktrees/#manually-created-worktrees).
@@ -80,13 +79,16 @@ Hook-driven setup currently skips AI config dirs (`.claude/` etc.) — see the [
 
 ## Cleaning up
 
-When a workspace is no longer needed, remove its branch/worktree and any associated service workspaces:
+When a workspace is no longer needed, remove its worktree, VCS ref, and associated service instances:
 
 ```bash
-devflow remove feature/auth            # confirm, then delete worktree + branch + services
-devflow remove feature/auth --force    # skip confirmation AND dirty-worktree protection
+devflow switch --template                # leave the workspace being removed
+devflow remove feature/auth            # preflight, then hooks → processes → services → worktree/ref
+devflow remove feature/auth --force    # explicitly accept dirty/partial-cleanup risk
 devflow remove feature/auth --keep-services
 ```
+
+The default and current workspaces are never removable, even with `--force`.
 
 ## Pruning stale worktrees
 
@@ -94,7 +96,7 @@ If a worktree directory was deleted by hand, Git metadata lingers. devflow auto-
 
 ## Troubleshooting
 
-- **“Failed to create worktree”** — usually a name collision: another branch normalizing to the same directory (see [name sanitization](/devflow/concepts/workspaces/#workspace-names)), or a leftover directory at the target path. Remove/rename and retry.
+- **“Failed to create worktree”** — usually a leftover directory at the target path or stale VCS metadata. Service keys are collision-safe, so separator/case variants do not share a generated path.
 - **Switch didn't `cd`** — shell integration not installed in this shell; see [Shell integration](/devflow/getting-started/shell-integration/). devflow prints the path either way.
 - **Copy flags seemed ignored** — overrides like `--no-respect-gitignore` only apply when the worktree is *created*; switching to an existing worktree reuses it as-is.
 - **`.env.local` missing in a new worktree** — add it to `worktree.copy_files`, or generate it with a `post-create`/`post-switch` [write-env hook](/devflow/concepts/hooks/) (preferred: values stay correct per workspace).

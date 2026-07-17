@@ -42,6 +42,7 @@ pub async fn run_lifecycle_hooks_with_result(
     phase: HookPhase,
     opts: &LifecycleOptions,
 ) -> Result<crate::hooks::executor::HookRunResult> {
+    super::validate_workspace_name(workspace_name).map_err(anyhow::Error::msg)?;
     let Some(ref hooks_config) = config.hooks else {
         return Ok(crate::hooks::executor::HookRunResult::default());
     };
@@ -49,7 +50,10 @@ pub async fn run_lifecycle_hooks_with_result(
         return Ok(crate::hooks::executor::HookRunResult::default());
     }
 
-    let mut context = hooks::build_hook_context(config, project_dir, workspace_name).await;
+    // Strict: this path EXECUTES user hooks, so an unresolved workspace
+    // identity must fail closed (like switch/link/delete do before their
+    // hooks) instead of exporting the sentinel key to user commands.
+    let mut context = hooks::build_hook_context_strict(config, project_dir, workspace_name).await?;
 
     if let Some(ref source) = opts.trigger_source {
         context.trigger_source = source.clone();

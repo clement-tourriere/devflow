@@ -57,7 +57,7 @@ hooks:
       background: true
 ```
 
-Key variables: `workspace` (raw branch name), `workspace_sanitized`, `worktree_path`, `default_workspace`, `repo`, `name`, `commit`/`short_commit`, `trigger_source` (`cli`/`vcs`/`gui`), and `service.<name>.{host,port,database,user,password,url}`. Filters include `sanitize`, `sanitize_db`, `hash_port` (deterministic port from the workspace name), `lower`, `upper`, `replace`, `truncate`. [Full tables →](/devflow/reference/hooks/)
+Key variables: `workspace` (raw VCS name), `workspace_key` (the reported backend service/path key; collision-safe for new workspaces), its `workspace_sanitized` compatibility alias, `worktree_path`, `default_workspace`, `repo`, `name`, `commit`/`short_commit`, `trigger_source` (`cli`/`vcs`/`gui`), and `service.<name>.{host,port,database,user,password,url}`. Filters include `sanitize`, `sanitize_db`, `hash_port` (deterministic port from the workspace name), `lower`, `upper`, `replace`, `truncate`. [Full tables →](/devflow/reference/hooks/)
 
 Inspect the live context anytime:
 

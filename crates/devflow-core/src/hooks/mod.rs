@@ -335,7 +335,9 @@ pub type HooksConfig = IndexMap<HookPhase, IndexMap<String, HookEntry>>;
 pub struct HookContext {
     /// Current workspace name (raw VCS branch name, e.g. "feature/auth")
     pub workspace: String,
-    /// Sanitized workspace name (safe for file/db/container names)
+    /// Collision-resistant workspace key (safe for file/db/container names).
+    pub workspace_key: String,
+    /// Backwards-compatible alias for `workspace_key`.
     pub workspace_sanitized: String,
     /// Project name from config (`name`) or project directory fallback.
     pub name: String,
@@ -344,7 +346,7 @@ pub struct HookContext {
     /// Worktree path (if in a worktree)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
-    /// Default workspace (main/master)
+    /// Configured default workspace.
     pub default_workspace: String,
     /// HEAD commit SHA
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -391,11 +393,43 @@ pub struct ServiceContext {
 /// Build a `HookContext` for the given config and workspace.
 ///
 /// Populates service connection info from all configured services.
+///
+/// Infallible: when the workspace's service key cannot be resolved (e.g.
+/// ambiguous legacy identity), the context carries a non-existent sentinel
+/// key. That is safe for INSPECTION surfaces (vars/render/explain) only —
+/// anything that EXECUTES hooks must use [`build_hook_context_strict`], or
+/// user commands run with `DEVFLOW_WORKSPACE_KEY=<sentinel>` and create
+/// sentinel-named resources.
 pub async fn build_hook_context(
     config: &crate::config::Config,
     project_dir: &Path,
     workspace_name: &str,
 ) -> HookContext {
+    match build_hook_context_impl(config, project_dir, workspace_name, false).await {
+        Ok(context) => context,
+        // Unreachable: strict=false never errors.
+        Err(error) => unreachable!("non-strict hook context cannot fail: {error:#}"),
+    }
+}
+
+/// Like [`build_hook_context`], but fails when the workspace's service key
+/// cannot be resolved instead of substituting the sentinel. Use this on every
+/// path that executes hooks, mirroring how switch/link/delete fail closed on
+/// the same condition before running theirs.
+pub async fn build_hook_context_strict(
+    config: &crate::config::Config,
+    project_dir: &Path,
+    workspace_name: &str,
+) -> anyhow::Result<HookContext> {
+    build_hook_context_impl(config, project_dir, workspace_name, true).await
+}
+
+async fn build_hook_context_impl(
+    config: &crate::config::Config,
+    project_dir: &Path,
+    workspace_name: &str,
+    strict: bool,
+) -> anyhow::Result<HookContext> {
     let canonical_project_dir = project_dir
         .canonicalize()
         .unwrap_or_else(|_| project_dir.to_path_buf());
@@ -412,44 +446,45 @@ pub async fn build_hook_context(
         .cloned()
         .unwrap_or_else(|| repo.clone());
 
-    // Detect worktree path if we're inside a VCS worktree
+    // Resolve the requested raw VCS identity directly. Never fall back to a
+    // lossy sanitized-name comparison: distinct branches may share the same
+    // legacy normalization.
     let worktree_path = crate::vcs::detect_vcs_provider(&canonical_project_dir)
         .ok()
         .and_then(|vcs_repo| {
-            if vcs_repo.is_worktree() {
-                Some(canonical_project_dir.to_string_lossy().to_string())
-            } else {
-                let normalized = config.get_normalized_workspace_name(workspace_name);
-                vcs_repo
-                    .worktree_path(workspace_name)
-                    .ok()
-                    .flatten()
-                    .or_else(|| {
-                        vcs_repo.list_worktrees().ok().and_then(|worktrees| {
-                            worktrees.into_iter().find_map(|wt| {
-                                let branch = wt.workspace?;
-                                let normalized_branch =
-                                    config.get_normalized_workspace_name(&branch);
-                                if branch == workspace_name
-                                    || normalized_branch == workspace_name
-                                    || normalized_branch == normalized
-                                {
-                                    Some(wt.path)
-                                } else {
-                                    None
-                                }
-                            })
-                        })
-                    })
-                    .map(|p| p.to_string_lossy().to_string())
-            }
+            vcs_repo
+                .worktree_path(workspace_name)
+                .ok()
+                .flatten()
+                .map(|path| path.to_string_lossy().to_string())
         });
+
+    let workspace_key = match crate::state::LocalStateManager::new().and_then(|state| {
+        state.resolve_workspace_service_key_by_dir(&canonical_project_dir, workspace_name)
+    }) {
+        Ok(key) => key,
+        Err(error) if strict => {
+            return Err(error.context(format!(
+                "Refusing to execute hooks for workspace '{workspace_name}': its service key cannot be resolved safely"
+            )));
+        }
+        Err(error) => {
+            // Inspection/rendering stays infallible. Use a non-existent
+            // sentinel rather than a newly-computed key so ambiguous legacy
+            // state cannot expose another workspace's data.
+            log::warn!(
+                "Could not resolve service key for workspace '{}': {error:#}",
+                workspace_name
+            );
+            "__devflow_unresolved_workspace_identity__".to_string()
+        }
+    };
 
     // Build service map from all configured services
     let mut service = HashMap::new();
 
     if let Ok(conn_infos) =
-        crate::services::factory::get_all_connection_info(config, workspace_name).await
+        crate::services::factory::get_all_connection_info(config, &workspace_key).await
     {
         for (name, info) in conn_infos {
             let url = info
@@ -482,9 +517,10 @@ pub async fn build_hook_context(
         })
         .unwrap_or((None, None));
 
-    HookContext {
+    Ok(HookContext {
         workspace: workspace_name.to_string(),
-        workspace_sanitized: config.get_normalized_workspace_name(workspace_name),
+        workspace_sanitized: workspace_key.clone(),
+        workspace_key,
         name,
         repo,
         worktree_path,
@@ -496,7 +532,7 @@ pub async fn build_hook_context(
         trigger_source: "cli".to_string(),
         vcs_event: None,
         service,
-    }
+    })
 }
 
 #[cfg(test)]

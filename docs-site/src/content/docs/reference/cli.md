@@ -43,17 +43,21 @@ devflow switch feature/auth --dry-run
 | `--no-services` | VCS only — skip service branching |
 | `--no-processes` | skip process auto-start during switch |
 | `--no-verify` | skip **all** hooks |
-| `--template` | switch to the main/template workspace |
+| `--template` | select the configured default workspace and its services |
 | `--dry-run` | print the plan (worktree path, services, hooks) without acting |
 | `--no-respect-gitignore` | also copy gitignored entries into a newly created worktree (one-shot `copy_ignored: true`) |
 
-### `devflow list` · `devflow graph` · `devflow status`
+In JSON mode, switch emits exactly one document with raw `workspace`, backend `service_key`, and `worktree_path`. When `-x`, `--detach`, or `--open` is used, it adds a nested `execution` result (including captured stdout/stderr when present) instead of printing a second document.
+
+### `devflow list` · `devflow status`
 
 ```bash
-devflow list            # workspaces with service + worktree state (--json includes worktree_path)
-devflow graph           # full tree: workspaces → services → worktree paths
+devflow list            # parent tree: paths, services, processes, and health
+devflow --json list     # versioned tree document with a stable shape
 devflow status          # current workspace, services, connections
 ```
+
+The list document contains `schema_version`, project/VCS metadata, `context_workspace`, `default_workspace`, `roots`, workspace nodes, and `warnings`. Nodes expose raw `name`, effective `service_key`, newly-derived `canonical_service_key`, `identity_status`, immutable `parent`, `children`, `worktree_path`, health, services, processes, `created_at`, `executed_command`, and `execution_status`. New keys are collision-safe; an unambiguously migrated workspace may retain its legacy key for data continuity. The shape is the same with zero, one, or many services.
 
 ### `devflow connection <workspace>`
 
@@ -61,11 +65,11 @@ Alias for `service connection`. `--format uri|env|json`.
 
 ### `devflow link <workspace>`
 
-Adopt an existing VCS branch into devflow (registry entry + optional service materialization). `--from <ws>` sets the parent.
+Adopt an existing materialized VCS workspace into devflow (registry entry + optional service provisioning). `--from <ws>` records its creation parent.
 
 ### `devflow remove <workspace>`
 
-Delete workspace + worktree + services. Refuses on a dirty worktree without `--force`; requires `--force` in `--json`/`--non-interactive`. `--keep-services` removes only branch + worktree.
+Delete a workspace, its worktree/VCS ref, and services. A read-only preflight protects dirty/default/current workspaces. Removal hooks run while the directory exists, followed by processes and services; the worktree/ref and registry entry are removed last. A service failure leaves code intact for retry. `--force` accepts dirty/partial-cleanup risk and is required in `--json`/`--non-interactive`; `--keep-services` removes only the worktree/ref.
 
 ### `devflow cleanup`
 
@@ -73,13 +77,18 @@ Alias for `service cleanup` (`--max-count <n>`).
 
 ## Services
 
+`service add` scaffolds complete local/shared definitions: PostgreSQL and
+ClickHouse (local/shared), MySQL (local), Redis and RustFS (shared). Define
+credentialed cloud, generic, or plugin providers explicitly under `services:`
+in `.devflow.yml` so their required fields are present.
+
 ```bash
 devflow service add [name] [--provider local] [--service-type postgres] [--from <seed>]
 devflow service remove <name>              # remove the service config
 devflow service list | status | capabilities
 devflow service up                         # start all shared global engines (one-shot reconcile)
 devflow service create <ws> [--from <parent>]
-devflow service delete <ws>                # delete instances; keep branch + worktree
+devflow service delete <ws>                # delete instances; keep the VCS workspace
 devflow service start|stop|reset <ws>
 devflow service connection <ws> [--format uri|env|json]
 devflow service logs <ws> [--tail N]
@@ -151,7 +160,7 @@ See the [proxy guide](/devflow/guides/proxy/).
 ## Setup & maintenance
 
 ```bash
-devflow init [path] [--name <n>] [--force]    # initialize (worktrees default ON when non-interactive)
+devflow init [path] [--name <n>] [--force]    # initialize (additional workspaces are always materialized)
 devflow destroy [--force]                     # tear down the whole project (irreversible)
 devflow config [-v]                           # merged config (+ precedence details)
 devflow doctor                                # diagnostics: docker, vcs, config, storage, hooks

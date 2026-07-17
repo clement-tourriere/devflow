@@ -2,6 +2,14 @@
 members = [".", "crates/devflow-core", "crates/devflow-proxy", "crates/devflow-terminal", "src-tauri"]
 resolver = "2"
 
+# rust-s3 0.37.2 and aws-creds 0.39.1 constrain quick-xml to the vulnerable
+# 0.38 line (RUSTSEC-2026-0194/0195). Pin the upstream two-line dependency
+# fix until rust-s3 publishes a release containing it, then remove this patch.
+# https://github.com/durch/rust-s3/pull/468
+[patch.crates-io]
+rust-s3 = { git = "https://github.com/durch/rust-s3", rev = "01b6ccb9babf858475163a4b9bcd7dea3d56fd00" }
+aws-creds = { git = "https://github.com/durch/rust-s3", rev = "01b6ccb9babf858475163a4b9bcd7dea3d56fd00" }
+
 [package]
 name = "devflow"
 version = "0.6.0"
@@ -85,8 +93,8 @@ rayon = "1.12"
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 
 # TUI framework
-ratatui = { version = "0.29", default-features = false, features = ["crossterm"], optional = true }
-crossterm = { version = "0.28", default-features = false, features = ["events", "use-dev-tty"], optional = true }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"], optional = true }
+crossterm = { version = "0.29", default-features = false, features = ["events", "use-dev-tty"], optional = true }
 
 [profile.release]
 # Day-to-day optimized builds (local `mise run install`, `cargo tauri build`).

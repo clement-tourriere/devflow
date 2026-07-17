@@ -162,7 +162,7 @@ function ProjectList() {
                   )}
                   {p.detail?.has_config && (
                     <span className="badge badge-info" style={{ fontSize: 11 }}>
-                      {p.detail.worktree_enabled ? "worktree" : "branch"}
+                      workspaces
                     </span>
                   )}
                   <button

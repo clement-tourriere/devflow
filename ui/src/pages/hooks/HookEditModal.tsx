@@ -1010,7 +1010,7 @@ function ConditionPicker({
 
 const TEMPLATE_SNIPPETS: { label: string; value: string; tooltip: string; category: string }[] = [
   // Variables
-  { label: "workspace", value: "{{ workspace }}", tooltip: "Current workspace/branch name", category: "Variables" },
+  { label: "workspace", value: "{{ workspace }}", tooltip: "Current raw VCS workspace name", category: "Variables" },
   { label: "repo", value: "{{ repo }}", tooltip: "Repository name", category: "Variables" },
   { label: "worktree_path", value: "{{ worktree_path }}", tooltip: "Absolute path to the worktree directory", category: "Variables" },
   { label: "short_commit", value: "{{ short_commit }}", tooltip: "Short (7-char) commit hash", category: "Variables" },

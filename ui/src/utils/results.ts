@@ -6,6 +6,7 @@ interface WorkspaceOpResult {
   hooks?: HookRunResult[];
   processes?: ProcessResult[];
   worktree_path?: string | null;
+  vcs_ref_deleted?: boolean;
 }
 
 /**
@@ -30,6 +31,9 @@ export function reportWorkspaceResult(action: string, result: WorkspaceOpResult)
 
   const blockingProblems: string[] = [];
   const warnings: string[] = [];
+  if (result.vcs_ref_deleted === false) {
+    blockingProblems.push("the VCS ref still exists after partial cleanup");
+  }
   for (const s of failedServices) {
     blockingProblems.push(`service "${s.service_name}": ${s.message}`);
   }

@@ -1,15 +1,19 @@
 ---
 title: Workspaces & isolation
-description: What a devflow workspace is, how names map to branches, databases, and directories, and how the two isolation models work.
+description: What a devflow workspace is, how identity and lineage work, and how the two service-isolation models fit into it.
 sidebar:
   order: 1
 ---
 
-A **workspace** is devflow's unit of isolation: one VCS branch plus everything that belongs to it — optionally a worktree directory, one service workspace per configured service, hook-generated files, and registry state.
+A **workspace** is devflow's unit of isolation: one materialized VCS directory plus its service instances, processes, hook-generated files, and registry state. Git uses the primary checkout for the default workspace and a linked worktree for every additional workspace. Jujutsu uses native workspaces.
+
+For jj, the raw devflow workspace name is also a bookmark. `devflow commit` advances that bookmark to the commit it just finalized, and workspace removal refreshes it before forgetting the native workspace. A direct `jj commit` does not advance bookmarks automatically; if you commit outside devflow and need the bookmark immediately, run `jj bookmark set <workspace> --revision @-`.
+
+devflow treats jj's native primary workspace (internal name `default`) as the stable project root. Keep that internal workspace registered under `default`; if it is renamed or forgotten, devflow fails closed instead of guessing that another workspace is the primary. Raw user-facing workspace identities remain bookmarks and are unaffected by this internal-name requirement.
 
 ```
-Git branch  feature/auth
- ├─ worktree          ../myapp.feature_auth          (optional)
+Git worktree  feature/auth
+ ├─ directory         ../myapp.feature_auth_fc659bd73585
  ├─ service app-db    postgres container or database  (isolated)
  ├─ service cache     redis DB index                  (isolated)
  └─ .env.local        written by hooks                (per-workspace values)
@@ -78,30 +82,30 @@ Shared engines use one fixed port, start faster, and consume less memory — at 
 
 See [Local containers](/devflow/guides/local-containers/) and [Shared engines](/devflow/guides/shared-engines/) for full configuration.
 
-## Workspace names
+## Workspace identity
 
-Git branch names are sanitized wherever they become identifiers (database names, container names, worktree directories, registry keys):
+devflow keeps two names with different jobs:
 
-- lowercased,
-- every character outside `[a-z0-9_$]` becomes `_` (so `/`, `-`, `.` all map to `_`),
-- leading digits stripped, doubled `__` collapsed,
-- truncated to 63 characters with a hash suffix if longer.
+- **`name`** is the raw VCS identity, such as `feature/Auth-System`. It is shown in every frontend, passed to VCS operations, and exposed to hooks as `{{ workspace }}`.
+- **`service_key`** is a deterministic, database/file-safe identity for services and generated paths. Already-safe names are preserved; names that need normalization receive a stable short hash, so `feature/auth`, `feature-auth`, and case variants never collide. Hooks expose it as `{{ workspace_key }}` and as the `{{ workspace_sanitized }}` compatibility alias.
 
-`feature/Auth-System` → `feature_auth_system`. The raw branch name is preserved in Git and in hook templates as `{{ workspace }}`; the sanitized form is `{{ workspace_sanitized }}`.
-
-:::caution
-Distinct branches can normalize to the same name (`feature/auth` and `feature-auth` both become `feature_auth`) — they would share a service workspace and worktree path. Avoid branch names that differ only in separators or case.
-:::
+Never reconstruct a workspace name from its `service_key`; use the raw `name` field for `switch`, `remove`, and other VCS operations.
 
 ## State & identity
 
-Workspace metadata (parent relationships, worktree paths, executed commands) lives in `~/.config/devflow/local_state.yml` — machine-local, never committed. Project identity is the **canonical main-repo root**: commands run from inside a worktree resolve to the same project as the main checkout, so registries, hook approvals, and lookups agree no matter where you invoke devflow.
+Workspace metadata (creation parents, paths, service keys, executed commands) lives in `~/.config/devflow/local_state.yml` — machine-local, never committed. Project identity is the **canonical main-repo root**: commands run from inside any worktree resolve to the same project as the primary checkout, so registries, hook approvals, and lookups agree.
+
+`devflow list` reconciles this state with live Git worktrees or jj workspaces, services, and processes. Its JSON output is one versioned tree document for zero, one, or many services: `schema_version`, project/VCS metadata, `context_workspace`, `default_workspace`, `roots`, workspace nodes, and `warnings`. `context_workspace` is derived from the VCS workspace containing the project path used for the request; it does not imply other worktrees are inactive.
+
+When upgrading from the older lossy naming scheme, devflow recovers raw names only where a live worktree gives an unambiguous match. That workspace keeps its persisted legacy `service_key`, so existing services and process state remain visible without risky renames. Ambiguous ownership is shown in inventory warnings and service/process operations fail before creating a parallel namespace or attaching another workspace's data. Inventory nodes expose `identity_status` (`canonical`, `legacy_adopted`, or `legacy_unresolved`) plus `canonical_service_key`, so automation can handle recovery without parsing warning text.
 
 ## Parent relationships
 
-Every created workspace records a parent (`--from <ws>`, or your current context branch). Parents drive:
+Every created workspace records its parent (`--from <ws>`, or the current context workspace). This is immutable creation/clone provenance, not inferred commit ancestry. Parents drive:
 
 - **service branching** — the new database is cloned from the parent's,
-- **`devflow graph`** — the rendered tree.
+- **`devflow list`** — the rendered parent tree in CLI, TUI, GUI, and JSON.
+
+Deleting a parent does not rewrite its children. Inventory keeps the recorded relationship and marks that parent as missing/deleted, which preserves how service data was originally cloned.
 
 Override the inferred context with `DEVFLOW_CONTEXT_BRANCH=<ws>` (useful in CI).

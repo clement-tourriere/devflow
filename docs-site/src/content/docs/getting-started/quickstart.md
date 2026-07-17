@@ -14,15 +14,13 @@ devflow init
 
 The interactive wizard:
 
-- detects your VCS (Git or Jujutsu) and main branch,
-- proposes **worktrees** (recommended — each workspace gets its own directory),
+- detects your VCS (Git or Jujutsu) and primary/default workspace,
+- configures the worktree path and copy policy (every workspace gets its own directory),
 - detects Copy-on-Write support on your filesystem,
 - optionally adds a first service (PostgreSQL, ClickHouse, MySQL, Redis, …),
 - installs the VCS hooks and offers shell integration.
 
-:::note
-In `--json` / `--non-interactive` mode, `devflow init` enables worktrees **by default**. Pass a path (`devflow init myapp`) to create and initialize a new directory.
-:::
+Pass a path (`devflow init myapp`) to create and initialize a new directory. Git worktrees (or jj workspaces) are always used for additional workspaces in interactive and non-interactive modes.
 
 This writes a `.devflow.yml` you commit with the repo:
 
@@ -36,7 +34,6 @@ services:
       image: postgres:17
 
 worktree:
-  enabled: true
   path_template: "../{repo}.{workspace}"
 ```
 
@@ -48,8 +45,8 @@ devflow switch -c feature/auth
 
 One command does all of it:
 
-- creates the Git branch (from your current branch, or `--from <parent>`),
-- creates a worktree at `../my-project.feature_auth` and copies configured files into it,
+- creates the Git ref and linked worktree (or jj workspace) from the current context or `--from <parent>`,
+- creates a worktree at `../my-project.feature_auth_fc659bd73585` and copies configured files into it,
 - clones the parent's database into a new isolated service workspace (CoW — near-instant),
 - runs your `post-create` / `post-switch` hooks (write `.env.local`, run migrations, …),
 - `cd`s your shell into the worktree (with [shell integration](/devflow/getting-started/shell-integration/) installed).
@@ -58,8 +55,8 @@ One command does all of it:
 
 ```bash
 devflow status          # current workspace, services, connection info
-devflow list            # all workspaces with service + worktree state
-devflow graph           # full tree: workspaces → services → worktree paths
+devflow list            # parent tree with paths, services, processes, and health
+devflow --json list     # stable versioned tree document for automation
 ```
 
 ## 4. Use the connection info
@@ -86,10 +83,11 @@ hooks:
 ## 5. Clean up
 
 ```bash
+devflow switch --template       # move back to the configured default workspace
 devflow remove feature/auth
 ```
 
-Removes the workspace, its worktree (refusing if it has uncommitted changes — use `--force` to override), and all associated service workspaces.
+Preflight always protects the default/current workspace, so move to another workspace before removing the one you finished; `--force` does not override that protection. A dirty worktree is also refused unless explicitly forced. Removal hooks run while the directory exists; processes and services are cleaned up before the worktree and VCS ref are deleted.
 
 ## Where to go next
 

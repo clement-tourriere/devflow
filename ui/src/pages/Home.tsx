@@ -236,9 +236,9 @@ function ProjectCard({ project }: { project: ProjectInfo }) {
       </div>
 
       <div className="flex items-center gap-2" style={{ flexWrap: "wrap" }}>
-        {d?.current_workspace && !d?.worktree_enabled && (
+        {d?.current_workspace && (
           <span className="badge" style={{ opacity: 0.7 }}>
-            active: {d.current_workspace}
+            context: {d.current_workspace}
           </span>
         )}
         {d?.vcs_type && (
@@ -247,12 +247,8 @@ function ProjectCard({ project }: { project: ProjectInfo }) {
           </span>
         )}
         {d?.has_config && (
-          <span
-            className="badge badge-info"
-            style={{ fontSize: 11 }}
-            title="Default creation mode. You can still choose branch or worktree when creating a workspace."
-          >
-            default: {d.worktree_enabled ? "worktree" : "branch"}
+          <span className="badge badge-info" style={{ fontSize: 11 }}>
+            isolated workspaces
           </span>
         )}
         {d && (

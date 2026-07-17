@@ -56,13 +56,7 @@ pub async fn run() -> Result<()> {
 
     if let Some(workspace_name) = app.take_open_branch_on_exit() {
         let config = &app.context.config;
-        let project_dir = app
-            .context
-            .config_path
-            .as_ref()
-            .and_then(|p: &std::path::PathBuf| p.parent().map(|d| d.to_path_buf()))
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let project_dir = app.context.project_dir.clone();
 
         let options = devflow_core::workspace::switch::SwitchOptions {
             lifecycle: devflow_core::workspace::LifecycleOptions::default(),

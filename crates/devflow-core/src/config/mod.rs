@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 
 mod loading;
 
-pub(crate) use loading::normalize_workspace_name;
+pub use loading::workspace_service_key;
+pub(crate) use loading::{
+    explicit_main_workspace_for_dir, legacy_normalize_workspace_name, normalize_workspace_name,
+};
 
 /// Default AI tool configuration directories to copy into new worktrees.
 pub const AI_TOOL_DIRS: &[&str] = &[".claude", ".cursor", ".opencode", ".agents"];
@@ -27,8 +30,10 @@ pub struct Config {
     pub behavior: BehaviorConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub services: Option<Vec<NamedServiceConfig>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worktree: Option<WorktreeConfig>,
+    /// Worktree materialization settings. Every non-default devflow workspace
+    /// is materialized as a Git worktree or jj workspace.
+    #[serde(default)]
+    pub worktree: WorktreeConfig,
     /// New hook engine configuration (Phase 2).
     /// Maps hook phase names to named hook entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -396,19 +401,24 @@ pub struct CommitGenerationConfig {
     pub model: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct WorktreeConfig {
-    /// Whether worktree mode is enabled (default: false).
-    /// When true, `devflow switch` creates Git worktrees instead of `git checkout`.
-    #[serde(default)]
-    pub enabled: bool,
+    /// Removed setting: worktrees are always enabled now. Accepted (and
+    /// ignored) so configs written by older releases keep parsing; a
+    /// deprecation warning is logged in `Config::from_file`.
+    #[serde(default, skip_serializing)]
+    pub enabled: Option<bool>,
     /// Path template for new worktrees.
-    /// Supports `{repo}` and `{workspace}` placeholders.
+    /// Supports `{repo}` and `{workspace}` placeholders. `{workspace}` is the
+    /// collision-safe service key; raw VCS names remain user-facing metadata.
     /// Default: `"../{repo}.{workspace}"`
     #[serde(default = "default_worktree_path_template")]
     pub path_template: String,
     /// Files to copy from the main worktree into each new worktree.
-    #[serde(default)]
+    /// Default: `[".env", ".env.local"]` — must match `Default::default()` so a
+    /// partial `worktree:` section behaves like an absent one.
+    #[serde(default = "default_copy_files")]
     pub copy_files: Vec<String>,
     /// Also copy gitignored dependency/cache directories (e.g. `.venv/`,
     /// `node_modules/`, `target/`). Environment files should usually be listed
@@ -430,12 +440,18 @@ pub struct WorktreeConfig {
 
 impl WorktreeConfig {
     /// Recommended default worktree configuration for new projects.
-    /// Enables worktrees with sensible defaults for common environment files.
+    /// Kept as a named constructor for callers that want to be explicit.
     pub fn recommended_default() -> Self {
-        WorktreeConfig {
-            enabled: true,
+        Self::default()
+    }
+}
+
+impl Default for WorktreeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: None,
             path_template: default_worktree_path_template(),
-            copy_files: vec![".env".to_string(), ".env.local".to_string()],
+            copy_files: default_copy_files(),
             copy_ignored: false,
             respect_gitignore: true,
             copy_ai_configs: true,
@@ -448,8 +464,6 @@ impl WorktreeConfig {
 pub struct GitConfig {
     #[serde(default = "default_true", alias = "auto_create_on_branch")]
     pub auto_create_on_workspace: bool,
-    #[serde(default = "default_true", alias = "auto_switch_on_branch")]
-    pub auto_switch_on_workspace: bool,
     #[serde(default = "default_main_workspace", alias = "main_branch")]
     pub main_workspace: String,
     #[serde(
@@ -472,7 +486,6 @@ impl Default for GitConfig {
     fn default() -> Self {
         Self {
             auto_create_on_workspace: true,
-            auto_switch_on_workspace: true,
             main_workspace: "main".to_string(),
             auto_create_workspace_filter: None,
             workspace_filter_regex: None,
@@ -495,6 +508,10 @@ fn default_main_workspace() -> String {
 
 fn default_worktree_path_template() -> String {
     "../{repo}.{workspace}".to_string()
+}
+
+fn default_copy_files() -> Vec<String> {
+    vec![".env".to_string(), ".env.local".to_string()]
 }
 
 fn default_respect_gitignore() -> bool {
@@ -536,8 +553,6 @@ pub struct LocalConfig {
 pub struct LocalGitConfig {
     #[serde(alias = "auto_create_on_branch")]
     pub auto_create_on_workspace: Option<bool>,
-    #[serde(alias = "auto_switch_on_branch")]
-    pub auto_switch_on_workspace: Option<bool>,
     #[serde(alias = "main_branch")]
     pub main_workspace: Option<String>,
     #[serde(alias = "auto_create_branch_filter")]
@@ -560,7 +575,6 @@ pub struct EnvConfig {
     pub disabled: Option<bool>,
     pub skip_hooks: Option<bool>,
     pub auto_create: Option<bool>,
-    pub auto_switch: Option<bool>,
     pub workspace_filter_regex: Option<String>,
     pub disabled_workspaces: Option<Vec<String>>,
     pub current_workspace_disabled: Option<bool>,
@@ -640,7 +654,6 @@ impl Default for Config {
             default_vcs: None,
             git: GitConfig {
                 auto_create_on_workspace: true,
-                auto_switch_on_workspace: true,
                 main_workspace: "main".to_string(),
                 auto_create_workspace_filter: None,
                 workspace_filter_regex: None,
@@ -650,7 +663,7 @@ impl Default for Config {
                 max_workspaces: Some(10),
             },
             services: None,
-            worktree: None,
+            worktree: WorktreeConfig::default(),
             hooks: None,
             triggers: None,
             processes: None,
@@ -695,7 +708,6 @@ impl EnvConfig {
             disabled: Self::parse_bool_env("DEVFLOW_DISABLED")?,
             skip_hooks: Self::parse_bool_env("DEVFLOW_SKIP_HOOKS")?,
             auto_create: Self::parse_bool_env("DEVFLOW_AUTO_CREATE")?,
-            auto_switch: Self::parse_bool_env("DEVFLOW_AUTO_SWITCH")?,
             current_workspace_disabled: Self::parse_bool_env("DEVFLOW_CURRENT_BRANCH_DISABLED")?,
             workspace_filter_regex: env::var("DEVFLOW_BRANCH_FILTER_REGEX").ok(),
             disabled_workspaces: env::var("DEVFLOW_DISABLED_BRANCHES")
@@ -847,9 +859,6 @@ impl EffectiveConfig {
                 if let Some(auto_create) = local_git.auto_create_on_workspace {
                     merged.git.auto_create_on_workspace = auto_create;
                 }
-                if let Some(auto_switch) = local_git.auto_switch_on_workspace {
-                    merged.git.auto_switch_on_workspace = auto_switch;
-                }
                 if let Some(ref main_workspace) = local_git.main_workspace {
                     merged.git.main_workspace = main_workspace.clone();
                 }
@@ -871,7 +880,7 @@ impl EffectiveConfig {
             }
 
             if let Some(ref worktree) = local_config.worktree {
-                merged.worktree = Some(worktree.clone());
+                merged.worktree = worktree.clone();
             }
 
             // Local default_vcs overrides both project and global
@@ -883,9 +892,6 @@ impl EffectiveConfig {
         // Apply environment config overrides
         if let Some(auto_create) = self.env_config.auto_create {
             merged.git.auto_create_on_workspace = auto_create;
-        }
-        if let Some(auto_switch) = self.env_config.auto_switch {
-            merged.git.auto_switch_on_workspace = auto_switch;
         }
         if let Some(ref regex) = self.env_config.workspace_filter_regex {
             merged.git.workspace_filter_regex = Some(regex.clone());

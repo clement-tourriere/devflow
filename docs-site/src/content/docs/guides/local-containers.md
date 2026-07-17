@@ -87,7 +87,7 @@ devflow service stop feature/x            # stop (data preserved)
 devflow service reset feature/x           # re-clone from parent — clean slate
 devflow service logs feature/x --tail 50
 devflow service connection feature/x --format env
-devflow service delete feature/x          # delete instances, keep branch + worktree
+devflow service delete feature/x          # delete instances, keep the VCS workspace
 devflow service cleanup --max-count 10    # drop oldest service workspaces
 ```
 

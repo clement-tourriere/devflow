@@ -12,7 +12,7 @@ Concepts and patterns: [Hooks concept](/devflow/concepts/hooks/) · [hooks guide
 | Phase | Fires | Blocking |
 | --- | --- | --- |
 | `pre-switch` | before switching to a workspace | **yes** |
-| `post-create` | after a new branch **or worktree** was created | **yes** |
+| `post-create` | after a new worktree/jj workspace was created | **yes** |
 | `post-start` | after starting a stopped service workspace | no |
 | `post-switch` | after every switch (including the one implied by creation) | no |
 | `pre-remove` | before removing a workspace | **yes** |
@@ -51,7 +51,7 @@ hooks:
       condition: "<condition>"
 ```
 
-Hooks run with their working directory set to the **target workspace's worktree** when one exists, the project root otherwise.
+Hooks run with their working directory set to the target materialized workspace.
 
 ## Template variables
 
@@ -59,23 +59,36 @@ Rendered with MiniJinja (Jinja2-compatible) in commands, environment values, act
 
 | Variable | Description | Example |
 | --- | --- | --- |
-| `{{ workspace }}` | raw VCS branch name | `feature/auth` |
-| `{{ workspace_sanitized }}` | normalized name (db/file-safe) | `feature_auth` |
+| `{{ workspace }}` | raw VCS workspace/ref name | `feature/auth` |
+| `{{ workspace_key }}` | backend service/path key (collision-safe for new workspaces) | `feature_auth_fc659bd73585` |
+| `{{ workspace_sanitized }}` | compatibility alias for `workspace_key` | `feature_auth_fc659bd73585` |
 | `{{ name }}` | project name (config `name:` or directory) | `my-project` |
 | `{{ repo }}` | repository directory name | `my-project` |
-| `{{ worktree_path }}` | absolute worktree path, when in worktree context | `/…/my-project.feature_auth` |
-| `{{ default_workspace }}` | main workspace | `main` |
+| `{{ worktree_path }}` | absolute worktree path, when in worktree context | `/…/my-project.feature_auth_fc659bd73585` |
+| `{{ default_workspace }}` | configured default workspace | `main` |
 | `{{ commit }}` / `{{ short_commit }}` | HEAD SHA / abbreviated | `a1b2c3d…` / `a1b2c3d` |
 | `{{ base }}` | base/parent workspace (creation hooks) | `main` |
 | `{{ trigger_source }}` | what invoked the hook: `cli`, `vcs`, `gui` | `vcs` |
 | `{{ vcs_event }}` | originating VCS event, when any | `post-checkout` |
 | `{{ service.<name>.host }}` | service host | `localhost` |
 | `{{ service.<name>.port }}` | service port | `55433` |
-| `{{ service.<name>.database }}` | database/bucket/index | `feature_auth` |
+| `{{ service.<name>.database }}` | database/bucket/index | `feature_auth_fc659bd73585` |
 | `{{ service.<name>.user }}` / `.password` | credentials | `postgres` |
 | `{{ service.<name>.url }}` | full connection URL | `postgresql://…` |
 
 Use bracket access for hyphenated service names: `{{ service['app-db'].url }}`. Inspect live values with `devflow hook vars`.
+
+### Injected environment variables
+
+Shell hook commands also run with these variables exported, so external scripts (where template syntax is unavailable) can read the workspace identity directly:
+
+| Variable | Contents |
+| --- | --- |
+| `DEVFLOW_WORKSPACE` | raw VCS workspace name (same as `{{ workspace }}`) |
+| `DEVFLOW_WORKSPACE_KEY` | backend service/path key (same as `{{ workspace_key }}`) |
+| `DEVFLOW_BRANCH` | compatibility alias for the raw name |
+
+`devflow switch -x`/`--open` sessions and GUI terminals export the same variables.
 
 ## Filters
 
@@ -98,7 +111,7 @@ Conditions are template-rendered first, then evaluated. Built-ins:
 | `command_exists:<bin>` | binary found on PATH or in mise shims (comma-separated alternatives = any) |
 | `workspace_is:<name>` / `workspace_not:<name>` | workspace equals / differs |
 | `workspace_matches:<regex>` | workspace matches the regex |
-| `is_default_workspace` / `not_default_workspace` | workspace is / isn't the main workspace |
+| `is_default_workspace` / `not_default_workspace` | workspace is / isn't the configured default workspace |
 | `is_worktree` / `not_worktree` | a worktree exists for this context |
 | `trigger_is:<src>` / `trigger_not:<src>` | trigger source is / isn't `cli`·`vcs`·`gui` |
 | `env_set:<VAR>` / `env_is:<VAR>=<value>` | environment variable set / equals |

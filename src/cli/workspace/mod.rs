@@ -1,8 +1,6 @@
-use std::path::PathBuf;
-
 use anyhow::Result;
 use devflow_core::config::Config;
-use devflow_core::services::{self};
+use devflow_core::services;
 use devflow_core::vcs;
 
 mod context;
@@ -17,7 +15,7 @@ pub(crate) use context::{
 };
 use interactive::handle_interactive_switch;
 use link::{handle_link_command, resolve_parent_for_branch_creation};
-use list::{enrich_branch_list_json, handle_environment_graph, print_enriched_branch_list};
+use list::handle_workspace_list;
 use remove::handle_remove_command;
 
 pub(super) async fn handle_branch_command(
@@ -30,46 +28,8 @@ pub(super) async fn handle_branch_command(
 ) -> Result<()> {
     match cmd {
         super::Commands::List => {
-            // List: show combined VCS + service workspace info
-            let has_multiple_services = config.resolve_services().len() > 1;
-            if database_name.is_none() && has_multiple_services {
-                return super::service::handle_multi_service_aggregation(
-                    super::service::ServiceAggregation::List,
-                    config,
-                    json_output,
-                    config_path,
-                )
-                .await;
-            }
-
-            // Try to resolve a service provider; if none is available we
-            // still show VCS workspaces with an empty service workspace list.
-            let (provider_name, workspaces) =
-                match services::factory::resolve_provider(config, database_name).await {
-                    Ok(named) => {
-                        let workspaces = named.provider.list_workspaces().await?;
-                        (named.provider.provider_name().to_string(), workspaces)
-                    }
-                    Err(_) => {
-                        // No service provider available — still show VCS workspaces.
-                        ("none".to_string(), Vec::new())
-                    }
-                };
-
-            if json_output {
-                let enriched = enrich_branch_list_json(&workspaces, config, config_path);
-                println!("{}", serde_json::to_string_pretty(&enriched)?);
-            } else {
-                if provider_name == "none" {
-                    println!("Branches (no service configured):");
-                } else {
-                    println!("Branches ({}):", provider_name);
-                }
-                print_enriched_branch_list(&workspaces, config, config_path);
-            }
-        }
-        super::Commands::Graph => {
-            handle_environment_graph(config, config_path, json_output).await?;
+            let _ = database_name;
+            handle_workspace_list(config, config_path, json_output).await?;
         }
         super::Commands::Link {
             workspace_name,
@@ -100,13 +60,14 @@ pub(super) async fn handle_branch_command(
             dry_run,
             no_respect_gitignore,
         } => {
+            let mut machine_output = None;
+            // The workspace actually switched to, for -x/--open targeting.
+            let mut switched_workspace: Option<String> = None;
             if dry_run {
                 if let Some(ref workspace) = workspace_name {
-                    let normalized_branch = config.get_normalized_workspace_name(workspace);
-                    let worktree_enabled = config.worktree.as_ref().is_some_and(|wt| wt.enabled);
-                    let context = resolve_branch_context(config);
+                    let context = resolve_branch_context();
                     let default_parent = if create {
-                        from.clone().or_else(|| context.context_branch_raw.clone())
+                        from.clone().or_else(|| context.context_branch.clone())
                     } else {
                         None
                     };
@@ -114,25 +75,18 @@ pub(super) async fn handle_branch_command(
                         .ok()
                         .and_then(|repo| repo.workspace_exists(workspace).ok());
 
-                    let project_dir = config_path
-                        .as_ref()
-                        .and_then(|p| p.parent())
-                        .map(|p| p.to_path_buf())
-                        .unwrap_or_else(|| PathBuf::from("."));
+                    let project_dir = super::operation_project_dir(config_path);
+                    let service_key = devflow_core::state::LocalStateManager::new()?
+                        .resolve_workspace_service_key_by_dir(&project_dir, workspace)?;
 
                     if json_output {
-                        let mut wt_path_value = serde_json::Value::Null;
-                        if worktree_enabled {
-                            let wt_path = super::config::resolve_cd_target(
-                                &devflow_core::workspace::worktree::resolve_worktree_path(
-                                    config,
-                                    &project_dir,
-                                    &normalized_branch,
-                                ),
-                            )?;
-                            wt_path_value =
-                                serde_json::Value::String(wt_path.display().to_string());
-                        }
+                        let wt_path = super::config::resolve_cd_target(
+                            &devflow_core::workspace::worktree::resolve_existing_or_planned_worktree_path(
+                                config,
+                                &project_dir,
+                                workspace,
+                            ),
+                        )?;
                         let auto_providers: Vec<serde_json::Value> = if !no_services {
                             config
                                 .resolve_services()
@@ -148,26 +102,24 @@ pub(super) async fn handle_branch_command(
                         } else {
                             vec![]
                         };
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(&serde_json::json!({
-                                "dry_run": true,
-                                "workspace": normalized_branch,
-                                "worktree_enabled": worktree_enabled,
-                                "worktree_path": wt_path_value,
-                                "parent": default_parent,
-                                "workspace_exists": workspace_exists,
-                                "services_skipped": no_services,
-                                "auto_branch_services": auto_providers,
-                                "processes_skipped": no_processes,
-                                "auto_start_processes": if !no_processes { config.processes.as_ref().map(|p| p.daemons.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() } else { Vec::<String>::new() },
-                                "hooks_skipped": no_verify,
-                                "execute": execute,
-                                "would_fail_without_create": workspace_exists == Some(false) && !create,
-                            }))?
-                        );
+                        machine_output = Some(serde_json::json!({
+                            "status": "ok",
+                            "dry_run": true,
+                            "workspace": workspace,
+                            "service_key": service_key,
+                            "worktree_path": wt_path.display().to_string(),
+                            "parent": default_parent,
+                            "workspace_exists": workspace_exists,
+                            "services_skipped": no_services,
+                            "auto_branch_services": auto_providers,
+                            "processes_skipped": no_processes,
+                            "auto_start_processes": if !no_processes { config.processes.as_ref().map(|p| p.daemons.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() } else { Vec::<String>::new() },
+                            "hooks_skipped": no_verify,
+                            "execute": execute,
+                            "would_fail_without_create": workspace_exists == Some(false) && !create,
+                        }));
                     } else {
-                        println!("Dry run: would switch to workspace: {}", normalized_branch);
+                        println!("Dry run: would select workspace: {}", workspace);
                         if let Some(ref parent) = default_parent {
                             println!("  Parent workspace: {}", parent);
                         }
@@ -176,17 +128,15 @@ pub(super) async fn handle_branch_command(
                                 "  Note: workspace does not exist; this would fail (use -c to create it)"
                             );
                         }
-                        if worktree_enabled {
-                            println!("  Worktree mode: enabled");
-                            let wt_path = super::config::resolve_cd_target(
-                                &devflow_core::workspace::worktree::resolve_worktree_path(
-                                    config,
-                                    &project_dir,
-                                    &normalized_branch,
-                                ),
-                            )?;
-                            println!("  Worktree path: {}", wt_path.display());
-                        }
+                        println!("  Service key: {}", service_key);
+                        let wt_path = super::config::resolve_cd_target(
+                            &devflow_core::workspace::worktree::resolve_existing_or_planned_worktree_path(
+                                config,
+                                &project_dir,
+                                workspace,
+                            ),
+                        )?;
+                        println!("  Worktree path: {}", wt_path.display());
                         if !no_services {
                             let auto_providers = config
                                 .resolve_services()
@@ -230,79 +180,105 @@ pub(super) async fn handle_branch_command(
                 } else {
                     anyhow::bail!("Dry run requires a workspace name");
                 }
-            } else if template {
-                handle_switch_to_main(
+            } else if template
+                || workspace_name.as_deref() == Some(config.git.main_workspace.as_str())
+            {
+                let main_workspace = config.git.main_workspace.clone();
+                if !json_output {
+                    println!("Switching to main workspace: {}", main_workspace);
+                }
+                switched_workspace = Some(main_workspace.clone());
+                machine_output = handle_switch_command(
                     config,
+                    &main_workspace,
                     config_path,
-                    json_output,
+                    false, // create — the default workspace always exists
+                    None,  // from
                     no_services,
                     no_processes,
                     no_verify,
+                    json_output,
                     non_interactive,
                     None,
                     None,
+                    None, // copy_ignored — use config default
                 )
                 .await?;
             } else if let Some(ref workspace) = workspace_name {
-                if workspace == &config.git.main_workspace {
-                    handle_switch_to_main(
-                        config,
-                        config_path,
-                        json_output,
-                        no_services,
-                        no_processes,
-                        no_verify,
-                        non_interactive,
-                        None,
-                        None,
-                    )
-                    .await?;
-                } else {
-                    handle_switch_command(
-                        config,
-                        workspace,
-                        config_path,
-                        create,
-                        from.as_deref(),
-                        no_services,
-                        no_processes,
-                        no_verify,
-                        json_output,
-                        non_interactive,
-                        None,
-                        None,
-                        if no_respect_gitignore {
-                            Some(true)
-                        } else {
-                            None
-                        },
-                    )
-                    .await?;
-                }
-            } else if non_interactive {
+                switched_workspace = Some(workspace.clone());
+                machine_output = handle_switch_command(
+                    config,
+                    workspace,
+                    config_path,
+                    create,
+                    from.as_deref(),
+                    no_services,
+                    no_processes,
+                    no_verify,
+                    json_output,
+                    non_interactive,
+                    None,
+                    None,
+                    if no_respect_gitignore {
+                        Some(true)
+                    } else {
+                        None
+                    },
+                )
+                .await?;
+            } else if non_interactive || json_output {
                 anyhow::bail!(
-                    "No workspace specified. Use 'devflow switch <workspace>' in non-interactive mode."
+                    "No workspace specified. Use 'devflow switch <workspace>' in non-interactive or JSON mode."
                 );
             } else {
-                handle_interactive_switch(config, config_path).await?;
+                // The picked (or newly created) workspace is the target for
+                // -x/--open below; a cancelled picker must not fall back to
+                // executing in the default workspace.
+                switched_workspace = handle_interactive_switch(config, config_path).await?;
             }
 
             // Execute command or open interactive session in workspace
-            if open || execute.is_some() {
-                let workspace = workspace_name
+            let switch_failed = machine_output.as_ref().is_some_and(machine_switch_failed);
+            let execution_output = if !dry_run
+                && !switch_failed
+                && (open || execute.is_some())
+                && switched_workspace.is_some()
+            {
+                let workspace = switched_workspace
                     .as_deref()
                     .unwrap_or(&config.git.main_workspace);
                 let cmd = execute.as_deref().unwrap_or("");
-                exec::execute_in_workspace(
-                    config,
-                    config_path,
-                    workspace,
-                    cmd,
-                    &execute_args,
-                    detach || open,
-                    json_output,
+                Some(
+                    exec::execute_in_workspace(
+                        config,
+                        config_path,
+                        workspace,
+                        cmd,
+                        &execute_args,
+                        detach || open,
+                        json_output,
+                    )
+                    .await?,
                 )
-                .await?;
+            } else {
+                None
+            };
+
+            if json_output {
+                let output = machine_output.ok_or_else(|| {
+                    anyhow::anyhow!("switch did not produce a machine-readable result")
+                })?;
+                let execution_failed = execution_output
+                    .as_ref()
+                    .is_some_and(|execution| execution.exit_code.is_some_and(|code| code != 0));
+                let output = compose_switch_output(output, execution_output)?;
+                println!("{}", serde_json::to_string_pretty(&output)?);
+                if switch_failed {
+                    anyhow::bail!("Workspace switch completed with orchestration failures");
+                }
+                if execution_failed {
+                    anyhow::bail!("Workspace command completed with a non-zero exit code");
+                }
             }
         }
         super::Commands::Remove {
@@ -413,6 +389,27 @@ pub(super) async fn handle_branch_command(
 
 // ── Interactive switch ─────────────────────────────────────────────────────────
 
+fn compose_switch_output(
+    mut switch_output: serde_json::Value,
+    execution: Option<exec::ExecutionOutput>,
+) -> Result<serde_json::Value> {
+    if let Some(execution) = execution {
+        let execution_failed = execution.exit_code.is_some_and(|code| code != 0);
+        let object = switch_output.as_object_mut().ok_or_else(|| {
+            anyhow::anyhow!("machine-readable switch result must be a JSON object")
+        })?;
+        object.insert("execution".to_string(), serde_json::to_value(execution)?);
+        if execution_failed {
+            object.insert("status".to_string(), serde_json::json!("error"));
+        }
+    }
+    Ok(switch_output)
+}
+
+fn machine_switch_failed(output: &serde_json::Value) -> bool {
+    output.get("status").and_then(serde_json::Value::as_str) == Some("error")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_switch_command(
     config: &Config,
@@ -428,10 +425,10 @@ pub(super) async fn handle_switch_command(
     trigger_source: Option<&str>,
     vcs_event: Option<&str>,
     copy_ignored_override: Option<bool>,
-) -> Result<()> {
+) -> Result<Option<serde_json::Value>> {
     // Resolve parent via CLI-specific interactive prompt (if needed)
     let from_workspace = if create {
-        let context = resolve_branch_context(config);
+        let context = resolve_branch_context();
         resolve_parent_for_branch_creation(
             config,
             config_path,
@@ -452,12 +449,7 @@ pub(super) async fn handle_switch_command(
         devflow_core::workspace::hooks::HookApprovalMode::Interactive
     };
 
-    let project_dir = config_path
-        .as_ref()
-        .and_then(|p| p.parent())
-        .map(|d| d.to_path_buf())
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
+    let project_dir = super::operation_project_dir(config_path);
 
     let options = devflow_core::workspace::switch::SwitchOptions {
         lifecycle: devflow_core::workspace::LifecycleOptions {
@@ -470,7 +462,6 @@ pub(super) async fn handle_switch_command(
             vcs_event: vcs_event.map(String::from),
         },
         create_if_missing: create,
-        creation_mode: devflow_core::workspace::WorkspaceCreationMode::Default,
         from_workspace,
         copy_files: None,
         copy_ignored: copy_ignored_override,
@@ -485,8 +476,8 @@ pub(super) async fn handle_switch_command(
     .await?;
 
     // ── CLI-specific output ──────────────────────────────────────────
-    let worktree_enabled = config.worktree.as_ref().is_some_and(|wt| wt.enabled);
     let shell_integration = super::config::shell_integration_enabled();
+    let mut machine_output = None;
 
     // Worktree DEVFLOW_CD output
     if let Some(ref wt) = result.worktree {
@@ -506,14 +497,7 @@ pub(super) async fn handle_switch_command(
             }
         }
     } else if !json_output {
-        if result.branch_created {
-            println!(
-                "Creating workspace '{}' (parent: {})",
-                workspace_name,
-                result.parent.as_deref().unwrap_or("HEAD")
-            );
-        }
-        println!("Switched git workspace: {}", result.workspace);
+        println!("Selected workspace: {}", result.workspace);
     }
 
     // Service/process results output
@@ -525,6 +509,12 @@ pub(super) async fn handle_switch_command(
         .iter()
         .filter(|r| !r.success && r.required)
         .count();
+    // Post-create/post-switch hooks run best-effort, so their failures reach
+    // callers only through `result.hooks`. The machine-readable status must
+    // reflect them: the TUI and GUI already treat hook failures as blocking,
+    // and CI/agents drive this JSON — reporting "ok" would let them proceed
+    // on a broken workspace.
+    let hook_fail_count: usize = result.hooks.iter().map(|r| r.failed).sum();
 
     if json_output {
         let service_results: Vec<serde_json::Value> = result
@@ -567,7 +557,9 @@ pub(super) async fn handle_switch_command(
             })
             .collect();
         let summary = serde_json::json!({
+            "status": if fail_count == 0 && process_fail_count == 0 && hook_fail_count == 0 { "ok" } else { "error" },
             "workspace": result.workspace,
+            "service_key": result.service_key,
             "parent": result.parent,
             "worktree_path": result.worktree.as_ref().map(|w| w.path.display().to_string()),
             "worktree_created": result.worktree.as_ref().map(|w| w.created).unwrap_or(false),
@@ -579,9 +571,10 @@ pub(super) async fn handle_switch_command(
             "processes_failed": process_fail_count,
             "processes_skipped": no_processes,
             "process_results": process_results,
+            "hooks_failed": hook_fail_count,
             "hook_results": hook_results,
         });
-        println!("{}", serde_json::to_string_pretty(&summary)?);
+        machine_output = Some(summary);
     } else if !no_services && !result.services.is_empty() {
         for r in &result.services {
             if r.success {
@@ -619,9 +612,7 @@ pub(super) async fn handle_switch_command(
             );
         }
     } else if !no_services && !json_output {
-        if worktree_enabled {
-            println!("Selected workspace/worktree: {}", result.workspace);
-        }
+        println!("Selected workspace/worktree: {}", result.workspace);
         println!("  (no services configured — use 'devflow service add' to add one)");
     }
 
@@ -648,7 +639,7 @@ pub(super) async fn handle_switch_command(
         }
     }
 
-    if process_fail_count > 0 {
+    if process_fail_count > 0 && !json_output {
         anyhow::bail!(
             "Failed to start {}/{} process(es)",
             process_fail_count,
@@ -656,44 +647,76 @@ pub(super) async fn handle_switch_command(
         );
     }
 
-    Ok(())
+    Ok(machine_output)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn handle_switch_to_main(
-    config: &Config,
-    config_path: &Option<std::path::PathBuf>,
-    json_output: bool,
-    no_services: bool,
-    no_processes: bool,
-    no_verify: bool,
-    non_interactive: bool,
-    trigger_source: Option<&str>,
-    vcs_event: Option<&str>,
-) -> Result<()> {
-    let main_workspace = config.git.main_workspace.clone();
+#[cfg(test)]
+mod tests {
+    use super::{compose_switch_output, exec::ExecutionOutput, machine_switch_failed};
 
-    if !json_output {
-        println!("Switching to main workspace: {}", main_workspace);
+    #[test]
+    fn switch_and_execution_are_composed_into_one_document() {
+        let switch = serde_json::json!({
+            "workspace": "feature/auth",
+            "worktree_path": "/tmp/project.feature_auth",
+            "services_switched": 1,
+        });
+        let execution = ExecutionOutput {
+            workspace: "feature/auth".into(),
+            service_key: "feature_auth-abc123".into(),
+            command: "cargo test".into(),
+            session: None,
+            worktree: "/tmp/project.feature_auth".into(),
+            detached: false,
+            exit_code: Some(0),
+            stdout: Some("tests passed\n".into()),
+            stderr: None,
+        };
+
+        let output = compose_switch_output(switch, Some(execution)).unwrap();
+        assert_eq!(output["workspace"], "feature/auth");
+        assert_eq!(output["services_switched"], 1);
+        assert_eq!(output["execution"]["workspace"], "feature/auth");
+        assert_eq!(output["execution"]["exit_code"], 0);
+        assert_eq!(output["execution"]["stdout"], "tests passed\n");
+
+        let rendered = serde_json::to_string_pretty(&output).unwrap();
+        let documents = serde_json::Deserializer::from_str(&rendered)
+            .into_iter::<serde_json::Value>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(documents.len(), 1);
     }
 
-    // Delegate to the shared switch command — main is just a special case
-    handle_switch_command(
-        config,
-        &main_workspace,
-        config_path,
-        false,
-        None,
-        no_services,
-        no_processes,
-        no_verify,
-        json_output,
-        non_interactive,
-        trigger_source,
-        vcs_event,
-        None, // copy_ignored — use config default
-    )
-    .await
+    #[test]
+    fn switch_without_execution_keeps_the_existing_shape() {
+        let switch = serde_json::json!({"workspace": "main", "worktree_created": false});
+        assert_eq!(compose_switch_output(switch.clone(), None).unwrap(), switch);
+    }
+
+    #[test]
+    fn failed_execution_keeps_one_document_and_sets_error_status() {
+        let switch = serde_json::json!({
+            "status": "ok",
+            "workspace": "feature/auth",
+        });
+        let execution = ExecutionOutput {
+            workspace: "feature/auth".into(),
+            service_key: "feature_auth-abc123".into(),
+            command: "exit 7".into(),
+            session: None,
+            worktree: "/tmp/project.feature_auth".into(),
+            detached: false,
+            exit_code: Some(7),
+            stdout: None,
+            stderr: Some("failed\n".into()),
+        };
+
+        let output = compose_switch_output(switch, Some(execution)).unwrap();
+        assert!(machine_switch_failed(&output));
+        assert_eq!(output["execution"]["exit_code"], 7);
+        assert_eq!(output["execution"]["stderr"], "failed\n");
+    }
 }
 
 // ── Remove ─────────────────────────────────────────────────────────────────────

@@ -60,14 +60,6 @@ pub trait VcsProvider: Send {
     fn delete_workspace(&self, name: &str) -> Result<()>;
     fn workspace_exists(&self, name: &str) -> Result<bool>;
 
-    /// Checkout/switch to an existing workspace (classic mode, no worktrees).
-    fn checkout_workspace(&self, _name: &str) -> Result<()> {
-        anyhow::bail!(
-            "{} does not support checkout_workspace",
-            self.provider_name()
-        )
-    }
-
     // ── Worktree operations ────────────────────────────────────────
     fn supports_worktrees(&self) -> bool;
     fn is_worktree(&self) -> bool;
@@ -80,6 +72,12 @@ pub trait VcsProvider: Send {
     /// non-ignored files) — mirroring `git worktree remove`.  With `force`,
     /// the worktree is removed regardless.
     fn remove_worktree(&self, path: &Path, force: bool) -> Result<()>;
+    /// Return whether removing this worktree would discard user changes.
+    /// Providers whose working-copy model has no uncommitted state may keep
+    /// the default `false` implementation.
+    fn worktree_is_dirty(&self, _path: &Path) -> Result<bool> {
+        Ok(false)
+    }
     fn worktree_path(&self, workspace: &str) -> Result<Option<PathBuf>>;
     fn main_worktree_dir(&self) -> Option<PathBuf>;
 
@@ -228,12 +226,24 @@ fn effective_vcs_kind(has_jj: bool, has_git: bool, jj_available: bool) -> Option
 /// into per-worktree silos. Resolving every identity derivation through this
 /// function unifies them: a worktree and its main repo share one identity.
 ///
-/// For a normal repo this is the work tree root; for a worktree it is the
-/// main work tree root (the parent of the shared `.git` common dir). Falls
-/// back to the canonicalized input when `start` is not in a git repository
-/// (e.g. a plain directory or a jj-only repo).
+/// For a normal repo this is the work tree root; for a Git worktree it is the
+/// main work tree root (the parent of the shared `.git` common dir); for a jj
+/// workspace it is the root of jj's primary (`default`) workspace. Falls back
+/// to the canonicalized input when `start` is not in a supported repository.
 pub fn resolve_project_root(start: &Path) -> PathBuf {
     let canonical = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+
+    // Native jj workspaces have separate `.jj/` directories and do not
+    // necessarily expose a Git common-dir that can unify their identity. Ask
+    // jj for its explicit workspace roots before trying the Git fallback.
+    let (has_jj, _) = find_vcs_markers(&canonical);
+    if has_jj && tool_available("jj") {
+        if let Ok(repo) = JjRepository::new(&canonical) {
+            if let Some(primary) = repo.main_worktree_dir() {
+                return primary.canonicalize().unwrap_or(primary);
+            }
+        }
+    }
 
     // `discover` walks up from `start` to the nearest `.git`, so it works
     // from the repo root, a subdirectory, or a worktree root alike.
@@ -257,6 +267,16 @@ pub fn resolve_project_root(start: &Path) -> PathBuf {
     }
 
     canonical
+}
+
+/// Compare two paths by identity: canonicalized when possible, verbatim
+/// otherwise. This is the one rule used for destructive ownership decisions
+/// (worktree removal, current/primary workspace guards) — keep it shared so
+/// those decisions can never disagree.
+pub(crate) fn paths_equal(left: &Path, right: &Path) -> bool {
+    let left = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
+    let right = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
+    left == right
 }
 
 /// Detect which VCS kind is present without constructing a provider.
@@ -388,23 +408,23 @@ fn find_vcs_markers(start: &Path) -> (bool, bool) {
         current.pop();
     }
 
-    let mut has_jj = false;
-    let mut has_git = false;
-
+    // Nearest-wins: stop at the FIRST ancestor that carries any VCS marker
+    // and report what THAT directory contains. Accumulating markers across
+    // different levels conflates nested repositories — a plain git repo
+    // living under a jj-tracked ancestor (e.g. jj-managed $HOME dotfiles)
+    // would otherwise be treated as jj/colocated, and its project identity
+    // would resolve to the OUTER jj root, merging unrelated projects' state.
+    // True colocation means `.jj` and `.git` in the same directory.
     loop {
-        if !has_jj && current.join(".jj").is_dir() {
-            has_jj = true;
+        let has_jj = current.join(".jj").is_dir();
+        let has_git = current.join(".git").is_dir() || current.join(".git").is_file();
+        if has_jj || has_git {
+            return (has_jj, has_git);
         }
-        if !has_git && (current.join(".git").is_dir() || current.join(".git").is_file()) {
-            has_git = true;
-        }
-        // Found both or reached filesystem root
-        if (has_jj && has_git) || !current.pop() {
-            break;
+        if !current.pop() {
+            return (false, false);
         }
     }
-
-    (has_jj, has_git)
 }
 
 #[cfg(test)]
@@ -476,6 +496,26 @@ mod tests {
         let (has_jj, has_git) = find_vcs_markers(&subdir);
         assert!(!has_jj);
         assert!(has_git);
+    }
+
+    #[test]
+    fn test_find_vcs_markers_nested_git_under_jj_ancestor_is_git() {
+        // A plain git repo nested under a jj-tracked ancestor (jj-managed
+        // $HOME) must resolve as git at its own root — not as the outer jj
+        // repo, which would merge unrelated projects' state buckets.
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".jj")).unwrap();
+        let nested = tmp.path().join("code").join("app");
+        fs::create_dir_all(nested.join(".git")).unwrap();
+
+        let (has_jj, has_git) = find_vcs_markers(&nested);
+        assert!(!has_jj);
+        assert!(has_git);
+
+        // From the ancestor itself, jj is still detected.
+        let (has_jj, has_git) = find_vcs_markers(tmp.path());
+        assert!(has_jj);
+        assert!(!has_git);
     }
 
     #[test]

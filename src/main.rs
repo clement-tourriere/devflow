@@ -28,7 +28,6 @@ Daily Use:
   commit              Commit staged changes (--ai for AI message)
 
 Workspace Management:
-  graph               Render full environment graph (workspace tree + services)
   link                Link an existing workspace into devflow
   cleanup             Clean up old service workspaces
 
@@ -59,7 +58,7 @@ Processes:
 Setup & Config:
   config              Show current configuration (-v for precedence details)
   destroy             Tear down the entire devflow project (inverse of init)
-  install-hooks       Install Git hooks (auto workspace/switch on checkout)
+  install-hooks       Install Git hooks (adopt linked worktrees + lifecycle hooks)
   uninstall-hooks     Uninstall Git hooks
   shell-init          Print shell integration script (enables worktree cd)
   worktree-setup      Set up devflow in a Git worktree

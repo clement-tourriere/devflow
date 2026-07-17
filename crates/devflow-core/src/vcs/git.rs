@@ -5,15 +5,55 @@ use std::path::{Path, PathBuf};
 
 use super::{VcsProvider, WorkspaceInfo, WorktreeCreateResult, WorktreeInfo};
 
+/// Post-checkout hook installed into `.git/hooks` for git repos and colocated
+/// jj repos alike: adopt linked worktrees, deliberately ignore in-place branch
+/// checkouts in the primary worktree — devflow is worktree-only.
+pub(crate) fn worktree_only_post_checkout_script() -> String {
+    r#"#!/bin/sh
+# devflow auto-generated hook
+# Linked worktrees are adopted automatically. In-place branch checkouts in the
+# primary worktree are deliberately ignored: devflow is worktree-only.
+
+# For post-checkout hook, check if this is a workspace checkout (not file checkout)
+# Parameters: $1=previous HEAD, $2=new HEAD, $3=checkout type (1=workspace, 0=file)
+if [ "$3" = "0" ]; then
+    # This is a file checkout, not a workspace checkout - skip devflow execution
+    exit 0
+fi
+
+# Detect if we're in a worktree (git-dir differs from common-dir)
+GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
+
+if [ "$GIT_DIR" != "$GIT_COMMON_DIR" ]; then
+    # Worktree: resolve main worktree root from common dir
+    MAIN_WORKTREE=$(cd "$GIT_COMMON_DIR/.." && pwd)
+    if command -v devflow >/dev/null 2>&1; then
+        devflow git-hook --worktree --main-worktree-dir "$MAIN_WORKTREE"
+    fi
+    exit 0
+fi
+
+# Primary worktree checkout: no lifecycle action. Use `devflow switch` to
+# materialize/select another workspace.
+exit 0
+"#
+    .to_string()
+}
+
 pub struct GitRepository {
     repo: Repository,
+    /// Canonical path of the primary checkout. `Repository::workdir()` points
+    /// at the linked checkout when this provider is opened from a worktree.
+    primary_root: PathBuf,
 }
 
 impl GitRepository {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let repo = Repository::open(path).context("Failed to open Git repository")?;
+        let primary_root = Self::resolve_primary_root(&repo)?;
 
-        Ok(GitRepository { repo })
+        Ok(GitRepository { repo, primary_root })
     }
 
     /// Initialize a new Git repository at `path` using `git2::Repository::init()`.
@@ -39,7 +79,8 @@ impl GitRepository {
             })
             .context("Failed to set default workspace to main")?;
 
-        let git_repo = GitRepository { repo };
+        let primary_root = Self::resolve_primary_root(&repo)?;
+        let git_repo = GitRepository { repo, primary_root };
 
         // Create an initial empty commit so that the "main" workspace actually
         // exists.  Without this the repo stays in "unborn HEAD" state and
@@ -107,13 +148,10 @@ impl GitRepository {
 
     pub fn get_current_workspace(&self) -> Result<Option<String>> {
         match self.repo.head() {
-            Ok(head) => {
-                if let Ok(workspace_name) = head.shorthand() {
-                    Ok(Some(workspace_name.to_string()))
-                } else {
-                    Ok(None)
-                }
-            }
+            Ok(head) if head.is_branch() => Ok(head.shorthand().ok().map(ToOwned::to_owned)),
+            // A detached HEAD has no raw workspace identity. In particular,
+            // do not expose the literal pseudo-name `HEAD` to callers.
+            Ok(_) => Ok(None),
             Err(e) if e.code() == ErrorCode::UnbornBranch => {
                 // HEAD exists but points to a workspace with no commits.
                 // Read the symbolic target of HEAD to get the workspace name.
@@ -152,150 +190,16 @@ impl GitRepository {
     }
 
     pub fn detect_main_workspace(&self) -> Result<Option<String>> {
-        // Strategy 1: Check for remote's default workspace (most reliable)
-        if let Some(main_workspace) = self.get_remote_default_workspace()? {
-            log::debug!("Found remote default workspace: {}", main_workspace);
-            return Ok(Some(main_workspace));
-        }
-
-        // Strategy 2: Check common main workspace names that exist locally
-        let common_main_workspacees = vec!["main", "master", "develop", "development"];
-        for workspace_name in common_main_workspacees {
-            if self.workspace_exists(workspace_name)? {
-                log::debug!("Found local main workspace: {}", workspace_name);
-                return Ok(Some(workspace_name.to_string()));
-            }
-        }
-
-        // Strategy 3: Find the local workspace that tracks a remote main workspace
-        if let Some(main_workspace) = self.find_local_tracking_main_workspace()? {
-            log::debug!(
-                "Found local workspace tracking remote main: {}",
-                main_workspace
-            );
-            return Ok(Some(main_workspace));
-        }
-
-        // Strategy 4: Use current workspace as last resort (original behavior)
-        if let Some(current_workspace) = self.get_current_workspace()? {
-            log::debug!(
-                "Using current workspace as fallback main: {}",
-                current_workspace
-            );
-            return Ok(Some(current_workspace));
-        }
-
-        Ok(None)
-    }
-
-    fn get_remote_default_workspace(&self) -> Result<Option<String>> {
-        // Try to get the default workspace from the remote
-        let mut found_default = None;
-
-        // Get all remotes
-        let remotes = self.repo.remotes()?;
-
-        // Check origin first, then others
-        let remote_names: Vec<&str> = if remotes.iter().flatten().flatten().any(|r| r == "origin") {
-            let mut names = vec!["origin"];
-            names.extend(
-                remotes
-                    .iter()
-                    .flatten()
-                    .flatten()
-                    .filter(|&r| r != "origin"),
-            );
-            names
-        } else {
-            remotes.iter().flatten().flatten().collect()
-        };
-
-        for remote_name in remote_names {
-            if let Ok(_remote) = self.repo.find_remote(remote_name) {
-                // Look for HEAD reference in remote
-                let head_ref = format!("refs/remotes/{}/HEAD", remote_name);
-                if let Ok(reference) = self.repo.find_reference(&head_ref) {
-                    if let Ok(Some(target)) = reference.symbolic_target() {
-                        // Extract workspace name from refs/remotes/origin/main -> main
-                        let prefix = format!("refs/remotes/{}/", remote_name);
-                        if target.starts_with(&prefix) {
-                            let workspace_name = target.strip_prefix(&prefix).unwrap();
-                            found_default = Some(workspace_name.to_string());
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(found_default)
-    }
-
-    fn find_local_tracking_main_workspace(&self) -> Result<Option<String>> {
-        let workspaces = self.repo.branches(Some(git2::BranchType::Local))?;
-
-        for branch_result in workspaces {
-            let (workspace, _) = branch_result?;
-            if let Some(workspace_name) = workspace.name()? {
-                // Check if this workspace tracks a remote main/master workspace
-                if let Ok(upstream) = workspace.upstream() {
-                    if let Some(upstream_name) = upstream.name()? {
-                        // Check if upstream is a main workspace (contains main, master, etc.)
-                        let upstream_lower = upstream_name.to_lowercase();
-                        if upstream_lower.contains("main") || upstream_lower.contains("master") {
-                            return Ok(Some(workspace_name.to_string()));
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(None)
+        // The primary checkout is the stable root of devflow's workspace
+        // graph. Its checked-out branch therefore defines Git's default
+        // workspace, even when a remote advertises another default or a
+        // conventional `main` branch also exists. This is deliberately
+        // independent of the linked checkout from which devflow was invoked.
+        Self::workspace_at(&self.primary_root)
     }
 
     fn generate_hook_script(&self) -> String {
-        r#"#!/bin/sh
-# devflow auto-generated hook
-# This hook automatically creates service workspaces when switching Git workspaces
-
-# For post-checkout hook, check if this is a workspace checkout (not file checkout)
-# Parameters: $1=previous HEAD, $2=new HEAD, $3=checkout type (1=workspace, 0=file)
-if [ "$3" = "0" ]; then
-    # This is a file checkout, not a workspace checkout - skip devflow execution
-    exit 0
-fi
-
-# Detect if we're in a worktree (git-dir differs from common-dir)
-GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
-GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
-
-if [ "$GIT_DIR" != "$GIT_COMMON_DIR" ]; then
-    # Worktree: resolve main worktree root from common dir
-    MAIN_WORKTREE=$(cd "$GIT_COMMON_DIR/.." && pwd)
-    if command -v devflow >/dev/null 2>&1; then
-        devflow git-hook --worktree --main-worktree-dir "$MAIN_WORKTREE"
-    fi
-    exit 0
-fi
-
-# Regular checkout: skip if same workspace
-PREV_BRANCH=$(git reflog | awk 'NR==1{ print $6; exit }')
-NEW_BRANCH=$(git reflog | awk 'NR==1{ print $8; exit }')
-
-if [ "$PREV_BRANCH" = "$NEW_BRANCH" ]; then
-    # This is the same workspace checkout - skip devflow execution
-    exit 0
-fi
-
-# Check if devflow is available
-if command -v devflow >/dev/null 2>&1; then
-    # Run devflow git-hook command to handle workspace creation
-    devflow git-hook
-else
-    echo "devflow not found in PATH, skipping service workspace creation"
-fi
-"#
-        .to_string()
+        worktree_only_post_checkout_script()
     }
 
     fn generate_pre_commit_script(&self) -> String {
@@ -312,7 +216,44 @@ fi
     }
 
     pub fn get_repo_root(&self) -> &Path {
-        self.repo.workdir().unwrap_or_else(|| self.repo.path())
+        &self.primary_root
+    }
+
+    /// Resolve the primary checkout independently of the checkout from which
+    /// the repository was opened.
+    fn resolve_primary_root(repo: &Repository) -> Result<PathBuf> {
+        let root = if repo.is_worktree() {
+            repo.commondir().parent().with_context(|| {
+                format!(
+                    "Git common directory '{}' has no parent",
+                    repo.commondir().display()
+                )
+            })?
+        } else {
+            repo.workdir().unwrap_or_else(|| repo.path())
+        };
+
+        Ok(root.canonicalize().unwrap_or_else(|_| root.to_path_buf()))
+    }
+
+    fn workspace_at(path: &Path) -> Result<Option<String>> {
+        let repo = Repository::open(path)
+            .with_context(|| format!("Failed to open Git worktree at '{}'", path.display()))?;
+        let result = match repo.head() {
+            Ok(head) if head.is_branch() => Ok(head.shorthand().ok().map(ToOwned::to_owned)),
+            Ok(_) => Ok(None),
+            Err(error) if error.code() == ErrorCode::UnbornBranch => {
+                let head = repo.find_reference("HEAD")?;
+                Ok(head.symbolic_target()?.map(|target| {
+                    target
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(target)
+                        .to_owned()
+                }))
+            }
+            Err(error) => Err(error).context("Failed to get worktree HEAD"),
+        };
+        result
     }
 
     /// Diff of the index against HEAD (staged changes). HEAD may be unborn,
@@ -328,10 +269,9 @@ fi
             .context("Failed to diff index against HEAD")
     }
 
-    /// Sanitize a workspace name into a valid worktree name for git.
-    /// Replaces `/` with `-` since worktree names are used as directory components.
+    /// Build a collision-resistant internal worktree name for Git metadata.
     fn worktree_name_for_branch(workspace: &str) -> String {
-        workspace.replace('/', "-")
+        crate::config::workspace_service_key(workspace)
     }
 }
 
@@ -343,20 +283,7 @@ fi
 /// files — the same set `git worktree remove` refuses on.  Gitignored files
 /// (e.g. `.env.local` copied in by devflow) never block removal.
 fn ensure_worktree_clean(path: &Path) -> Result<()> {
-    let wt_repo = Repository::open(path)
-        .with_context(|| format!("Failed to open worktree at '{}'", path.display()))?;
-    let mut opts = git2::StatusOptions::new();
-    opts.include_untracked(true)
-        .include_ignored(false)
-        .exclude_submodules(true);
-    let statuses = wt_repo
-        .statuses(Some(&mut opts))
-        .with_context(|| format!("Failed to read status of worktree '{}'", path.display()))?;
-
-    let dirty: Vec<String> = statuses
-        .iter()
-        .filter_map(|e| e.path().ok().map(String::from))
-        .collect();
+    let dirty = worktree_changes(path)?;
 
     if !dirty.is_empty() {
         let preview = dirty
@@ -375,6 +302,23 @@ fn ensure_worktree_clean(path: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn worktree_changes(path: &Path) -> Result<Vec<String>> {
+    let wt_repo = Repository::open(path)
+        .with_context(|| format!("Failed to open worktree at '{}'", path.display()))?;
+    let mut opts = git2::StatusOptions::new();
+    opts.include_untracked(true)
+        .include_ignored(false)
+        .exclude_submodules(true);
+    let statuses = wt_repo
+        .statuses(Some(&mut opts))
+        .with_context(|| format!("Failed to read status of worktree '{}'", path.display()))?;
+
+    Ok(statuses
+        .iter()
+        .filter_map(|e| e.path().ok().map(String::from))
+        .collect())
 }
 
 impl VcsProvider for GitRepository {
@@ -418,12 +362,17 @@ impl VcsProvider for GitRepository {
 
         // Resolve the base commit
         let base_commit = if let Some(base_name) = base {
-            let obj = self
+            // Workspace identities are exact local branch names. Avoid Git's
+            // DWIM revision lookup here: a tag with the same name as the
+            // requested parent must never silently select a different commit.
+            let base_branch = self
                 .repo
-                .revparse_single(base_name)
+                .find_branch(base_name, git2::BranchType::Local)
                 .with_context(|| format!("Failed to find base workspace '{}'", base_name))?;
-            obj.peel_to_commit()
-                .context("Base reference is not a commit")?
+            base_branch
+                .get()
+                .peel_to_commit()
+                .context("Base workspace reference is not a commit")?
         } else {
             // On unborn repos this auto-creates an initial empty commit.
             self.head_commit_or_init()?
@@ -456,39 +405,6 @@ impl VcsProvider for GitRepository {
         self.workspace_exists(name)
     }
 
-    fn checkout_workspace(&self, name: &str) -> Result<()> {
-        let workspace = self
-            .repo
-            .find_branch(name, git2::BranchType::Local)
-            .with_context(|| {
-                format!(
-                    "Workspace '{}' not found. Run 'devflow list' to see available workspaces.",
-                    name
-                )
-            })?;
-        let reference = workspace.into_reference();
-        let commit = reference
-            .peel_to_commit()
-            .context("Workspace does not point to a commit")?;
-        let tree = commit.tree().context("Failed to get tree from commit")?;
-
-        self.repo
-            .checkout_tree(
-                tree.as_object(),
-                Some(git2::build::CheckoutBuilder::new().safe()),
-            )
-            .with_context(|| format!("Failed to checkout tree for workspace '{}'", name))?;
-
-        let refname = reference
-            .name()
-            .context("Workspace reference has invalid UTF-8 name")?;
-        self.repo
-            .set_head(refname)
-            .with_context(|| format!("Failed to set HEAD to workspace '{}'", name))?;
-
-        Ok(())
-    }
-
     fn supports_worktrees(&self) -> bool {
         true
     }
@@ -500,17 +416,12 @@ impl VcsProvider for GitRepository {
     fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>> {
         let mut result = Vec::new();
 
-        // Add the main worktree
-        let current_workspace = self.get_current_workspace()?;
-        let repo_root = self
-            .repo
-            .workdir()
-            .unwrap_or_else(|| self.repo.path())
-            .to_path_buf();
-
+        // The repository may have been opened from a linked worktree. Always
+        // inspect the primary checkout explicitly instead of labelling the
+        // context checkout as main.
         result.push(WorktreeInfo {
-            path: repo_root,
-            workspace: current_workspace,
+            path: self.primary_root.clone(),
+            workspace: Self::workspace_at(&self.primary_root)?,
             is_main: true,
             is_locked: false,
         });
@@ -522,18 +433,17 @@ impl VcsProvider for GitRepository {
             let Ok(Some(name)) = wt_name else { continue };
 
             if let Ok(wt) = self.repo.find_worktree(name) {
-                let wt_path = wt.path().to_path_buf();
+                let wt_path = wt
+                    .path()
+                    .canonicalize()
+                    .unwrap_or_else(|_| wt.path().to_path_buf());
 
-                // Get workspace for this worktree by opening the repo at that path
-                let wt_branch = if let Ok(wt_repo) = Repository::open(&wt_path) {
-                    if let Ok(head) = wt_repo.head() {
-                        head.shorthand().ok().map(|s| s.to_string())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
+                // Resolve the worktree's workspace with the same guarded
+                // HEAD parsing as the primary entry: a detached HEAD yields
+                // None, never the literal pseudo-name "HEAD" — inventory
+                // adoption would otherwise persist a phantom "HEAD"
+                // workspace whenever a worktree is mid-rebase/bisect.
+                let wt_branch = Self::workspace_at(&wt_path).ok().flatten();
 
                 let is_locked = matches!(wt.is_locked(), Ok(WorktreeLockStatus::Locked(_)));
 
@@ -550,6 +460,9 @@ impl VcsProvider for GitRepository {
     }
 
     fn create_worktree(&self, workspace: &str, path: &Path) -> Result<WorktreeCreateResult> {
+        // Old releases used a lossy worktree metadata name. Prune all stale
+        // entries before selecting the collision-resistant name below.
+        let _ = <Self as VcsProvider>::prune_worktrees(self);
         let wt_name = Self::worktree_name_for_branch(workspace);
 
         // If stale worktree metadata exists for this name (path removed on disk),
@@ -637,6 +550,10 @@ impl VcsProvider for GitRepository {
         anyhow::bail!("No worktree found at path '{}'", path.display());
     }
 
+    fn worktree_is_dirty(&self, path: &Path) -> Result<bool> {
+        Ok(!worktree_changes(path)?.is_empty())
+    }
+
     fn worktree_path(&self, workspace: &str) -> Result<Option<PathBuf>> {
         let worktree_names = self.repo.worktrees().context("Failed to list worktrees")?;
 
@@ -656,31 +573,21 @@ impl VcsProvider for GitRepository {
             }
         }
 
-        // Also check if the main worktree has this workspace
-        if let Some(current) = self.get_current_workspace()? {
-            if current == workspace {
-                let main_path = self
-                    .repo
-                    .workdir()
-                    .unwrap_or_else(|| self.repo.path())
-                    .to_path_buf();
-                return Ok(Some(main_path));
-            }
+        // Opening from a linked worktree means `get_current_workspace()` is
+        // the linked branch, not the primary checkout's branch.
+        if Self::workspace_at(&self.primary_root)?.as_deref() == Some(workspace) {
+            return Ok(Some(self.primary_root.clone()));
         }
 
         Ok(None)
     }
 
     fn main_worktree_dir(&self) -> Option<PathBuf> {
-        if self.repo.is_worktree() {
-            self.repo.commondir().parent().map(|p| p.to_path_buf())
-        } else {
-            self.repo.workdir().map(|p| p.to_path_buf())
-        }
+        Some(self.primary_root.clone())
     }
 
     fn install_hooks(&self) -> Result<()> {
-        let hooks_dir = self.repo.path().join("hooks");
+        let hooks_dir = self.repo.commondir().join("hooks");
         fs::create_dir_all(&hooks_dir).context("Failed to create hooks directory")?;
 
         let hook_script = self.generate_hook_script();
@@ -718,7 +625,7 @@ impl VcsProvider for GitRepository {
     }
 
     fn uninstall_hooks(&self) -> Result<()> {
-        let hooks_dir = self.repo.path().join("hooks");
+        let hooks_dir = self.repo.commondir().join("hooks");
 
         let post_checkout_hook = hooks_dir.join("post-checkout");
         if post_checkout_hook.exists() && self.is_devflow_hook(&post_checkout_hook)? {
@@ -915,15 +822,155 @@ mod tests {
 
     #[test]
     fn test_worktree_name_for_branch() {
-        assert_eq!(
-            GitRepository::worktree_name_for_branch("feature/auth"),
-            "feature-auth"
-        );
         assert_eq!(GitRepository::worktree_name_for_branch("main"), "main");
-        assert_eq!(
-            GitRepository::worktree_name_for_branch("fix/bug/123"),
-            "fix-bug-123"
+        assert_ne!(
+            GitRepository::worktree_name_for_branch("feature/auth"),
+            GitRepository::worktree_name_for_branch("feature-auth")
         );
+    }
+
+    #[test]
+    fn colliding_legacy_names_can_have_distinct_worktrees() {
+        let (_tmp, root, repo) = repo_with_commit();
+        let slash_path = root.join("slash-worktree");
+        let dash_path = root.join("dash-worktree");
+
+        repo.create_worktree("feature/auth", &slash_path).unwrap();
+        repo.create_worktree("feature-auth", &dash_path).unwrap();
+
+        assert_eq!(
+            repo.worktree_path("feature/auth").unwrap().as_deref(),
+            Some(slash_path.as_path())
+        );
+        assert_eq!(
+            repo.worktree_path("feature-auth").unwrap().as_deref(),
+            Some(dash_path.as_path())
+        );
+    }
+
+    #[test]
+    fn provider_opened_from_linked_worktree_keeps_primary_checkout_identity() {
+        let (_tmp, root, repo) = repo_with_commit();
+        let wt_path = root.join("linked-feature");
+        repo.create_worktree("feature/linked", &wt_path).unwrap();
+
+        let linked = GitRepository::new(&wt_path).unwrap();
+
+        assert_eq!(
+            linked.current_workspace().unwrap().as_deref(),
+            Some("feature/linked"),
+            "the command context remains the linked checkout"
+        );
+        assert_eq!(linked.repo_root(), root.as_path());
+        assert_eq!(linked.main_worktree_dir().as_deref(), Some(root.as_path()));
+        assert_eq!(
+            linked.worktree_path("main").unwrap().as_deref(),
+            Some(root.as_path()),
+            "switching to the default workspace must resolve the primary checkout"
+        );
+
+        let worktrees = linked.list_worktrees().unwrap();
+        let primary = worktrees.iter().find(|worktree| worktree.is_main).unwrap();
+        assert_eq!(primary.path, root);
+        assert_eq!(primary.workspace.as_deref(), Some("main"));
+
+        let feature = worktrees
+            .iter()
+            .find(|worktree| worktree.workspace.as_deref() == Some("feature/linked"))
+            .unwrap();
+        assert_eq!(feature.path, wt_path.canonicalize().unwrap());
+        assert!(!feature.is_main);
+
+        let sibling_path = root.join("linked-sibling");
+        linked
+            .create_worktree("feature/sibling", &sibling_path)
+            .expect("a provider opened from a linked checkout can create sibling worktrees");
+        assert_eq!(
+            linked.worktree_path("feature/sibling").unwrap().as_deref(),
+            Some(sibling_path.as_path())
+        );
+    }
+
+    #[test]
+    fn primary_checkout_branch_is_the_default_workspace() {
+        let (_tmp, _root, repo) = repo_with_commit();
+        repo.create_workspace("feature/primary", Some("main"))
+            .unwrap();
+        repo.repo.set_head("refs/heads/feature/primary").unwrap();
+
+        // `main` still exists, but the primary checkout is intentionally on a
+        // different raw branch. Devflow must not create a second linked
+        // `main` and pretend that it is the root workspace.
+        assert!(repo.workspace_exists("main").unwrap());
+        assert_eq!(
+            repo.default_workspace().unwrap().as_deref(),
+            Some("feature/primary")
+        );
+    }
+
+    #[test]
+    fn workspace_parent_resolution_uses_exact_local_branch_when_tag_collides() {
+        let (_tmp, root, repo) = repo_with_commit();
+        repo.create_workspace("release", Some("main")).unwrap();
+        let release_target = repo
+            .repo
+            .find_branch("release", git2::BranchType::Local)
+            .unwrap()
+            .get()
+            .target()
+            .unwrap();
+
+        // Advance main and create a tag with the same raw name as the parent
+        // workspace. DWIM revision parsing may prefer or reject this tag;
+        // devflow must always use refs/heads/release.
+        std::fs::write(root.join("later.txt"), "later").unwrap();
+        let mut index = repo.repo.index().unwrap();
+        index.add_path(Path::new("later.txt")).unwrap();
+        index.write().unwrap();
+        let tree = repo.repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("t", "t@t").unwrap();
+        let parent = repo.repo.head().unwrap().peel_to_commit().unwrap();
+        let later = repo
+            .repo
+            .commit(Some("HEAD"), &sig, &sig, "later", &tree, &[&parent])
+            .unwrap();
+        let later = repo.repo.find_object(later, None).unwrap();
+        repo.repo.tag_lightweight("release", &later, false).unwrap();
+
+        repo.create_workspace("child", Some("release")).unwrap();
+        let child_target = repo
+            .repo
+            .find_branch("child", git2::BranchType::Local)
+            .unwrap()
+            .get()
+            .target()
+            .unwrap();
+        assert_eq!(child_target, release_target);
+        assert_ne!(child_target, later.id());
+    }
+
+    #[test]
+    fn unborn_primary_checkout_retains_its_symbolic_workspace_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let raw = Repository::init(tmp.path()).unwrap();
+        raw.set_head("refs/heads/feature/unborn").unwrap();
+        drop(raw);
+
+        let repo = GitRepository::new(tmp.path()).unwrap();
+        assert_eq!(
+            repo.default_workspace().unwrap().as_deref(),
+            Some("feature/unborn")
+        );
+    }
+
+    #[test]
+    fn detached_primary_checkout_has_no_workspace_identity() {
+        let (_tmp, _root, repo) = repo_with_commit();
+        let head = repo.repo.head().unwrap().target().unwrap();
+        repo.repo.set_head_detached(head).unwrap();
+
+        assert_eq!(repo.current_workspace().unwrap(), None);
+        assert_eq!(repo.default_workspace().unwrap(), None);
     }
 
     /// Build a repo with one commit so worktrees can be created.

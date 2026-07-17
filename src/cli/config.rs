@@ -571,7 +571,6 @@ pub(super) fn show_effective_config(effective_config: &EffectiveConfig) -> Resul
     let has_env_overrides = effective_config.env_config.disabled.is_some()
         || effective_config.env_config.skip_hooks.is_some()
         || effective_config.env_config.auto_create.is_some()
-        || effective_config.env_config.auto_switch.is_some()
         || effective_config.env_config.workspace_filter_regex.is_some()
         || effective_config.env_config.disabled_workspaces.is_some()
         || effective_config
@@ -590,9 +589,6 @@ pub(super) fn show_effective_config(effective_config: &EffectiveConfig) -> Resul
         }
         if let Some(auto_create) = effective_config.env_config.auto_create {
             println!("  DEVFLOW_AUTO_CREATE: {}", auto_create);
-        }
-        if let Some(auto_switch) = effective_config.env_config.auto_switch {
-            println!("  DEVFLOW_AUTO_SWITCH: {}", auto_switch);
         }
         if let Some(ref regex) = effective_config.env_config.workspace_filter_regex {
             println!("  DEVFLOW_BRANCH_FILTER_REGEX: {}", regex);

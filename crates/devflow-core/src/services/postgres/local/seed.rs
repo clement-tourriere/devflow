@@ -413,7 +413,7 @@ async fn seed_from_s3(
     let filename = key.rsplit('/').next().unwrap_or("dump");
     let temp_path = temp_dir.path().join(filename);
 
-    println!("Downloading s3://{}/{} ...", bucket, key);
+    log::info!("Downloading s3://{}/{}", bucket, key);
     let response = s3_bucket
         .get_object(key)
         .await

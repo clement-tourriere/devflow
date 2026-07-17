@@ -1,23 +1,12 @@
 use anyhow::Result;
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use devflow_core::config::Config;
 use devflow_core::hooks::HookEntry;
 use devflow_core::services::factory;
-use devflow_core::state::LocalStateManager;
-use devflow_core::vcs::{self, VcsProvider, WorktreeInfo};
+use devflow_core::vcs;
 
 use super::action::*;
-
-/// Snapshot of VCS data captured synchronously from the main thread.
-/// All fields are `Send + Clone` so they can be passed to background tasks.
-#[derive(Debug, Clone)]
-pub struct VcsSnapshot {
-    pub current_workspace: Option<String>,
-    pub default_workspace: Option<String>,
-    pub worktrees: Vec<WorktreeInfo>,
-}
 
 /// Shared context that the TUI components use to fetch data.
 /// Encapsulates config loading, VCS detection, and provider creation.
@@ -28,8 +17,10 @@ pub struct VcsSnapshot {
 pub struct DevflowContext {
     pub config: Config,
     pub config_path: Option<PathBuf>,
-    vcs: Box<dyn VcsProvider>,
-    vcs_snapshot: VcsSnapshot,
+    /// The checkout/worktree from which the TUI was launched. This can differ
+    /// from `config_path` when a linked worktree falls back to configuration
+    /// stored in Git's primary checkout.
+    pub project_dir: PathBuf,
 }
 
 fn summarize_workspace_switch(
@@ -37,6 +28,7 @@ fn summarize_workspace_switch(
     workspace: &str,
     services: &[devflow_core::workspace::ServiceResult],
     processes: &[devflow_core::processes::ProcessResult],
+    hooks: &[devflow_core::workspace::LifecycleHookResult],
 ) -> Result<String> {
     let mut failures: Vec<String> = services
         .iter()
@@ -49,6 +41,17 @@ fn summarize_workspace_switch(
             .filter(|r| !r.success && r.required)
             .map(|r| format!("process '{}': {}", r.process, r.message)),
     );
+    failures.extend(hooks.iter().filter(|hook| hook.failed > 0).map(|hook| {
+        let details = if hook.errors.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", hook.errors.join("; "))
+        };
+        format!(
+            "hook phase '{}': {} failed{}",
+            hook.phase, hook.failed, details
+        )
+    }));
     if !failures.is_empty() {
         anyhow::bail!(
             "{} '{}' completed with failures: {}",
@@ -58,11 +61,17 @@ fn summarize_workspace_switch(
         );
     }
 
-    let warnings: Vec<String> = processes
+    let mut warnings: Vec<String> = processes
         .iter()
         .filter(|r| !r.success && !r.required)
         .map(|r| format!("optional process '{}': {}", r.process, r.message))
         .collect();
+    warnings.extend(
+        hooks
+            .iter()
+            .filter(|hook| hook.skipped > 0)
+            .map(|hook| format!("hook phase '{}': {} skipped", hook.phase, hook.skipped)),
+    );
     if warnings.is_empty() {
         Ok(format!("{} workspace '{}'", verb, workspace))
     } else {
@@ -75,9 +84,20 @@ fn summarize_workspace_switch(
     }
 }
 
+fn ensure_vcs_ref_deleted(workspace: &str, deleted: bool) -> Result<()> {
+    if !deleted {
+        anyhow::bail!(
+            "Deletion of workspace '{}' completed only partially: its VCS ref still exists",
+            workspace
+        );
+    }
+    Ok(())
+}
+
 impl DevflowContext {
     /// Load config, inject state services, detect VCS, snapshot VCS data.
     pub fn new() -> Result<Self> {
+        let project_dir = std::env::current_dir()?;
         let (effective_config, config_path) = Config::load_effective_config_with_path_info()?;
         let mut config = effective_config.get_merged_config();
 
@@ -86,82 +106,29 @@ impl DevflowContext {
             config.overlay_local_state_services(path);
         }
 
-        let vcs = vcs::detect_vcs_provider(".")?;
-
-        // Capture VCS data snapshot (all sync, fast)
-        let vcs_snapshot = Self::take_vcs_snapshot(&*vcs);
+        // Fail early with a useful message when the TUI is opened outside a
+        // supported VCS project. Inventory refreshes perform live detection.
+        let _ = vcs::detect_vcs_provider(&project_dir)?;
 
         Ok(Self {
             config,
             config_path,
-            vcs,
-            vcs_snapshot,
+            project_dir,
         })
     }
 
-    /// Take a snapshot of VCS state. All calls here are synchronous.
-    fn take_vcs_snapshot(vcs: &dyn VcsProvider) -> VcsSnapshot {
-        let current_workspace = vcs.current_workspace().ok().flatten();
-        let default_workspace = vcs.default_workspace().ok().flatten();
-        let worktrees = if vcs.supports_worktrees() {
-            vcs.list_worktrees().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        VcsSnapshot {
-            current_workspace,
-            default_workspace,
-            worktrees,
+    /// Reload committed/local/environment configuration and CLI-managed
+    /// local-state services. TUI mutations (notably service add/remove) must
+    /// refresh this snapshot before rebuilding the canonical inventory.
+    pub fn reload_config(&mut self) -> Result<()> {
+        let (effective_config, config_path) = Config::load_effective_config_with_path_info()?;
+        let mut config = effective_config.get_merged_config();
+        if let Some(ref path) = config_path {
+            config.overlay_local_state_services(path);
         }
-    }
-
-    /// Return a clone of the current VCS snapshot for use in background tasks.
-    pub fn snapshot_vcs_data(&self) -> VcsSnapshot {
-        self.vcs_snapshot.clone()
-    }
-
-    /// Snapshot the workspace registry (name -> parent) for use in background tasks.
-    /// Returns a HashMap<workspace_name, Option<parent_name>> from the local state.
-    pub fn snapshot_branch_registry(&self) -> HashMap<String, Option<String>> {
-        let mut map = HashMap::new();
-        if let Ok(mut state_manager) = LocalStateManager::new() {
-            if let Some(ref path) = self.config_path {
-                if let Some(project_dir) = path.parent() {
-                    let workspaces = state_manager
-                        .get_or_init_workspaces_by_dir(project_dir, &self.config.git.main_workspace)
-                        .unwrap_or_else(|_| state_manager.get_workspaces(path));
-
-                    for workspace in workspaces {
-                        map.insert(workspace.name, workspace.parent);
-                    }
-                }
-            }
-        }
-        map
-    }
-
-    /// Snapshot the current devflow context workspace.
-    ///
-    /// Resolution order:
-    /// 1) DEVFLOW_CONTEXT_BRANCH env override
-    /// 2) current VCS workspace in this cwd
-    pub fn snapshot_context_branch(&self) -> Option<String> {
-        if let Ok(override_branch) = std::env::var("DEVFLOW_CONTEXT_BRANCH") {
-            let trimmed = override_branch.trim();
-            if !trimmed.is_empty() {
-                return Some(self.config.get_normalized_workspace_name(trimmed));
-            }
-        }
-
-        self.vcs_snapshot
-            .current_workspace
-            .as_deref()
-            .map(|b| self.config.get_normalized_workspace_name(b))
-    }
-
-    /// Re-capture VCS state after a workspace switch/create/delete.
-    pub fn refresh_vcs_snapshot(&mut self) {
-        self.vcs_snapshot = Self::take_vcs_snapshot(&*self.vcs);
+        self.config = config;
+        self.config_path = config_path;
+        Ok(())
     }
 
     // ── Synchronous data fetchers (local, no network) ───────────────
@@ -218,80 +185,57 @@ impl DevflowContext {
     // These are designed to be called from `tokio::spawn` background
     // tasks. They only need a `Config` clone, not the full context.
 
-    /// Fetch enriched workspace list: registry-first, enriched with VCS + service data.
-    ///
-    /// Only devflow-registered workspaces are shown.  VCS workspaces that are
-    /// not in the registry are excluded.  Service states are attached where
-    /// available.
+    /// Fetch the canonical core workspace inventory and adapt it for the TUI.
     pub async fn fetch_branches_bg(
         config: &Config,
-        vcs: VcsSnapshot,
-        branch_registry: HashMap<String, Option<String>>,
-        context_branch: Option<String>,
+        project_dir: &std::path::Path,
     ) -> Result<BranchesData> {
-        // Get all providers and their workspaces (network calls)
-        let providers = factory::create_all_providers(config).await.ok();
-
-        let mut enriched = Vec::with_capacity(branch_registry.len());
-
-        for (reg_name, reg_parent) in &branch_registry {
-            // Enrich with VCS data: worktree path, is_current
-            let worktree_path = vcs
-                .worktrees
-                .iter()
-                .find(|wt| wt.workspace.as_deref() == Some(reg_name.as_str()))
-                .map(|wt| wt.path.display().to_string());
-
-            let normalized = config.get_normalized_workspace_name(reg_name);
-            let is_current = context_branch
-                .as_deref()
-                .map(|active| active == reg_name || active == normalized)
-                .unwrap_or(false);
-
-            let is_default = vcs
-                .default_workspace
-                .as_deref()
-                .map(|db| db == reg_name || config.get_normalized_workspace_name(db) == *reg_name)
-                .unwrap_or(false);
-
-            // Collect service states for this workspace
-            let mut services = Vec::new();
-            if let Some(ref providers) = providers {
-                for named in providers {
-                    let svc_branches = named.provider.list_workspaces().await.ok();
-                    if let Some(svc_branches) = svc_branches {
-                        if let Some(svc_branch) =
-                            svc_branches.iter().find(|sb| sb.name == *reg_name)
-                        {
-                            services.push(BranchServiceState {
-                                service_name: named.name.clone(),
-                                state: svc_branch.state.clone(),
-                                database_name: Some(svc_branch.database_name.clone()),
-                                parent_workspace: svc_branch.parent_workspace.clone(),
-                                supports_lifecycle: named.provider.supports_lifecycle(),
-                            });
-                        }
-                    }
-                }
-            }
-
-            enriched.push(EnrichedBranch {
-                name: reg_name.clone(),
-                is_current,
-                is_default,
-                worktree_path,
-                services,
-                parent: reg_parent.clone(),
-            });
-        }
+        let inventory =
+            devflow_core::workspace::inventory::build_workspace_inventory(config, project_dir)
+                .await?;
+        let roots = inventory.roots;
+        let workspaces = inventory
+            .workspaces
+            .into_iter()
+            .map(|workspace| EnrichedBranch {
+                name: workspace.name,
+                is_current: workspace.is_context,
+                is_default: workspace.is_default,
+                worktree_path: workspace.worktree_path,
+                health: workspace.health,
+                services: workspace
+                    .services
+                    .into_iter()
+                    .map(|service| BranchServiceState {
+                        service_name: service.name,
+                        state: service.state,
+                        database_name: service.database_name,
+                        provisioned: service.provisioned,
+                        supports_lifecycle: service.supports_lifecycle,
+                    })
+                    .collect(),
+                processes: workspace.processes,
+                parent: workspace.parent,
+                parent_state: workspace.parent_state,
+                children: workspace.children,
+            })
+            .collect();
 
         Ok(BranchesData {
-            workspaces: enriched,
+            roots,
+            workspaces,
+            warnings: inventory.warnings,
         })
     }
 
     /// Fetch all services with their workspaces.
-    pub async fn fetch_services_bg(config: &Config) -> Result<ServicesData> {
+    pub async fn fetch_services_bg(
+        config: &Config,
+        project_dir: &std::path::Path,
+    ) -> Result<ServicesData> {
+        let inventory =
+            devflow_core::workspace::inventory::build_workspace_inventory(config, project_dir)
+                .await?;
         let named_configs = config.resolve_services();
         let mut services = Vec::new();
 
@@ -300,21 +244,27 @@ impl DevflowContext {
                 .await
                 .ok();
 
-            let mut workspaces = Vec::new();
+            let mut workspaces = inventory
+                .workspaces
+                .iter()
+                .filter_map(|workspace| {
+                    workspace
+                        .services
+                        .iter()
+                        .find(|service| service.name == named_config.name && service.provisioned)
+                        .map(|service| ServiceWorkspaceEntry {
+                            name: workspace.name.clone(),
+                            state: service.state.clone(),
+                            parent_workspace: workspace.parent.clone(),
+                            database_name: service.database_name.clone().unwrap_or_default(),
+                            supports_lifecycle: service.supports_lifecycle,
+                        })
+                })
+                .collect::<Vec<_>>();
+            workspaces.sort_by(|a, b| a.name.cmp(&b.name));
             let mut project_info = None;
 
             if let Some(ref provider) = provider {
-                if let Ok(svc_branches) = provider.list_workspaces().await {
-                    for b in svc_branches {
-                        workspaces.push(ServiceWorkspaceEntry {
-                            name: b.name,
-                            state: b.state,
-                            parent_workspace: b.parent_workspace,
-                            database_name: b.database_name,
-                        });
-                    }
-                }
-
                 if let Some(info) = provider.project_info() {
                     project_info = Some(ProjectInfoEntry {
                         storage_driver: info.storage_driver,
@@ -397,9 +347,12 @@ impl DevflowContext {
         config: &Config,
         service_name: &str,
         workspace_name: &str,
+        project_dir: &std::path::Path,
     ) -> Result<String> {
+        let service_key = devflow_core::state::LocalStateManager::new()?
+            .resolve_workspace_service_key_by_dir(project_dir, workspace_name)?;
         let named = factory::resolve_provider(config, Some(service_name)).await?;
-        named.provider.logs(workspace_name, Some(200)).await
+        named.provider.logs(&service_key, Some(200)).await
     }
 
     /// Switch a workspace via the shared core lifecycle.
@@ -411,7 +364,6 @@ impl DevflowContext {
         let options = devflow_core::workspace::switch::SwitchOptions {
             lifecycle: devflow_core::workspace::LifecycleOptions::default(),
             create_if_missing: false,
-            creation_mode: devflow_core::workspace::WorkspaceCreationMode::Default,
             from_workspace: None,
             copy_files: None,
             copy_ignored: None,
@@ -428,6 +380,7 @@ impl DevflowContext {
             &result.workspace,
             &result.services,
             &result.processes,
+            &result.hooks,
         )
     }
 
@@ -440,7 +393,6 @@ impl DevflowContext {
     ) -> Result<String> {
         let options = devflow_core::workspace::create::CreateOptions {
             lifecycle: devflow_core::workspace::LifecycleOptions::default(),
-            creation_mode: devflow_core::workspace::WorkspaceCreationMode::Default,
             from_workspace: from.map(ToString::to_string),
             copy_files: None,
             copy_ignored: None,
@@ -453,6 +405,7 @@ impl DevflowContext {
             &result.workspace,
             &result.services,
             &result.processes,
+            &result.hooks,
         )
     }
 
@@ -461,21 +414,33 @@ impl DevflowContext {
         config: &Config,
         name: &str,
         project_dir: &std::path::Path,
+        force: bool,
     ) -> Result<String> {
         let options = devflow_core::workspace::delete::DeleteOptions {
             lifecycle: devflow_core::workspace::LifecycleOptions::default(),
             keep_services: false,
-            force: false,
+            force,
         };
         let result =
             devflow_core::workspace::delete::delete_workspace(config, project_dir, name, &options)
                 .await?;
+        ensure_vcs_ref_deleted(&result.workspace, result.vcs_ref_deleted)?;
         summarize_workspace_switch(
             "Deleted",
             &result.workspace,
             &result.services,
             &result.processes,
+            &result.hooks,
         )
+    }
+
+    /// Inspect deletion safety without mutating workspace state.
+    pub fn preflight_delete_workspace_bg(
+        config: &Config,
+        name: &str,
+        project_dir: &std::path::Path,
+    ) -> Result<devflow_core::workspace::delete::DeleteWorkspacePreflight> {
+        devflow_core::workspace::delete::preflight_delete_workspace(config, project_dir, name)
     }
 
     /// Start a service workspace.
@@ -483,9 +448,12 @@ impl DevflowContext {
         config: &Config,
         service_name: &str,
         workspace_name: &str,
+        project_dir: &std::path::Path,
     ) -> Result<String> {
+        let service_key = devflow_core::state::LocalStateManager::new()?
+            .resolve_workspace_service_key_by_dir(project_dir, workspace_name)?;
         let named = factory::resolve_provider(config, Some(service_name)).await?;
-        named.provider.start_workspace(workspace_name).await?;
+        named.provider.start_workspace(&service_key).await?;
         Ok(format!(
             "Started {} on workspace '{}'",
             service_name, workspace_name
@@ -497,9 +465,12 @@ impl DevflowContext {
         config: &Config,
         service_name: &str,
         workspace_name: &str,
+        project_dir: &std::path::Path,
     ) -> Result<String> {
+        let service_key = devflow_core::state::LocalStateManager::new()?
+            .resolve_workspace_service_key_by_dir(project_dir, workspace_name)?;
         let named = factory::resolve_provider(config, Some(service_name)).await?;
-        named.provider.stop_workspace(workspace_name).await?;
+        named.provider.stop_workspace(&service_key).await?;
         Ok(format!(
             "Stopped {} on workspace '{}'",
             service_name, workspace_name
@@ -511,9 +482,12 @@ impl DevflowContext {
         config: &Config,
         service_name: &str,
         workspace_name: &str,
+        project_dir: &std::path::Path,
     ) -> Result<String> {
+        let service_key = devflow_core::state::LocalStateManager::new()?
+            .resolve_workspace_service_key_by_dir(project_dir, workspace_name)?;
         let named = factory::resolve_provider(config, Some(service_name)).await?;
-        named.provider.reset_workspace(workspace_name).await?;
+        named.provider.reset_workspace(&service_key).await?;
         Ok(format!(
             "Reset {} on workspace '{}'",
             service_name, workspace_name
@@ -637,5 +611,36 @@ impl DevflowContext {
 
         std::fs::remove_file(&pid_path)?;
         Ok(format!("Proxy stopped (pid: {})", pid))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ensure_vcs_ref_deleted, summarize_workspace_switch};
+
+    #[test]
+    fn undeleted_vcs_ref_is_not_reported_as_tui_success() {
+        let error = ensure_vcs_ref_deleted("feature/api", false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("VCS ref still exists"));
+        ensure_vcs_ref_deleted("feature/api", true).unwrap();
+    }
+
+    #[test]
+    fn hook_failures_are_not_reported_as_tui_success() {
+        let hooks = vec![devflow_core::workspace::LifecycleHookResult {
+            phase: "post-create".to_string(),
+            succeeded: 0,
+            failed: 1,
+            skipped: 0,
+            background: 0,
+            errors: vec!["migration failed".to_string()],
+        }];
+        let error = summarize_workspace_switch("Created", "feature/api", &[], &[], &hooks)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("post-create"));
+        assert!(error.contains("migration failed"));
     }
 }

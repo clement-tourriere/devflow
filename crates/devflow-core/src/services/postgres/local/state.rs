@@ -191,9 +191,12 @@ impl Store {
         project_id: &str,
         workspace_name: &str,
     ) -> anyhow::Result<Option<Workspace>> {
-        // Rows are stored under the normalized name; accept raw VCS names
-        // (e.g. `feature/foo-bar`) from any caller.
-        let workspace_name = crate::config::normalize_workspace_name(workspace_name);
+        // Try the exact name first: adopted legacy service keys (e.g. keys
+        // containing `$` or longer than the canonical cap) are not fixpoints
+        // of the normalization below, and re-normalizing them would look up a
+        // key no row was ever stored under — orphaning the very resources the
+        // legacy adoption preserved. Fall back to the normalized form so raw
+        // VCS names (e.g. `feature/foo-bar`) still resolve.
         let mut stmt = self.conn.prepare(
             r#"
             SELECT id, project_id, name, parent_workspace_id, state, data_dir, container_name, port, storage_metadata, created_at
@@ -205,6 +208,15 @@ impl Store {
         let mut rows = stmt.query(rusqlite::params![project_id, workspace_name])?;
         if let Some(row) = rows.next()? {
             return Ok(Some(map_branch_row(row)?));
+        }
+        drop(rows);
+
+        let normalized = crate::config::normalize_workspace_name(workspace_name);
+        if normalized != workspace_name {
+            let mut rows = stmt.query(rusqlite::params![project_id, normalized])?;
+            if let Some(row) = rows.next()? {
+                return Ok(Some(map_branch_row(row)?));
+            }
         }
 
         Ok(None)

@@ -344,7 +344,6 @@ function AddServiceModal({
             <option value="neon">Neon</option>
             <option value="dblab">DBLab</option>
             <option value="xata">Xata</option>
-            <option value="postgres_template">PostgreSQL Template</option>
           </select>
         </div>
       )}
@@ -480,7 +479,7 @@ function AddServiceModal({
             checked={autoWorkspace}
             onChange={(e) => setAutoWorkspace(e.target.checked)}
           />
-          <span style={{ color: "var(--text-primary)" }}>Auto-workspace on git checkout</span>
+          <span style={{ color: "var(--text-primary)" }}>Provision for new workspaces</span>
         </label>
       </div>
 

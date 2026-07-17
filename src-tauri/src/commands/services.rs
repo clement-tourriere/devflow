@@ -41,6 +41,20 @@ fn service_entry(named: &NamedServiceConfig, source: &str) -> ServiceEntry {
     }
 }
 
+fn resolve_effective_service_key(
+    project_dir: &std::path::Path,
+    raw_workspace: &str,
+) -> Result<String, String> {
+    // The UI's service-workspace rows carry provider-side service keys (from
+    // list_service_workspaces), while workspace rows carry raw names — accept
+    // both: a key belonging to exactly one verified workspace passes through
+    // instead of tripping the raw-name owner guard.
+    LocalStateManager::new()
+        .map_err(crate::commands::format_error)?
+        .resolve_workspace_or_key_by_dir(project_dir, raw_workspace)
+        .map_err(crate::commands::format_error)
+}
+
 #[tauri::command]
 pub async fn add_service(
     project_path: String,
@@ -67,11 +81,17 @@ pub async fn add_service(
         if let Ok(provider) =
             services::factory::create_provider_from_named_config(&config, &named).await
         {
-            let _ = provider.create_workspace("main", None).await;
+            let default_workspace_key =
+                resolve_effective_service_key(project_dir, &config.git.main_workspace)?;
+            let _ = provider
+                .create_workspace(&default_workspace_key, None)
+                .await;
 
             if let Some(ref seed) = request.seed_from {
                 if !seed.is_empty() {
-                    let _ = provider.seed_from_source("main", seed).await;
+                    let _ = provider
+                        .seed_from_source(&default_workspace_key, seed)
+                        .await;
                 }
             }
         }
@@ -240,8 +260,9 @@ pub async fn start_service(
         .await
         .map_err(crate::commands::format_error)?;
 
+    let service_key = resolve_effective_service_key(project_dir, &workspace_name)?;
     provider
-        .start_workspace(&workspace_name)
+        .start_workspace(&service_key)
         .await
         .map_err(crate::commands::format_error)
 }
@@ -266,8 +287,9 @@ pub async fn stop_service(
         .await
         .map_err(crate::commands::format_error)?;
 
+    let service_key = resolve_effective_service_key(project_dir, &workspace_name)?;
     provider
-        .stop_workspace(&workspace_name)
+        .stop_workspace(&service_key)
         .await
         .map_err(crate::commands::format_error)
 }
@@ -540,8 +562,9 @@ pub async fn get_service_logs(
         .await
         .map_err(crate::commands::format_error)?;
 
+    let service_key = resolve_effective_service_key(project_dir, &workspace_name)?;
     provider
-        .logs(&workspace_name, Some(200))
+        .logs(&service_key, Some(200))
         .await
         .map_err(crate::commands::format_error)
 }
@@ -566,8 +589,9 @@ pub async fn reset_service(
         .await
         .map_err(crate::commands::format_error)?;
 
+    let service_key = resolve_effective_service_key(project_dir, &workspace_name)?;
     provider
-        .reset_workspace(&workspace_name)
+        .reset_workspace(&service_key)
         .await
         .map_err(crate::commands::format_error)
 }
@@ -592,8 +616,9 @@ pub async fn delete_service_workspace(
         .await
         .map_err(crate::commands::format_error)?;
 
+    let service_key = resolve_effective_service_key(project_dir, &workspace_name)?;
     provider
-        .delete_workspace(&workspace_name)
+        .delete_workspace(&service_key)
         .await
         .map_err(crate::commands::format_error)
 }

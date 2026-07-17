@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Style, Stylize},
+    style::Style,
     text::{Line, Span},
     widgets::{
         Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
@@ -59,6 +59,9 @@ impl WorkspacesComponent {
     }
 
     pub fn set_data(&mut self, data: BranchesData) {
+        for warning in &data.warnings {
+            log::warn!("Workspace inventory: {warning}");
+        }
         self.data = Some(data);
         self.loading = false;
         self.rebuild_tree();
@@ -70,9 +73,7 @@ impl WorkspacesComponent {
         }
     }
 
-    /// Build the flattened tree from workspace data.
-    /// Uses parent info from EnrichedBranch.services (parent_workspace field)
-    /// and from the workspace registry.
+    /// Build the flattened tree from the canonical inventory graph.
     fn rebuild_tree(&mut self) {
         self.tree_rows.clear();
 
@@ -80,61 +81,6 @@ impl WorkspacesComponent {
             Some(d) => d,
             None => return,
         };
-
-        // Build parent map: workspace_name -> parent_name
-        let mut parent_map: HashMap<String, String> = HashMap::new();
-
-        for workspace in &data.workspaces {
-            // Check service-level parent info
-            for svc in &workspace.services {
-                if let Some(ref parent) = svc.parent_workspace {
-                    parent_map
-                        .entry(workspace.name.clone())
-                        .or_insert_with(|| parent.clone());
-                }
-            }
-            // Registry parent takes precedence
-            if let Some(ref parent) = workspace.parent {
-                parent_map.insert(workspace.name.clone(), parent.clone());
-            }
-        }
-
-        // Build children map
-        let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
-        let all_names: HashSet<String> = data.workspaces.iter().map(|b| b.name.clone()).collect();
-
-        for workspace in &data.workspaces {
-            if let Some(parent) = parent_map.get(&workspace.name) {
-                if all_names.contains(parent) {
-                    children_map
-                        .entry(parent.clone())
-                        .or_default()
-                        .push(workspace.name.clone());
-                }
-            }
-        }
-
-        // Find root nodes (no parent, or parent not in our workspace list)
-        let mut roots: Vec<EnrichedBranch> = data
-            .workspaces
-            .iter()
-            .filter(|b| match parent_map.get(&b.name) {
-                None => true,
-                Some(parent) => !all_names.contains(parent),
-            })
-            .cloned()
-            .collect();
-
-        // Sort: default workspace first, then current, then alphabetical
-        roots.sort_by(|a, b| {
-            if a.is_default != b.is_default {
-                return b.is_default.cmp(&a.is_default);
-            }
-            if a.is_current != b.is_current {
-                return b.is_current.cmp(&a.is_current);
-            }
-            a.name.cmp(&b.name)
-        });
 
         // Build a name->workspace lookup (clone data to avoid borrow conflict)
         let branches_owned: Vec<EnrichedBranch> = data.workspaces.clone();
@@ -147,20 +93,41 @@ impl WorkspacesComponent {
         let collapsed = &self.collapsed;
         let filter = &self.filter;
         let mut tree_rows = Vec::new();
+        let mut visited = HashSet::new();
 
-        for (i, root) in roots.iter().enumerate() {
-            let is_last = i == roots.len() - 1;
-            Self::flatten_node_static(
-                root,
-                0,
-                is_last,
-                &[],
-                &children_map,
-                &branch_map,
-                collapsed,
-                filter,
-                &mut tree_rows,
-            );
+        for (i, root_name) in data.roots.iter().enumerate() {
+            if let Some(root) = branch_map.get(root_name.as_str()) {
+                let is_last = i == data.roots.len() - 1;
+                Self::flatten_node_static(
+                    root,
+                    0,
+                    is_last,
+                    &[],
+                    &branch_map,
+                    collapsed,
+                    filter,
+                    &mut visited,
+                    &mut tree_rows,
+                );
+            }
+        }
+
+        // Corrupt/cyclic state should remain inspectable instead of disappearing.
+        // Inventory order is stable, and no lineage is invented for these nodes.
+        for workspace in &branches_owned {
+            if !visited.contains(&workspace.name) {
+                Self::flatten_node_static(
+                    workspace,
+                    0,
+                    true,
+                    &[],
+                    &branch_map,
+                    collapsed,
+                    filter,
+                    &mut visited,
+                    &mut tree_rows,
+                );
+            }
         }
 
         self.tree_rows = tree_rows;
@@ -173,14 +140,22 @@ impl WorkspacesComponent {
         depth: usize,
         is_last_sibling: bool,
         ancestor_has_next: &[bool],
-        children_map: &HashMap<String, Vec<String>>,
         branch_map: &HashMap<&str, &EnrichedBranch>,
         collapsed: &HashSet<String>,
         filter: &str,
+        visited: &mut HashSet<String>,
         tree_rows: &mut Vec<TreeRow>,
     ) {
-        let children = children_map.get(&workspace.name);
-        let has_children = children.is_some_and(|c| !c.is_empty());
+        if !visited.insert(workspace.name.clone()) {
+            return;
+        }
+
+        let children = workspace
+            .children
+            .iter()
+            .filter(|name| branch_map.contains_key(name.as_str()))
+            .collect::<Vec<_>>();
+        let has_children = !children.is_empty();
         let is_collapsed = collapsed.contains(&workspace.name);
 
         // Apply filter
@@ -203,10 +178,9 @@ impl WorkspacesComponent {
 
         // Recurse into children if not collapsed
         if has_children && !is_collapsed {
-            let child_names = children.unwrap();
-            for (i, child_name) in child_names.iter().enumerate() {
+            for (i, child_name) in children.iter().enumerate() {
                 if let Some(child_branch) = branch_map.get(child_name.as_str()) {
-                    let child_is_last = i == child_names.len() - 1;
+                    let child_is_last = i == children.len() - 1;
                     let mut child_ancestors = ancestor_has_next.to_vec();
                     child_ancestors.push(!is_last_sibling);
                     Self::flatten_node_static(
@@ -214,10 +188,10 @@ impl WorkspacesComponent {
                         depth + 1,
                         child_is_last,
                         &child_ancestors,
-                        children_map,
                         branch_map,
                         collapsed,
                         filter,
+                        visited,
                         tree_rows,
                     );
                 }
@@ -387,8 +361,16 @@ impl WorkspacesComponent {
                 if !row.workspace.services.is_empty() {
                     spans.push(Span::raw("  "));
                     for svc in &row.workspace.services {
-                        let state_str = svc.state.as_deref().unwrap_or("?");
-                        let color = theme::state_color(state_str);
+                        let state_str = if svc.provisioned {
+                            svc.state.as_deref().unwrap_or("unknown")
+                        } else {
+                            "not-provisioned"
+                        };
+                        let color = if svc.provisioned {
+                            theme::state_color(state_str)
+                        } else {
+                            theme::TEXT_MUTED
+                        };
                         spans.push(Span::styled(
                             format!("[{}:{}]", svc.service_name, state_str),
                             Style::default().fg(color),
@@ -474,16 +456,34 @@ impl WorkspacesComponent {
                 }
                 if workspace.is_default {
                     lines.push(Line::styled(
-                        "  (default/main workspace)",
+                        "  (default workspace)",
                         Style::default().fg(theme::BRANCH_DEFAULT),
                     ));
                 }
-
+                lines.push(Line::from(vec![
+                    Span::styled("Health: ", Style::default().fg(theme::TEXT_SECONDARY)),
+                    Span::styled(
+                        &workspace.health,
+                        if workspace.health == "ready" {
+                            Style::default().fg(theme::BRANCH_CURRENT)
+                        } else {
+                            Style::default().fg(theme::TREE_COLLAPSED)
+                        },
+                    ),
+                ]));
                 // Parent
                 if let Some(ref parent) = workspace.parent {
                     lines.push(Line::from(vec![
                         Span::styled("Parent: ", Style::default().fg(theme::TEXT_SECONDARY)),
                         Span::styled(parent, Style::default().fg(theme::VALUE_PARENT)),
+                        Span::styled(
+                            if workspace.parent_state.as_deref() == Some("missing") {
+                                " (missing)"
+                            } else {
+                                ""
+                            },
+                            Style::default().fg(theme::TREE_COLLAPSED),
+                        ),
                     ]));
                 }
 
@@ -512,8 +512,16 @@ impl WorkspacesComponent {
                         Style::default().fg(theme::TEXT_SECONDARY),
                     ));
                     for svc in &workspace.services {
-                        let state = svc.state.as_deref().unwrap_or("unknown");
-                        let color = theme::state_color(state);
+                        let state = if svc.provisioned {
+                            svc.state.as_deref().unwrap_or("unknown")
+                        } else {
+                            "not provisioned"
+                        };
+                        let color = if svc.provisioned {
+                            theme::state_color(state)
+                        } else {
+                            theme::TEXT_MUTED
+                        };
 
                         lines.push(Line::from(vec![
                             Span::raw("  "),
@@ -529,12 +537,6 @@ impl WorkspacesComponent {
                             lines.push(Line::from(vec![
                                 Span::raw("    db: "),
                                 Span::styled(db, Style::default().fg(theme::VALUE_DATABASE)),
-                            ]));
-                        }
-                        if let Some(ref parent) = svc.parent_workspace {
-                            lines.push(Line::from(vec![
-                                Span::raw("    parent: "),
-                                Span::styled(parent, Style::default().fg(theme::VALUE_PARENT)),
                             ]));
                         }
                     }
@@ -573,6 +575,38 @@ impl WorkspacesComponent {
 
                 lines.push(Line::raw(""));
 
+                // Processes section
+                if workspace.processes.is_empty() {
+                    lines.push(Line::styled(
+                        "Processes: (none)",
+                        Style::default().fg(theme::TEXT_MUTED),
+                    ));
+                } else {
+                    lines.push(Line::styled(
+                        "Processes:",
+                        Style::default().fg(theme::TEXT_SECONDARY),
+                    ));
+                    for process in &workspace.processes {
+                        let status_color = theme::state_color(&process.status);
+                        let pid = process
+                            .pid
+                            .map(|pid| format!(" pid={pid}"))
+                            .unwrap_or_default();
+                        lines.push(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(
+                                &process.process,
+                                Style::default().fg(theme::TEXT_PRIMARY),
+                            ),
+                            Span::raw(": "),
+                            Span::styled(&process.status, Style::default().fg(status_color)),
+                            Span::styled(pid, Style::default().fg(theme::TEXT_MUTED)),
+                        ]));
+                    }
+                }
+
+                lines.push(Line::raw(""));
+
                 // Actions hint
                 lines.push(Line::styled(
                     "Actions:",
@@ -585,8 +619,12 @@ impl WorkspacesComponent {
                     .unwrap_or(false);
                 let has_lifecycle = self
                     .selected_service_for_row(row)
-                    .map(|svc| svc.supports_lifecycle)
+                    .map(|svc| svc.provisioned && svc.supports_lifecycle)
                     .unwrap_or(false);
+                let has_any_lifecycle = workspace
+                    .services
+                    .iter()
+                    .any(|svc| svc.provisioned && svc.supports_lifecycle);
                 let enter_action = if workspace.is_current {
                     "Already on this workspace"
                 } else if has_any_service {
@@ -603,9 +641,13 @@ impl WorkspacesComponent {
                         ("S", "Start focused service"),
                         ("x", "Stop focused service"),
                         ("R", "Reset focused service"),
-                        ("A", "Start all services"),
-                        ("X", "Stop all services"),
                         ("l", "Logs for focused service"),
+                    ]);
+                }
+                if has_any_lifecycle {
+                    hint_lines.extend([
+                        ("A", "Start all provisioned services"),
+                        ("X", "Stop all provisioned services"),
                     ]);
                 }
                 hint_lines.extend([("c", "Create child workspace"), ("d", "Delete workspace")]);
@@ -707,7 +749,10 @@ impl Component for WorkspacesComponent {
                                 "Delete workspace '{}' and all its service workspaces?",
                                 row.workspace.name
                             ),
-                            on_confirm: Box::new(Action::DeleteBranch(row.workspace.name.clone())),
+                            on_confirm: Box::new(Action::DeleteBranch {
+                                name: row.workspace.name.clone(),
+                                force: false,
+                            }),
                         }
                     } else {
                         Action::None
@@ -719,11 +764,16 @@ impl Component for WorkspacesComponent {
             KeyCode::Char('S') => {
                 if let Some(row) = self.selected_row() {
                     if let Some(svc) = self.selected_service_for_row(row) {
-                        if svc.supports_lifecycle {
+                        if svc.provisioned && svc.supports_lifecycle {
                             Action::StartService {
                                 service: svc.service_name.clone(),
                                 workspace: row.workspace.name.clone(),
                             }
+                        } else if !svc.provisioned {
+                            Action::Error(format!(
+                                "Service '{}' is not provisioned for workspace '{}'",
+                                svc.service_name, row.workspace.name
+                            ))
                         } else {
                             Action::Error(format!(
                                 "Service '{}' does not support lifecycle operations",
@@ -743,11 +793,16 @@ impl Component for WorkspacesComponent {
             KeyCode::Char('x') => {
                 if let Some(row) = self.selected_row() {
                     if let Some(svc) = self.selected_service_for_row(row) {
-                        if svc.supports_lifecycle {
+                        if svc.provisioned && svc.supports_lifecycle {
                             Action::StopService {
                                 service: svc.service_name.clone(),
                                 workspace: row.workspace.name.clone(),
                             }
+                        } else if !svc.provisioned {
+                            Action::Error(format!(
+                                "Service '{}' is not provisioned for workspace '{}'",
+                                svc.service_name, row.workspace.name
+                            ))
                         } else {
                             Action::Error(format!(
                                 "Service '{}' does not support lifecycle operations",
@@ -766,14 +821,28 @@ impl Component for WorkspacesComponent {
             }
             KeyCode::Char('A') => {
                 if let Some(row) = self.selected_row() {
-                    Action::StartAllServices(row.workspace.name.clone())
+                    if self.services_for_branch(&row.workspace.name).is_empty() {
+                        Action::Error(format!(
+                            "No provisioned lifecycle services on workspace '{}'",
+                            row.workspace.name
+                        ))
+                    } else {
+                        Action::StartAllServices(row.workspace.name.clone())
+                    }
                 } else {
                     Action::None
                 }
             }
             KeyCode::Char('X') => {
                 if let Some(row) = self.selected_row() {
-                    Action::StopAllServices(row.workspace.name.clone())
+                    if self.services_for_branch(&row.workspace.name).is_empty() {
+                        Action::Error(format!(
+                            "No provisioned lifecycle services on workspace '{}'",
+                            row.workspace.name
+                        ))
+                    } else {
+                        Action::StopAllServices(row.workspace.name.clone())
+                    }
                 } else {
                     Action::None
                 }
@@ -781,7 +850,7 @@ impl Component for WorkspacesComponent {
             KeyCode::Char('R') => {
                 if let Some(row) = self.selected_row() {
                     if let Some(svc) = self.selected_service_for_row(row) {
-                        if svc.supports_lifecycle {
+                        if svc.provisioned && svc.supports_lifecycle {
                             Action::ShowConfirm {
                                 title: "Reset Service".to_string(),
                                 message: format!(
@@ -793,6 +862,11 @@ impl Component for WorkspacesComponent {
                                     workspace: row.workspace.name.clone(),
                                 }),
                             }
+                        } else if !svc.provisioned {
+                            Action::Error(format!(
+                                "Service '{}' is not provisioned for workspace '{}'",
+                                svc.service_name, row.workspace.name
+                            ))
                         } else {
                             Action::Error(format!(
                                 "Service '{}' does not support lifecycle operations",
@@ -812,11 +886,16 @@ impl Component for WorkspacesComponent {
             KeyCode::Char('l') => {
                 if let Some(row) = self.selected_row() {
                     if let Some(svc) = self.selected_service_for_row(row) {
-                        if svc.supports_lifecycle {
+                        if svc.provisioned && svc.supports_lifecycle {
                             Action::ViewLogs {
                                 service: svc.service_name.clone(),
                                 workspace: row.workspace.name.clone(),
                             }
+                        } else if !svc.provisioned {
+                            Action::Error(format!(
+                                "Service '{}' is not provisioned for workspace '{}'",
+                                svc.service_name, row.workspace.name
+                            ))
                         } else {
                             Action::Error(format!(
                                 "Service '{}' does not support logs",
@@ -925,7 +1004,10 @@ impl WorkspacesComponent {
 
         if let Some(workspace) = workspaces.iter().find(|b| b.name == workspace_name) {
             for svc in &workspace.services {
-                if !names.iter().any(|n| n == &svc.service_name) {
+                if svc.provisioned
+                    && svc.supports_lifecycle
+                    && !names.iter().any(|n| n == &svc.service_name)
+                {
                     names.push(svc.service_name.clone());
                 }
             }
@@ -939,5 +1021,78 @@ impl WorkspacesComponent {
         self.rebuild_tree();
         self.selected_index = 0;
         self.list_state.select(Some(0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn workspace(
+        name: &str,
+        children: &[&str],
+        services: Vec<BranchServiceState>,
+    ) -> EnrichedBranch {
+        EnrichedBranch {
+            name: name.to_string(),
+            is_current: name == "root",
+            is_default: name == "root",
+            worktree_path: Some(format!("/tmp/{name}")),
+            health: "ready".to_string(),
+            services,
+            processes: Vec::new(),
+            parent: (name != "root").then(|| "root".to_string()),
+            parent_state: (name != "root").then(|| "present".to_string()),
+            children: children.iter().map(|child| (*child).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn tree_uses_inventory_roots_and_children() {
+        let mut component = WorkspacesComponent::new();
+        component.set_data(BranchesData {
+            roots: vec!["root".to_string()],
+            workspaces: vec![
+                workspace("child", &[], Vec::new()),
+                workspace("root", &["child"], Vec::new()),
+            ],
+            warnings: Vec::new(),
+        });
+
+        let rows = component.visible_rows();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].workspace.name, "root");
+        assert_eq!(rows[0].depth, 0);
+        assert_eq!(rows[1].workspace.name, "child");
+        assert_eq!(rows[1].depth, 1);
+    }
+
+    #[test]
+    fn bulk_lifecycle_excludes_unprovisioned_templates() {
+        let provisioned = BranchServiceState {
+            service_name: "database".to_string(),
+            state: Some("running".to_string()),
+            database_name: Some("db".to_string()),
+            provisioned: true,
+            supports_lifecycle: true,
+        };
+        let template = BranchServiceState {
+            service_name: "cache".to_string(),
+            state: None,
+            database_name: None,
+            provisioned: false,
+            supports_lifecycle: true,
+        };
+        let mut component = WorkspacesComponent::new();
+        component.set_data(BranchesData {
+            roots: vec!["root".to_string()],
+            workspaces: vec![workspace("root", &[], vec![template, provisioned])],
+            warnings: Vec::new(),
+        });
+
+        assert_eq!(
+            component.services_for_branch("root"),
+            vec!["database".to_string()]
+        );
     }
 }

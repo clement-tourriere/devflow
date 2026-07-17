@@ -21,8 +21,9 @@ use tokio::time::{sleep, Instant};
 use crate::config::{DockerCustomSettings, GenericDockerConfig};
 use crate::services::{
     local_docker::{
-        collect_container_logs, inspect_container_status, list_managed_service_containers,
-        pick_available_port, sanitize_name_component, service_workspace_prefix, ContainerStatus,
+        bounded_container_name, collect_container_logs, inspect_container_status,
+        list_managed_service_containers, pick_available_port, sanitize_name_component,
+        service_workspace_prefix, ContainerStatus,
     },
     ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceCapabilities, ServiceProvider,
     WorkspaceInfo,
@@ -86,11 +87,7 @@ impl GenericDockerProvider {
             sanitize_name_component(&self.service_name),
             sanitize_name_component(workspace_name)
         );
-        if raw.len() > 128 {
-            raw[..128].trim_end_matches('-').to_string()
-        } else {
-            raw
-        }
+        bounded_container_name(&raw)
     }
 
     async fn container_status(&self, container_name: &str) -> anyhow::Result<ContainerStatus> {
@@ -340,7 +337,13 @@ impl GenericDockerProvider {
     /// List all devflow-managed containers for this service.
     async fn list_managed_containers(&self) -> anyhow::Result<Vec<(String, String, bool)>> {
         let prefix = service_workspace_prefix(&self.project_name, &self.service_name);
-        list_managed_service_containers(&self.client, &self.service_name, &prefix).await
+        list_managed_service_containers(
+            &self.client,
+            &self.project_name,
+            &self.service_name,
+            &prefix,
+        )
+        .await
     }
 }
 

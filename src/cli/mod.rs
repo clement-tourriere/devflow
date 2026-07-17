@@ -29,25 +29,30 @@ pub(crate) use workspace::{
     ensure_default_workspace_registered, resolve_branch_context, BranchContextSource,
 };
 
+/// Directory whose VCS checkout is the caller's live workspace context.
+///
+/// Linked Git worktrees may load an untracked `.devflow.yml` from the primary
+/// checkout.  The config path is therefore project identity/configuration,
+/// not evidence of which workspace invoked the command.  Prefer the process
+/// cwd for lifecycle safety and context-sensitive operations, falling back to
+/// the config directory only when the cwd is unavailable.
+pub(crate) fn operation_project_dir(config_path: &Option<PathBuf>) -> PathBuf {
+    std::env::current_dir()
+        .ok()
+        .or_else(|| {
+            config_path
+                .as_deref()
+                .and_then(std::path::Path::parent)
+                .map(std::path::Path::to_path_buf)
+        })
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     // ── Workspace Management ──
-    #[command(about = "List all workspaces (with service + worktree status)")]
+    #[command(about = "List the workspace tree with service and process status")]
     List,
-    #[command(
-        about = "Render full environment graph",
-        long_about = "Render the full environment graph (workspace tree + service states + worktree paths).
-
-This command is designed for both humans and automation:
-  - human mode prints an ASCII tree with service workspaces under each workspace
-  - --json mode prints a graph document suitable for tools/agents
-
-Examples:
-  devflow graph
-  devflow --json graph",
-        hide = true
-    )]
-    Graph,
     #[command(
         about = "Link an existing workspace into devflow",
         long_about = "Link an existing workspace into devflow.
@@ -72,8 +77,8 @@ Examples:
         from: Option<String>,
     },
     #[command(
-        about = "Switch to an existing workspace/worktree (use -c to create)",
-        long_about = "Switch to an existing workspace/worktree.\n\nWith no arguments, shows an interactive workspace picker with fuzzy search.\nWith a workspace name, switches to that workspace and aligns services/worktrees.\nIf the workspace does not exist, use -c/--create to create it first.\n\nExamples:\n  devflow switch                     # Interactive picker\n  devflow switch feature-auth        # Switch to existing workspace\n  devflow switch -c feature-new      # Create new workspace from current context\n  devflow switch -c feature-new --from release_1_0  # Create from explicit parent\n  devflow switch --template           # Switch to main/template\n  devflow switch feature-auth -x 'npm run migrate'  # Run command after switch"
+        about = "Select or create a materialized workspace",
+        long_about = "Select an existing Git worktree or jj workspace.\n\nWith no arguments, shows an interactive workspace picker with fuzzy search.\nAn existing Git branch without a worktree is materialized automatically.\nIf the VCS reference does not exist, use -c/--create to create it from the current context.\n\nExamples:\n  devflow switch                     # Interactive picker\n  devflow switch feature-auth        # Select/materialize existing workspace\n  devflow switch -c feature-new      # Create from current context\n  devflow switch -c feature-new --from release_1_0\n  devflow switch --template          # Select the default workspace\n  devflow switch feature-auth -x 'npm run migrate'"
     )]
     Switch {
         #[arg(
@@ -111,7 +116,10 @@ Examples:
         no_processes: bool,
         #[arg(long, help = "Skip hook execution")]
         no_verify: bool,
-        #[arg(long, help = "Switch to main database (template/development database)")]
+        #[arg(
+            long,
+            help = "Select the configured default workspace and its services"
+        )]
         template: bool,
         #[arg(long, help = "Simulate switching without actual operations")]
         dry_run: bool,
@@ -257,7 +265,7 @@ Examples:
     },
     #[command(
         about = "Install Git hooks",
-        long_about = "Install Git hooks.\n\nSets up post-checkout and pre-commit Git hooks so devflow\nautomatically creates service workspaces, switches environments\non checkout, and can run commit hooks. Safe to re-run.\n\nExamples:\n  devflow install-hooks",
+        long_about = "Install Git hooks.\n\nSets up post-checkout and pre-commit Git hooks so devflow can adopt\nmanually-created linked worktrees, run their lifecycle setup, and run\ncommit hooks. Ordinary in-place branch checkouts are ignored. Safe to re-run.\n\nExamples:\n  devflow install-hooks",
         hide = true
     )]
     InstallHooks,
@@ -498,24 +506,24 @@ pub enum ServiceCommands {
     #[command(about = "Show service capabilities")]
     Capabilities,
     #[command(
-        about = "Add a new service provider",
-        long_about = "Add a new service provider to the project.\n\nConfigures a new service provider (local Docker, Neon, ClickHouse, etc.) and\nstores it in local state. When run without flags, an interactive wizard guides\nyou through service type, provider, and name selection.\n\nExamples:\n  devflow service add                              # Interactive wizard\n  devflow service add mydb                         # Interactive (name pre-filled)\n  devflow service add mydb --provider neon          # Add Neon cloud provider\n  devflow service add analytics --provider local --service-type clickhouse"
+        about = "Add a local/shared service provider",
+        long_about = "Add a local/shared service provider to the project.\n\nBuilds a complete service definition and stores it in local state. When run\nwithout flags, an interactive wizard guides you through service type, provider,\nand name selection. Credentialed cloud and custom/plugin providers must be\ndefined explicitly under `services:` in .devflow.yml.\n\nExamples:\n  devflow service add                              # Interactive wizard\n  devflow service add mydb --provider local        # Local PostgreSQL\n  devflow service add cache --provider shared --service-type redis\n  devflow service add analytics --provider local --service-type clickhouse"
     )]
     Add {
         #[arg(help = "Service name (prompted if omitted)")]
         name: Option<String>,
-        #[arg(long, help = "Provider type (local, neon, dblab, xata)")]
+        #[arg(long, help = "Provider type to scaffold (local or shared)")]
         provider: Option<String>,
         #[arg(
             long,
-            help = "Service type (postgres, clickhouse, mysql, generic, plugin)"
+            help = "Service type (postgres, clickhouse, mysql, redis, rustfs)"
         )]
         service_type: Option<String>,
         #[arg(long, help = "Force overwrite existing service with same name")]
         force: bool,
         #[arg(
             long,
-            help = "Seed main workspace from source (PostgreSQL URL, file path, or s3:// URL)"
+            help = "Seed the default workspace from source (PostgreSQL URL, file path, or s3:// URL)"
         )]
         from: Option<String>,
     },
@@ -824,6 +832,18 @@ pub async fn handle_command(
     non_interactive: bool,
     database_name: Option<&str>,
 ) -> Result<()> {
+    let json_unsupported = matches!(
+        &cmd,
+        Commands::ShellInit { .. } | Commands::Completions { .. }
+    );
+    #[cfg(feature = "tui")]
+    let json_unsupported = json_unsupported || matches!(&cmd, Commands::Tui);
+    if json_output && json_unsupported {
+        anyhow::bail!(
+            "--json is not supported by shell-init, completions, or tui because their stdout is the generated/interactive interface"
+        );
+    }
+
     // TUI command — launch immediately without loading service infrastructure
     #[cfg(feature = "tui")]
     if matches!(cmd, Commands::Tui) {
@@ -861,7 +881,6 @@ pub async fn handle_command(
         Commands::Service { .. }
             | Commands::Process { .. }
             | Commands::List
-            | Commands::Graph
             | Commands::Link { .. }
             | Commands::Connection { .. }
             | Commands::Status
@@ -1063,36 +1082,44 @@ pub async fn handle_command(
 
             // Auto-detect main workspace from VCS
             if let Ok(vcs_prov) = vcs::detect_vcs_provider(".") {
-                if let Ok(Some(detected_main)) = vcs_prov.default_workspace() {
-                    init_config.git.main_workspace = detected_main.clone();
-                    if !json_output {
-                        println!(
-                            "Auto-detected main workspace: {} ({})",
-                            detected_main,
-                            vcs_prov.provider_name()
+                match vcs_prov.default_workspace() {
+                    Ok(Some(detected_main)) => {
+                        init_config.git.main_workspace = detected_main.clone();
+                        if !json_output {
+                            println!(
+                                "Auto-detected main workspace: {} ({})",
+                                detected_main,
+                                vcs_prov.provider_name()
+                            );
+                        }
+                        // Detection follows the current primary checkout, so
+                        // initializing from a feature branch would commit that
+                        // machine-local branch into the shared config — and
+                        // the primary/default invariant then blocks every
+                        // teammate whose primary sits on the real default.
+                        let conventional = ["main", "master", "develop", "development", "trunk"];
+                        if !conventional.contains(&detected_main.as_str()) {
+                            eprintln!(
+                                "Warning: '{}' is the branch currently checked out here, not a conventional default (main/master/…). If this is a feature branch, set git.main_workspace in .devflow.yml to your real default branch before committing it.",
+                                detected_main
+                            );
+                        }
+                    }
+                    Ok(None) if vcs_prov.provider_name() == "git" => {
+                        anyhow::bail!(
+                            "Cannot initialize devflow while the Git primary checkout has a detached HEAD. Check out a branch in the primary checkout and retry."
                         );
                     }
-                } else if !json_output {
-                    println!("Could not auto-detect main workspace, using default: main");
+                    Ok(None) => {
+                        if !json_output {
+                            println!("Could not auto-detect main workspace, using default: main");
+                        }
+                    }
+                    Err(error) => {
+                        return Err(error).context("Failed to detect the VCS default workspace");
+                    }
                 }
             }
-
-            // Propose worktree configuration
-            let enable_worktrees = if json_output || non_interactive {
-                // Default to enabled in non-interactive / JSON mode
-                true
-            } else {
-                println!();
-                inquire::Confirm::new(
-                    "Enable worktrees? (isolate each workspace in its own directory)",
-                )
-                .with_default(true)
-                .with_help_message(
-                    "Recommended. Each workspace gets its own working directory via git worktrees.",
-                )
-                .prompt()
-                .unwrap_or(true)
-            };
 
             // Detect CoW filesystem capability (used for both display and JSON output)
             let cow_cap = vcs::cow_worktree::detect_cow_capability(
@@ -1104,26 +1131,24 @@ pub async fn handle_command(
                 vcs::cow_worktree::CowCapability::None => "none",
             };
 
-            if enable_worktrees {
-                init_config.worktree = Some(WorktreeConfig::recommended_default());
+            init_config.worktree = WorktreeConfig::recommended_default();
 
-                if !json_output {
-                    match cow_cap {
-                        vcs::cow_worktree::CowCapability::Apfs => {
-                            println!(
-                                "Filesystem: APFS detected — worktrees will use fast copy-on-write cloning"
-                            );
-                        }
-                        vcs::cow_worktree::CowCapability::Reflink => {
-                            println!(
-                                "Filesystem: reflink support detected — worktrees will use fast copy-on-write cloning"
-                            );
-                        }
-                        vcs::cow_worktree::CowCapability::None => {
-                            println!(
-                                "Filesystem: copy-on-write not available — worktrees will use standard file copy"
-                            );
-                        }
+            if !json_output {
+                match cow_cap {
+                    vcs::cow_worktree::CowCapability::Apfs => {
+                        println!(
+                            "Filesystem: APFS detected — worktrees will use fast copy-on-write cloning"
+                        );
+                    }
+                    vcs::cow_worktree::CowCapability::Reflink => {
+                        println!(
+                            "Filesystem: reflink support detected — worktrees will use fast copy-on-write cloning"
+                        );
+                    }
+                    vcs::cow_worktree::CowCapability::None => {
+                        println!(
+                            "Filesystem: copy-on-write not available — worktrees will use standard file copy"
+                        );
                     }
                 }
             }
@@ -1141,6 +1166,14 @@ pub async fn handle_command(
 
             // Derive vcs_initialized label for JSON output
             let vcs_init_label = vcs_initialized.map(|k| k.to_string());
+            let vcs_provider_label = vcs::detect_vcs_provider(".")
+                .ok()
+                .map(|provider| provider.provider_name().to_string());
+            let workspace_model = match vcs_provider_label.as_deref() {
+                Some("git") => "linked_worktree",
+                Some("jj") => "native_workspace",
+                _ => "materialized_workspace",
+            };
 
             if json_output {
                 println!(
@@ -1151,7 +1184,8 @@ pub async fn handle_command(
                         "name": resolved_name,
                         "config_path": init_config_path.display().to_string(),
                         "cd_path": init_target_dir.as_ref().map(|p| p.display().to_string()),
-                        "worktree_enabled": enable_worktrees,
+                        "workspace_model": workspace_model,
+                        "vcs_provider": vcs_provider_label,
                         "cow_capability": cow_label,
                         "vcs_initialized": vcs_init_label,
                     }))?
@@ -1172,13 +1206,9 @@ pub async fn handle_command(
                     }
                 }
 
-                if enable_worktrees {
-                    println!(
-                        "\nWorktrees enabled. Each workspace will get its own working directory."
-                    );
-                    println!("  Path template: ../{{repo}}.{{workspace}}");
-                    println!("  Files copied:  .env, .env.local");
-                }
+                println!("\nEach workspace gets its own working directory.");
+                println!("  Path template: ../{{repo}}.{{workspace}}");
+                println!("  Files copied:  .env, .env.local");
 
                 // ── Guided wizard steps (interactive only) ──────────────────
 
@@ -1285,10 +1315,12 @@ pub async fn handle_command(
                     // Step 2: Offer Git hooks installation
                     println!();
                     let install_hooks = inquire::Confirm::new(
-                        "Install Git hooks? (auto-sync services on checkout)",
+                        "Install Git hooks? (adopt linked worktrees and run lifecycle hooks)",
                     )
                     .with_default(true)
-                    .with_help_message("Recommended. Automatically creates/switches service workspaces on git checkout.")
+                    .with_help_message(
+                        "Installs lifecycle hooks and adopts manually-created linked worktrees.",
+                    )
                     .prompt()
                     .unwrap_or(false);
 
@@ -1306,12 +1338,11 @@ pub async fn handle_command(
                         }
                     }
 
-                    // Step 2.5: Offer sync-ai-configs recipe (only if worktrees are enabled)
-                    if enable_worktrees {
-                        use devflow_core::hooks::recipes;
+                    // Step 2.5: Offer sync-ai-configs recipe
+                    use devflow_core::hooks::recipes;
 
-                        println!();
-                        let install_recipe = inquire::Confirm::new(
+                    println!();
+                    let install_recipe = inquire::Confirm::new(
                             "Install AI config sync recipe? (copy .claude/.cursor settings back on workspace removal)",
                         )
                         .with_default(true)
@@ -1319,25 +1350,23 @@ pub async fn handle_command(
                         .prompt()
                         .unwrap_or(false);
 
-                        if install_recipe {
-                            let generated = recipes::RecipeId::SyncAiConfigs
-                                .build(&recipes::RecipeParams::new())?;
-                            let mut hooks_config = init_config.hooks.clone().unwrap_or_default();
-                            let result =
-                                recipes::merge_hooks_into_config(&mut hooks_config, &generated);
-                            init_config.hooks = Some(hooks_config);
-                            init_config.save_to_file(&init_config_path)?;
-                            println!(
-                                "Installed recipe 'sync-ai-configs': {} hook(s) added",
-                                result.hooks_added
-                            );
-                        }
+                    if install_recipe {
+                        let generated =
+                            recipes::RecipeId::SyncAiConfigs.build(&recipes::RecipeParams::new())?;
+                        let mut hooks_config = init_config.hooks.clone().unwrap_or_default();
+                        let result =
+                            recipes::merge_hooks_into_config(&mut hooks_config, &generated);
+                        init_config.hooks = Some(hooks_config);
+                        init_config.save_to_file(&init_config_path)?;
+                        println!(
+                            "Installed recipe 'sync-ai-configs': {} hook(s) added",
+                            result.hooks_added
+                        );
                     }
 
-                    // Step 3: Offer shell integration (only if worktrees are enabled)
-                    if enable_worktrees {
-                        println!();
-                        let setup_shell = inquire::Confirm::new(
+                    // Step 3: Offer shell integration
+                    println!();
+                    let setup_shell = inquire::Confirm::new(
                             "Enable shell integration? (auto-cd into worktrees)",
                         )
                         .with_default(true)
@@ -1345,79 +1374,78 @@ pub async fn handle_command(
                         .prompt()
                         .unwrap_or(false);
 
-                        if setup_shell {
-                            if let Ok(shell) = config::detect_shell_from_env() {
-                                let home = std::env::var("HOME").ok().map(PathBuf::from);
-                                let shell_config_path = match shell.as_str() {
-                                    "zsh" => home.as_ref().map(|h| h.join(".zshrc")),
-                                    "bash" => {
-                                        let bashrc = home.as_ref().map(|h| h.join(".bashrc"));
-                                        if bashrc.as_ref().is_some_and(|p| p.exists()) {
-                                            bashrc
-                                        } else {
-                                            home.as_ref().map(|h| h.join(".bash_profile"))
-                                        }
-                                    }
-                                    "fish" => home.as_ref().map(|h| {
-                                        h.join(".config").join("fish").join("config.fish")
-                                    }),
-                                    _ => None,
-                                };
-
-                                let eval_line = if shell == "fish" {
-                                    "devflow shell-init fish | source"
-                                } else {
-                                    "eval \"$(devflow shell-init)\""
-                                };
-
-                                if let Some(ref rc_path) = shell_config_path {
-                                    let already_configured = rc_path.exists()
-                                        && std::fs::read_to_string(rc_path)
-                                            .unwrap_or_default()
-                                            .contains("devflow shell-init");
-
-                                    if already_configured {
-                                        println!(
-                                            "Shell integration already configured in {}",
-                                            rc_path.display()
-                                        );
-                                        shell_configured = true;
+                    if setup_shell {
+                        if let Ok(shell) = config::detect_shell_from_env() {
+                            let home = std::env::var("HOME").ok().map(PathBuf::from);
+                            let shell_config_path = match shell.as_str() {
+                                "zsh" => home.as_ref().map(|h| h.join(".zshrc")),
+                                "bash" => {
+                                    let bashrc = home.as_ref().map(|h| h.join(".bashrc"));
+                                    if bashrc.as_ref().is_some_and(|p| p.exists()) {
+                                        bashrc
                                     } else {
-                                        let append = inquire::Confirm::new(&format!(
-                                            "Append to {}?",
-                                            rc_path.display()
-                                        ))
-                                        .with_default(true)
-                                        .prompt()
-                                        .unwrap_or(false);
+                                        home.as_ref().map(|h| h.join(".bash_profile"))
+                                    }
+                                }
+                                "fish" => home
+                                    .as_ref()
+                                    .map(|h| h.join(".config").join("fish").join("config.fish")),
+                                _ => None,
+                            };
 
-                                        if append {
-                                            use std::io::Write;
-                                            if let Ok(mut file) = std::fs::OpenOptions::new()
-                                                .append(true)
-                                                .create(true)
-                                                .open(rc_path)
-                                            {
-                                                writeln!(file, "\n# devflow shell integration")?;
-                                                writeln!(file, "{}", eval_line)?;
-                                                println!("Added to {}", rc_path.display());
-                                                shell_configured = true;
-                                            } else {
-                                                println!(
-                                                    "Could not write to {}. Add manually:",
-                                                    rc_path.display()
-                                                );
-                                                println!("  {}", eval_line);
-                                            }
+                            let eval_line = if shell == "fish" {
+                                "devflow shell-init fish | source"
+                            } else {
+                                "eval \"$(devflow shell-init)\""
+                            };
+
+                            if let Some(ref rc_path) = shell_config_path {
+                                let already_configured = rc_path.exists()
+                                    && std::fs::read_to_string(rc_path)
+                                        .unwrap_or_default()
+                                        .contains("devflow shell-init");
+
+                                if already_configured {
+                                    println!(
+                                        "Shell integration already configured in {}",
+                                        rc_path.display()
+                                    );
+                                    shell_configured = true;
+                                } else {
+                                    let append = inquire::Confirm::new(&format!(
+                                        "Append to {}?",
+                                        rc_path.display()
+                                    ))
+                                    .with_default(true)
+                                    .prompt()
+                                    .unwrap_or(false);
+
+                                    if append {
+                                        use std::io::Write;
+                                        if let Ok(mut file) = std::fs::OpenOptions::new()
+                                            .append(true)
+                                            .create(true)
+                                            .open(rc_path)
+                                        {
+                                            writeln!(file, "\n# devflow shell integration")?;
+                                            writeln!(file, "{}", eval_line)?;
+                                            println!("Added to {}", rc_path.display());
+                                            shell_configured = true;
                                         } else {
-                                            println!("Add this to your shell profile:");
+                                            println!(
+                                                "Could not write to {}. Add manually:",
+                                                rc_path.display()
+                                            );
                                             println!("  {}", eval_line);
                                         }
+                                    } else {
+                                        println!("Add this to your shell profile:");
+                                        println!("  {}", eval_line);
                                     }
-                                } else {
-                                    println!("Add this to your shell profile:");
-                                    println!("  {}", eval_line);
                                 }
+                            } else {
+                                println!("Add this to your shell profile:");
+                                println!("  {}", eval_line);
                             }
                         }
                     }
@@ -1441,32 +1469,28 @@ pub async fn handle_command(
                             "not installed"
                         }
                     );
-                    if enable_worktrees {
-                        println!(
-                            "  Shell:      {}",
-                            if shell_configured {
-                                "configured"
-                            } else {
-                                "not configured (run: eval \"$(devflow shell-init)\")"
-                            }
-                        );
-                        println!("  Worktrees:  enabled (../{{repo}}.{{workspace}})");
-                    }
+                    println!(
+                        "  Shell:      {}",
+                        if shell_configured {
+                            "configured"
+                        } else {
+                            "not configured (run: eval \"$(devflow shell-init)\")"
+                        }
+                    );
+                    println!("  Workspace:  {workspace_model}");
                     println!();
                     println!("Next: devflow switch -c feature/my-feature");
                 } else {
                     // Non-interactive: print legacy next steps
                     println!("\nNext steps:");
-                    if enable_worktrees {
-                        println!(
-                            "  eval \"$(devflow shell-init)\"  Add to your shell profile for auto-cd into worktrees"
-                        );
-                    }
+                    println!(
+                        "  eval \"$(devflow shell-init)\"  Add to your shell profile for auto-cd into worktrees"
+                    );
                     println!(
                         "  devflow service add          Add a service provider (interactive wizard)"
                     );
                     println!(
-                        "  devflow install-hooks        Install Git hooks for automatic branching"
+                        "  devflow install-hooks        Install Git hooks for worktree adoption and lifecycle hooks"
                     );
                     println!(
                         "  devflow doctor               Check system health and configuration"
@@ -1616,11 +1640,21 @@ pub async fn handle_command(
                 "json_mode": {
                     "stdout_single_json_document": true,
                     "diagnostics_on_stderr": true,
+                    "unsupported_commands": ["shell-init", "completions", "tui"],
                 },
                 "non_interactive": {
                     "prompts_disabled": true,
                     "requires_force_for": ["destroy", "remove"],
-                    "hook_unapproved_behavior": "error",
+                    "hook_unapproved_behavior": "skip_with_warning",
+                    "hook_skips_reported_in_results": true,
+                },
+                "workspaces": {
+                    "model": "materialized_only",
+                    "git": "linked_worktree",
+                    "jj": "native_workspace",
+                    "raw_identity_field": "name",
+                    "backend_identity_field": "service_key",
+                    "inventory_schema_version": devflow_core::workspace::inventory::INVENTORY_SCHEMA_VERSION,
                 },
                 "orchestration": {
                     "partial_failure_exit_code": "non-zero",
@@ -1629,12 +1663,12 @@ pub async fn handle_command(
                 "recommended_for_agents": {
                     "global_flags": ["--json", "--non-interactive"],
                     "task_pattern": [
-                        "create",
-                        "connection",
+                        "switch -c <workspace>",
+                        "service connection <workspace>",
                         "seed (optional)",
                         "work",
-                        "reset (retry)",
-                        "delete"
+                        "service reset <workspace> (retry)",
+                        "remove <workspace> --force (from another workspace)"
                     ],
                 },
                 "environment": {
@@ -1650,7 +1684,10 @@ pub async fn handle_command(
             } else {
                 println!("Automation capabilities:");
                 println!("- JSON mode: single JSON document on stdout (diagnostics on stderr)");
+                println!("  Unsupported output interfaces: shell-init, completions, tui");
                 println!("- Non-interactive: no prompts; --force required for destroy/remove");
+                println!("- Unapproved hooks: skipped with warnings and reported in results");
+                println!("- Workspace model: materialized only (Git worktrees / jj workspaces)");
                 println!("- Multi-service partial failures: command exits non-zero by default");
                 println!("- Recommended flags for agents: --json --non-interactive");
                 println!(

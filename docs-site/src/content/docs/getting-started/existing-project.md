@@ -22,19 +22,19 @@ devflow install-hooks
 devflow capabilities
 ```
 
-## Adopt existing branches and worktrees
+## Adopt existing refs and worktrees
 
-Branches that existed before devflow can be linked into the registry:
+Materialize a Git ref that existed before devflow with `switch`:
 
 ```bash
-devflow link feature/auth                # register + create matching services
-devflow link feature/auth --from main    # set the parent explicitly
+devflow switch feature/auth
 ```
 
 Worktrees you created manually with `git worktree add` are picked up automatically: the installed post-checkout hook detects worktree context and runs the setup (file copying + service workspace creation). To do it explicitly from inside a worktree:
 
 ```bash
 devflow worktree-setup
+devflow link feature/auth --from main    # record immutable provenance + provision services
 ```
 
 ## Migration map from Docker Compose
@@ -72,7 +72,6 @@ services:
       image: redis:7
 
 worktree:
-  enabled: true
   path_template: "../{repo}.{workspace}"
   copy_files: [.env]
 
@@ -90,15 +89,16 @@ hooks:
           CELERY_BROKER_URL: "{{ service['cache'].url }}"
 ```
 
-Bootstrap and seed the main database:
+Bootstrap and seed the configured default database:
 
 ```bash
 devflow service up
-devflow service create main
-MAIN_DATABASE_URL="$(devflow connection main --format uri)"
+DEFAULT_WORKSPACE="$(devflow --json list | jq -r '.default_workspace')"
+devflow service create "$DEFAULT_WORKSPACE"
+DEFAULT_DATABASE_URL="$(devflow connection "$DEFAULT_WORKSPACE" --format uri)"
 
 # Example: import from an existing Compose Postgres container.
-docker compose exec -T postgres pg_dump -U postgres postgres | psql "$MAIN_DATABASE_URL"
+docker compose exec -T postgres pg_dump -U postgres postgres | psql "$DEFAULT_DATABASE_URL"
 ```
 
 Now create a workspace. With `template_branching: true`, workspace databases are copied from the parent database:
@@ -205,8 +205,7 @@ If a team already uses a hosted branching database, use a cloud provider (`neon`
 
 ```yaml
 git:
-  auto_create_on_workspace: true        # create service workspaces on git checkout
-  auto_switch_on_workspace: true        # switch services on git checkout
+  auto_create_on_workspace: true        # provision services for manually added worktrees
   main_workspace: main
   workspace_filter_regex: "^(feature|fix|agent)/.*"   # only these patterns
   exclude_workspaces: [main, master, develop]          # never these

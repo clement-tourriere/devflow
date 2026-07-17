@@ -7,12 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 fn project_dir(config_path: &Option<PathBuf>) -> PathBuf {
-    config_path
-        .as_ref()
-        .and_then(|p| p.parent())
-        .map(|p| p.to_path_buf())
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
+    super::operation_project_dir(config_path)
 }
 
 fn current_workspace(config: &Config, workspace: Option<String>) -> String {

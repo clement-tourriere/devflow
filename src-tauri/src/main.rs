@@ -23,25 +23,30 @@ fn parse_workspace_menu_payload(id: &str) -> Option<(String, String)> {
 }
 
 fn workspace_tray_label(workspace: &commands::workspaces::WorkspaceEntry) -> (String, bool) {
+    let mut details = Vec::new();
     if let Some(path) = workspace.worktree_path.as_ref() {
         let folder = std::path::Path::new(path)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string());
-        let mut details = vec![format!("dir={}", folder)];
-        if let Some(parent) = workspace.parent.as_ref().filter(|p| !p.trim().is_empty()) {
-            details.push(format!("from {}", parent));
-        }
-        if workspace.is_current {
-            details.push("checked out".to_string());
-        }
-        let label = format!("worktree: {} ({})", workspace.name, details.join(", "));
-        (label, workspace.is_current)
-    } else if workspace.is_current {
-        (format!("branch: {} (checked out)", workspace.name), true)
-    } else {
-        (format!("branch: {}", workspace.name), false)
+        details.push(format!("dir={}", folder));
     }
+    if let Some(parent) = workspace.parent.as_ref().filter(|p| !p.trim().is_empty()) {
+        details.push(format!("from {}", parent));
+    }
+    if workspace.is_context {
+        details.push("context".to_string());
+    }
+    if workspace.health != "ready" {
+        details.push(workspace.health.clone());
+    }
+
+    let suffix = if details.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", details.join(", "))
+    };
+    (format!("workspace: {}{}", workspace.name, suffix), false)
 }
 
 fn navigate_to_project(app: &tauri::AppHandle, project_path: &str) {
@@ -135,12 +140,13 @@ fn main() {
             commands::projects::detect_orphan_projects,
             commands::projects::cleanup_orphan_project,
             commands::projects::detect_vcs_info,
-            commands::projects::detect_git_branches,
+            commands::projects::detect_vcs_workspaces,
             // Workspaces
             commands::workspaces::list_workspaces,
             commands::workspaces::get_connection_info,
             commands::workspaces::create_workspace,
             commands::workspaces::switch_workspace,
+            commands::workspaces::preflight_delete_workspace,
             commands::workspaces::delete_workspace,
             commands::workspaces::prune_worktrees,
             // Processes
@@ -206,12 +212,15 @@ fn main() {
         .setup(move |app| {
             log::info!("Application setup complete");
 
-            // Build tray
+            // Build tray (placeholders only — no Docker/inventory work here)
             let tray = build_tray(app)?;
 
             // Store tray handle for dynamic updates
             let app_state: &AppState = app.state::<AppState>().inner();
             *app_state.tray.lock().unwrap() = Some(tray);
+
+            // Fill in per-project workspace entries asynchronously.
+            update_tray_menu(&app.handle().clone());
 
             // Auto-start proxy if configured
             let handle = app.handle().clone();
@@ -309,54 +318,21 @@ fn build_tray(app: &tauri::App) -> Result<tauri::tray::TrayIcon, Box<dyn std::er
                         .build(app)?;
                 project_builder = project_builder.item(&open_item);
 
-                match tauri::async_runtime::block_on(commands::workspaces::list_workspaces(
-                    project.path.clone(),
-                )) {
-                    Ok(ws) => {
-                        let sep = PredefinedMenuItem::separator(app)?;
-                        project_builder = project_builder.item(&sep);
-
-                        if ws.workspaces.is_empty() {
-                            let empty = MenuItemBuilder::with_id(
-                                format!("workspace-empty:{}", urlencoding::encode(&project.path)),
-                                "No workspaces",
-                            )
-                            .enabled(false)
-                            .build(app)?;
-                            project_builder = project_builder.item(&empty);
-                        } else {
-                            for workspace in &ws.workspaces {
-                                let (label, disabled) = workspace_tray_label(workspace);
-                                let item = MenuItemBuilder::with_id(
-                                    workspace_menu_item_id(&project.path, &workspace.name),
-                                    &label,
-                                )
-                                .enabled(!disabled)
-                                .build(app)?;
-                                project_builder = project_builder.item(&item);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "Failed to load workspaces for tray project '{}': {}",
-                            project.path,
-                            e
-                        );
-                        let sep = PredefinedMenuItem::separator(app)?;
-                        project_builder = project_builder.item(&sep);
-                        let unavailable = MenuItemBuilder::with_id(
-                            format!(
-                                "workspace-unavailable:{}",
-                                urlencoding::encode(&project.path)
-                            ),
-                            "Workspaces unavailable",
-                        )
-                        .enabled(false)
-                        .build(app)?;
-                        project_builder = project_builder.item(&unavailable);
-                    }
-                }
+                // The initial tray must not block startup on the full
+                // workspace inventory (per-service Docker inspections and
+                // process probing, up to bollard's 120s timeout per request
+                // when the daemon is slow) — the window is only shown after
+                // this function returns. Populate a placeholder and let the
+                // async `update_tray_menu` pass fill in workspaces.
+                let sep = PredefinedMenuItem::separator(app)?;
+                project_builder = project_builder.item(&sep);
+                let loading = MenuItemBuilder::with_id(
+                    format!("workspace-loading:{}", urlencoding::encode(&project.path)),
+                    "Loading workspaces…",
+                )
+                .enabled(false)
+                .build(app)?;
+                project_builder = project_builder.item(&loading);
 
                 let project_submenu = project_builder.build()?;
                 builder = builder.item(&project_submenu);
@@ -458,52 +434,12 @@ fn build_tray(app: &tauri::App) -> Result<tauri::tray::TrayIcon, Box<dyn std::er
                     navigate_to_project(app, project_path);
                 }
                 _ if id.starts_with("workspace-open:") => {
-                    if let Some((project_path, workspace_name)) = parse_workspace_menu_payload(id) {
-                        let handle = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let should_switch = match commands::workspaces::list_workspaces(
-                                project_path.clone(),
-                            )
-                            .await
-                            {
-                                Ok(result) => result
-                                    .workspaces
-                                    .iter()
-                                    .find(|w| w.name == workspace_name)
-                                    .map(|w| w.worktree_path.is_none())
-                                    .unwrap_or(false),
-                                Err(err) => {
-                                    log::warn!(
-                                        "Could not determine workspace type for tray action in '{}': {}",
-                                        project_path,
-                                        err
-                                    );
-                                    false
-                                }
-                            };
-
-                            if should_switch {
-                                if let Err(err) = commands::workspaces::switch_workspace(
-                                    handle.clone(),
-                                    project_path.clone(),
-                                    workspace_name.clone(),
-                                )
-                                .await
-                                {
-                                    log::warn!(
-                                        "Failed to switch workspace from tray for '{}': {}",
-                                        project_path,
-                                        err
-                                    );
-                                }
-                            } else {
-                                log::debug!(
-                                    "Skipping tray switch for worktree/unknown workspace '{}'",
-                                    workspace_name
-                                );
-                            }
-                            navigate_to_project(&handle, &project_path);
-                        });
+                    if let Some((project_path, _workspace_name)) = parse_workspace_menu_payload(id)
+                    {
+                        // Every workspace is already materialized. Selecting a
+                        // tray item opens its project view; it must not mutate
+                        // another checkout just to establish UI context.
+                        navigate_to_project(app, &project_path);
                     }
                 }
                 _ => {}

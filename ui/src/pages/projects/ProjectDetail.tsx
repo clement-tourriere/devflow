@@ -11,6 +11,7 @@ import {
   addService,
   createWorkspace,
   switchWorkspace,
+  preflightDeleteWorkspace,
   deleteWorkspace,
   listProcesses,
   startProcesses,
@@ -43,7 +44,6 @@ import type {
   AddServiceRequest,
   ContainerEntry,
   ProxyStatus,
-  WorkspaceCreationMode,
   ProcessStatus,
   ProcessResult,
   PitchforkBridgeInfo,
@@ -95,6 +95,95 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
   });
 }
 
+function canForceDeleteAfter(error: unknown): boolean {
+  const message = String(error).toLowerCase();
+  // Refusals the backend marks force_overridable=false — offering the Force
+  // dialog for these would just fail a second time. Keep in sync with the
+  // preflight/bail messages in devflow-core workspace/delete.rs and
+  // state/local_state.rs.
+  return ![
+    "main workspace",
+    "default workspace",
+    "currently checked out",
+    "current workspace",
+    "from its own worktree context",
+    "physical primary checkout",
+    "only present in devflow's registry",
+    "unresolved ownership",
+    "unresolved raw ownership",
+    "already owned by raw workspace",
+    "live vcs metadata does not identify",
+    "live vcs worktree metadata is unavailable",
+  ].some((reason) => message.includes(reason));
+}
+
+interface WorkspaceTreeRow {
+  workspace: WorkspaceEntry;
+  depth: number;
+  hasChildren: boolean;
+}
+
+function buildWorkspaceTree(
+  workspaces: WorkspaceEntry[],
+  roots: string[],
+  collapsed: Set<string>,
+): WorkspaceTreeRow[] {
+  const byName = new Map(workspaces.map((workspace) => [workspace.name, workspace]));
+  const children = new Map<string, Set<string>>();
+  for (const workspace of workspaces) {
+    children.set(workspace.name, new Set(workspace.children || []));
+  }
+  for (const workspace of workspaces) {
+    if (workspace.parent && byName.has(workspace.parent)) {
+      const parentChildren = children.get(workspace.parent) ?? new Set<string>();
+      parentChildren.add(workspace.name);
+      children.set(workspace.parent, parentChildren);
+    }
+  }
+
+  const sortNames = (names: string[]) =>
+    names
+      .filter((name) => byName.has(name))
+      .sort((a, b) => {
+        const left = byName.get(a)!;
+        const right = byName.get(b)!;
+        if (left.is_default !== right.is_default) return left.is_default ? -1 : 1;
+        return left.name.localeCompare(right.name);
+      });
+
+  const inferredRoots = workspaces
+    .filter((workspace) => !workspace.parent || !byName.has(workspace.parent))
+    .map((workspace) => workspace.name);
+  const rootNames = sortNames([...new Set([...roots, ...inferredRoots])]);
+  const visited = new Set<string>();
+  const rows: WorkspaceTreeRow[] = [];
+
+  const hideDescendants = (name: string) => {
+    if (visited.has(name)) return;
+    visited.add(name);
+    for (const child of children.get(name) ?? []) {
+      hideDescendants(child);
+    }
+  };
+
+  const visit = (name: string, depth: number) => {
+    const workspace = byName.get(name);
+    if (!workspace || visited.has(name)) return;
+    visited.add(name);
+    const childNames = sortNames([...(children.get(name) ?? [])]);
+    rows.push({ workspace, depth, hasChildren: childNames.length > 0 });
+    if (collapsed.has(name)) {
+      childNames.forEach(hideDescendants);
+    } else {
+      childNames.forEach((child) => visit(child, depth + 1));
+    }
+  };
+
+  rootNames.forEach((root) => visit(root, 0));
+  sortNames(workspaces.map((workspace) => workspace.name)).forEach((name) => visit(name, 0));
+  return rows;
+}
+
 function ProjectDetail() {
   const { "*": splat } = useParams();
   const projectPath = splat ? decodeURIComponent(splat) : "";
@@ -103,6 +192,9 @@ function ProjectDetail() {
 
   const [detail, setDetail] = useState<ProjectDetailType | null>(null);
   const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
+  const [workspaceRoots, setWorkspaceRoots] = useState<string[]>([]);
+  const [inventoryWarnings, setInventoryWarnings] = useState<string[]>([]);
+  const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(new Set());
   const [services, setServices] = useState<ServiceEntry[]>([]);
   const [processStatuses, setProcessStatuses] = useState<ProcessStatus[]>([]);
   const [processWorkspace, setProcessWorkspace] = useState<string>("");
@@ -124,10 +216,13 @@ function ProjectDetail() {
   const [showCreateWorkspace, setShowCreateWorkspace] = useState(false);
   const [newWorkspaceName, setNewWorkspaceName] = useState("");
   const [fromWorkspace, setFromWorkspace] = useState("");
-  const [creationMode, setCreationMode] = useState<WorkspaceCreationMode>("branch");
   const [copyFiles, setCopyFiles] = useState<string[]>([]);
   const [copyIgnored, setCopyIgnored] = useState(false);
   const [deletingWorkspace, setDeletingWorkspace] = useState<string | null>(null);
+  const [forceDeleteWorkspace, setForceDeleteWorkspace] = useState<{
+    name: string;
+    reason: string;
+  } | null>(null);
   const [connInfoWorkspace, setConnInfoWorkspace] = useState<string | null>(null);
   const [connInfo, setConnInfo] = useState<Record<string, ConnectionInfo>>({});
   const [connInfoContainers, setConnInfoContainers] = useState<Record<string, ContainerEntry>>({});
@@ -163,9 +258,6 @@ function ProjectDetail() {
   // Loading state
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const isCreatingWorkspace = actionLoading === "create";
-  const projectDefaultCreationMode: WorkspaceCreationMode = detail?.worktree_enabled
-    ? "worktree"
-    : "branch";
 
   const fetchProcesses = useCallback(
     async (workspaceName?: string) => {
@@ -229,11 +321,13 @@ function ProjectDetail() {
       listWorkspaces(projectPath)
         .then((b) => {
           setWorkspaces(b.workspaces);
-          setCurrentWorkspace(b.current);
+          setWorkspaceRoots(b.roots);
+          setInventoryWarnings(b.warnings);
+          setCurrentWorkspace(b.context_workspace);
           const preferredWorkspace =
             processWorkspace ||
-            b.current ||
-            b.workspaces.find((w) => w.is_default)?.name ||
+            b.context_workspace ||
+            b.default_workspace ||
             b.workspaces[0]?.name ||
             "";
           if (preferredWorkspace && !processWorkspace) {
@@ -245,6 +339,8 @@ function ProjectDetail() {
         })
         .catch(() => {
           setWorkspaces([]);
+          setWorkspaceRoots([]);
+          setInventoryWarnings([]);
           setCurrentWorkspace(null);
         }),
       listServices(projectPath)
@@ -326,9 +422,8 @@ function ProjectDetail() {
           projectPath,
           requestedWorkspace,
           fromWorkspace || undefined,
-          creationMode,
-          creationMode === "worktree" ? copyFiles : undefined,
-          creationMode === "worktree" ? copyIgnored : undefined
+          copyFiles,
+          copyIgnored,
         ),
         310000,
         "Workspace creation timed out. Refreshing state; parts of it may exist — retry if needed."
@@ -339,7 +434,6 @@ function ProjectDetail() {
       setShowCreateWorkspace(false);
       setNewWorkspaceName("");
       setFromWorkspace("");
-      setCreationMode(projectDefaultCreationMode);
       setCopyFiles(detail?.worktree_copy_files ?? []);
       setCopyIgnored(detail?.worktree_copy_ignored ?? false);
       await reload();
@@ -370,23 +464,51 @@ function ProjectDetail() {
     }
   };
 
-  const handleDeleteWorkspace = async () => {
-    if (!deletingWorkspace) return;
+  const handleDeleteWorkspace = async (force = false) => {
+    const target = force ? forceDeleteWorkspace?.name : deletingWorkspace;
+    if (!target) return;
     setActionLoading("delete");
-    const target = deletingWorkspace;
     try {
       const result = await withTimeout(
-        deleteWorkspace(projectPath, target),
+        deleteWorkspace(projectPath, target, force),
         65000,
         "Workspace deletion timed out. Refreshing state; retry if the workspace still appears."
       );
       reportWorkspaceResult(`Workspace "${target}" deleted`, result);
       setDeletingWorkspace(null);
+      setForceDeleteWorkspace(null);
       await reload();
     } catch (e) {
-      toast.error(`${e}`);
       setDeletingWorkspace(null);
+      if (force || !canForceDeleteAfter(e)) {
+        toast.error(`${e}`);
+        setForceDeleteWorkspace(null);
+      } else {
+        setForceDeleteWorkspace({ name: target, reason: `${e}` });
+      }
       await reload();
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const prepareDeleteWorkspace = async (workspaceName: string) => {
+    setActionLoading(`delete-preflight:${workspaceName}`);
+    try {
+      const preflight = await preflightDeleteWorkspace(projectPath, workspaceName);
+      if (preflight.issues.length === 0) {
+        setDeletingWorkspace(workspaceName);
+        return;
+      }
+
+      const reason = preflight.issues.map((issue) => issue.message).join(" ");
+      if (preflight.issues.every((issue) => issue.force_overridable)) {
+        setForceDeleteWorkspace({ name: workspaceName, reason });
+      } else {
+        toast.error(reason);
+      }
+    } catch (e) {
+      toast.error(`Could not verify workspace deletion safety: ${e}`);
     } finally {
       setActionLoading(null);
     }
@@ -817,10 +939,8 @@ function ProjectDetail() {
     );
   }
 
-  const currentWorkspaceEntry = workspaces.find((w) => w.is_current);
-  const showActiveWorkspaceBadge = Boolean(
-    currentWorkspace && currentWorkspaceEntry && !currentWorkspaceEntry.worktree_path
-  );
+  const currentWorkspaceEntry = workspaces.find((w) => w.is_context);
+  const showActiveWorkspaceBadge = Boolean(currentWorkspace && currentWorkspaceEntry);
 
   // Map a service-workspace state string to a status-dot class.
   const stateDotClass = (state: string | null): string => {
@@ -840,17 +960,38 @@ function ProjectDetail() {
   // Join per-workspace service status so the workspaces table shows, at a
   // glance, which services are provisioned/running for each workspace —
   // instead of forcing the user to expand the per-service accordions below.
-  const normalizeWs = (s: string) =>
-    s.toLowerCase().replace(/[^a-z0-9]/g, "-").replace(/-{2,}/g, "-");
-  const serviceChipsFor = (workspaceName: string) => {
-    const wsKey = normalizeWs(workspaceName);
+  const serviceChipsFor = (workspace: WorkspaceEntry) => {
+    if (workspace.services.length > 0) {
+      return workspace.services.map((service) => ({
+        service: service.name,
+        state: service.state,
+        provisioned: service.provisioned,
+      }));
+    }
+    // Fallback for inventories without per-workspace service templates:
+    // provider-side rows are keyed by the workspace's service_key (exact
+    // match only — client-side name normalization can never reproduce the
+    // backend's hashed key scheme and would silently mismatch).
     return services.map((svc) => {
       const infos = serviceWorkspaces[svc.name] || [];
       const match = infos.find(
-        (i) => i.name === workspaceName || normalizeWs(i.name) === wsKey
+        (i) => i.name === workspace.service_key || i.name === workspace.name
       );
       return { service: svc.name, state: match?.state ?? null, provisioned: !!match };
     });
+  };
+
+  const workspaceTreeRows = buildWorkspaceTree(
+    workspaces,
+    workspaceRoots,
+    collapsedWorkspaces,
+  );
+  const rawWorkspaceName = (serviceIdentity: string | null | undefined) => {
+    if (!serviceIdentity) return null;
+    return workspaces.find(
+      (workspace) =>
+        workspace.service_key === serviceIdentity || workspace.name === serviceIdentity,
+    )?.name ?? serviceIdentity;
   };
 
   const selectedProcessNamesForWorkspace = selectedProcessNames();
@@ -881,7 +1022,7 @@ function ProjectDetail() {
             </span>
             {showActiveWorkspaceBadge && (
               <span className="badge" style={{ opacity: 0.7 }}>
-                active: {currentWorkspace}
+                context: {currentWorkspace}
               </span>
             )}
             {!detail.has_config && (
@@ -891,12 +1032,7 @@ function ProjectDetail() {
               <span className="badge">vcs: {detail.vcs_type}</span>
             )}
             {detail.has_config && (
-              <span
-                className="badge badge-info"
-                title="Default creation mode. You can still choose branch or worktree when creating a workspace."
-              >
-                default: {detail.worktree_enabled ? "worktree" : "branch"}
-              </span>
+              <span className="badge badge-info">isolated workspaces</span>
             )}
           </div>
         </div>
@@ -1033,7 +1169,6 @@ function ProjectDetail() {
               const defaultWorkspace = workspaces.find((b) => b.is_default);
               setFromWorkspace(defaultWorkspace?.name ?? "");
               setNewWorkspaceName("");
-              setCreationMode(projectDefaultCreationMode);
               setCopyFiles(detail.worktree_copy_files);
               setCopyIgnored(detail.worktree_copy_ignored);
               setShowCreateWorkspace(true);
@@ -1043,29 +1178,106 @@ function ProjectDetail() {
             Create Workspace
           </button>
         </div>
+        {inventoryWarnings.length > 0 && (
+          <div
+            style={{
+              marginBottom: 12,
+              padding: "8px 10px",
+              border: "1px solid var(--warning, #d29922)",
+              borderRadius: 6,
+              color: "var(--text-secondary)",
+              fontSize: 12,
+            }}
+          >
+            {inventoryWarnings.map((warning) => (
+              <div key={warning}>{warning}</div>
+            ))}
+          </div>
+        )}
         {workspaces.length === 0 ? (
           <p style={{ color: "var(--text-secondary)" }}>No workspaces found.</p>
         ) : (
           <table className="table" style={{ tableLayout: "fixed", width: "100%" }}>
             <thead>
               <tr>
-                <th style={{ width: "22%" }}>Workspace</th>
+                <th style={{ width: "30%" }}>Workspace tree</th>
                 <th style={{ width: "16%" }}>Tags</th>
-                <th style={{ width: "22%" }}>Services</th>
-                <th style={{ width: "11%" }}>Parent</th>
-                <th style={{ width: "10%" }}>Created</th>
+                <th style={{ width: "24%" }}>Services</th>
+                <th style={{ width: "11%" }}>Created</th>
                 <th style={{ textAlign: "right", width: "19%" }}>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {workspaces.map((b) => (
+              {workspaceTreeRows.map(({ workspace: b, depth, hasChildren }) => (
                 <tr key={b.name}>
                   <td style={{ overflow: "hidden" }} title={b.name}>
-                    <div>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 4,
+                        paddingLeft: depth * 18,
+                      }}
+                    >
+                      {hasChildren ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setCollapsedWorkspaces((previous) => {
+                              const next = new Set(previous);
+                              if (next.has(b.name)) next.delete(b.name);
+                              else next.add(b.name);
+                              return next;
+                            })
+                          }
+                          aria-label={`${collapsedWorkspaces.has(b.name) ? "Expand" : "Collapse"} ${b.name}`}
+                          title={collapsedWorkspaces.has(b.name) ? "Expand children" : "Collapse children"}
+                          style={{
+                            width: 18,
+                            border: 0,
+                            padding: 0,
+                            background: "transparent",
+                            color: "var(--text-muted)",
+                            cursor: "pointer",
+                          }}
+                        >
+                          {collapsedWorkspaces.has(b.name) ? "▸" : "▾"}
+                        </button>
+                      ) : (
+                        <span style={{ width: 18, color: "var(--text-muted)" }}>└</span>
+                      )}
                       <span style={{ fontWeight: b.is_default ? 600 : 400 }}>
                         {b.name}
                       </span>
                     </div>
+                    {b.service_key !== b.name && (
+                      <span
+                        className="mono"
+                        style={{
+                          color: "var(--text-muted)",
+                          fontSize: 10,
+                          display: "block",
+                          paddingLeft: depth * 18 + 22,
+                        }}
+                        title="Collision-safe service key"
+                      >
+                        key: {b.service_key}
+                      </span>
+                    )}
+                    {b.parent && (
+                      <span
+                        style={{
+                          color: "var(--text-muted)",
+                          fontSize: 10,
+                          display: "block",
+                          paddingLeft: depth * 18 + 22,
+                        }}
+                        title="Creation provenance"
+                      >
+                        from: {b.parent}
+                        {b.parent_state === "missing" ? " (missing)" : ""}
+                      </span>
+                    )}
                     {b.worktree_path && (
                       <span
                         className="mono"
@@ -1076,6 +1288,7 @@ function ProjectDetail() {
                           overflow: "hidden",
                           textOverflow: "ellipsis",
                           whiteSpace: "nowrap",
+                          paddingLeft: depth * 18 + 22,
                         }}
                         title={b.worktree_path}
                       >
@@ -1085,16 +1298,27 @@ function ProjectDetail() {
                   </td>
                   <td>
                     <div className="flex gap-1" style={{ flexWrap: "wrap" }}>
-                      {b.worktree_path ? (
-                        <span className="badge" style={{ fontSize: 10 }}>git worktree</span>
-                      ) : (
-                        <span className="badge" style={{ fontSize: 10 }}>git branch</span>
-                      )}
-                      {b.is_current && !b.worktree_path && (
-                        <span className="badge badge-success" style={{ fontSize: 10 }}>active</span>
+                      <span className="badge" style={{ fontSize: 10 }}>workspace</span>
+                      {b.is_context && (
+                        <span className="badge badge-success" style={{ fontSize: 10 }}>context</span>
                       )}
                       {b.is_default && (
                         <span className="badge badge-info" style={{ fontSize: 10 }}>default</span>
+                      )}
+                      {b.identity_status !== "canonical" && (
+                        <span
+                          className={`badge ${
+                            b.identity_status === "legacy_unresolved"
+                              ? "badge-danger"
+                              : "badge-warning"
+                          }`}
+                          style={{ fontSize: 10 }}
+                          title={`Effective key: ${b.service_key}; canonical key: ${b.canonical_service_key}`}
+                        >
+                          {b.identity_status === "legacy_unresolved"
+                            ? "identity unresolved"
+                            : "legacy key retained"}
+                        </span>
                       )}
                       {b.execution_status && (
                         <span
@@ -1105,16 +1329,33 @@ function ProjectDetail() {
                           {b.execution_status}
                         </span>
                       )}
+                      <span
+                        className={`badge${
+                          b.health === "ready"
+                            ? " badge-success"
+                            : b.health === "missing" || b.health === "error"
+                              ? " badge-danger"
+                              : " badge-warning"
+                        }`}
+                        style={{ fontSize: 10 }}
+                      >
+                        {b.health}
+                      </span>
+                      {b.parent_state && b.parent_state !== "present" && (
+                        <span className="badge badge-warning" style={{ fontSize: 10 }}>
+                          parent {b.parent_state}
+                        </span>
+                      )}
                     </div>
                   </td>
                   <td>
-                    {services.length === 0 ? (
+                    {services.length === 0 && b.services.length === 0 ? (
                       <span style={{ color: "var(--text-muted)", fontSize: 12 }}>
                         —
                       </span>
                     ) : (
                       <div className="svc-chips">
-                        {serviceChipsFor(b.name).map((chip) => (
+                        {serviceChipsFor(b).map((chip) => (
                           <span
                             key={chip.service}
                             className={`svc-chip${chip.state === "running" ? " running" : ""}`}
@@ -1135,15 +1376,15 @@ function ProjectDetail() {
                       </div>
                     )}
                   </td>
-                  <td style={{ color: "var(--text-muted)", fontSize: 13 }}>
-                    {b.parent || "-"}
-                  </td>
-                  <td style={{ color: "var(--text-muted)", fontSize: 12 }}>
-                    {b.created_at || "-"}
+                  <td
+                    style={{ color: "var(--text-muted)", fontSize: 12 }}
+                    title={b.created_at}
+                  >
+                    {formatRelativeTime(b.created_at) || b.created_at || "-"}
                   </td>
                   <td style={{ textAlign: "right" }}>
                     <div className="flex gap-2" style={{ justifyContent: "flex-end", flexWrap: "wrap", rowGap: 6 }}>
-                      {!b.is_current && (
+                      {!b.is_context && (
                         <button
                           className="btn"
                           style={{ padding: "2px 10px", fontSize: 12 }}
@@ -1178,7 +1419,6 @@ function ProjectDetail() {
                           onClick={() => {
                             setFromWorkspace(b.name);
                             setNewWorkspaceName("");
-                            setCreationMode(projectDefaultCreationMode);
                             setCopyFiles(detail.worktree_copy_files);
                             setCopyIgnored(detail.worktree_copy_ignored);
                             setShowCreateWorkspace(true);
@@ -1213,7 +1453,8 @@ function ProjectDetail() {
                             padding: 0,
                             justifyContent: "center",
                           }}
-                          onClick={() => setDeletingWorkspace(b.name)}
+                          onClick={() => prepareDeleteWorkspace(b.name)}
+                          disabled={actionLoading === `delete-preflight:${b.name}`}
                           title={`Delete workspace ${b.name}`}
                           aria-label={`Delete workspace ${b.name}`}
                         >
@@ -1770,11 +2011,13 @@ function ProjectDetail() {
                                 b.state === "failed" ||
                                 b.state === null ||
                                 b.state === undefined;
+                              const displayWorkspace = rawWorkspaceName(b.name);
+                              const displayParent = rawWorkspaceName(b.parent_workspace);
                               return (
                                 <tr key={b.name}>
                                   <td>
-                                    <span>
-                                      {b.name}
+                                    <span title={b.name}>
+                                      {displayWorkspace}
                                     </span>
                                   </td>
                                   <td>
@@ -1786,7 +2029,9 @@ function ProjectDetail() {
                                       fontSize: 13,
                                     }}
                                   >
-                                    {b.parent_workspace || "-"}
+                                    <span title={b.parent_workspace ?? undefined}>
+                                      {displayParent || "-"}
+                                    </span>
                                   </td>
                                   <td
                                     className="mono"
@@ -2142,42 +2387,7 @@ function ProjectDetail() {
             spellCheck={false}
           />
         </div>
-        <div style={{ marginBottom: 16 }}>
-          <label
-            style={{
-              display: "block",
-              marginBottom: 4,
-              fontSize: 13,
-              color: "var(--text-secondary)",
-            }}
-          >
-            Creation method
-          </label>
-          <select
-            value={creationMode}
-            onChange={(e) => setCreationMode(e.target.value as WorkspaceCreationMode)}
-            style={{
-              width: "100%",
-              background: "var(--bg-primary)",
-              color: "var(--text-primary)",
-              border: "1px solid var(--border)",
-              borderRadius: 6,
-              padding: "6px 12px",
-              fontSize: 14,
-            }}
-          >
-            <option value="worktree">
-              Git worktree{detail.worktree_enabled ? " (default)" : ""}
-            </option>
-            <option value="branch">
-              Git branch{!detail.worktree_enabled ? " (default)" : ""}
-            </option>
-          </select>
-          <p style={{ marginTop: 6, color: "var(--text-muted)", fontSize: 12 }}>
-            The project default is preselected.
-          </p>
-        </div>
-        {creationMode === "worktree" && detail.worktree_copy_files.length > 0 && (
+        {detail.worktree_copy_files.length > 0 && (
           <div style={{ marginBottom: 16 }}>
             <label
               style={{
@@ -2187,7 +2397,7 @@ function ProjectDetail() {
                 color: "var(--text-secondary)",
               }}
             >
-              Files copied to worktree
+              Files copied into the workspace
             </label>
             <div
               style={{
@@ -2233,8 +2443,7 @@ function ProjectDetail() {
             </p>
           </div>
         )}
-        {creationMode === "worktree" && (
-          <div style={{ marginBottom: 16 }}>
+        <div style={{ marginBottom: 16 }}>
             <label
               style={{
                 display: "flex",
@@ -2255,8 +2464,7 @@ function ProjectDetail() {
             <p style={{ marginTop: 4, color: "var(--text-muted)", fontSize: 12 }}>
               Leave this off for the fastest workspace creation. Even CoW copies must enumerate thousands of files.
             </p>
-          </div>
-        )}
+        </div>
         <div style={{ marginBottom: 16 }}>
           <label
             style={{
@@ -2327,10 +2535,22 @@ function ProjectDetail() {
       <ConfirmDialog
         open={deletingWorkspace !== null}
         onClose={() => setDeletingWorkspace(null)}
-        onConfirm={handleDeleteWorkspace}
+        onConfirm={() => handleDeleteWorkspace(false)}
         title="Delete Workspace"
-        message={`Delete workspace "${deletingWorkspace}"? This will also delete associated service workspaces.`}
+        message={`Delete workspace "${deletingWorkspace}"? Devflow will stop its processes, remove associated services, and refuse if the workspace has uncommitted changes.`}
         confirmLabel="Delete"
+        danger
+        loading={actionLoading === "delete"}
+      />
+
+      {/* Force deletion is deliberately a separate confirmation after safe deletion fails. */}
+      <ConfirmDialog
+        open={forceDeleteWorkspace !== null}
+        onClose={() => setForceDeleteWorkspace(null)}
+        onConfirm={() => handleDeleteWorkspace(true)}
+        title="Force Delete Workspace"
+        message={`Safe deletion of "${forceDeleteWorkspace?.name}" was refused: ${forceDeleteWorkspace?.reason}\n\nForce deletion can discard uncommitted files and continue past partial cleanup failures.`}
+        confirmLabel="Force Delete"
         danger
         loading={actionLoading === "delete"}
       />
@@ -2341,7 +2561,7 @@ function ProjectDetail() {
         onClose={() => setResetTarget(null)}
         onConfirm={handleResetService}
         title="Reset Service"
-        message={`Reset service "${resetTarget?.name}" for workspace "${resetTarget?.workspace}"? This will destroy all data for this workspace.`}
+        message={`Reset service "${resetTarget?.name}" for workspace "${rawWorkspaceName(resetTarget?.workspace)}"? This will destroy all data for this workspace.`}
         confirmLabel="Reset"
         danger
         loading={actionLoading === "reset"}
@@ -2353,7 +2573,7 @@ function ProjectDetail() {
         onClose={() => setDeleteServiceWsTarget(null)}
         onConfirm={handleDeleteServiceWorkspace}
         title="Delete Service Workspace"
-        message={`Delete workspace "${deleteServiceWsTarget?.workspace}" for service "${deleteServiceWsTarget?.name}"? This will destroy all data for this workspace.`}
+        message={`Delete workspace "${rawWorkspaceName(deleteServiceWsTarget?.workspace)}" for service "${deleteServiceWsTarget?.name}"? This will destroy all data for this workspace.`}
         confirmLabel="Delete"
         danger
         loading={actionLoading === "delete-svc-ws"}
@@ -2379,7 +2599,7 @@ function ProjectDetail() {
           setConnInfo({});
           setConnInfoContainers({});
         }}
-        title={`Connection Info — ${connInfoWorkspace}`}
+        title={`Connection Info — ${rawWorkspaceName(connInfoWorkspace)}`}
         width={560}
       >
         {Object.keys(connInfo).length === 0 ? (

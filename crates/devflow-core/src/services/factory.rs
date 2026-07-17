@@ -700,7 +700,7 @@ pub async fn orchestrate_switch(
     Ok(results)
 }
 
-/// Get connection info from all services for a given workspace.
+/// Get connection info from all services for an already-resolved service key.
 ///
 /// Returns a map of service_name -> ConnectionInfo. Used by the hook context
 /// builder to populate per-service template variables.
@@ -710,23 +710,19 @@ pub async fn orchestrate_switch(
 /// the given workspace are silently skipped.
 pub async fn get_all_connection_info(
     config: &Config,
-    workspace_name: &str,
+    service_key: &str,
 ) -> Result<Vec<(String, super::ConnectionInfo)>> {
-    // Backends key workspaces by the normalized name (as used during
-    // orchestration); accept raw VCS names so callers building hook/template
-    // contexts don't have to normalize themselves.
-    let workspace_name = config.get_normalized_workspace_name(workspace_name);
     let providers = create_all_providers(config).await?;
     let mut results = Vec::with_capacity(providers.len());
 
     for named in &providers {
-        match named.provider.get_connection_info(&workspace_name).await {
+        match named.provider.get_connection_info(service_key).await {
             Ok(info) => results.push((named.name.clone(), info)),
             Err(e) => {
                 log::debug!(
                     "Could not get connection info for {} on workspace '{}': {}",
                     named.name,
-                    workspace_name,
+                    service_key,
                     e
                 );
             }

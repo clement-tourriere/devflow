@@ -1,6 +1,8 @@
 //! Pure, unit-testable naming and SQL helpers for the shared-postgres
 //! provider. No Docker or I/O here so the logic can be tested in isolation.
 
+use sha2::{Digest, Sha256};
+
 /// Max length of a PostgreSQL identifier (bytes). Names are truncated to fit.
 const PG_IDENT_MAX: usize = 63;
 
@@ -29,7 +31,7 @@ fn sanitize_fragment(input: &str) -> String {
 /// quote them at the call site, but a leading digit is still avoided so the
 /// name is valid everywhere. Empty results fall back to a stable default.
 pub fn logical_db_name(project: &str, workspace: &str) -> String {
-    let project = sanitize_fragment(project);
+    let project = bounded_project_fragment(&sanitize_fragment(project), '_');
     let workspace = sanitize_fragment(workspace);
 
     let mut name = match (project.is_empty(), workspace.is_empty()) {
@@ -44,25 +46,63 @@ pub fn logical_db_name(project: &str, workspace: &str) -> String {
         name.insert_str(0, "db_");
     }
 
-    truncate_ident(&name)
+    stable_truncate(&name, PG_IDENT_MAX, '_')
 }
 
 /// The prefix shared by every logical database of a project: `<project>_`.
 /// Used to list/GC a project's databases.
 pub fn project_db_prefix(project: &str) -> String {
-    format!("{}_", sanitize_fragment(project))
+    format!(
+        "{}_",
+        bounded_project_fragment(&sanitize_fragment(project), '_')
+    )
 }
 
-/// Truncate to the postgres identifier byte limit on a char boundary.
-fn truncate_ident(name: &str) -> String {
-    if name.len() <= PG_IDENT_MAX {
+/// Keep long project names useful as list/GC prefixes while reserving room
+/// for a workspace fragment. The digest prevents two equally-prefixed project
+/// names from sharing a global-engine namespace.
+///
+/// MIGRATION CONSTRAINT: releases before hash-bounded naming used the full
+/// sanitized project fragment, and existing databases/buckets carry those
+/// names. Hashing must therefore only kick in where the old scheme's list/GC
+/// prefix contract was already broken. `stable_truncate` preserves the first
+/// `max - 1 - 12` bytes (50 for the 63-byte limits used here), so any project
+/// fragment ≤ 49 bytes keeps prefix-matching every truncated name — bound at
+/// exactly that, NOT lower, or projects between the bound and 49 bytes get
+/// silently renamed and their existing data orphaned.
+fn bounded_project_fragment(project: &str, separator: char) -> String {
+    const PROJECT_MAX: usize = 49;
+    if project.len() <= PROJECT_MAX {
+        return project.to_string();
+    }
+    let digest = short_digest(project);
+    let prefix_len = PROJECT_MAX - 1 - digest.len();
+    format!("{}{separator}{digest}", &project[..prefix_len])
+}
+
+/// Truncate an ASCII-safe identifier without throwing away its distinguishing
+/// suffix. Hashing the full value keeps long project/workspace pairs unique
+/// even when their readable prefixes are identical. (Names over `max` were
+/// plainly cut by pre-hash releases — and could collide; only that population
+/// changes names across the upgrade.)
+pub(crate) fn stable_truncate(name: &str, max: usize, separator: char) -> String {
+    if name.len() <= max {
         return name.to_string();
     }
-    let mut end = PG_IDENT_MAX;
-    while !name.is_char_boundary(end) {
-        end -= 1;
-    }
-    name[..end].trim_end_matches('_').to_string()
+    let digest = short_digest(name);
+    let prefix_len = max - 1 - digest.len();
+    format!(
+        "{}{separator}{digest}",
+        name[..prefix_len].trim_end_matches(separator)
+    )
+}
+
+fn short_digest(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    digest[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Quote a postgres identifier by doubling embedded double-quotes and wrapping
@@ -129,7 +169,7 @@ const S3_BUCKET_MAX: usize = 63;
 /// digit, and no underscores or consecutive dots. We use `-` as the separator
 /// (not `_` like databases).
 pub fn logical_bucket_name(project: &str, workspace: &str) -> String {
-    let project = sanitize_bucket_fragment(project);
+    let project = bounded_project_fragment(&sanitize_bucket_fragment(project), '-');
     let workspace = sanitize_bucket_fragment(workspace);
 
     let mut name = match (project.is_empty(), workspace.is_empty()) {
@@ -139,9 +179,7 @@ pub fn logical_bucket_name(project: &str, workspace: &str) -> String {
         (false, false) => format!("{project}-{workspace}"),
     };
 
-    if name.len() > S3_BUCKET_MAX {
-        name.truncate(S3_BUCKET_MAX);
-    }
+    name = stable_truncate(&name, S3_BUCKET_MAX, '-');
     name = name.trim_matches('-').to_string();
     // Pad if the trimmed name fell below the minimum length.
     while name.len() < S3_BUCKET_MIN {
@@ -152,7 +190,10 @@ pub fn logical_bucket_name(project: &str, workspace: &str) -> String {
 
 /// The shared prefix of every bucket for a project: `<project>-`.
 pub fn project_bucket_prefix(project: &str) -> String {
-    format!("{}-", sanitize_bucket_fragment(project))
+    format!(
+        "{}-",
+        bounded_project_fragment(&sanitize_bucket_fragment(project), '-')
+    )
 }
 
 // ── Redis allocation identity ───────────────────────────────────────────
@@ -215,6 +256,15 @@ mod tests {
         assert!(long
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
+        let a = logical_bucket_name(
+            &"project".repeat(20),
+            &format!("{}-a", "feature".repeat(20)),
+        );
+        let b = logical_bucket_name(
+            &"project".repeat(20),
+            &format!("{}-b", "feature".repeat(20)),
+        );
+        assert_ne!(a, b, "long bucket identities must retain uniqueness");
     }
 
     #[test]
@@ -264,6 +314,11 @@ mod tests {
         let long = "x".repeat(100);
         let name = logical_db_name(&long, "ws");
         assert!(name.len() <= 63, "got {} bytes", name.len());
+        assert_ne!(
+            logical_db_name(&"project".repeat(20), &format!("{}a", "feature".repeat(20))),
+            logical_db_name(&"project".repeat(20), &format!("{}b", "feature".repeat(20)))
+        );
+        assert!(name.starts_with(project_db_prefix(&long).trim_end_matches('_')));
     }
 
     #[test]
@@ -276,6 +331,31 @@ mod tests {
     #[test]
     fn test_project_db_prefix() {
         assert_eq!(project_db_prefix("My-App"), "my_app_");
+    }
+
+    #[test]
+    fn test_mid_length_project_names_unchanged_from_plain_scheme() {
+        // Projects with ≤49 sanitized bytes must keep their historical
+        // (pre-hash) names whenever the total fits the identifier limit:
+        // renaming them would orphan databases/buckets created by earlier
+        // releases and break their list/GC prefixes.
+        let project = "my-organization-analytics-platform";
+        assert_eq!(
+            logical_db_name(project, "main"),
+            "my_organization_analytics_platform_main"
+        );
+        assert_eq!(
+            project_db_prefix(project),
+            "my_organization_analytics_platform_"
+        );
+        assert_eq!(
+            logical_bucket_name(project, "main"),
+            "my-organization-analytics-platform-main"
+        );
+        assert_eq!(
+            project_bucket_prefix(project),
+            "my-organization-analytics-platform-"
+        );
     }
 
     #[test]
