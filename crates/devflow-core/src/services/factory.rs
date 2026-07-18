@@ -19,6 +19,37 @@ use super::ServiceProvider;
 use crate::config::{Config, NamedServiceConfig};
 use anyhow::{Context, Result};
 
+/// Resolve the provider-side key a NON-CREATING service operation targets.
+///
+/// Registered workspaces resolve through local state exactly like
+/// [`crate::state::LocalStateManager::resolve_workspace_or_key_by_dir`]. An
+/// input that matches no registered workspace but exactly names an existing
+/// provider-side workspace is targeted verbatim: such orphan namespaces
+/// (surfaced by inventory warnings) would otherwise be unreachable, because
+/// re-deriving a key from an orphan key manufactures a namespace that never
+/// existed. Creation paths must NOT use this — a fresh workspace must always
+/// receive its canonical key rather than silently adopting a stale orphan.
+pub async fn resolve_service_operation_key(
+    project_dir: &std::path::Path,
+    workspace: &str,
+    provider: &dyn ServiceProvider,
+) -> Result<String> {
+    let state = crate::state::LocalStateManager::new()?;
+    let resolved = state.resolve_workspace_or_key_by_dir(project_dir, workspace)?;
+    if resolved != workspace && state.get_workspace_by_dir(project_dir, workspace).is_none() {
+        match provider.list_workspaces().await {
+            Ok(existing) if existing.iter().any(|entry| entry.name == workspace) => {
+                return Ok(workspace.to_string());
+            }
+            Ok(_) => {}
+            Err(error) => log::debug!(
+                "Could not check provider-side workspaces while resolving '{workspace}': {error:#}"
+            ),
+        }
+    }
+    Ok(resolved)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProviderType {
     #[cfg(feature = "service-local")]
@@ -779,6 +810,120 @@ mod tests {
         assert!(!is_shared_service(&svc("db", "local", "postgres")));
         assert!(!is_shared_service(&svc("db", "neon", "postgres")));
         assert!(!is_shared_service(&svc("ch", "local", "clickhouse")));
+    }
+
+    struct StaticProvider {
+        workspaces: Vec<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl ServiceProvider for StaticProvider {
+        async fn create_workspace(
+            &self,
+            _workspace_name: &str,
+            _from_workspace: Option<&str>,
+        ) -> Result<super::super::WorkspaceInfo> {
+            anyhow::bail!("not needed")
+        }
+        async fn delete_workspace(&self, _workspace_name: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn list_workspaces(&self) -> Result<Vec<super::super::WorkspaceInfo>> {
+            Ok(self
+                .workspaces
+                .iter()
+                .map(|name| super::super::WorkspaceInfo {
+                    name: name.clone(),
+                    created_at: None,
+                    parent_workspace: None,
+                    database_name: name.clone(),
+                    state: None,
+                })
+                .collect())
+        }
+        async fn workspace_exists(&self, workspace_name: &str) -> Result<bool> {
+            Ok(self.workspaces.iter().any(|name| name == workspace_name))
+        }
+        async fn switch_to_branch(
+            &self,
+            _workspace_name: &str,
+        ) -> Result<super::super::WorkspaceInfo> {
+            anyhow::bail!("not needed")
+        }
+        async fn get_connection_info(
+            &self,
+            _workspace_name: &str,
+        ) -> Result<super::super::ConnectionInfo> {
+            anyhow::bail!("not needed")
+        }
+        async fn doctor(&self) -> Result<super::super::DoctorReport> {
+            anyhow::bail!("not needed")
+        }
+        async fn test_connection(&self) -> Result<()> {
+            Ok(())
+        }
+        fn provider_name(&self) -> &'static str {
+            "static-test"
+        }
+    }
+
+    #[tokio::test]
+    async fn operation_key_targets_provider_side_orphans_verbatim() {
+        let _guard = crate::processes::PROCESS_TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let config_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("DEVFLOW_CONFIG_DIR", config_dir.path());
+        let project = tempfile::tempdir().unwrap();
+
+        let orphan_key = "feature_x-ab12cd";
+        let provider = StaticProvider {
+            workspaces: vec![orphan_key.to_string()],
+        };
+
+        // Unregistered input that exactly names a provider-side workspace:
+        // targeted verbatim, NOT re-derived into a namespace that never
+        // existed (the orphan would be unreachable for cleanup otherwise).
+        let resolved = resolve_service_operation_key(project.path(), orphan_key, &provider)
+            .await
+            .unwrap();
+        assert_eq!(resolved, orphan_key);
+
+        // Unregistered input the provider does not know: canonical derivation.
+        let resolved = resolve_service_operation_key(project.path(), "feature/new", &provider)
+            .await
+            .unwrap();
+        assert_eq!(
+            resolved,
+            crate::config::workspace_service_key("feature/new")
+        );
+
+        // A registered raw name always resolves through the registry, even if
+        // a provider-side workspace shares the raw spelling.
+        let mut state = crate::state::LocalStateManager::new().unwrap();
+        let registered = crate::state::DevflowWorkspace {
+            name: "feature/auth".to_string(),
+            service_key: crate::config::workspace_service_key("feature/auth"),
+            raw_identity_verified: true,
+            parent: None,
+            worktree_path: None,
+            created_at: chrono::Utc::now(),
+            executed_command: None,
+            execution_status: None,
+            executed_at: None,
+        };
+        state
+            .register_workspace_by_dir(project.path(), registered.clone())
+            .unwrap();
+        let provider = StaticProvider {
+            workspaces: vec!["feature/auth".to_string()],
+        };
+        let resolved = resolve_service_operation_key(project.path(), "feature/auth", &provider)
+            .await
+            .unwrap();
+        assert_eq!(resolved, registered.service_key);
+
+        std::env::remove_var("DEVFLOW_CONFIG_DIR");
     }
 
     #[tokio::test]

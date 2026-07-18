@@ -81,7 +81,6 @@ fn preflight_delete_workspace_with_registered_path(
     workspace_name: &str,
     registered_path: Option<PathBuf>,
 ) -> Result<DeleteWorkspacePreflight> {
-    super::validate_workspace_name(workspace_name).map_err(anyhow::Error::msg)?;
     // Resolve before any destructive action. Legacy keys are retained only
     // when their raw owner is unambiguous; unresolved ownership cannot be
     // overridden with `--force`.
@@ -95,6 +94,19 @@ fn preflight_delete_workspace_with_registered_path(
     let worktree_path = live_path.or(registered_path);
 
     let mut issues = Vec::new();
+    // Name validation guards creation and switching; it must not make an
+    // already-materialized workspace (adopted branch, old registry entry)
+    // permanently undeletable. Deletion of such a name needs explicit force.
+    if let Err(reason) = super::validate_workspace_name(workspace_name) {
+        issues.push(DeletePreflightIssue {
+            code: "invalid_workspace_name".to_string(),
+            message: format!(
+                "Workspace name '{}' is outside devflow's supported alphabet ({}). Deleting it requires explicit force; lifecycle hooks receive the raw name verbatim.",
+                workspace_name, reason
+            ),
+            force_overridable: true,
+        });
+    }
     let physical_git_primary = vcs_provider
         .as_ref()
         .map(|repo| super::invariant::inspect_git_primary_workspace(repo.as_ref()))
@@ -140,10 +152,10 @@ fn preflight_delete_workspace_with_registered_path(
             issues.push(DeletePreflightIssue {
                 code: "unverified_worktree_path".to_string(),
                 message: format!(
-                    "Refusing to remove '{}' because it is only present in devflow's registry and is not owned by this project's live VCS worktree metadata. Remove or relink the stale registry entry without deleting that directory.",
+                    "'{}' is only present in devflow's registry and is not owned by this project's live VCS worktree metadata. Forced deletion cleans services, processes, and registry state but leaves that directory untouched; remove it manually after verifying its owner.",
                     path.display()
                 ),
-                force_overridable: false,
+                force_overridable: true,
             });
         } else if let Some(repo) = vcs_provider.as_ref() {
             if repo.worktree_is_dirty(path)? {
@@ -201,13 +213,32 @@ fn remove_materialized_worktree(
         return Ok(true);
     }
 
-    let repo = repo.with_context(|| {
-        format!(
+    // Force must never delete a directory whose ownership cannot be proven —
+    // the registry path may have been reused by another repo. Instead of
+    // erroring (which would dead-end the whole forced cleanup), leave the
+    // path on disk and let service/process/state cleanup proceed.
+    let Some(repo) = repo else {
+        if force {
+            log::warn!(
+                "Live VCS worktree metadata is unavailable; leaving '{}' on disk and continuing forced cleanup",
+                path.display()
+            );
+            return Ok(false);
+        }
+        anyhow::bail!(
             "Refusing to remove '{}' because live VCS worktree metadata is unavailable",
             path.display()
-        )
-    })?;
+        );
+    };
     if !vcs_owns_worktree_path(repo, workspace_name, path)? {
+        if force {
+            log::warn!(
+                "'{}' is not owned by workspace '{}' in live VCS metadata; leaving it on disk and continuing forced cleanup",
+                path.display(),
+                workspace_name
+            );
+            return Ok(false);
+        }
         anyhow::bail!(
             "Refusing to remove '{}' because this project's live VCS metadata does not identify it as workspace '{}'",
             path.display(),
@@ -587,21 +618,60 @@ mod tests {
             Some(unrelated.path().to_path_buf()),
         )
         .unwrap();
-        assert!(!report.can_delete(true));
+        // Forced cleanup may proceed (services/processes/state), but the
+        // unproven directory itself must survive untouched.
+        assert!(!report.can_delete(false));
+        assert!(report.can_delete(true));
         assert!(report
             .issues
             .iter()
-            .any(|issue| { issue.code == "unverified_worktree_path" && !issue.force_overridable }));
+            .any(|issue| { issue.code == "unverified_worktree_path" && issue.force_overridable }));
 
-        let error =
+        let removed =
             remove_materialized_worktree(Some(&repo), "feature/stale", unrelated.path(), true)
-                .unwrap_err();
-        assert!(error.to_string().contains("live VCS metadata"));
+                .unwrap();
+        assert!(!removed);
         assert_eq!(
             std::fs::read_to_string(unrelated.path().join("keep.txt")).unwrap(),
             "must survive"
         );
         assert!(unrelated.path().join(".git").exists());
+
+        // Without force the same condition is still a hard error.
+        let error =
+            remove_materialized_worktree(Some(&repo), "feature/stale", unrelated.path(), false)
+                .unwrap_err();
+        assert!(error.to_string().contains("live VCS metadata"));
+
+        // No VCS metadata at all: forced cleanup skips, unforced errors.
+        assert!(
+            !remove_materialized_worktree(None, "feature/stale", unrelated.path(), true).unwrap()
+        );
+        assert!(
+            remove_materialized_worktree(None, "feature/stale", unrelated.path(), false).is_err()
+        );
+        assert!(unrelated.path().join(".git").exists());
+    }
+
+    #[test]
+    fn invalid_workspace_name_is_deletable_only_with_force() {
+        let project = tempfile::tempdir().unwrap();
+        GitRepository::init(project.path()).unwrap();
+
+        // Legal in git, outside devflow's supported alphabet.
+        let report = preflight_delete_workspace_with_registered_path(
+            &Config::default(),
+            project.path(),
+            "feat@123",
+            None,
+        )
+        .unwrap();
+        assert!(!report.can_delete(false));
+        assert!(report.can_delete(true));
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "invalid_workspace_name" && issue.force_overridable));
     }
 
     #[test]

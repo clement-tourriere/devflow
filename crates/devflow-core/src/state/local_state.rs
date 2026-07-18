@@ -93,6 +93,15 @@ fn lock_file_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.lock", path.display()))
 }
 
+/// Best-effort live worktree enumeration for one project; failures degrade to
+/// an empty (registry-only) view exactly like an unavailable project.
+fn scan_project_worktrees(project_dir: &Path) -> Vec<crate::vcs::WorktreeInfo> {
+    crate::vcs::detect_vcs_provider(project_dir)
+        .ok()
+        .and_then(|repo| repo.list_worktrees().ok())
+        .unwrap_or_default()
+}
+
 fn acquire_file_lock(lock_path: &Path) -> Result<FileLockGuard> {
     const MAX_ATTEMPTS: usize = 200;
     const SLEEP_MS: u64 = 25;
@@ -141,27 +150,76 @@ impl LocalStateManager {
         };
 
         if mgr.requires_state_migration() {
-            // Migration is a mutation too: another agent may register a
-            // workspace while this process starts. Reload and migrate while
-            // holding the same transaction lock used by normal CRUD so an old
-            // snapshot cannot overwrite that concurrent update. Fully current
-            // state remains a lock-free read path.
-            let lock_path = lock_file_path(&mgr.state_file_path);
-            let _lock = acquire_file_lock(&lock_path)?;
-            mgr.refresh_state()?;
+            // Dry-run the migration on a snapshot first, with every VCS scan
+            // done BEFORE the transaction lock is taken. Worktree enumeration
+            // can be slow (a subprocess per jj project, network filesystems),
+            // and `acquire_file_lock` steals locks older than 30s as stale —
+            // holding the lock across the scans would let a concurrent
+            // process steal it mid-migration and reintroduce the lost-update
+            // race the lock exists to prevent. Scans read VCS metadata, not
+            // local state, so they need no lock.
+            let mut probe = Self {
+                state_file_path: mgr.state_file_path.clone(),
+                state: mgr.state.clone(),
+            };
+            let mut probe_changed = probe.migrate_worktree_project_keys();
+            let prescanned = probe.scan_worktrees_for_identity_migration();
+            probe_changed |= probe.migrate_workspace_identities(&prescanned);
 
-            // One-time migration: older versions keyed state by the worktree
-            // directory, so the same project fragmented across worktrees.
-            let mut migrated = mgr.migrate_worktree_project_keys();
-            migrated |= mgr.migrate_workspace_identities();
-            if migrated {
-                if let Err(e) = mgr.save_state_unlocked() {
-                    log::warn!("Failed to persist local state migration: {}", e);
+            // Permanently unresolved entries keep `requires_state_migration`
+            // true on every construction; when reconciliation cannot make
+            // progress, skip the lock and the write entirely instead of
+            // serializing every devflow command on a no-op transaction.
+            if probe_changed {
+                // Migration is a mutation too: another agent may register a
+                // workspace while this process starts. Reload and migrate
+                // while holding the same transaction lock used by normal
+                // CRUD so an old snapshot cannot overwrite that concurrent
+                // update. The locked section is now pure in-memory work plus
+                // one atomic write — far inside the stale-lock window.
+                let lock_path = lock_file_path(&mgr.state_file_path);
+                let _lock = acquire_file_lock(&lock_path)?;
+                mgr.refresh_state()?;
+
+                // One-time migration: older versions keyed state by the
+                // worktree directory, so the same project fragmented across
+                // worktrees.
+                let mut migrated = mgr.migrate_worktree_project_keys();
+                migrated |= mgr.migrate_workspace_identities(&prescanned);
+                if migrated {
+                    if let Err(e) = mgr.save_state_unlocked() {
+                        log::warn!("Failed to persist local state migration: {}", e);
+                    }
                 }
             }
         }
 
         Ok(mgr)
+    }
+
+    /// Enumerate live worktrees for every project that still has unresolved
+    /// workspace identities. Run before taking the state lock: this is the
+    /// expensive part of migration and must not count against the stale-lock
+    /// window.
+    fn scan_worktrees_for_identity_migration(
+        &self,
+    ) -> HashMap<String, Vec<crate::vcs::WorktreeInfo>> {
+        let mut scans = HashMap::new();
+        for (project_path, project) in &self.state.projects {
+            let Some(workspaces) = project.workspaces.as_ref() else {
+                continue;
+            };
+            if workspaces.iter().all(|workspace| {
+                !workspace.service_key.is_empty() && workspace.raw_identity_verified
+            }) {
+                continue;
+            }
+            scans.insert(
+                project_path.clone(),
+                scan_project_worktrees(Path::new(project_path)),
+            );
+        }
+        scans
     }
 
     fn requires_state_migration(&self) -> bool {
@@ -234,7 +292,13 @@ impl LocalStateManager {
     /// a later run with live worktrees is the only authoritative opportunity to
     /// recover its raw names. Ambiguous legacy entries are retained rather than
     /// guessed.
-    fn migrate_workspace_identities(&mut self) -> bool {
+    /// `prescanned` carries worktree listings gathered before the state lock
+    /// was taken; projects absent from it (e.g. registered by a concurrent
+    /// process between snapshot and lock) are scanned inline.
+    fn migrate_workspace_identities(
+        &mut self,
+        prescanned: &HashMap<String, Vec<crate::vcs::WorktreeInfo>>,
+    ) -> bool {
         if self.state.schema_version >= CURRENT_STATE_SCHEMA_VERSION
             && self.state.projects.values().all(|project| {
                 project.workspaces.as_ref().is_none_or(|workspaces| {
@@ -259,10 +323,10 @@ impl LocalStateManager {
                 continue;
             }
 
-            let live_worktrees = crate::vcs::detect_vcs_provider(Path::new(project_path))
-                .ok()
-                .and_then(|repo| repo.list_worktrees().ok())
-                .unwrap_or_default();
+            let live_worktrees = prescanned
+                .get(project_path.as_str())
+                .cloned()
+                .unwrap_or_else(|| scan_project_worktrees(Path::new(project_path)));
             let live_names = live_worktrees
                 .iter()
                 .filter_map(|worktree| worktree.workspace.as_ref())
@@ -1203,7 +1267,7 @@ mod tests {
             },
         };
 
-        assert!(manager.migrate_workspace_identities());
+        assert!(manager.migrate_workspace_identities(&HashMap::new()));
         let migrated = manager
             .state
             .projects
@@ -1269,7 +1333,7 @@ mod tests {
             },
         };
 
-        assert!(manager.migrate_workspace_identities());
+        assert!(manager.migrate_workspace_identities(&HashMap::new()));
         let migrated = manager
             .state
             .projects
@@ -1346,7 +1410,7 @@ mod tests {
             },
         };
 
-        assert!(manager.migrate_workspace_identities());
+        assert!(manager.migrate_workspace_identities(&HashMap::new()));
         let adopted_key = crate::config::legacy_normalize_workspace_name("feature/auth");
         let key_of = |manager: &LocalStateManager, name: &str| {
             manager
@@ -1368,7 +1432,7 @@ mod tests {
 
         // The unresolved sibling keeps migration re-triggering; the second
         // pass must not touch the adopted key.
-        manager.migrate_workspace_identities();
+        manager.migrate_workspace_identities(&HashMap::new());
         assert_eq!(key_of(&manager, "feature/auth"), adopted_key);
         assert_ne!(
             key_of(&manager, "feature/auth"),
@@ -1409,7 +1473,7 @@ mod tests {
 
         // The schema can advance while the project is offline, but raw-name
         // recovery must remain retryable on later startups.
-        assert!(manager.migrate_workspace_identities());
+        assert!(manager.migrate_workspace_identities(&HashMap::new()));
         assert_eq!(manager.state.schema_version, CURRENT_STATE_SCHEMA_VERSION);
         assert!(
             !manager
@@ -1431,7 +1495,7 @@ mod tests {
         let worktree = container.path().join("auth-worktree");
         repo.create_worktree("feature/auth", &worktree).unwrap();
 
-        assert!(manager.migrate_workspace_identities());
+        assert!(manager.migrate_workspace_identities(&HashMap::new()));
         let migrated = manager
             .state
             .projects
@@ -1497,7 +1561,7 @@ mod tests {
             },
         };
 
-        assert!(manager.migrate_workspace_identities());
+        assert!(manager.migrate_workspace_identities(&HashMap::new()));
         let unresolved = manager
             .state
             .projects

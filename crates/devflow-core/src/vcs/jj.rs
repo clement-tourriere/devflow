@@ -433,13 +433,21 @@ impl VcsProvider for JjRepository {
             bail!("jj bookmark '{workspace}' does not exist");
         }
 
+        // A stale registration (directory removed on disk, e.g. manual
+        // `rm -rf`) would otherwise block re-creation of this bookmark
+        // forever. Mirror the git provider: prune before the exists check.
+        let _ = <Self as VcsProvider>::prune_worktrees(self);
+
         let internal_name = Self::workspace_name_for_branch(workspace);
-        if self
-            .workspace_entries()?
-            .iter()
-            .any(|entry| entry.internal_name == internal_name)
+        // Check through the compat mapping, not just the current naming
+        // scheme: a live workspace materialized by an older release must not
+        // be shadowed by a second workspace for the same bookmark.
+        let entries = self.workspace_entries()?;
+        let default = self.detect_default_bookmark()?;
+        if let Some(existing) =
+            Self::internal_workspace_for_raw(&entries, workspace, default.as_deref())
         {
-            bail!("jj workspace '{internal_name}' already exists");
+            bail!("jj workspace '{existing}' already exists");
         }
 
         let path_str = path.to_str().context("Worktree path is not valid UTF-8")?;
@@ -594,6 +602,30 @@ impl VcsProvider for JjRepository {
 
     fn main_worktree_dir(&self) -> Option<PathBuf> {
         Some(self.primary_root.clone())
+    }
+
+    fn prune_worktrees(&self) -> Result<()> {
+        // Mirror `git worktree prune`: forget workspace registrations whose
+        // working directory no longer exists. Without this, a manually
+        // deleted jj workspace directory stays registered forever —
+        // `worktree_path` keeps returning the dangling path and re-creation
+        // of the bookmark's workspace is permanently blocked. Only native
+        // registration metadata is touched: no directories, no bookmarks.
+        for entry in self.workspace_entries()? {
+            // `default` is jj's reserved primary workspace; never forget it,
+            // even if its recorded path looks missing (e.g. an unmounted
+            // volume) — losing the primary registration is unrecoverable.
+            if entry.internal_name == "default" || entry.path.exists() {
+                continue;
+            }
+            if let Err(error) = self.jj(&["workspace", "forget", &entry.internal_name]) {
+                log::debug!(
+                    "Failed to forget stale jj workspace '{}': {error:#}",
+                    entry.internal_name
+                );
+            }
+        }
+        Ok(())
     }
 
     // ── Hooks ──────────────────────────────────────────────────────

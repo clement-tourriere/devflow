@@ -349,9 +349,13 @@ impl DevflowContext {
         workspace_name: &str,
         project_dir: &std::path::Path,
     ) -> Result<String> {
-        let service_key = devflow_core::state::LocalStateManager::new()?
-            .resolve_workspace_service_key_by_dir(project_dir, workspace_name)?;
         let named = factory::resolve_provider(config, Some(service_name)).await?;
+        let service_key = factory::resolve_service_operation_key(
+            project_dir,
+            workspace_name,
+            named.provider.as_ref(),
+        )
+        .await?;
         named.provider.logs(&service_key, Some(200)).await
     }
 
@@ -450,9 +454,13 @@ impl DevflowContext {
         workspace_name: &str,
         project_dir: &std::path::Path,
     ) -> Result<String> {
-        let service_key = devflow_core::state::LocalStateManager::new()?
-            .resolve_workspace_service_key_by_dir(project_dir, workspace_name)?;
         let named = factory::resolve_provider(config, Some(service_name)).await?;
+        let service_key = factory::resolve_service_operation_key(
+            project_dir,
+            workspace_name,
+            named.provider.as_ref(),
+        )
+        .await?;
         named.provider.start_workspace(&service_key).await?;
         Ok(format!(
             "Started {} on workspace '{}'",
@@ -467,9 +475,13 @@ impl DevflowContext {
         workspace_name: &str,
         project_dir: &std::path::Path,
     ) -> Result<String> {
-        let service_key = devflow_core::state::LocalStateManager::new()?
-            .resolve_workspace_service_key_by_dir(project_dir, workspace_name)?;
         let named = factory::resolve_provider(config, Some(service_name)).await?;
+        let service_key = factory::resolve_service_operation_key(
+            project_dir,
+            workspace_name,
+            named.provider.as_ref(),
+        )
+        .await?;
         named.provider.stop_workspace(&service_key).await?;
         Ok(format!(
             "Stopped {} on workspace '{}'",
@@ -484,9 +496,13 @@ impl DevflowContext {
         workspace_name: &str,
         project_dir: &std::path::Path,
     ) -> Result<String> {
-        let service_key = devflow_core::state::LocalStateManager::new()?
-            .resolve_workspace_service_key_by_dir(project_dir, workspace_name)?;
         let named = factory::resolve_provider(config, Some(service_name)).await?;
+        let service_key = factory::resolve_service_operation_key(
+            project_dir,
+            workspace_name,
+            named.provider.as_ref(),
+        )
+        .await?;
         named.provider.reset_workspace(&service_key).await?;
         Ok(format!(
             "Reset {} on workspace '{}'",

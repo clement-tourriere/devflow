@@ -55,6 +55,21 @@ fn resolve_effective_service_key(
         .map_err(crate::commands::format_error)
 }
 
+/// Like [`resolve_effective_service_key`], but for operations that target an
+/// EXISTING provider-side workspace: an unregistered input that exactly names
+/// one (an orphan row echoed back from `list_service_workspaces`) is targeted
+/// verbatim so it stays reachable for cleanup instead of being re-derived
+/// into a namespace that never existed.
+async fn resolve_operation_service_key(
+    project_dir: &std::path::Path,
+    raw_workspace: &str,
+    provider: &dyn services::ServiceProvider,
+) -> Result<String, String> {
+    services::factory::resolve_service_operation_key(project_dir, raw_workspace, provider)
+        .await
+        .map_err(crate::commands::format_error)
+}
+
 #[tauri::command]
 pub async fn add_service(
     project_path: String,
@@ -260,7 +275,8 @@ pub async fn start_service(
         .await
         .map_err(crate::commands::format_error)?;
 
-    let service_key = resolve_effective_service_key(project_dir, &workspace_name)?;
+    let service_key =
+        resolve_operation_service_key(project_dir, &workspace_name, provider.as_ref()).await?;
     provider
         .start_workspace(&service_key)
         .await
@@ -287,7 +303,8 @@ pub async fn stop_service(
         .await
         .map_err(crate::commands::format_error)?;
 
-    let service_key = resolve_effective_service_key(project_dir, &workspace_name)?;
+    let service_key =
+        resolve_operation_service_key(project_dir, &workspace_name, provider.as_ref()).await?;
     provider
         .stop_workspace(&service_key)
         .await
@@ -562,7 +579,8 @@ pub async fn get_service_logs(
         .await
         .map_err(crate::commands::format_error)?;
 
-    let service_key = resolve_effective_service_key(project_dir, &workspace_name)?;
+    let service_key =
+        resolve_operation_service_key(project_dir, &workspace_name, provider.as_ref()).await?;
     provider
         .logs(&service_key, Some(200))
         .await
@@ -589,7 +607,8 @@ pub async fn reset_service(
         .await
         .map_err(crate::commands::format_error)?;
 
-    let service_key = resolve_effective_service_key(project_dir, &workspace_name)?;
+    let service_key =
+        resolve_operation_service_key(project_dir, &workspace_name, provider.as_ref()).await?;
     provider
         .reset_workspace(&service_key)
         .await
@@ -616,7 +635,8 @@ pub async fn delete_service_workspace(
         .await
         .map_err(crate::commands::format_error)?;
 
-    let service_key = resolve_effective_service_key(project_dir, &workspace_name)?;
+    let service_key =
+        resolve_operation_service_key(project_dir, &workspace_name, provider.as_ref()).await?;
     provider
         .delete_workspace(&service_key)
         .await

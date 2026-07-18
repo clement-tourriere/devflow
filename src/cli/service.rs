@@ -156,6 +156,25 @@ fn resolve_effective_service_key(
         .resolve_workspace_service_key_by_dir(&project_dir_for_config(config_path), raw_workspace)
 }
 
+/// Resolution for operations that target an EXISTING service workspace
+/// (delete/start/stop/reset/logs/connection/seed): registered names resolve
+/// through local state, and an unregistered input that exactly names a
+/// provider-side workspace (an orphan surfaced by inventory warnings) is
+/// targeted verbatim so it stays reachable for cleanup. Creation keeps
+/// [`resolve_effective_service_key`] so new workspaces never adopt orphans.
+async fn resolve_operation_service_key(
+    config_path: &Option<PathBuf>,
+    raw_workspace: &str,
+    provider: &dyn devflow_core::services::ServiceProvider,
+) -> Result<String> {
+    services::factory::resolve_service_operation_key(
+        &project_dir_for_config(config_path),
+        raw_workspace,
+        provider,
+    )
+    .await
+}
+
 fn raw_workspace_for_service_key(
     config: &Config,
     config_path: &Option<PathBuf>,
@@ -1142,7 +1161,9 @@ pub(super) async fn handle_service_provider_command(
             }
         }
         super::ServiceCommands::Delete { workspace_name } => {
-            let service_key = resolve_effective_service_key(config_path, &workspace_name)?;
+            let service_key =
+                resolve_operation_service_key(config_path, &workspace_name, provider.as_ref())
+                    .await?;
             let project_dir = project_dir_for_config(config_path);
             let hook_opts = devflow_core::workspace::LifecycleOptions {
                 hook_approval: if non_interactive || json_output {
@@ -1222,7 +1243,9 @@ pub(super) async fn handle_service_provider_command(
             }
         }
         super::ServiceCommands::Start { workspace_name } => {
-            let service_key = resolve_effective_service_key(config_path, &workspace_name)?;
+            let service_key =
+                resolve_operation_service_key(config_path, &workspace_name, provider.as_ref())
+                    .await?;
             if !provider.supports_lifecycle() {
                 anyhow::bail!(
                     "Service '{}' does not support start/stop lifecycle",
@@ -1266,7 +1289,9 @@ pub(super) async fn handle_service_provider_command(
             }
         }
         super::ServiceCommands::Stop { workspace_name } => {
-            let service_key = resolve_effective_service_key(config_path, &workspace_name)?;
+            let service_key =
+                resolve_operation_service_key(config_path, &workspace_name, provider.as_ref())
+                    .await?;
             if !provider.supports_lifecycle() {
                 anyhow::bail!(
                     "Service '{}' does not support start/stop lifecycle",
@@ -1287,7 +1312,9 @@ pub(super) async fn handle_service_provider_command(
             }
         }
         super::ServiceCommands::Reset { workspace_name } => {
-            let service_key = resolve_effective_service_key(config_path, &workspace_name)?;
+            let service_key =
+                resolve_operation_service_key(config_path, &workspace_name, provider.as_ref())
+                    .await?;
             if !provider.supports_lifecycle() {
                 anyhow::bail!(
                     "Service '{}' does not support reset",
@@ -1311,7 +1338,9 @@ pub(super) async fn handle_service_provider_command(
             workspace_name,
             format,
         } => {
-            let service_key = resolve_effective_service_key(config_path, &workspace_name)?;
+            let service_key =
+                resolve_operation_service_key(config_path, &workspace_name, provider.as_ref())
+                    .await?;
             let conn = provider.get_connection_info(&service_key).await?;
             // Global --json flag overrides --format
             let fmt = if json_output {
@@ -1453,7 +1482,9 @@ pub(super) async fn handle_service_provider_command(
             workspace_name,
             tail,
         } => {
-            let service_key = resolve_effective_service_key(config_path, &workspace_name)?;
+            let service_key =
+                resolve_operation_service_key(config_path, &workspace_name, provider.as_ref())
+                    .await?;
             let output = provider.logs(&service_key, tail).await?;
             if json_output {
                 println!(
@@ -1471,7 +1502,9 @@ pub(super) async fn handle_service_provider_command(
             workspace_name,
             from,
         } => {
-            let service_key = resolve_effective_service_key(config_path, &workspace_name)?;
+            let service_key =
+                resolve_operation_service_key(config_path, &workspace_name, provider.as_ref())
+                    .await?;
             if !json_output {
                 println!("Seeding workspace '{}' from '{}'...", workspace_name, from);
             }

@@ -1,5 +1,4 @@
 use devflow_core::processes::ProcessResult;
-use devflow_core::state::LocalStateManager;
 use devflow_core::vcs;
 use devflow_core::workspace::hooks::HookApprovalMode;
 use devflow_core::workspace::{self, LifecycleOptions};
@@ -56,10 +55,14 @@ pub async fn get_connection_info(
 
         // Accepts raw names AND provider-side keys — the UI's service rows
         // echo keys from list_service_workspaces back into this command.
-        let service_key = LocalStateManager::new()
-            .map_err(crate::commands::format_error)?
-            .resolve_workspace_or_key_by_dir(project_dir, &workspace_name)
-            .map_err(crate::commands::format_error)?;
+        // Unregistered orphan keys resolve verbatim so they stay inspectable.
+        let service_key = devflow_core::services::factory::resolve_service_operation_key(
+            project_dir,
+            &workspace_name,
+            provider.as_ref(),
+        )
+        .await
+        .map_err(crate::commands::format_error)?;
         let info = provider
             .get_connection_info(&service_key)
             .await
