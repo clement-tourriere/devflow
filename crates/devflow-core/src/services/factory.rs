@@ -868,6 +868,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Env vars are process-global; the awaits under this std lock are all
+    // in-process test doubles, so holding it cannot deadlock the runtime.
+    #[allow(clippy::await_holding_lock)]
     async fn operation_key_targets_provider_side_orphans_verbatim() {
         let _guard = crate::processes::PROCESS_TEST_ENV_LOCK
             .lock()
