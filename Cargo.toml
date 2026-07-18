@@ -12,7 +12,7 @@ aws-creds = { git = "https://github.com/durch/rust-s3", rev = "01b6ccb9babf85847
 
 [package]
 name = "devflow"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "Universal development environment branching tool — worktrees, databases, and stateful services"
 authors = ["Clément Tourrière <clement.tourriere@gmail.com>"]

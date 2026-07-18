@@ -1339,7 +1339,7 @@ checksum = "abd57806937c9cc163efc8ea3910e00a62e2aeb0b8119f1793a978088f8f6b04"
 
 [[package]]
 name = "devflow"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1369,7 +1369,7 @@ dependencies = [
 
 [[package]]
 name = "devflow-app"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1392,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "devflow-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1430,7 +1430,7 @@ dependencies = [
 
 [[package]]
 name = "devflow-proxy"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "bollard",
@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "devflow-terminal"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "portable-pty",

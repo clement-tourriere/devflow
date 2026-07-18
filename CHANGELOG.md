@@ -5,56 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## v0.7.0 (2026-07-18)
 
-### Fixed
+### BREAKING CHANGE
 
-- **Workspace creation freeze (GUI, and CLI after a repo move)** — `LocalProvider::ensure_project` self-deadlocked on its store mutex whenever the stored `project_path` mismatched the computed one (the `if let` scrutinee held the `MutexGuard` across the second `store()` lock). The GUI always mismatched because Finder launches apps with cwd `/`, freezing every db-service operation and leaving "Creating..." stuck forever. Regression-tested.
-- **Project identity no longer derives from process cwd** — `Config` now carries `project_root` (set at load time); project naming and orphan-detection paths use it instead of `std::env::current_dir()`, which was wrong in the GUI/daemon.
-- **GUI lifecycle commands are bounded** — create/switch time out after 5 minutes (delete already had a bound), and the frontend mirrors the timeouts, so a wedged backend surfaces as an error instead of a stuck dialog.
-- **Tray updates no longer hold a lock across main-thread dispatch** — the tray handle is cloned out of its mutex before `set_menu`/`set_tooltip`.
+- the docker-compose recipe is removed (devflow init
+imports compose app services as processes.daemons; data services are
+devflow services) and local-dev-setup is renamed to workspace-setup —
+both names now return migration messages. --json hook recipes emits
+RecipeDetectionInfo[] inside a project, and the install_recipe(s) GUI
+IPC now takes params/selections.
+- `devflow destroy --json` now emits a uniform
+`{name, success, workspaces_destroyed, error}` shape for every entry
+in `services` (previously `branches_deleted` for some providers) and
+includes `processes_stopped`.
 
-### Changed
+### Feat
 
-- **Single source of truth across CLI/TUI/GUI** — new core `Config::load_effective_for_dir` (full committed+global+local+env merge for a project dir) and `Config::overlay_local_state_services` (merge-by-name; fixes CLI/TUI wholesale-replace of committed services); GUI/daemon/factory/processes all use them. Workspace-list enrichment unified in `workspace::list::enriched_workspaces` (GUI uses it; a byte-identical CLI copy in `service.rs` was deleted). Delete safety checks (refuse main / currently-checked-out workspace) moved into core `delete_workspace`. GUI/TUI creates route through core `create_workspace`.
-- **Fewer subprocesses** — `git worktree prune`, staged diff/summary now use git2 (also from the GUI); `id -u/-g` and `ps -o pgid=` replaced with `nix` calls; the `http` hook action uses reqwest instead of `curl`; the `docker-exec` hook action uses the Docker Engine API (bollard) with a CLI fallback.
-- **Hook recipes are now intent-based and detection-driven** — installing a recipe probes the project (files present, binaries actually installed via PATH/mise shims), proposes parameter values, and generates one lean, editable hook set instead of a guarded variant per possible tool. New recipe set: `env-file` (write per-workspace service URLs via approval-free `write-env`), `patch-config` (parameterized find-and-replace, repeatable), `db-migrate` (one editable command; detects prisma/rails/django/alembic/sqlx/diesel/dbmate), `install-deps` (picks *the* package manager: lockfile + installed binary), `workspace-setup` (renamed from `local-dev-setup`; only detected parts), plus `sync-ai-configs` and `multiplexer-session`. CLI: `devflow hook recipes` shows per-project detection, `devflow hook install` gains `--param KEY=VALUE`/`--yes`, new `devflow hook setup` wizard. GUI: detection-driven recipes tab with parameter forms and live preview; hardcoded "Local Dev"/"Docker Dev" profiles replaced by a "Suggested for this project" panel. **Breaking:** `--json hook recipes` output shape changed (now `RecipeDetectionInfo[]` inside a project); GUI `install_recipe(s)` IPC now takes params/selections.
+- **hooks**: rework recipes into detection-driven generators
+- **cli**: add config-validate command
+- **sandbox**: enable landlock in default Linux features
+- **scripts**: add safety-gated PR auto-merge loop
 
-### Added
+### Fix
 
-- **`command_exists:<bin>` hook condition** — approval-free built-in condition, true when a binary resolves on PATH or in the mise shims dir (comma-separated alternatives = any). Used by generated `workspace-setup` hooks to guard `mise trust`/`direnv allow` on machines without the tool.
+- **workspace**: clear fail-closed dead ends left by the identity refactor
+- **processes**: probe wildcard addrs for port availability
+- **services**: resolve service workspaces by normalized name
+- **project**: stop processes and purge state on destroy
+- resolve workspace-creation store deadlock
+- bound pitchfork readiness in workspace lifecycle
+- **gui**: align Tauri package versions
+- **cli**: doctor exits non-zero and replace unreachable! catch-alls
+- **proxy**: drop blanket CORS and add configurable bind address
+- **services**: bind docker ports to loopback and harden secrets
+- **workspace**: validate names and roll back branch on worktree failure
+- **hooks**: gate http action and confine file actions to workspace
+- **deps**: adapt code for chore(deps): bump git2 from 0.20.2 to 0.21.0 (automated)
+- **deps**: adapt code for chore(deps): bump git2 from 0.20.2 to 0.21.0 (automated)
+- **mise**: drop redundant cargo tool entry
 
-### Removed
+### Refactor
 
-- **`docker-compose` hook recipe** — it overlapped with devflow's own process management: `devflow init` imports compose app services as `processes.daemons`, and database/cache containers are devflow services. `devflow hook install docker-compose` now explains the replacement.
-- Unused dependencies: `async-trait`, `rpassword` (root), `rpassword` (core), `log` (devflow-terminal), `chrono` (devflow-proxy, devflow-app).
-- Dead code: 14 unused functions across config/state/vcs/hooks/services, stale `#[allow(dead_code)]` attributes, and 5 unused GUI IPC commands (`add_project`, `init_project`, `get_service_status`, `validate_hook`, `preview_hook`) with their frontend wrappers.
+- **workspace**: split raw VCS names from service keys behind a shared inventory
+- focus devflow on workspaces
+- **config**: split config/mod.rs into loading and tests submodules
+- **cli**: finish splitting workspace.rs into 7 submodules
+- **cli**: split workspace.rs into context and exec submodules
 
-## [0.1.0] - 2026-03-06
+### Perf
 
-### Added
-
-- **CLI** — Full command-line interface: `init`, `switch`, `list`, `graph`, `link`, `remove`, `cleanup`, `status`, `doctor`, `capabilities`, `gc`.
-- **Multi-service support** — PostgreSQL, ClickHouse, MySQL, generic Docker containers, and plugin backends from a single config.
-- **Local Docker backend** — Docker containers with CoW storage (APFS clones, ZFS snapshots, Btrfs/XFS reflinks).
-- **Template backend** — PostgreSQL `CREATE DATABASE ... WITH TEMPLATE` for server-side branching.
-- **Cloud backends** — Neon, DBLab, and Xata API integration.
-- **Plugin backend** — Custom backends via JSON-over-stdio protocol.
-- **Git worktree management** — Creates worktree directories with configurable path templates and file copying.
-- **Jujutsu (jj) VCS support** — Auto-detects and supports Jujutsu alongside Git.
-- **Git hook integration** — Auto-creates/switches service workspaces on `git checkout` via installed hooks.
-- **Hook engine** — MiniJinja-templated lifecycle hooks with approval system and built-in recipes.
-- **AI tool config sync** — Auto-copies `.claude/`, `.cursor/`, `.opencode/`, `.agents/` into worktrees; `sync-ai-configs` merges back.
-- **AI commit messages** — `devflow commit --ai` generates commit messages via LLM (CLI-first, API fallback).
-- **AI agent integration** — `devflow agent status/context/skill` for managing AI coding agents in isolated workspaces; launch agents with `devflow switch -c <workspace> -x <command>`.
-- **Native reverse proxy** — Auto-discovers Docker containers and serves them via HTTPS `*.local` domains with auto-generated certificates.
-- **Desktop GUI** — Tauri 2 desktop app with React frontend for managing projects, workspaces, services, hooks, proxy, and configuration.
-- **TUI** — Ratatui-based terminal dashboard.
-- **Seed support** — Seed databases from PostgreSQL URLs, local dump files, or S3.
-- **Shell integration** — `eval "$(devflow shell-init)"` for automatic `cd` into worktrees.
-- **Multiplexer support** — Terminal multiplexer integration (tmux, zellij) with `--open` flag.
-- **Three-tier configuration** — `.devflow.yml` (team) -> `.devflow.local.yml` (local) -> environment variables.
-- **JSON output + non-interactive mode** — For CI/CD and AI agent workflows.
+- **workspace**: speed up CoW workspace creation
 
 ## v0.6.0 (2026-06-12)
 
