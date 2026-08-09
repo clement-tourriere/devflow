@@ -391,7 +391,7 @@ pub(crate) async fn run_add_service_wizard(
         name: name.clone(),
         provider_type: provider_type.clone(),
         service_type: service_type.clone(),
-        auto_workspace: devflow_core::config::default_auto_branch(),
+        auto_workspace: devflow_core::config::default_auto_workspace(),
         default: false,
         local: if is_local {
             Some(devflow_core::config::LocalServiceConfig {
@@ -681,7 +681,7 @@ pub(super) async fn handle_service_dispatch(
                     name: name.clone(),
                     provider_type: provider_type.clone(),
                     service_type: service_type.clone(),
-                    auto_workspace: devflow_core::config::default_auto_branch(),
+                    auto_workspace: devflow_core::config::default_auto_workspace(),
                     default: false,
                     local: if is_local {
                         Some(devflow_core::config::LocalServiceConfig {
@@ -907,7 +907,7 @@ pub(super) async fn handle_service_dispatch(
                     }
                 }
                 println!(
-                    "Branches: {} total ({} running, {} stopped)",
+                    "Workspaces: {} total ({} running, {} stopped)",
                     workspaces.len(),
                     running,
                     stopped
@@ -1415,9 +1415,9 @@ pub(super) async fn handle_service_provider_command(
                 println!("This will permanently destroy the following:");
                 println!("  Project: {}", project_name);
                 if workspace_names.is_empty() {
-                    println!("  Branches: (none)");
+                    println!("  Workspaces: (none)");
                 } else {
-                    println!("  Branches ({}):", workspace_names.len());
+                    println!("  Workspaces ({}):", workspace_names.len());
                     for name in &workspace_names {
                         println!("    - {}", name);
                     }
@@ -1545,12 +1545,12 @@ pub(super) async fn handle_top_level_status(
         }))
     });
 
-    let context = super::resolve_branch_context();
+    let context = super::resolve_workspace_context();
     let context_differs_from_cwd = |cwd: &str| {
-        let Some(context_branch) = context.context_branch.as_deref() else {
+        let Some(context_workspace) = context.context_workspace.as_deref() else {
             return false;
         };
-        context.source == super::BranchContextSource::EnvOverride && context_branch != cwd
+        context.source == super::WorkspaceContextSource::EnvOverride && context_workspace != cwd
     };
 
     // Show service info — services are optional; show VCS/project info even without them
@@ -1592,11 +1592,11 @@ pub(super) async fn handle_top_level_status(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "vcs": vcs_info,
-                    "devflow_context_branch": context.context_branch.clone(),
+                    "devflow_context_branch": context.context_workspace.clone(),
                     "context_source": match context.source {
-                        super::BranchContextSource::EnvOverride => "env",
-                        super::BranchContextSource::Cwd => "cwd",
-                        super::BranchContextSource::None => "none",
+                        super::WorkspaceContextSource::EnvOverride => "env",
+                        super::WorkspaceContextSource::Cwd => "cwd",
+                        super::WorkspaceContextSource::None => "none",
                     },
                     "services": services_map,
                 }))?
@@ -1608,10 +1608,10 @@ pub(super) async fn handle_top_level_status(
                     info["provider"].as_str().unwrap_or("unknown"),
                     info["workspace"].as_str().unwrap_or("unknown")
                 );
-                if let Some(context_branch) = context.context_branch.as_deref() {
+                if let Some(context_workspace) = context.context_workspace.as_deref() {
                     let cwd = info["workspace"].as_str().unwrap_or("unknown");
                     if context_differs_from_cwd(cwd) {
-                        println!("Devflow context workspace: {}", context_branch);
+                        println!("Devflow context workspace: {}", context_workspace);
                     }
                 }
                 println!();
@@ -1638,7 +1638,7 @@ pub(super) async fn handle_top_level_status(
                     }
                 }
                 println!(
-                    "  Branches: {} total ({} running, {} stopped)",
+                    "  Workspaces: {} total ({} running, {} stopped)",
                     workspaces.len(),
                     running,
                     stopped
@@ -1684,11 +1684,11 @@ pub(super) async fn handle_top_level_status(
                         "{}",
                         serde_json::to_string_pretty(&serde_json::json!({
                             "vcs": vcs_info,
-                            "devflow_context_branch": context.context_branch.clone(),
+                            "devflow_context_branch": context.context_workspace.clone(),
                             "context_source": match context.source {
-                                super::BranchContextSource::EnvOverride => "env",
-                                super::BranchContextSource::Cwd => "cwd",
-                                super::BranchContextSource::None => "none",
+                                super::WorkspaceContextSource::EnvOverride => "env",
+                                super::WorkspaceContextSource::Cwd => "cwd",
+                                super::WorkspaceContextSource::None => "none",
                             },
                             "service": service_status,
                         }))?
@@ -1700,16 +1700,16 @@ pub(super) async fn handle_top_level_status(
                             info["provider"].as_str().unwrap_or("unknown"),
                             info["workspace"].as_str().unwrap_or("unknown")
                         );
-                        if let Some(context_branch) = context.context_branch.as_deref() {
+                        if let Some(context_workspace) = context.context_workspace.as_deref() {
                             let cwd = info["workspace"].as_str().unwrap_or("unknown");
                             if context_differs_from_cwd(cwd) {
-                                println!("Devflow context workspace: {}", context_branch);
+                                println!("Devflow context workspace: {}", context_workspace);
                             }
                         }
                         println!();
-                    } else if let Some(context_branch) = context.context_branch.as_deref() {
-                        if context.source == super::BranchContextSource::EnvOverride {
-                            println!("Devflow context workspace: {}", context_branch);
+                    } else if let Some(context_workspace) = context.context_workspace.as_deref() {
+                        if context.source == super::WorkspaceContextSource::EnvOverride {
+                            println!("Devflow context workspace: {}", context_workspace);
                             println!();
                         }
                     }
@@ -1728,7 +1728,7 @@ pub(super) async fn handle_top_level_status(
                         }
                     }
                     println!(
-                        "  Branches: {} total ({} running, {} stopped)",
+                        "  Workspaces: {} total ({} running, {} stopped)",
                         workspaces.len(),
                         running,
                         stopped
@@ -1742,11 +1742,11 @@ pub(super) async fn handle_top_level_status(
                         "{}",
                         serde_json::to_string_pretty(&serde_json::json!({
                             "vcs": vcs_info,
-                            "devflow_context_branch": context.context_branch.clone(),
+                            "devflow_context_branch": context.context_workspace.clone(),
                             "context_source": match context.source {
-                                super::BranchContextSource::EnvOverride => "env",
-                                super::BranchContextSource::Cwd => "cwd",
-                                super::BranchContextSource::None => "none",
+                                super::WorkspaceContextSource::EnvOverride => "env",
+                                super::WorkspaceContextSource::Cwd => "cwd",
+                                super::WorkspaceContextSource::None => "none",
                             },
                             "services": null,
                         }))?
@@ -1758,16 +1758,16 @@ pub(super) async fn handle_top_level_status(
                             info["provider"].as_str().unwrap_or("unknown"),
                             info["workspace"].as_str().unwrap_or("unknown")
                         );
-                        if let Some(context_branch) = context.context_branch.as_deref() {
+                        if let Some(context_workspace) = context.context_workspace.as_deref() {
                             let cwd = info["workspace"].as_str().unwrap_or("unknown");
                             if context_differs_from_cwd(cwd) {
-                                println!("Devflow context workspace: {}", context_branch);
+                                println!("Devflow context workspace: {}", context_workspace);
                             }
                         }
                         println!();
-                    } else if let Some(context_branch) = context.context_branch.as_deref() {
-                        if context.source == super::BranchContextSource::EnvOverride {
-                            println!("Devflow context workspace: {}", context_branch);
+                    } else if let Some(context_workspace) = context.context_workspace.as_deref() {
+                        if context.source == super::WorkspaceContextSource::EnvOverride {
+                            println!("Devflow context workspace: {}", context_workspace);
                             println!();
                         }
                     }
@@ -1899,7 +1899,7 @@ pub(super) async fn handle_multi_service_aggregation(
                         }
                     }
                     println!(
-                        "  Branches: {} total ({} running, {} stopped)",
+                        "  Workspaces: {} total ({} running, {} stopped)",
                         workspaces.len(),
                         running,
                         stopped
@@ -2024,7 +2024,7 @@ async fn handle_orchestrated_mutation(
                 let json_results: Vec<_> = results
                     .iter()
                     .map(|r| {
-                        let branch_info = r.branch_info.as_ref().map(|info| {
+                        let workspace_info = r.workspace_info.as_ref().map(|info| {
                             public_workspace_info(
                                 config,
                                 config_path,
@@ -2045,7 +2045,7 @@ async fn handle_orchestrated_mutation(
                             "service": r.service_name,
                             "success": r.success,
                             "message": message,
-                            "branch_info": branch_info,
+                            "branch_info": workspace_info,
                         })
                     })
                     .collect();
@@ -2067,7 +2067,7 @@ async fn handle_orchestrated_mutation(
                             "[{}] Created workspace '{}'",
                             r.service_name, workspace_name
                         );
-                        if let Some(ref info) = r.branch_info {
+                        if let Some(ref info) = r.workspace_info {
                             if let Some(ref state) = info.state {
                                 println!("  State: {}", state);
                             }

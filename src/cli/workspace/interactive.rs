@@ -4,7 +4,7 @@ use devflow_core::services;
 use devflow_core::state::LocalStateManager;
 use devflow_core::vcs;
 
-use super::context::resolve_branch_context;
+use super::context::resolve_workspace_context;
 
 /// Returns the workspace that was switched to, or `None` when the picker was
 /// cancelled/failed — callers must not run follow-up actions (e.g. `-x`) in
@@ -18,8 +18,8 @@ pub(super) async fn handle_interactive_switch(
 
     // 1) VCS workspaces (authoritative source)
     if let Ok(vcs_repo) = vcs::detect_vcs_provider(".") {
-        if let Ok(vcs_branches) = vcs_repo.list_workspaces() {
-            for workspace in vcs_branches {
+        if let Ok(vcs_workspaces) = vcs_repo.list_workspaces() {
+            for workspace in vcs_workspaces {
                 vcs_workspace_names.insert(workspace.name.clone());
                 workspace_names.insert(workspace.name);
             }
@@ -42,8 +42,8 @@ pub(super) async fn handle_interactive_switch(
     if !config.resolve_services().is_empty() {
         if let Ok(providers) = services::factory::create_all_providers(config).await {
             for named in providers {
-                if let Ok(service_branches) = named.provider.list_workspaces().await {
-                    for workspace in service_branches {
+                if let Ok(service_workspaces) = named.provider.list_workspaces().await {
+                    for workspace in service_workspaces {
                         if vcs_workspace_names.is_empty()
                             || vcs_workspace_names.contains(&workspace.name)
                         {
@@ -60,17 +60,17 @@ pub(super) async fn handle_interactive_switch(
         workspace_names.insert(config.git.main_workspace.clone());
     }
 
-    let context = resolve_branch_context();
-    let current_git = context.cwd_branch.clone();
+    let context = resolve_workspace_context();
+    let current_git = context.cwd_workspace.clone();
 
     // Create workspace items with display info
-    let mut branch_items: Vec<BranchItem> = workspace_names
+    let mut workspace_items: Vec<WorkspaceItem> = workspace_names
         .iter()
         .map(|workspace| {
             let is_cwd = current_git.as_deref() == Some(workspace.as_str());
-            let is_context = context.context_branch.as_deref() == Some(workspace.as_str());
+            let is_context = context.context_workspace.as_deref() == Some(workspace.as_str());
 
-            BranchItem {
+            WorkspaceItem {
                 name: workspace.clone(),
                 display_name: workspace.clone(),
                 is_cwd,
@@ -80,7 +80,7 @@ pub(super) async fn handle_interactive_switch(
         .collect();
 
     // Add a "Create new workspace" option at the end
-    branch_items.push(BranchItem {
+    workspace_items.push(WorkspaceItem {
         name: "__create_new__".to_string(),
         display_name: "+ Create new workspace".to_string(),
         is_cwd: false,
@@ -88,9 +88,9 @@ pub(super) async fn handle_interactive_switch(
     });
 
     // Run interactive selector
-    match run_interactive_selector(branch_items) {
-        Ok(selected_branch) => {
-            let target = if selected_branch == "__create_new__" {
+    match run_interactive_selector(workspace_items) {
+        Ok(selected_workspace) => {
+            let target = if selected_workspace == "__create_new__" {
                 // Prompt for a new workspace name
                 let new_name = inquire::Text::new("New workspace name:")
                     .with_help_message("Enter the name for the new workspace")
@@ -102,7 +102,7 @@ pub(super) async fn handle_interactive_switch(
                 }
                 (new_name, true)
             } else {
-                (selected_branch, false)
+                (selected_workspace, false)
             };
             let (workspace, create) = target;
             super::handle_switch_command(
@@ -144,14 +144,14 @@ pub(super) async fn handle_interactive_switch(
 }
 
 #[derive(Clone)]
-struct BranchItem {
+struct WorkspaceItem {
     name: String,
     display_name: String,
     is_cwd: bool,
     is_context: bool,
 }
 
-fn run_interactive_selector(items: Vec<BranchItem>) -> Result<String, inquire::InquireError> {
+fn run_interactive_selector(items: Vec<WorkspaceItem>) -> Result<String, inquire::InquireError> {
     use inquire::Select;
 
     if items.is_empty() {

@@ -26,7 +26,7 @@ use devflow_core::vcs;
 
 // Re-export workspace types used by service.rs
 pub(crate) use workspace::{
-    ensure_default_workspace_registered, resolve_branch_context, BranchContextSource,
+    ensure_default_workspace_registered, resolve_workspace_context, WorkspaceContextSource,
 };
 
 /// Directory whose VCS checkout is the caller's live workspace context.
@@ -110,7 +110,7 @@ Examples:
         open: bool,
         #[arg(last = true, help = "Arguments passed to the -x command")]
         execute_args: Vec<String>,
-        #[arg(long, help = "Skip service branching (only VCS switch)")]
+        #[arg(long, help = "Skip service provisioning (only VCS switch)")]
         no_services: bool,
         #[arg(long, help = "Skip process orchestration")]
         no_processes: bool,
@@ -988,7 +988,7 @@ pub async fn handle_command(
             }
             // Workspace management commands that need service context
             _ => {
-                workspace::handle_branch_command(
+                workspace::handle_workspace_command(
                     cmd,
                     &mut config_merged,
                     json_output,

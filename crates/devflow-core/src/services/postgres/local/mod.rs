@@ -19,9 +19,9 @@ use super::super::{
     WorkspaceInfo,
 };
 use crate::config::{Config, DockerCustomSettings, LocalServiceConfig};
-use docker::{DockerRuntime, ReserveBranchSpec, StartBranchSpec};
-use model::BranchState;
-use state::{NewBranch, NewProject, Store};
+use docker::{DockerRuntime, ReserveWorkspaceSpec, StartWorkspaceSpec};
+use model::WorkspaceState;
+use state::{NewProject, NewWorkspace, Store};
 use storage::StorageCoordinator;
 
 const DEFAULT_IMAGE: &str = "postgres:17";
@@ -205,8 +205,8 @@ impl LocalProvider {
         // Apply changes (sync)
         if !changes.is_empty() {
             let store = self.store();
-            for (branch_id, new_state) in changes {
-                store.update_branch_state(&branch_id, new_state)?;
+            for (workspace_id, new_state) in changes {
+                store.update_workspace_state(&workspace_id, new_state)?;
             }
         }
 
@@ -236,7 +236,7 @@ impl ServiceProvider for LocalProvider {
             .store()
             .get_workspace_by_name(&project.id, workspace_name)?
         {
-            if existing.state == BranchState::Running {
+            if existing.state == WorkspaceState::Running {
                 return Ok(WorkspaceInfo {
                     name: existing.name,
                     created_at: None,
@@ -247,19 +247,19 @@ impl ServiceProvider for LocalProvider {
             }
         }
 
-        let branch_id = Uuid::new_v4().to_string();
+        let workspace_id = Uuid::new_v4().to_string();
         let data_dir = self
             .data_root
             .join("projects")
             .join(&project.id)
             .join("workspaces")
-            .join(&branch_id)
+            .join(&workspace_id)
             .join("pgdata");
 
         // Reserve container name and find port
         let reserved = self
             .runtime
-            .reserve_branch(&ReserveBranchSpec {
+            .reserve_workspace(&ReserveWorkspaceSpec {
                 project_name: self.project_name.clone(),
                 service_name: self.service_name.clone(),
                 workspace_name: workspace_name.to_string(),
@@ -281,8 +281,12 @@ impl ServiceProvider for LocalProvider {
             let workspaces = self.store().list_workspaces(&project.id)?;
             workspaces
                 .iter()
-                .find(|b| b.state == BranchState::Stopped)
-                .or_else(|| workspaces.iter().find(|b| b.state == BranchState::Running))
+                .find(|b| b.state == WorkspaceState::Stopped)
+                .or_else(|| {
+                    workspaces
+                        .iter()
+                        .find(|b| b.state == WorkspaceState::Running)
+                })
                 .cloned()
         };
 
@@ -300,7 +304,7 @@ impl ServiceProvider for LocalProvider {
             if parent_running {
                 let stop_started = std::time::Instant::now();
                 self.runtime
-                    .stop_branch_for_clone(&parent_workspace.container_name)
+                    .stop_workspace_for_clone(&parent_workspace.container_name)
                     .await?;
                 log::debug!(
                     "[{}] stopped parent '{}' for clone in {:.2?}",
@@ -313,7 +317,7 @@ impl ServiceProvider for LocalProvider {
             let clone_started = std::time::Instant::now();
             let result = self
                 .storage
-                .clone_branch_from_parent(&project, parent_workspace, &branch_id, &data_dir)
+                .clone_branch_from_parent(&project, parent_workspace, &workspace_id, &data_dir)
                 .await;
             log::debug!(
                 "[{}] cloned data dir from parent '{}' ({} storage) in {:.2?}",
@@ -342,17 +346,17 @@ impl ServiceProvider for LocalProvider {
             result?
         } else {
             self.storage
-                .create_empty_branch(&project, &branch_id, &data_dir)
+                .create_empty_branch(&project, &workspace_id, &data_dir)
                 .await?
         };
 
         // Persist to state
-        let workspace = self.store().create_workspace(NewBranch {
-            id: branch_id,
+        let workspace = self.store().create_workspace(NewWorkspace {
+            id: workspace_id,
             project_id: project.id.clone(),
             name: workspace_name.to_string(),
             parent_workspace_id: parent.as_ref().map(|p| p.id.clone()),
-            state: BranchState::Provisioning,
+            state: WorkspaceState::Provisioning,
             data_dir: data_dir.to_string_lossy().to_string(),
             container_name: reserved.container_name.clone(),
             port,
@@ -362,7 +366,7 @@ impl ServiceProvider for LocalProvider {
         // Start container
         let start_started = std::time::Instant::now();
         self.runtime
-            .start_workspace(&StartBranchSpec {
+            .start_workspace(&StartWorkspaceSpec {
                 image: project.image.clone(),
                 container_name: reserved.container_name.clone(),
                 data_dir,
@@ -395,7 +399,7 @@ impl ServiceProvider for LocalProvider {
 
         // Update state
         self.store()
-            .update_branch_state(&workspace.id, BranchState::Running)?;
+            .update_workspace_state(&workspace.id, WorkspaceState::Running)?;
 
         Ok(WorkspaceInfo {
             name: workspace_name.to_string(),
@@ -476,9 +480,9 @@ impl ServiceProvider for LocalProvider {
             .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
 
         // Start if stopped
-        if workspace.state == BranchState::Stopped {
+        if workspace.state == WorkspaceState::Stopped {
             self.runtime
-                .start_workspace(&StartBranchSpec {
+                .start_workspace(&StartWorkspaceSpec {
                     image: project.image.clone(),
                     container_name: workspace.container_name.clone(),
                     data_dir: PathBuf::from(&workspace.data_dir),
@@ -502,7 +506,7 @@ impl ServiceProvider for LocalProvider {
                 )
                 .await?;
             self.store()
-                .update_branch_state(&workspace.id, BranchState::Running)?;
+                .update_workspace_state(&workspace.id, WorkspaceState::Running)?;
         }
 
         Ok(WorkspaceInfo {
@@ -541,7 +545,7 @@ impl ServiceProvider for LocalProvider {
             .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
 
         self.runtime
-            .start_workspace(&StartBranchSpec {
+            .start_workspace(&StartWorkspaceSpec {
                 image: project.image.clone(),
                 container_name: workspace.container_name.clone(),
                 data_dir: PathBuf::from(&workspace.data_dir),
@@ -565,7 +569,7 @@ impl ServiceProvider for LocalProvider {
             )
             .await?;
         self.store()
-            .update_branch_state(&workspace.id, BranchState::Running)?;
+            .update_workspace_state(&workspace.id, WorkspaceState::Running)?;
 
         Ok(())
     }
@@ -582,7 +586,7 @@ impl ServiceProvider for LocalProvider {
             .stop_workspace(&workspace.container_name)
             .await?;
         self.store()
-            .update_branch_state(&workspace.id, BranchState::Stopped)?;
+            .update_workspace_state(&workspace.id, WorkspaceState::Stopped)?;
 
         Ok(())
     }
@@ -595,7 +599,7 @@ impl ServiceProvider for LocalProvider {
             .get_workspace_by_name(&project.id, workspace_name)?
             .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
 
-        let was_running = workspace.state == BranchState::Running;
+        let was_running = workspace.state == WorkspaceState::Running;
 
         // Stop container
         self.runtime
@@ -619,7 +623,7 @@ impl ServiceProvider for LocalProvider {
 
                 if parent_running {
                     self.runtime
-                        .stop_branch_for_clone(&parent_workspace.container_name)
+                        .stop_workspace_for_clone(&parent_workspace.container_name)
                         .await?;
                 }
 
@@ -647,7 +651,7 @@ impl ServiceProvider for LocalProvider {
 
                 if let Some(metadata) = &new_metadata {
                     self.store()
-                        .update_branch_storage_metadata(&workspace.id, Some(metadata))?;
+                        .update_workspace_storage_metadata(&workspace.id, Some(metadata))?;
                 }
             }
         }
@@ -655,7 +659,7 @@ impl ServiceProvider for LocalProvider {
         // Restart if it was running
         if was_running {
             self.runtime
-                .start_workspace(&StartBranchSpec {
+                .start_workspace(&StartWorkspaceSpec {
                     image: project.image.clone(),
                     container_name: workspace.container_name.clone(),
                     data_dir: PathBuf::from(&workspace.data_dir),
@@ -679,10 +683,10 @@ impl ServiceProvider for LocalProvider {
                 )
                 .await?;
             self.store()
-                .update_branch_state(&workspace.id, BranchState::Running)?;
+                .update_workspace_state(&workspace.id, WorkspaceState::Running)?;
         } else {
             self.store()
-                .update_branch_state(&workspace.id, BranchState::Stopped)?;
+                .update_workspace_state(&workspace.id, WorkspaceState::Stopped)?;
         }
 
         Ok(())

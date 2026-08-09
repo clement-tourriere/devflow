@@ -188,12 +188,12 @@ impl LocalDriver {
     }
 
     pub async fn remove_dir(&self, data_dir: &Path) -> anyhow::Result<()> {
-        let branch_root = branch_root_from_data_dir(data_dir)?;
-        if tokio::fs::metadata(branch_root).await.is_ok() {
-            tokio::fs::remove_dir_all(branch_root)
+        let workspace_root = branch_root_from_data_dir(data_dir)?;
+        if tokio::fs::metadata(workspace_root).await.is_ok() {
+            tokio::fs::remove_dir_all(workspace_root)
                 .await
                 .with_context(|| {
-                    format!("failed to delete directory '{}'", branch_root.display())
+                    format!("failed to delete directory '{}'", workspace_root.display())
                 })?;
         }
         Ok(())
@@ -207,11 +207,13 @@ fn branch_root_from_data_dir(data_dir: &Path) -> anyhow::Result<&Path> {
 }
 
 async fn recreate_dir(path: &Path) -> anyhow::Result<()> {
-    let branch_root = branch_root_from_data_dir(path)?;
-    if tokio::fs::metadata(branch_root).await.is_ok() {
-        tokio::fs::remove_dir_all(branch_root)
+    let workspace_root = branch_root_from_data_dir(path)?;
+    if tokio::fs::metadata(workspace_root).await.is_ok() {
+        tokio::fs::remove_dir_all(workspace_root)
             .await
-            .with_context(|| format!("failed to delete directory '{}'", branch_root.display()))?;
+            .with_context(|| {
+                format!("failed to delete directory '{}'", workspace_root.display())
+            })?;
     }
 
     tokio::fs::create_dir_all(path)

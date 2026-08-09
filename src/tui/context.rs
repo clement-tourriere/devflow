@@ -186,17 +186,17 @@ impl DevflowContext {
     // tasks. They only need a `Config` clone, not the full context.
 
     /// Fetch the canonical core workspace inventory and adapt it for the TUI.
-    pub async fn fetch_branches_bg(
+    pub async fn fetch_workspaces_bg(
         config: &Config,
         project_dir: &std::path::Path,
-    ) -> Result<BranchesData> {
+    ) -> Result<WorkspacesData> {
         let inventory =
             devflow_core::workspace::inventory::build_workspace_inventory(config, project_dir)
                 .await?;
         let workspaces = inventory
             .workspaces
             .into_iter()
-            .map(|workspace| EnrichedBranch {
+            .map(|workspace| EnrichedWorkspace {
                 name: workspace.name,
                 is_current: workspace.is_context,
                 is_default: workspace.is_default,
@@ -205,7 +205,7 @@ impl DevflowContext {
                 services: workspace
                     .services
                     .into_iter()
-                    .map(|service| BranchServiceState {
+                    .map(|service| WorkspaceServiceState {
                         service_name: service.name,
                         state: service.state,
                         database_name: service.database_name,
@@ -219,7 +219,7 @@ impl DevflowContext {
             })
             .collect();
 
-        Ok(BranchesData {
+        Ok(WorkspacesData {
             workspaces,
             flat_order: inventory.flat_order,
             warnings: inventory.warnings,

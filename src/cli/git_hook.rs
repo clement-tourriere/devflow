@@ -87,17 +87,20 @@ pub(super) async fn handle_git_hook(
         return Ok(());
     }
 
-    if let Some(current_git_branch) = vcs_repo.current_workspace()? {
-        log::info!("Git hook triggered for workspace: {}", current_git_branch);
+    if let Some(current_git_workspace) = vcs_repo.current_workspace()? {
+        log::info!(
+            "Git hook triggered for workspace: {}",
+            current_git_workspace
+        );
 
         // Worktree-only model: the hook's sole job is adopting a linked
         // worktree by provisioning services for its workspace. In-place
         // checkout switching is gone; the default workspace needs no
         // provisioning here.
-        if config.should_create_workspace(&current_git_branch) {
+        if config.should_create_workspace(&current_git_workspace) {
             super::workspace::handle_switch_command(
                 config,
-                &current_git_branch,
+                &current_git_workspace,
                 config_path,
                 false, // create — workspace already exists from git
                 None,  // from
@@ -114,7 +117,7 @@ pub(super) async fn handle_git_hook(
         } else {
             log::info!(
                 "Git workspace {} configured not to create service workspaces",
-                current_git_branch
+                current_git_workspace
             );
         }
     }

@@ -30,7 +30,7 @@ hooks:
 | --- | --- |
 | **Simple** — `name: "command"` | one-line shell commands |
 | **Extended** — `command:` + options (`working_dir`, `condition`, `environment`, `background`, `continue_on_error`) | anything needing context or control |
-| **Action** — `action: {type: …}` | built-in, shell-free operations: `write-env`, `write-file`, `copy`, `replace`, `docker-exec`, `http`, `notify`, `shell` |
+| **Action** — `action: {type: …}` | built-in, shell-free operations: `write-env`, `write-file`, `copy`, `replace`, `docker-exec`, `http`, `notify`, `sync-ai-configs`, `shell` |
 
 The full schema, every template variable, filter, condition, and action is in the [hooks reference](/devflow/reference/hooks/).
 

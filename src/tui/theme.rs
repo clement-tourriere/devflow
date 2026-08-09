@@ -30,10 +30,10 @@ pub const TEXT_PRIMARY: Color = Color::White;
 pub const TEXT_SECONDARY: Color = Color::DarkGray;
 pub const TEXT_MUTED: Color = Color::DarkGray;
 
-// Branches
-pub const BRANCH_CURRENT: Color = Color::Green;
-pub const BRANCH_DEFAULT: Color = Color::Yellow;
-pub const BRANCH_WORKTREE: Color = Color::Cyan;
+// Workspaces
+pub const WORKSPACE_CURRENT: Color = Color::Green;
+pub const WORKSPACE_DEFAULT: Color = Color::Yellow;
+pub const WORKSPACE_WORKTREE: Color = Color::Cyan;
 
 // Tree drawing
 pub const TREE_LINE: Color = Color::DarkGray;

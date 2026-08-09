@@ -17,7 +17,7 @@ pub struct Workspace {
     pub project_id: String,
     pub name: String,
     pub parent_workspace_id: Option<String>,
-    pub state: BranchState,
+    pub state: WorkspaceState,
     pub data_dir: String,
     pub container_name: String,
     pub port: u16,
@@ -58,14 +58,14 @@ impl StorageDriver {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum BranchState {
+pub enum WorkspaceState {
     Provisioning,
     Stopped,
     Running,
     Failed,
 }
 
-impl BranchState {
+impl WorkspaceState {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Provisioning => "provisioning",

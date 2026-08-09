@@ -59,7 +59,7 @@ pub struct App {
     modal: ModalState,
     status_message: Option<(String, bool, Instant)>, // (msg, is_error, when)
     running: bool,
-    open_branch_on_exit: Option<String>,
+    open_workspace_on_exit: Option<String>,
     tab_names: Vec<&'static str>,
     spinner_tick: usize,
     // Background task channel
@@ -82,7 +82,7 @@ impl App {
             modal: ModalState::None,
             status_message: None,
             running: true,
-            open_branch_on_exit: None,
+            open_workspace_on_exit: None,
             tab_names,
             spinner_tick: 0,
             bg_tx,
@@ -90,13 +90,13 @@ impl App {
         }
     }
 
-    pub fn take_open_branch_on_exit(&mut self) -> Option<String> {
-        self.open_branch_on_exit.take()
+    pub fn take_open_workspace_on_exit(&mut self) -> Option<String> {
+        self.open_workspace_on_exit.take()
     }
 
     /// Kick off initial data loads on background tasks.
     fn load_initial_data(&mut self) {
-        self.spawn_fetch_branches();
+        self.spawn_fetch_workspaces();
         self.spawn_fetch_services();
         self.spawn_fetch_capabilities();
         self.spawn_fetch_proxy_status();
@@ -125,14 +125,14 @@ impl App {
     // ── Background task spawners ────────────────────────────────────
 
     /// Spawn a background task to fetch workspaces.
-    fn spawn_fetch_branches(&self) {
+    fn spawn_fetch_workspaces(&self) {
         let config = self.context.config.clone();
         let project_dir = self.context.project_dir.clone();
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
-            match DevflowContext::fetch_branches_bg(&config, &project_dir).await {
+            match DevflowContext::fetch_workspaces_bg(&config, &project_dir).await {
                 Ok(data) => {
-                    let _ = tx.send(Action::DataLoaded(DataPayload::Branches(data)));
+                    let _ = tx.send(Action::DataLoaded(DataPayload::Workspaces(data)));
                 }
                 Err(e) => {
                     let _ = tx.send(Action::Error(format!("Failed to load workspaces: {}", e)));
@@ -314,7 +314,7 @@ impl App {
                             "Safe deletion of '{}' was blocked:\n\n{}\n\nForce deletion? This may discard uncommitted work or continue after partial cleanup failures.",
                             name, details
                         ),
-                        on_confirm: Box::new(Action::DeleteBranch {
+                        on_confirm: Box::new(Action::DeleteWorkspace {
                             name,
                             force: true,
                         }),
@@ -343,7 +343,7 @@ impl App {
                             "Safe deletion of '{}' stopped before removing its worktree/reference:\n\n{}\n\nForce cleanup now? Some service or process cleanup may remain incomplete.",
                             name, error
                         ),
-                        on_confirm: Box::new(Action::DeleteBranch { name, force: true }),
+                        on_confirm: Box::new(Action::DeleteWorkspace { name, force: true }),
                     });
                 }
                 Err(error) => {
@@ -629,15 +629,15 @@ impl App {
                 self.set_status(format!("Switching to workspace '{}'...", name), false);
                 self.spawn_switch_services(name.clone());
             }
-            Action::OpenBranchAndExit(ref name) => {
-                self.open_branch_on_exit = Some(name.clone());
+            Action::OpenWorkspaceAndExit(ref name) => {
+                self.open_workspace_on_exit = Some(name.clone());
                 self.running = false;
             }
-            Action::CreateBranch { ref name, ref from } => {
+            Action::CreateWorkspace { ref name, ref from } => {
                 self.set_status(format!("Creating workspace '{}'...", name), false);
                 self.spawn_create_workspace(name.clone(), from.clone());
             }
-            Action::DeleteBranch { ref name, force } => {
+            Action::DeleteWorkspace { ref name, force } => {
                 self.set_status(
                     format!(
                         "{} workspace '{}'...",
@@ -669,7 +669,7 @@ impl App {
                             name: svc_name.clone(),
                             provider_type: "local".to_string(),
                             service_type: svc_type.clone(),
-                            auto_workspace: devflow_core::config::default_auto_branch(),
+                            auto_workspace: devflow_core::config::default_auto_workspace(),
                             default: false,
                             local: if is_local {
                                 Some(devflow_core::config::LocalServiceConfig {
@@ -879,12 +879,12 @@ impl App {
                 {
                     let value = text.trim().to_string();
                     match target {
-                        InputTarget::CreateBranch { from } => {
+                        InputTarget::CreateWorkspace { from } => {
                             if !value.is_empty() {
-                                self.process_action(Action::CreateBranch { name: value, from });
+                                self.process_action(Action::CreateWorkspace { name: value, from });
                             }
                         }
-                        InputTarget::FilterBranches => self.workspaces.set_filter(value),
+                        InputTarget::FilterWorkspaces => self.workspaces.set_filter(value),
                         InputTarget::FilterLogsPicker => self.logs.set_filter(value),
                         InputTarget::AddServiceName { service_type } => {
                             if !value.is_empty() {
@@ -951,7 +951,7 @@ impl App {
                 self.set_status(msg.clone(), true);
             }
             Action::StartAllServices(ref workspace) => {
-                let services = self.workspaces.services_for_branch(workspace);
+                let services = self.workspaces.services_for_workspace(workspace);
                 if services.is_empty() {
                     self.set_status(
                         format!("No services to start on workspace '{}'", workspace),
@@ -972,7 +972,7 @@ impl App {
                 }
             }
             Action::StopAllServices(ref workspace) => {
-                let services = self.workspaces.services_for_branch(workspace);
+                let services = self.workspaces.services_for_workspace(workspace);
                 if services.is_empty() {
                     self.set_status(
                         format!("No services to stop on workspace '{}'", workspace),

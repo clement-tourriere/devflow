@@ -54,7 +54,7 @@ pub async fn run() -> Result<()> {
 
     run_result?;
 
-    if let Some(workspace_name) = app.take_open_branch_on_exit() {
+    if let Some(workspace_name) = app.take_open_workspace_on_exit() {
         let config = &app.context.config;
         let project_dir = app.context.project_dir.clone();
 

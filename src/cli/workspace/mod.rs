@@ -11,14 +11,14 @@ pub(crate) mod list;
 mod remove;
 
 pub(crate) use context::{
-    ensure_default_workspace_registered, resolve_branch_context, BranchContextSource,
+    ensure_default_workspace_registered, resolve_workspace_context, WorkspaceContextSource,
 };
 use interactive::handle_interactive_switch;
-use link::{handle_link_command, resolve_parent_for_branch_creation};
+use link::{handle_link_command, resolve_parent_for_workspace_creation};
 use list::handle_workspace_list;
 use remove::handle_remove_command;
 
-pub(super) async fn handle_branch_command(
+pub(super) async fn handle_workspace_command(
     cmd: super::Commands,
     config: &mut Config,
     json_output: bool,
@@ -65,9 +65,9 @@ pub(super) async fn handle_branch_command(
             let mut switched_workspace: Option<String> = None;
             if dry_run {
                 if let Some(ref workspace) = workspace_name {
-                    let context = resolve_branch_context();
+                    let context = resolve_workspace_context();
                     let default_parent = if create {
-                        from.clone().or_else(|| context.context_branch.clone())
+                        from.clone().or_else(|| context.context_workspace.clone())
                     } else {
                         None
                     };
@@ -428,8 +428,8 @@ pub(super) async fn handle_switch_command(
 ) -> Result<Option<serde_json::Value>> {
     // Resolve parent via CLI-specific interactive prompt (if needed)
     let from_workspace = if create {
-        let context = resolve_branch_context();
-        resolve_parent_for_branch_creation(
+        let context = resolve_workspace_context();
+        resolve_parent_for_workspace_creation(
             config,
             config_path,
             workspace_name,

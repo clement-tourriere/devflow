@@ -431,10 +431,10 @@ fn print_conditions_reference() {
 /// `devflow hook vars` — show available template variables with current values.
 async fn handle_hook_vars(
     config: &Config,
-    branch_override: Option<&str>,
+    workspace_override: Option<&str>,
     json_output: bool,
 ) -> Result<()> {
-    let workspace_name = if let Some(b) = branch_override {
+    let workspace_name = if let Some(b) = workspace_override {
         b.to_string()
     } else {
         match vcs::detect_vcs_provider(".") {
@@ -526,10 +526,10 @@ async fn handle_hook_vars(
 async fn handle_hook_render(
     config: &Config,
     template: &str,
-    branch_override: Option<&str>,
+    workspace_override: Option<&str>,
     json_output: bool,
 ) -> Result<()> {
-    let workspace_name = if let Some(b) = branch_override {
+    let workspace_name = if let Some(b) = workspace_override {
         b.to_string()
     } else {
         match vcs::detect_vcs_provider(".") {
@@ -566,7 +566,7 @@ async fn handle_hook_run(
     config: &Config,
     phase_str: &str,
     name_filter: Option<&str>,
-    branch_override: Option<&str>,
+    workspace_override: Option<&str>,
     json_output: bool,
     _non_interactive: bool,
 ) -> Result<()> {
@@ -590,7 +590,7 @@ async fn handle_hook_run(
     }
 
     // Determine workspace name: use override, or try current git workspace, or fallback
-    let workspace_name = if let Some(b) = branch_override {
+    let workspace_name = if let Some(b) = workspace_override {
         b.to_string()
     } else {
         match vcs::detect_vcs_provider(".") {
@@ -776,7 +776,7 @@ fn handle_hook_actions(json_output: bool) -> Result<()> {
     let actions = vec![
         ("shell", "Run a shell command", "action:\n  type: shell\n  command: \"npm ci\""),
         ("replace", "Find and replace in a file (plain or regex)", "action:\n  type: replace\n  file: config/database.yml\n  pattern: \"database: \\\\w+\"\n  replacement: \"database: {{ service['app-db'].database }}\"\n  regex: true"),
-        ("write-file", "Write content to a file", "action:\n  type: write-file\n  path: config/branch.txt\n  content: \"{{ workspace }}\""),
+        ("write-file", "Write content to a file", "action:\n  type: write-file\n  path: config/workspace.txt\n  content: \"{{ workspace }}\""),
         ("write-env", "Write a .env-style file with key=value pairs", "action:\n  type: write-env\n  path: .env.local\n  vars:\n    DATABASE_URL: \"{{ service['app-db'].url }}\"\n    WORKSPACE: \"{{ workspace }}\""),
         ("copy", "Copy a file", "action:\n  type: copy\n  from: .env.example\n  to: .env.local"),
         ("docker-exec", "Execute a command inside a Docker container", "action:\n  type: docker-exec\n  container: myapp-postgres\n  command: \"psql -U postgres -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto'\""),

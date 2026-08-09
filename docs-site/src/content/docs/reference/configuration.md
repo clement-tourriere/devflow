@@ -236,7 +236,7 @@ hooks:
       environment: { NODE_ENV: development }
     <hook-name>:            # action form
       action:
-        type: write-env     # write-env | write-file | copy | replace | docker-exec | http | notify | shell
+        type: write-env     # write-env | write-file | copy | replace | docker-exec | http | notify | sync-ai-configs | shell
         path: .env.local
         vars: { DATABASE_URL: "{{ service['app-db'].url }}" }
 ```

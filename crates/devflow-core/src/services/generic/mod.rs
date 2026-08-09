@@ -98,7 +98,7 @@ impl GenericDockerProvider {
     }
 
     /// Pick a port for a workspace. Uses port_range_start + offset based on existing containers.
-    async fn pick_port_for_branch(&self) -> anyhow::Result<u16> {
+    async fn pick_port_for_workspace(&self) -> anyhow::Result<u16> {
         let start = self.port_range_start.unwrap_or(56000);
         pick_available_port(&self.client, start).await
     }
@@ -345,7 +345,7 @@ impl ServiceProvider for GenericDockerProvider {
             ContainerStatus::NotFound | ContainerStatus::Other(_) => {}
         }
 
-        let port = self.pick_port_for_branch().await?;
+        let port = self.pick_port_for_workspace().await?;
         self.create_and_start_container(&container_name, port, workspace_name)
             .await?;
         self.wait_healthy(&container_name, Duration::from_secs(60))

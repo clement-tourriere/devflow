@@ -433,6 +433,7 @@ Current built-in action types include:
 - `docker-exec`
 - `http`
 - `notify`
+- `sync-ai-configs`
 
 ### `devflow hook recipes`
 

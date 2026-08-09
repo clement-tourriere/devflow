@@ -6,49 +6,49 @@ use devflow_core::state::LocalStateManager;
 use devflow_core::vcs;
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum BranchContextSource {
+pub(crate) enum WorkspaceContextSource {
     EnvOverride,
     Cwd,
     None,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct BranchContext {
+pub(crate) struct WorkspaceContext {
     /// Exact raw VCS workspace used as devflow context (env override or cwd).
-    pub(crate) context_branch: Option<String>,
+    pub(crate) context_workspace: Option<String>,
     /// Raw VCS workspace currently checked out in this directory.
-    pub(crate) cwd_branch: Option<String>,
-    pub(crate) source: BranchContextSource,
+    pub(crate) cwd_workspace: Option<String>,
+    pub(crate) source: WorkspaceContextSource,
 }
 
-pub(crate) fn resolve_branch_context() -> BranchContext {
-    let cwd_branch = vcs::detect_vcs_provider(".")
+pub(crate) fn resolve_workspace_context() -> WorkspaceContext {
+    let cwd_workspace = vcs::detect_vcs_provider(".")
         .ok()
         .and_then(|repo| repo.current_workspace().ok().flatten());
 
-    if let Ok(env_branch) = std::env::var("DEVFLOW_CONTEXT_BRANCH") {
-        let trimmed = env_branch.trim();
+    if let Ok(env_value) = std::env::var("DEVFLOW_CONTEXT_BRANCH") {
+        let trimmed = env_value.trim();
         if !trimmed.is_empty() {
-            return BranchContext {
-                context_branch: Some(trimmed.to_string()),
-                cwd_branch,
-                source: BranchContextSource::EnvOverride,
+            return WorkspaceContext {
+                context_workspace: Some(trimmed.to_string()),
+                cwd_workspace,
+                source: WorkspaceContextSource::EnvOverride,
             };
         }
     }
 
-    if let Some(cwd) = cwd_branch.as_deref() {
-        return BranchContext {
-            context_branch: Some(cwd.to_string()),
-            cwd_branch,
-            source: BranchContextSource::Cwd,
+    if let Some(cwd) = cwd_workspace.as_deref() {
+        return WorkspaceContext {
+            context_workspace: Some(cwd.to_string()),
+            cwd_workspace,
+            source: WorkspaceContextSource::Cwd,
         };
     }
 
-    BranchContext {
-        context_branch: None,
-        cwd_branch: None,
-        source: BranchContextSource::None,
+    WorkspaceContext {
+        context_workspace: None,
+        cwd_workspace: None,
+        source: WorkspaceContextSource::None,
     }
 }
 

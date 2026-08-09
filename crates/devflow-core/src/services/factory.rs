@@ -497,7 +497,7 @@ pub struct OrchestrationResult {
     pub service_name: String,
     pub success: bool,
     pub message: String,
-    pub branch_info: Option<super::WorkspaceInfo>,
+    pub workspace_info: Option<super::WorkspaceInfo>,
 }
 
 /// Create a workspace across all auto-workspace services.
@@ -526,13 +526,13 @@ pub async fn orchestrate_create(
                 service_name: named.name.clone(),
                 success: true,
                 message: format!("Created workspace '{}' on {}", workspace_name, named.name),
-                branch_info: Some(info),
+                workspace_info: Some(info),
             },
             Err(e) => OrchestrationResult {
                 service_name: named.name.clone(),
                 success: false,
                 message: format!("Failed to create workspace on {}: {}", named.name, e),
-                branch_info: None,
+                workspace_info: None,
             },
         };
         log::debug!(
@@ -560,7 +560,7 @@ pub async fn orchestrate_delete(
 
     for named in &providers {
         // Skip services that don't have this workspace
-        let has_branch = match named.provider.workspace_exists(workspace_name).await {
+        let has_workspace = match named.provider.workspace_exists(workspace_name).await {
             Ok(v) => v,
             Err(e) => {
                 results.push(OrchestrationResult {
@@ -570,13 +570,13 @@ pub async fn orchestrate_delete(
                         "Failed to check workspace existence on {}: {}",
                         named.name, e
                     ),
-                    branch_info: None,
+                    workspace_info: None,
                 });
                 continue;
             }
         };
 
-        if !has_branch {
+        if !has_workspace {
             results.push(OrchestrationResult {
                 service_name: named.name.clone(),
                 success: true,
@@ -584,7 +584,7 @@ pub async fn orchestrate_delete(
                     "Workspace '{}' not found on {} (skipped)",
                     workspace_name, named.name
                 ),
-                branch_info: None,
+                workspace_info: None,
             });
             continue;
         }
@@ -594,13 +594,13 @@ pub async fn orchestrate_delete(
                 service_name: named.name.clone(),
                 success: true,
                 message: format!("Deleted workspace '{}' on {}", workspace_name, named.name),
-                branch_info: None,
+                workspace_info: None,
             },
             Err(e) => OrchestrationResult {
                 service_name: named.name.clone(),
                 success: false,
                 message: format!("Failed to delete workspace on {}: {}", named.name, e),
-                branch_info: None,
+                workspace_info: None,
             },
         };
         results.push(result);
@@ -640,7 +640,7 @@ pub async fn orchestrate_switch(
                         "Failed to check workspace existence on {}: {}",
                         named.name, e
                     ),
-                    branch_info: None,
+                    workspace_info: None,
                 };
             }
         };
@@ -659,13 +659,13 @@ pub async fn orchestrate_switch(
                         "Created and switched to workspace '{}' on {}",
                         workspace_name, named.name
                     ),
-                    branch_info: Some(info),
+                    workspace_info: Some(info),
                 },
                 Err(e) => OrchestrationResult {
                     service_name: named.name.clone(),
                     success: false,
                     message: format!("Failed to create workspace on {}: {}", named.name, e),
-                    branch_info: None,
+                    workspace_info: None,
                 },
             }
         } else {
@@ -678,13 +678,13 @@ pub async fn orchestrate_switch(
                         "Switched to workspace '{}' on {}",
                         workspace_name, named.name
                     ),
-                    branch_info: Some(info),
+                    workspace_info: Some(info),
                 },
                 Err(e) => OrchestrationResult {
                     service_name: named.name.clone(),
                     success: false,
                     message: format!("Failed to switch workspace on {}: {}", named.name, e),
-                    branch_info: None,
+                    workspace_info: None,
                 },
             }
         };

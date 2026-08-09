@@ -27,19 +27,19 @@ pub enum ContainerStatus {
 }
 
 #[derive(Debug, Clone)]
-pub struct ReserveBranchSpec {
+pub struct ReserveWorkspaceSpec {
     pub project_name: String,
     pub service_name: String,
     pub workspace_name: String,
 }
 
 #[derive(Debug, Clone)]
-pub struct ReservedBranchRuntime {
+pub struct ReservedWorkspaceRuntime {
     pub container_name: String,
 }
 
 #[derive(Debug, Clone)]
-pub struct StartBranchSpec {
+pub struct StartWorkspaceSpec {
     pub image: String,
     pub container_name: String,
     pub data_dir: PathBuf,
@@ -95,10 +95,10 @@ impl DockerRuntime {
         }
     }
 
-    pub async fn reserve_branch(
+    pub async fn reserve_workspace(
         &self,
-        spec: &ReserveBranchSpec,
-    ) -> anyhow::Result<ReservedBranchRuntime> {
+        spec: &ReserveWorkspaceSpec,
+    ) -> anyhow::Result<ReservedWorkspaceRuntime> {
         let raw = format!(
             "devflow-{}-{}-{}",
             sanitize(&spec.project_name),
@@ -107,7 +107,7 @@ impl DockerRuntime {
         );
         let container_name = crate::services::local_docker::bounded_container_name(&raw);
 
-        Ok(ReservedBranchRuntime { container_name })
+        Ok(ReservedWorkspaceRuntime { container_name })
     }
 
     pub async fn ensure_image(&self, image: &str) -> anyhow::Result<()> {
@@ -143,13 +143,13 @@ impl DockerRuntime {
         }
     }
 
-    pub async fn start_workspace(&self, spec: &StartBranchSpec) -> anyhow::Result<()> {
+    pub async fn start_workspace(&self, spec: &StartWorkspaceSpec) -> anyhow::Result<()> {
         self.ensure_image(&spec.image).await?;
 
         match self.container_status(&spec.container_name).await? {
             ContainerStatus::Running => return Ok(()),
             ContainerStatus::Paused => {
-                self.unpause_branch(&spec.container_name).await?;
+                self.unpause_workspace(&spec.container_name).await?;
                 return Ok(());
             }
             ContainerStatus::Exited | ContainerStatus::Other(_) => {
@@ -245,7 +245,7 @@ impl DockerRuntime {
                 return Ok(())
             }
             ContainerStatus::Paused => {
-                self.unpause_branch(container_name).await?;
+                self.unpause_workspace(container_name).await?;
             }
             ContainerStatus::Running => {}
         }
@@ -268,13 +268,13 @@ impl DockerRuntime {
     /// Uses a generous timeout so postgres can complete its shutdown
     /// checkpoint — a SIGKILL here would make the clone a crash-state copy,
     /// which is exactly what stopping (instead of pausing) is meant to avoid.
-    pub async fn stop_branch_for_clone(&self, container_name: &str) -> anyhow::Result<()> {
+    pub async fn stop_workspace_for_clone(&self, container_name: &str) -> anyhow::Result<()> {
         match self.container_status(container_name).await? {
             ContainerStatus::NotFound | ContainerStatus::Exited | ContainerStatus::Other(_) => {
                 return Ok(())
             }
             ContainerStatus::Paused => {
-                self.unpause_branch(container_name).await?;
+                self.unpause_workspace(container_name).await?;
             }
             ContainerStatus::Running => {}
         }
@@ -296,7 +296,7 @@ impl DockerRuntime {
     pub async fn start_existing(&self, container_name: &str) -> anyhow::Result<()> {
         match self.container_status(container_name).await? {
             ContainerStatus::Running => Ok(()),
-            ContainerStatus::Paused => self.unpause_branch(container_name).await,
+            ContainerStatus::Paused => self.unpause_workspace(container_name).await,
             ContainerStatus::NotFound => {
                 anyhow::bail!("container '{container_name}' not found")
             }
@@ -311,7 +311,7 @@ impl DockerRuntime {
         }
     }
 
-    pub async fn unpause_branch(&self, container_name: &str) -> anyhow::Result<()> {
+    pub async fn unpause_workspace(&self, container_name: &str) -> anyhow::Result<()> {
         match self.container_status(container_name).await? {
             ContainerStatus::Paused => {}
             _ => return Ok(()),

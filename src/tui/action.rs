@@ -25,12 +25,12 @@ pub enum Action {
 
     // ── Workspace actions ──
     SwitchServices(String),
-    OpenBranchAndExit(String),
-    CreateBranch {
+    OpenWorkspaceAndExit(String),
+    CreateWorkspace {
         name: String,
         from: Option<String>,
     },
-    DeleteBranch {
+    DeleteWorkspace {
         name: String,
         force: bool,
     },
@@ -108,10 +108,10 @@ pub enum Action {
 /// Where to send input dialog results.
 #[derive(Debug, Clone)]
 pub enum InputTarget {
-    CreateBranch {
+    CreateWorkspace {
         from: Option<String>,
     },
-    FilterBranches,
+    FilterWorkspaces,
     FilterLogsPicker,
     /// Name input for a new service (service_type already selected)
     AddServiceName {
@@ -129,7 +129,7 @@ pub enum SelectTarget {
 /// Async data payloads that come back from background tasks.
 #[derive(Debug, Clone)]
 pub enum DataPayload {
-    Branches(BranchesData),
+    Workspaces(WorkspacesData),
     Services(ServicesData),
     Capabilities(CapabilitiesData),
     DoctorResults(Vec<DoctorEntry>),
@@ -142,7 +142,7 @@ pub enum DataPayload {
 
 /// Enriched workspace info combining VCS + service data.
 #[derive(Debug, Clone)]
-pub struct EnrichedBranch {
+pub struct EnrichedWorkspace {
     /// Exact VCS branch/bookmark name. Operations re-resolve the
     /// collision-safe backend key from state fail-closed; no key is carried.
     pub name: String,
@@ -150,7 +150,7 @@ pub struct EnrichedBranch {
     pub is_default: bool,
     pub worktree_path: Option<String>,
     pub health: String,
-    pub services: Vec<BranchServiceState>,
+    pub services: Vec<WorkspaceServiceState>,
     pub processes: Vec<devflow_core::processes::ProcessStatus>,
     /// Parent workspace name from the devflow workspace registry.
     pub parent: Option<String>,
@@ -158,7 +158,7 @@ pub struct EnrichedBranch {
 }
 
 #[derive(Debug, Clone)]
-pub struct BranchServiceState {
+pub struct WorkspaceServiceState {
     pub service_name: String,
     pub state: Option<String>,
     pub database_name: Option<String>,
@@ -169,8 +169,8 @@ pub struct BranchServiceState {
 }
 
 #[derive(Debug, Clone)]
-pub struct BranchesData {
-    pub workspaces: Vec<EnrichedBranch>,
+pub struct WorkspacesData {
+    pub workspaces: Vec<EnrichedWorkspace>,
     /// Canonical depth-first display order shared with the CLI and GUI.
     pub flat_order: Vec<devflow_core::workspace::inventory::FlatWorkspaceRow>,
     pub warnings: Vec<String>,

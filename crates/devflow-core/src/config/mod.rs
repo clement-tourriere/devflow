@@ -70,7 +70,7 @@ pub struct NamedServiceConfig {
     pub service_type: String,
     /// Whether to automatically workspace this service when git workspaces are created
     #[serde(
-        default = "default_auto_branch",
+        default = "default_auto_workspace",
         alias = "auto_branch",
         skip_serializing_if = "std::ops::Not::not"
     )]
@@ -232,7 +232,7 @@ fn is_default_service_type(s: &String) -> bool {
     s == "postgres"
 }
 
-pub fn default_auto_branch() -> bool {
+pub fn default_auto_workspace() -> bool {
     true
 }
 

@@ -141,18 +141,18 @@ impl ZfsDriver {
         &self,
         project: &Project,
         config: &ZfsProjectConfig,
-        branch_id: &str,
+        workspace_id: &str,
         data_dir: &Path,
     ) -> anyhow::Result<Option<String>> {
-        let branch_root = branch_root_from_data_dir(data_dir)?;
+        let workspace_root = branch_root_from_data_dir(data_dir)?;
         let project_dataset = project_dataset_name(config, &project.id);
-        let branch_dataset = branch_dataset_name(config, &project.id, branch_id);
+        let branch_dataset = branch_dataset_name(config, &project.id, workspace_id);
 
         ensure_dataset_exists(&project_dataset).await?;
         ensure_dataset_exists(&format!("{project_dataset}/workspaces")).await?;
         ensure_dataset_absent(&branch_dataset).await?;
 
-        create_dataset_with_mountpoint(&branch_dataset, branch_root).await?;
+        create_dataset_with_mountpoint(&branch_dataset, workspace_root).await?;
         tokio::fs::create_dir_all(data_dir)
             .await
             .with_context(|| format!("failed to create '{}'", data_dir.display()))?;
@@ -285,11 +285,11 @@ impl ZfsDriver {
             let _ = zfs_output_os(vec![OsString::from("destroy"), OsString::from(snapshot)]).await;
         }
 
-        let branch_root = branch_root_from_data_dir(Path::new(&workspace.data_dir))?;
-        if tokio::fs::metadata(branch_root).await.is_ok() {
-            tokio::fs::remove_dir_all(branch_root)
+        let workspace_root = branch_root_from_data_dir(Path::new(&workspace.data_dir))?;
+        if tokio::fs::metadata(workspace_root).await.is_ok() {
+            tokio::fs::remove_dir_all(workspace_root)
                 .await
-                .with_context(|| format!("failed to remove '{}'", branch_root.display()))?;
+                .with_context(|| format!("failed to remove '{}'", workspace_root.display()))?;
         }
 
         Ok(())
@@ -356,10 +356,10 @@ fn project_dataset_name(config: &ZfsProjectConfig, project_id: &str) -> String {
     format!("{}/projects/{}", config.root_dataset, project_id)
 }
 
-fn branch_dataset_name(config: &ZfsProjectConfig, project_id: &str, branch_id: &str) -> String {
+fn branch_dataset_name(config: &ZfsProjectConfig, project_id: &str, workspace_id: &str) -> String {
     format!(
         "{}/projects/{}/workspaces/{}",
-        config.root_dataset, project_id, branch_id
+        config.root_dataset, project_id, workspace_id
     )
 }
 

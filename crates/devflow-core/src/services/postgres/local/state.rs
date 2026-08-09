@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Context;
 use rusqlite::Connection;
 
-use super::model::{now_epoch_millis, BranchState, Project, StorageDriver, Workspace};
+use super::model::{now_epoch_millis, Project, StorageDriver, Workspace, WorkspaceState};
 
 #[derive(Debug)]
 pub struct NewProject {
@@ -15,12 +15,12 @@ pub struct NewProject {
 }
 
 #[derive(Debug)]
-pub struct NewBranch {
+pub struct NewWorkspace {
     pub id: String,
     pub project_id: String,
     pub name: String,
     pub parent_workspace_id: Option<String>,
-    pub state: BranchState,
+    pub state: WorkspaceState,
     pub data_dir: String,
     pub container_name: String,
     pub port: u16,
@@ -181,7 +181,7 @@ impl Store {
             "#,
         )?;
 
-        let rows = stmt.query_map([project_id], map_branch_row)?;
+        let rows = stmt.query_map([project_id], map_workspace_row)?;
         rows.collect::<Result<Vec<_>, _>>()
             .context("failed to list workspaces")
     }
@@ -207,7 +207,7 @@ impl Store {
 
         let mut rows = stmt.query(rusqlite::params![project_id, workspace_name])?;
         if let Some(row) = rows.next()? {
-            return Ok(Some(map_branch_row(row)?));
+            return Ok(Some(map_workspace_row(row)?));
         }
         drop(rows);
 
@@ -215,14 +215,14 @@ impl Store {
         if normalized != workspace_name {
             let mut rows = stmt.query(rusqlite::params![project_id, normalized])?;
             if let Some(row) = rows.next()? {
-                return Ok(Some(map_branch_row(row)?));
+                return Ok(Some(map_workspace_row(row)?));
             }
         }
 
         Ok(None)
     }
 
-    pub fn create_workspace(&self, input: NewBranch) -> anyhow::Result<Workspace> {
+    pub fn create_workspace(&self, input: NewWorkspace) -> anyhow::Result<Workspace> {
         let created_at = now_epoch_millis();
         // Store under the normalized name so lookups by raw VCS names match.
         let name = crate::config::workspace_service_key(&input.name);
@@ -253,33 +253,37 @@ impl Store {
         })
     }
 
-    pub fn update_branch_state(&self, branch_id: &str, state: BranchState) -> anyhow::Result<()> {
+    pub fn update_workspace_state(
+        &self,
+        workspace_id: &str,
+        state: WorkspaceState,
+    ) -> anyhow::Result<()> {
         self.conn
             .execute(
                 "UPDATE workspaces SET state = ?1 WHERE id = ?2",
-                rusqlite::params![state.as_str(), branch_id],
+                rusqlite::params![state.as_str(), workspace_id],
             )
             .context("failed to update workspace state")?;
         Ok(())
     }
 
-    pub fn update_branch_storage_metadata(
+    pub fn update_workspace_storage_metadata(
         &self,
-        branch_id: &str,
+        workspace_id: &str,
         storage_metadata: Option<&str>,
     ) -> anyhow::Result<()> {
         self.conn
             .execute(
                 "UPDATE workspaces SET storage_metadata = ?1 WHERE id = ?2",
-                rusqlite::params![storage_metadata, branch_id],
+                rusqlite::params![storage_metadata, workspace_id],
             )
             .context("failed to update workspace storage metadata")?;
         Ok(())
     }
 
-    pub fn delete_workspace(&self, branch_id: &str) -> anyhow::Result<()> {
+    pub fn delete_workspace(&self, workspace_id: &str) -> anyhow::Result<()> {
         self.conn
-            .execute("DELETE FROM workspaces WHERE id = ?1", [branch_id])
+            .execute("DELETE FROM workspaces WHERE id = ?1", [workspace_id])
             .context("failed to delete workspace")?;
         Ok(())
     }
@@ -304,9 +308,9 @@ impl Store {
     }
 }
 
-fn map_branch_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workspace> {
+fn map_workspace_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workspace> {
     let state_text: String = row.get(4)?;
-    let state = BranchState::from_str(&state_text).unwrap_or(BranchState::Failed);
+    let state = WorkspaceState::from_str(&state_text).unwrap_or(WorkspaceState::Failed);
 
     Ok(Workspace {
         id: row.get(0)?,

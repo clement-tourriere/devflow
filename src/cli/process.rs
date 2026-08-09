@@ -9,7 +9,7 @@ fn current_workspace(config: &Config, workspace: Option<String>) -> String {
     // Same context resolution as `devflow switch` and friends —
     // DEVFLOW_CONTEXT_BRANCH overrides, then the cwd checkout, then main.
     workspace
-        .or_else(|| super::workspace::resolve_branch_context().context_branch)
+        .or_else(|| super::workspace::resolve_workspace_context().context_workspace)
         .unwrap_or_else(|| config.git.main_workspace.clone())
 }
 

@@ -1,4 +1,4 @@
-use super::context::BranchContext;
+use super::context::WorkspaceContext;
 use anyhow::Result;
 use devflow_core::config::Config;
 use devflow_core::workspace::link::{LinkOptions, LinkWorkspaceResult};
@@ -10,7 +10,7 @@ fn services_failed(linked: &LinkWorkspaceResult) -> usize {
     linked.services.iter().filter(|r| !r.success).count()
 }
 
-pub(super) async fn link_branch_internal(
+pub(super) async fn link_workspace_internal(
     config: &Config,
     config_path: &Option<PathBuf>,
     workspace_name: &str,
@@ -45,7 +45,7 @@ pub(super) async fn handle_link_command(
     non_interactive: bool,
 ) -> Result<()> {
     let linked =
-        link_branch_internal(config, config_path, workspace_name, from, non_interactive).await?;
+        link_workspace_internal(config, config_path, workspace_name, from, non_interactive).await?;
 
     let failed = services_failed(&linked);
 
@@ -108,18 +108,18 @@ pub(super) async fn handle_link_command(
     Ok(())
 }
 
-pub(super) async fn resolve_parent_for_branch_creation(
+pub(super) async fn resolve_parent_for_workspace_creation(
     config: &Config,
     config_path: &Option<PathBuf>,
     target_workspace: &str,
     requested_parent: Option<&str>,
-    context: &BranchContext,
+    context: &WorkspaceContext,
     json_output: bool,
     non_interactive: bool,
 ) -> Result<Option<String>> {
     let mut parent = requested_parent
         .map(|p| p.to_string())
-        .or_else(|| context.context_branch.clone());
+        .or_else(|| context.context_workspace.clone());
 
     let Some(parent_name) = parent.as_deref() else {
         return Ok(None);
@@ -165,7 +165,7 @@ pub(super) async fn resolve_parent_for_branch_creation(
     .prompt()?;
 
     if choice.starts_with("Link '") {
-        let linked = link_branch_internal(config, config_path, parent_name, None, false).await?;
+        let linked = link_workspace_internal(config, config_path, parent_name, None, false).await?;
         let failed = services_failed(&linked);
         if failed > 0 {
             anyhow::bail!(
@@ -180,7 +180,9 @@ pub(super) async fn resolve_parent_for_branch_creation(
 
     if choice.starts_with("Use default workspace") {
         if !linked_workspace_exists(config_path, &default_workspace) {
-            match link_branch_internal(config, config_path, &default_workspace, None, false).await {
+            match link_workspace_internal(config, config_path, &default_workspace, None, false)
+                .await
+            {
                 Ok(linked) if services_failed(&linked) == 0 => {}
                 Ok(linked) => {
                     anyhow::bail!(
