@@ -757,6 +757,23 @@ fn resolve_env_var(value: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn shared_mysql_is_rejected_instead_of_building_local() {
+        // `type: shared, service_type: mysql` used to silently build a
+        // per-workspace local container while is_shared_service classified
+        // it shared, so the daemon reconciled a phantom engine.
+        let config = crate::config::Config::default();
+        let named: crate::config::NamedServiceConfig = serde_yaml_ng::from_str(
+            "name: legacy-db\ntype: shared\nservice_type: mysql\nmysql:\n  root_password: dev\n",
+        )
+        .unwrap();
+        let err = match create_provider_from_named_config(&config, &named).await {
+            Ok(_) => panic!("shared mysql must be rejected"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("does not support `type: shared`"));
+    }
+
     use super::*;
     use crate::config::NamedServiceConfig;
 

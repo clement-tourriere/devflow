@@ -156,6 +156,13 @@ fn filter_truncate(value: &str, length: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn truncate_filter_is_char_based_not_byte_based() {
+        // A byte slice would panic mid-codepoint on multi-byte UTF-8.
+        assert_eq!(super::filter_truncate("f\u{e9}ature", 2), "f\u{e9}");
+        assert_eq!(super::filter_truncate("caf\u{e9}", 10), "caf\u{e9}");
+    }
+
     use super::*;
     use crate::hooks::{HookContext, ServiceContext};
     use std::collections::HashMap;

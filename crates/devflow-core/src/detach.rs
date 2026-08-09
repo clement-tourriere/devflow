@@ -78,3 +78,29 @@ pub fn stop(pid_path: &Path) -> Result<Option<i32>> {
     let _ = std::fs::remove_file(pid_path);
     Ok(Some(pid))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stop_returns_none_when_no_pidfile_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("missing.pid");
+        assert!(stop(&pid_path).unwrap().is_none());
+    }
+
+    #[test]
+    fn stop_preserves_an_unparseable_pidfile_and_errors() {
+        // Deleting a corrupt pidfile would destroy the only record of a
+        // possibly-live daemon and report it as "not running".
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("daemon.pid");
+        std::fs::write(&pid_path, "not-a-pid").unwrap();
+
+        let err = stop(&pid_path).expect_err("corrupt pidfile must error");
+        assert!(err.to_string().contains("does not contain a valid pid"));
+        assert!(pid_path.exists(), "pidfile must be preserved");
+        assert_eq!(std::fs::read_to_string(&pid_path).unwrap(), "not-a-pid");
+    }
+}
