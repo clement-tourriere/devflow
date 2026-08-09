@@ -15,8 +15,9 @@ pub(super) async fn handle_agent_command(
     match action {
         super::AgentCommands::Status => {
             let state_manager = LocalStateManager::new()?;
-            if let Some(ref path) = config_path {
-                let workspaces = state_manager.get_workspaces(path);
+            if config_path.is_some() {
+                let project_dir = crate::cli::operation_project_dir(config_path);
+                let workspaces = state_manager.get_workspaces_by_dir(&project_dir);
 
                 let executed: Vec<_> = workspaces
                     .iter()

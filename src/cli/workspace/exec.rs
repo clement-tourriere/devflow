@@ -61,13 +61,13 @@ pub(super) async fn execute_in_workspace(
     let state_project_dir = crate::cli::operation_project_dir(config_path);
     let service_key = LocalStateManager::new()?
         .resolve_workspace_service_key_by_dir(&state_project_dir, workspace_name)?;
-    if let Some(ref path) = config_path {
+    if config_path.is_some() {
         if let Ok(mut state) = LocalStateManager::new() {
-            if let Some(mut ws) = state.get_workspace(path, workspace_name) {
+            if let Some(mut ws) = state.get_workspace_by_dir(&state_project_dir, workspace_name) {
                 ws.executed_command = Some(full_cmd.clone());
                 ws.execution_status = Some(if detach { "detached" } else { "running" }.to_string());
                 ws.executed_at = Some(chrono::Utc::now());
-                if let Err(e) = state.register_workspace(path, ws) {
+                if let Err(e) = state.register_workspace_by_dir(&state_project_dir, ws) {
                     log::warn!("Failed to record execution state: {}", e);
                 }
             }
@@ -242,11 +242,12 @@ pub(super) async fn execute_in_workspace(
 
         // Update state on completion
         let execution_status = if status.success() { "done" } else { "failed" };
-        if let Some(ref path) = config_path {
+        if config_path.is_some() {
+            let project_dir = crate::cli::operation_project_dir(config_path);
             if let Ok(mut state_mgr) = LocalStateManager::new() {
-                if let Some(mut ws) = state_mgr.get_workspace(path, workspace_name) {
+                if let Some(mut ws) = state_mgr.get_workspace_by_dir(&project_dir, workspace_name) {
                     ws.execution_status = Some(execution_status.to_string());
-                    if let Err(e) = state_mgr.register_workspace(path, ws) {
+                    if let Err(e) = state_mgr.register_workspace_by_dir(&project_dir, ws) {
                         log::warn!("Failed to update execution state: {}", e);
                     }
                 }

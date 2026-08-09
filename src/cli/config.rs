@@ -438,11 +438,12 @@ pub(super) fn run_doctor_pre_checks(
     }
 
     // Registry entries with missing worktree paths
-    if let Some(path) = config_path {
+    if config_path.is_some() {
+        let project_dir = crate::cli::operation_project_dir(config_path);
         match LocalStateManager::new() {
             Ok(state) => {
                 let missing: Vec<_> = state
-                    .get_workspaces(path)
+                    .get_workspaces_by_dir(&project_dir)
                     .into_iter()
                     .filter_map(|b| b.worktree_path.map(|p| (b.name, p)))
                     .filter(|(_, p)| !std::path::Path::new(p).exists())

@@ -618,7 +618,7 @@ impl LocalStateManager {
     // ── Workspace registry CRUD ────────────────────────────────────────
 
     /// Get all registered devflow workspaces for a project.
-    pub fn get_workspaces(&self, project_path: &Path) -> Vec<DevflowWorkspace> {
+    fn get_workspaces(&self, project_path: &Path) -> Vec<DevflowWorkspace> {
         self.get_project_key(project_path)
             .and_then(|key| self.state.projects.get(&key))
             .and_then(|p| p.workspaces.clone())
@@ -626,7 +626,7 @@ impl LocalStateManager {
     }
 
     /// Look up a single registered workspace by name.
-    pub fn get_workspace(&self, project_path: &Path, name: &str) -> Option<DevflowWorkspace> {
+    fn get_workspace(&self, project_path: &Path, name: &str) -> Option<DevflowWorkspace> {
         self.get_workspaces(project_path)
             .into_iter()
             .find(|b| b.name == name)
@@ -634,7 +634,7 @@ impl LocalStateManager {
 
     /// Register (upsert) a devflow workspace in the registry.
     /// If a workspace with the same name exists, it is updated.
-    pub fn register_workspace(
+    fn register_workspace(
         &mut self,
         project_path: &Path,
         mut workspace: DevflowWorkspace,

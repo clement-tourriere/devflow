@@ -178,10 +178,11 @@ fn raw_workspace_for_service_key(
     config_path: &Option<PathBuf>,
     service_key: &str,
 ) -> Option<String> {
-    if let Some(path) = config_path {
+    if config_path.is_some() {
+        let project_dir = super::operation_project_dir(config_path);
         if let Ok(state) = LocalStateManager::new() {
             let mut owners = state
-                .get_workspaces(path)
+                .get_workspaces_by_dir(&project_dir)
                 .into_iter()
                 .filter(|workspace| workspace.service_key == service_key);
             if let Some(workspace) = owners.next() {

@@ -53,13 +53,14 @@ pub(crate) fn resolve_branch_context() -> BranchContext {
 }
 
 pub(super) fn linked_workspace_exists(config_path: &Option<PathBuf>, workspace_name: &str) -> bool {
-    let Some(path) = config_path.as_ref() else {
+    if config_path.is_none() {
         return false;
-    };
+    }
+    let project_dir = crate::cli::operation_project_dir(config_path);
 
     LocalStateManager::new()
         .ok()
-        .and_then(|state| state.get_workspace(path, workspace_name))
+        .and_then(|state| state.get_workspace_by_dir(&project_dir, workspace_name))
         .is_some()
 }
 

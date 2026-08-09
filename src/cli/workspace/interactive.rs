@@ -27,9 +27,10 @@ pub(super) async fn handle_interactive_switch(
     }
 
     // 2) Devflow workspace registry
-    if let Some(path) = config_path.as_ref() {
+    if config_path.is_some() {
+        let project_dir = crate::cli::operation_project_dir(config_path);
         if let Ok(state) = LocalStateManager::new() {
-            for workspace in state.get_workspaces(path) {
+            for workspace in state.get_workspaces_by_dir(&project_dir) {
                 if vcs_workspace_names.is_empty() || vcs_workspace_names.contains(&workspace.name) {
                     workspace_names.insert(workspace.name);
                 }
