@@ -6,6 +6,25 @@ use devflow_core::hooks::{
 };
 use devflow_core::vcs;
 
+/// The enclosing worktree root for the hook template context. The raw cwd is
+/// wrong from a subdirectory (`{{ repo }}` would render "src" from repo/src/),
+/// and the config directory is wrong in a linked worktree whose config falls
+/// back to the primary checkout. A linked worktree has a `.git` FILE at its
+/// root, so walking up to the nearest `.git`/`.jj` entry stays inside the
+/// current worktree instead of jumping to the primary.
+fn hook_project_dir() -> std::path::PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let mut dir = cwd.clone();
+    loop {
+        if dir.join(".git").exists() || dir.join(".jj").exists() {
+            return dir;
+        }
+        if !dir.pop() {
+            return cwd;
+        }
+    }
+}
+
 fn parse_hook_phase_input(phase: &str) -> Result<HookPhase> {
     let trimmed = phase.trim();
     if trimmed.is_empty() {
@@ -24,16 +43,14 @@ fn parse_hook_phase_input(phase: &str) -> Result<HookPhase> {
 /// Inspection-only (vars/render/explain): unresolved identities render a
 /// sentinel key. Execution paths must use [`build_hook_context_strict`].
 async fn build_hook_context(config: &Config, workspace_name: &str) -> HookContext {
-    // cwd-first like every other context-sensitive operation — the config
-    // directory may be the primary checkout while we run in a linked worktree.
-    let project_dir = super::operation_project_dir(&None);
+    let project_dir = hook_project_dir();
     devflow_core::hooks::build_hook_context(config, &project_dir, workspace_name).await
 }
 
 /// Fallible variant for paths that EXECUTE hooks: fails closed on an
 /// unresolved workspace identity instead of exporting the sentinel key.
 async fn build_hook_context_strict(config: &Config, workspace_name: &str) -> Result<HookContext> {
-    let project_dir = super::operation_project_dir(&None);
+    let project_dir = hook_project_dir();
     devflow_core::hooks::build_hook_context_strict(config, &project_dir, workspace_name).await
 }
 

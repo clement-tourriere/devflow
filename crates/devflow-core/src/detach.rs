@@ -54,18 +54,27 @@ pub fn pidfile_alive(pid_path: &Path) -> bool {
 }
 
 /// SIGTERM the process recorded at `pid_path` and remove the pidfile.
-/// Returns the recorded pid, or `None` when no valid pidfile existed
-/// (a stale/unparseable pidfile is removed either way).
-pub fn stop(pid_path: &Path) -> Option<i32> {
-    let pid = read_pid(pid_path);
-    if let Some(pid) = pid {
-        #[cfg(unix)]
-        {
-            use nix::sys::signal::{kill, Signal};
-            use nix::unistd::Pid;
-            let _ = kill(Pid::from_raw(pid), Signal::SIGTERM);
-        }
+/// Returns `Ok(Some(pid))` when a recorded process was signalled,
+/// `Ok(None)` when no pidfile existed, and an error when the pidfile
+/// exists but is unreadable — in that case the file is PRESERVED, because
+/// deleting it would destroy the only record of a possibly-live daemon.
+pub fn stop(pid_path: &Path) -> Result<Option<i32>> {
+    if !pid_path.exists() {
+        return Ok(None);
+    }
+    let Some(pid) = read_pid(pid_path) else {
+        anyhow::bail!(
+            "pidfile {} exists but does not contain a valid pid; \
+             stop the process manually, then delete the file",
+            pid_path.display()
+        );
+    };
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+        let _ = kill(Pid::from_raw(pid), Signal::SIGTERM);
     }
     let _ = std::fs::remove_file(pid_path);
-    pid
+    Ok(Some(pid))
 }

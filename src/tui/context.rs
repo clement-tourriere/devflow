@@ -594,7 +594,7 @@ impl DevflowContext {
 
     /// Stop the proxy daemon.
     pub async fn stop_proxy_bg() -> Result<String> {
-        match devflow_core::detach::stop(&devflow_proxy::ca::default_pid_path()) {
+        match devflow_core::detach::stop(&devflow_proxy::ca::default_pid_path())? {
             Some(pid) => Ok(format!("Proxy stopped (pid: {})", pid)),
             None => anyhow::bail!("Proxy is not running (no PID file)"),
         }

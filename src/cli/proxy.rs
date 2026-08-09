@@ -130,7 +130,7 @@ pub(super) async fn handle_proxy_command(
             }
         }
         super::ProxyCommands::Stop => {
-            if let Some(pid) = devflow_core::detach::stop(&devflow_proxy::ca::default_pid_path()) {
+            if let Some(pid) = devflow_core::detach::stop(&devflow_proxy::ca::default_pid_path())? {
                 if json_output {
                     println!("{}", serde_json::json!({"status": "stopped", "pid": pid}));
                 } else {

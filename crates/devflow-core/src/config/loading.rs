@@ -56,10 +56,25 @@ impl Config {
             .is_some_and(|e| e.eq_ignore_ascii_case("toml"));
 
         let mut config: Config = if is_toml {
-            toml::from_str(&content)
+            let mut value: toml::Value = toml::from_str(&content)
+                .with_context(|| format!("Failed to parse TOML config file: {}", path.display()))?;
+            if let Some(git) = value.get_mut("git").and_then(|g| g.as_table_mut()) {
+                if git.contains_key("workspace_filter_regex") {
+                    for key in LEGACY_FILTER_KEYS {
+                        if git.remove(*key).is_some() {
+                            warn_superseded_filter_key(path, key);
+                        }
+                    }
+                }
+            }
+            value
+                .try_into()
                 .with_context(|| format!("Failed to parse TOML config file: {}", path.display()))?
         } else {
-            serde_yaml_ng::from_str(&content)
+            let mut value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&content)
+                .with_context(|| format!("Failed to parse YAML config file: {}", path.display()))?;
+            drop_conflicting_legacy_filter_keys(&mut value, path);
+            serde_yaml_ng::from_value(value)
                 .with_context(|| format!("Failed to parse YAML config file: {}", path.display()))?
         };
 
@@ -498,6 +513,43 @@ impl Config {
             EffectiveConfig::new(config, global_config, local_config, env_config)?;
 
         Ok((effective_config, config_path))
+    }
+}
+
+/// Legacy spellings that are serde ALIASES of `git.workspace_filter_regex`.
+/// A config carrying both the new key and a legacy one would fail to parse
+/// with "duplicate field" — which would brick every devflow command in that
+/// project, including the installed git hook — so loading strips the legacy
+/// keys (with a warning) whenever the canonical key is present.
+const LEGACY_FILTER_KEYS: &[&str] = &[
+    "branch_filter_regex",
+    "auto_create_workspace_filter",
+    "auto_create_branch_filter",
+];
+
+fn warn_superseded_filter_key(path: &Path, key: &str) {
+    log::warn!(
+        "{}: git.{key} is superseded by git.workspace_filter_regex and was ignored; \
+         delete the legacy key",
+        path.display()
+    );
+}
+
+/// YAML variant of the legacy-key cleanup used for `.devflow.yml` and
+/// `.devflow.local.yml`.
+pub(crate) fn drop_conflicting_legacy_filter_keys(value: &mut serde_yaml_ng::Value, path: &Path) {
+    let Some(git) = value.get_mut("git").and_then(|g| g.as_mapping_mut()) else {
+        return;
+    };
+    let canonical = serde_yaml_ng::Value::String("workspace_filter_regex".to_string());
+    if !git.contains_key(&canonical) {
+        return;
+    }
+    for key in LEGACY_FILTER_KEYS {
+        let legacy = serde_yaml_ng::Value::String((*key).to_string());
+        if git.remove(&legacy).is_some() {
+            warn_superseded_filter_key(path, key);
+        }
     }
 }
 

@@ -145,10 +145,12 @@ fn filter_hash_port(value: &str) -> u16 {
 
 /// Truncate to max length.
 fn filter_truncate(value: &str, length: usize) -> String {
-    if value.len() <= length {
+    // Take characters, not bytes: a byte slice panics mid-codepoint on
+    // multi-byte UTF-8 (e.g. branch names with accents).
+    if value.chars().count() <= length {
         value.to_string()
     } else {
-        value[..length].to_string()
+        value.chars().take(length).collect()
     }
 }
 

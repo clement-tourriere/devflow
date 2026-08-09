@@ -518,6 +518,40 @@ fn test_should_create_workspace_uses_workspace_filter_regex() {
 }
 
 #[test]
+fn test_both_filter_keys_parse_with_canonical_winning() {
+    // A config written under the old schema could legally carry BOTH keys;
+    // the serde aliases alone would reject that as a duplicate field and
+    // brick every command in the project. from_file strips the legacy key
+    // when the canonical one is present.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".devflow.yml");
+    std::fs::write(
+        &path,
+        "git:\n  workspace_filter_regex: \"^new/.*\"\n  auto_create_workspace_filter: \"^old/.*\"\n",
+    )
+    .unwrap();
+
+    let config = Config::from_file(&path).expect("both-keys config must keep parsing");
+    assert_eq!(
+        config.git.workspace_filter_regex.as_deref(),
+        Some("^new/.*"),
+        "the canonical key wins"
+    );
+
+    let toml_path = dir.path().join("devflow.toml");
+    std::fs::write(
+        &toml_path,
+        "[git]\nworkspace_filter_regex = \"^new/.*\"\nbranch_filter_regex = \"^old/.*\"\n",
+    )
+    .unwrap();
+    let config = Config::from_file(&toml_path).expect("TOML both-keys config must keep parsing");
+    assert_eq!(
+        config.git.workspace_filter_regex.as_deref(),
+        Some("^new/.*")
+    );
+}
+
+#[test]
 fn test_workspace_filter_regex_accepts_legacy_alias_keys() {
     // Configs written before the workspace naming migration keep working.
     for legacy_key in [

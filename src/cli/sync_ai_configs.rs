@@ -7,7 +7,7 @@ pub(super) fn handle_sync_ai_configs(json_output: bool) -> Result<()> {
     // Same effective-config resolution as the sync-ai-configs hook action,
     // so both paths see the same worktree.extra_ai_dirs.
     let current_dir = std::env::current_dir()?;
-    let config = Config::load_effective_for_dir(&current_dir).unwrap_or_default();
+    let config = Config::load_effective_for_dir(&current_dir)?;
     let outcome = devflow_core::ai_configs::sync_ai_configs(&config, &current_dir)?;
 
     for warning in &outcome.warnings {

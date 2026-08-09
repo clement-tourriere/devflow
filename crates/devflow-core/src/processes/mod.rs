@@ -3551,16 +3551,11 @@ fn listening_pid_for_port(_port: u16) -> Option<u32> {
     None
 }
 
-#[cfg(unix)]
+/// Signal-0 liveness probe, delegated to the single implementation in
+/// [`crate::detach`]. Off-unix this reports dead (devflow does not manage
+/// processes there).
 pub(crate) fn process_alive(pid: u32) -> bool {
-    use nix::sys::signal::kill;
-    use nix::unistd::Pid;
-    kill(Pid::from_raw(pid as i32), None).is_ok()
-}
-
-#[cfg(not(unix))]
-pub(crate) fn process_alive(_pid: u32) -> bool {
-    true
+    crate::detach::process_alive(pid as i32)
 }
 
 #[cfg(unix)]

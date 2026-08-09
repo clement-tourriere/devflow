@@ -1112,11 +1112,13 @@ fn detect_sync_ai_configs(ctx: &DetectContext) -> RecipeDetection {
 fn build_sync_ai_configs() -> HooksConfig {
     let mut pre_remove = IndexMap::new();
     // Built-in action (not a shell-out): runs natively in every frontend and
-    // needs no approval or devflow binary on PATH.
-    pre_remove.insert(
-        "sync-ai-configs".to_string(),
-        action_hook(HookAction::SyncAiConfigs, None),
-    );
+    // needs no approval or devflow binary on PATH. continue_on_error matches
+    // the old shell recipe: a failed sync warns but never blocks removal.
+    let mut entry = action_hook(HookAction::SyncAiConfigs, None);
+    if let HookEntry::Action(ref mut action_entry) = entry {
+        action_entry.continue_on_error = Some(true);
+    }
+    pre_remove.insert("sync-ai-configs".to_string(), entry);
     let mut hooks: HooksConfig = IndexMap::new();
     hooks.insert(HookPhase::PreRemove, pre_remove);
     hooks

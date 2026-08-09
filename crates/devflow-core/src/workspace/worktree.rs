@@ -123,7 +123,7 @@ pub fn create_worktree_with_files(
         .main_worktree_dir()
         .unwrap_or_else(|| project_dir.to_path_buf());
     copy_worktree_payload(
-        vcs,
+        Some(vcs),
         config,
         &main_dir,
         &wt_path,
@@ -145,9 +145,12 @@ pub fn create_worktree_with_files(
 /// `extra_ai_dirs`), and gitignored entries (`copy_ignored`). Existing
 /// destination entries are never overwritten, so this is safe both for
 /// freshly created worktrees and for adopting manually created ones (the git
-/// hook path). Returns the number of entries copied.
+/// hook path — which runs on every checkout, so a no-op invocation must stay
+/// cheap: the CoW probe only runs when something will actually be copied).
+/// `vcs` is only needed for `copy_ignored`; pass `None` to skip that phase
+/// gracefully. Returns the number of entries copied.
 pub fn copy_worktree_payload(
-    vcs: &dyn VcsProvider,
+    vcs: Option<&dyn VcsProvider>,
     config: &Config,
     main_dir: &Path,
     wt_path: &Path,
@@ -164,19 +167,38 @@ pub fn copy_worktree_payload(
     let files_to_copy = copy_files_override.unwrap_or(&wt_config.copy_files);
     let copy_ignored = copy_ignored_override.unwrap_or(wt_config.copy_ignored);
 
-    let will_copy = !files_to_copy.is_empty() || copy_ignored || wt_config.copy_ai_configs;
-    if will_copy {
-        check_cow_support(main_dir, wt_path, copy_ignored);
+    // Plan the cheap phases first so a no-op run (every re-checkout in an
+    // already-populated worktree) does no probing and no VCS work.
+    let planned_files: Vec<&String> = files_to_copy
+        .iter()
+        .filter(|entry| {
+            let src = main_dir.join(entry.as_str());
+            let dst = wt_path.join(entry.as_str());
+            src.exists() && !dst.exists()
+        })
+        .collect();
+
+    let planned_ai_dirs: Vec<&str> = if wt_config.copy_ai_configs {
+        crate::config::AI_TOOL_DIRS
+            .iter()
+            .copied()
+            .chain(wt_config.extra_ai_dirs.iter().map(|s| s.as_str()))
+            .filter(|dir_name| main_dir.join(dir_name).is_dir() && !wt_path.join(dir_name).exists())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    if planned_files.is_empty() && planned_ai_dirs.is_empty() && !copy_ignored {
+        return 0;
     }
+    check_cow_support(main_dir, wt_path, copy_ignored);
 
     // Copy explicitly listed files/directories using parallel reflink.
     let copy_started = std::time::Instant::now();
-    files_to_copy.par_iter().for_each(|entry| {
-        let src = main_dir.join(entry);
-        let dst = wt_path.join(entry);
-        if dst.exists() {
-            return;
-        }
+    planned_files.par_iter().for_each(|entry| {
+        let src = main_dir.join(entry.as_str());
+        let dst = wt_path.join(entry.as_str());
         if src.is_dir() {
             reflink_copy_dir(&src, &dst);
             copied.fetch_add(1, Ordering::Relaxed);
@@ -191,28 +213,22 @@ pub fn copy_worktree_payload(
             }
         }
     });
-    if !files_to_copy.is_empty() {
+    if !planned_files.is_empty() {
         log::debug!(
             "Copied {} configured file(s) into worktree in {:.2?}",
-            files_to_copy.len(),
+            planned_files.len(),
             copy_started.elapsed()
         );
     }
 
     // Copy AI tool config directories (.claude, .cursor, etc.) if enabled.
-    if wt_config.copy_ai_configs {
+    if !planned_ai_dirs.is_empty() {
         let ai_copy_started = std::time::Instant::now();
-        let ai_dirs: Vec<&str> = crate::config::AI_TOOL_DIRS.to_vec();
-        let extra: Vec<&str> = wt_config.extra_ai_dirs.iter().map(|s| s.as_str()).collect();
-        let all_ai_dirs: Vec<&str> = ai_dirs.into_iter().chain(extra).collect();
-
-        all_ai_dirs.par_iter().for_each(|dir_name| {
+        planned_ai_dirs.par_iter().for_each(|dir_name| {
             let src = main_dir.join(dir_name);
             let dst = wt_path.join(dir_name);
-            if src.is_dir() && !dst.exists() {
-                reflink_copy_dir(&src, &dst);
-                copied.fetch_add(1, Ordering::Relaxed);
-            }
+            reflink_copy_dir(&src, &dst);
+            copied.fetch_add(1, Ordering::Relaxed);
         });
         log::debug!(
             "Copied AI tool config dirs into worktree in {:.2?}",
@@ -226,6 +242,12 @@ pub fn copy_worktree_payload(
     // Uses list_ignored_entries() which returns collapsed directory-level
     // entries (e.g. "node_modules" as one entry) instead of enumerating
     // every file inside each ignored directory.
+    let Some(vcs) = vcs else {
+        if copy_ignored {
+            log::warn!("copy_ignored is enabled but no VCS provider is available; skipping");
+        }
+        return copied.load(Ordering::Relaxed);
+    };
     if copy_ignored {
         let ignored_copy_started = std::time::Instant::now();
         match vcs.list_ignored_entries() {

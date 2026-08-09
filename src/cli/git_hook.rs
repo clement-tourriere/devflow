@@ -10,10 +10,23 @@ pub(super) fn copy_worktree_files(config: &Config, main_worktree_dir: &str) -> R
 
     // Same payload as worktree creation (copy_files, AI config dirs,
     // gitignored entries) — adopting a manually created worktree must not
-    // behave differently from `devflow switch -c`.
-    let vcs_repo = vcs::detect_vcs_provider(main_worktree_dir)?;
+    // behave differently from `devflow switch -c`. The VCS provider is only
+    // needed for copy_ignored, and a detection failure (moved repo, hook
+    // running in a constrained environment) must degrade to a warning, not
+    // abort adoption — service provisioning still has to run.
+    let vcs_repo = if config.worktree.copy_ignored {
+        match vcs::detect_vcs_provider(main_worktree_dir) {
+            Ok(repo) => Some(repo),
+            Err(e) => {
+                log::warn!("Could not detect VCS at '{main_worktree_dir}' for copy_ignored: {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let copied = devflow_core::workspace::worktree::copy_worktree_payload(
-        vcs_repo.as_ref(),
+        vcs_repo.as_deref(),
         config,
         main_dir,
         &current_dir,

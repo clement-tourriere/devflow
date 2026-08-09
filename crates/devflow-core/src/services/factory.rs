@@ -175,6 +175,19 @@ pub async fn create_provider_from_named_config(
 
         #[cfg(feature = "service-local")]
         "mysql" | "mariadb" => {
+            // No shared-engine MySQL backend exists. Bailing here keeps this
+            // dispatch consistent with `is_shared_service`, which would
+            // otherwise have the daemon reconcile a phantom shared engine
+            // while a per-workspace local container was silently built.
+            if matches!(
+                named.provider_type.to_lowercase().as_str(),
+                "shared" | "global"
+            ) {
+                anyhow::bail!(
+                    "Service '{}': mysql does not support `type: shared` — use `type: local`",
+                    named.name
+                );
+            }
             let mysql_config = named.mysql.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
                     "Service '{}' has type '{}' but no mysql config section",

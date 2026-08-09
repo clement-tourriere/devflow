@@ -698,7 +698,15 @@ impl LocalConfig {
             )
         })?;
 
-        let local_config: LocalConfig = serde_yaml_ng::from_str(&content).with_context(|| {
+        let mut value: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&content).with_context(|| {
+                format!(
+                    "Failed to parse local config file: {}",
+                    local_config_path.display()
+                )
+            })?;
+        loading::drop_conflicting_legacy_filter_keys(&mut value, &local_config_path);
+        let local_config: LocalConfig = serde_yaml_ng::from_value(value).with_context(|| {
             format!(
                 "Failed to parse local config file: {}",
                 local_config_path.display()
