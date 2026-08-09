@@ -642,3 +642,34 @@ worktree:
     let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
     assert!(config.worktree.copy_files.is_empty());
 }
+
+#[test]
+fn test_sync_ai_configs_action_round_trips_through_yaml() {
+    // The only unit variant in the internally-tagged HookAction enum, and it
+    // is written by three independent producers (GUI modal, `devflow hook
+    // install sync-ai-configs`, hand-written config) — pin the wire form.
+    let yaml = r#"
+hooks:
+  pre-remove:
+    sync-ai-configs:
+      action:
+        type: sync-ai-configs
+"#;
+    let config: Config = serde_yaml_ng::from_str(yaml).expect("action should parse");
+    let hooks = config.hooks.expect("hooks section");
+    let entry = hooks
+        .get(&crate::hooks::HookPhase::PreRemove)
+        .and_then(|phase| phase.get("sync-ai-configs"))
+        .expect("hook entry");
+    let crate::hooks::HookEntry::Action(action_entry) = entry else {
+        panic!("expected action entry");
+    };
+    assert!(matches!(
+        action_entry.action,
+        crate::hooks::HookAction::SyncAiConfigs
+    ));
+
+    // And the serialized form round-trips back to the same tag.
+    let serialized = serde_yaml_ng::to_string(&action_entry.action).unwrap();
+    assert!(serialized.contains("type: sync-ai-configs"), "{serialized}");
+}

@@ -663,7 +663,7 @@ pub enum HookCommands {
     },
     #[command(
         about = "Show VCS event → devflow phase trigger mapping",
-        long_about = "Display the mapping from VCS events (e.g. git post-checkout) to\ndevflow hook phases (e.g. post-switch).\n\nThis mapping can be customized in .devflow.yml under the 'triggers' key.\n\nExamples:\n  devflow hook triggers"
+        long_about = "Display the mapping from VCS events (e.g. git post-checkout) to\ndevflow hook phases (e.g. post-switch).\n\nThis mapping is fixed and not configurable.\n\nExamples:\n  devflow hook triggers"
     )]
     Triggers,
     #[command(

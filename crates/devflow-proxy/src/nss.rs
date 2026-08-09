@@ -12,6 +12,8 @@ use anyhow::Result;
 
 #[cfg(target_os = "linux")]
 use crate::ca::default_ca_cert_path;
+#[cfg(target_os = "linux")]
+use crate::platform::run_privileged;
 
 /// The standard system-wide Firefox policy path on Linux.
 /// Works for deb/rpm installs. Snap/Flatpak may not honour this.
@@ -236,66 +238,4 @@ fn write_policy_file(json: &str) -> Result<()> {
     let _ = std::fs::remove_file(tmp_path);
 
     Ok(())
-}
-
-/// Run a privileged command (sudo if TTY, pkexec otherwise).
-/// Same approach as `platform.rs`.
-#[cfg(target_os = "linux")]
-fn run_privileged(program: &str, args: &[&str], action_desc: &str) -> Result<()> {
-    use std::io::IsTerminal;
-    use std::process::Command;
-
-    let full_cmd = format!("{} {}", program, args.join(" "));
-
-    if std::io::stdin().is_terminal() {
-        let output = Command::new("sudo")
-            .arg(program)
-            .args(args)
-            .output()
-            .map_err(|e| anyhow::anyhow!("Failed to run: sudo {}: {}", full_cmd, e))?;
-
-        if output.status.success() {
-            return Ok(());
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("sudo {} failed: {}", full_cmd, stderr.trim());
-    }
-
-    if which_exists("pkexec") {
-        let output = Command::new("pkexec")
-            .arg(program)
-            .args(args)
-            .output()
-            .map_err(|e| anyhow::anyhow!("Failed to run: pkexec {}: {}", full_cmd, e))?;
-
-        if output.status.success() {
-            return Ok(());
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "pkexec {} failed: {}\n\nYou can run the command manually:\n  sudo {}",
-            full_cmd,
-            stderr.trim(),
-            full_cmd
-        );
-    }
-
-    anyhow::bail!(
-        "Cannot {} without a terminal (no TTY for sudo) and pkexec is not installed.\n\n\
-        Please run manually:\n  sudo {}",
-        action_desc,
-        full_cmd
-    )
-}
-
-#[cfg(target_os = "linux")]
-fn which_exists(program: &str) -> bool {
-    use std::process::Command;
-    Command::new("which")
-        .arg(program)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }

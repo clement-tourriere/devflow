@@ -592,7 +592,7 @@ function HookManager() {
                   </div>
                   {triggerMappings.length === 0 ? (
                     <p style={{ color: "var(--text-secondary)", fontSize: 13 }}>
-                      No trigger mappings configured.
+                      No VCS trigger mappings.
                     </p>
                   ) : (
                     <>

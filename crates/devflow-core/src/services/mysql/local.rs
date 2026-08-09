@@ -133,3 +133,74 @@ impl MySQLLocalProvider {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn engine() -> MySQLEngine {
+        MySQLEngine {
+            image: "mysql:8".to_string(),
+            port_range_start: 53306,
+            root_password: "dev".to_string(),
+            database: Some("app".to_string()),
+            user: Some("dev".to_string()),
+            password: Some("secret".to_string()),
+        }
+    }
+
+    #[test]
+    fn spec_pins_container_contract() {
+        let e = engine();
+        assert_eq!(e.kind(), "mysql");
+        assert_eq!(e.data_mount_path(), "/var/lib/mysql");
+        assert_eq!(
+            e.env(),
+            vec![
+                "MYSQL_ROOT_PASSWORD=dev",
+                "MYSQL_DATABASE=app",
+                "MYSQL_USER=dev",
+                "MYSQL_PASSWORD=secret"
+            ]
+        );
+        assert!(matches!(
+            e.port_layout(),
+            PortLayout::Single {
+                container_port: 3306
+            }
+        ));
+        assert_eq!(e.restart_ready_timeout(), Duration::from_secs(120));
+        assert_eq!(
+            e.readiness_command(),
+            vec!["mysqladmin", "ping", "-h", "127.0.0.1", "-pdev", "--silent"]
+        );
+    }
+
+    #[test]
+    fn connection_info_defaults_and_shape() {
+        let info = engine().connection_info(53310);
+        assert_eq!(
+            info.connection_string.as_deref(),
+            Some("mysql://dev:secret@127.0.0.1:53310/app")
+        );
+
+        let bare = MySQLEngine {
+            image: "mysql:8".to_string(),
+            port_range_start: 53306,
+            root_password: "dev".to_string(),
+            database: None,
+            user: None,
+            password: None,
+        };
+        let info = bare.connection_info(53306);
+        assert_eq!(
+            (info.user.as_str(), info.database.as_str()),
+            ("root", "mysql")
+        );
+        assert_eq!(info.password.as_deref(), Some("dev"));
+        assert_eq!(
+            info.connection_string.as_deref(),
+            Some("mysql://root:dev@127.0.0.1:53306/mysql")
+        );
+    }
+}

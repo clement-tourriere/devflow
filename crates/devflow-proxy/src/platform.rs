@@ -2,8 +2,6 @@ use anyhow::{Context, Result};
 use std::process::Command;
 
 use crate::ca::{default_ca_cert_path, CertificateAuthority};
-#[cfg(target_os = "linux")]
-use crate::nss;
 
 /// Detect Alpine Linux by checking for `/etc/alpine-release` or `/sbin/apk`.
 #[cfg(target_os = "linux")]
@@ -27,7 +25,7 @@ fn which_exists(program: &str) -> bool {
 /// Run a privileged command with appropriate escalation.
 /// TTY → sudo, no TTY → pkexec, neither → error with manual instructions.
 #[cfg(target_os = "linux")]
-fn run_privileged(program: &str, args: &[&str], action_desc: &str) -> Result<()> {
+pub(crate) fn run_privileged(program: &str, args: &[&str], action_desc: &str) -> Result<()> {
     use std::io::IsTerminal;
 
     let full_cmd = format!("{} {}", program, args.join(" "));
@@ -322,7 +320,7 @@ pub fn trust_info() -> String {
             cert_path.display(),
             cert_path.display(),
             cert_path.display(),
-            nss::firefox_policy_info()
+            crate::nss::firefox_policy_info()
         )
     }
 
@@ -332,7 +330,7 @@ pub fn trust_info() -> String {
             "CA certificate: {}\n\nPlease consult your system documentation for trust installation.\n\n\
             {}",
             cert_path.display(),
-            nss::firefox_policy_info()
+            crate::nss::firefox_policy_info()
         )
     }
 }

@@ -89,17 +89,21 @@ pub fn sync_ai_configs(config: &Config, worktree_dir: &Path) -> Result<SyncAiCon
             }
 
             // Also copy other files/dirs additively
-            if let Ok(count) = additive_copy_dir(&src_dir, &dst_dir, &[settings_file]) {
-                if count > 0 {
-                    outcome.synced_dirs.push(dir_name.to_string());
-                }
+            match additive_copy_dir(&src_dir, &dst_dir, &[settings_file]) {
+                Ok(count) if count > 0 => outcome.synced_dirs.push(dir_name.to_string()),
+                Ok(_) => {}
+                Err(e) => outcome
+                    .warnings
+                    .push(format!("Failed to copy {}/: {}", dir_name, e)),
             }
         } else {
             // For other dirs: additive copy (don't overwrite existing files)
-            if let Ok(count) = additive_copy_dir(&src_dir, &dst_dir, &[]) {
-                if count > 0 {
-                    outcome.synced_dirs.push(dir_name.to_string());
-                }
+            match additive_copy_dir(&src_dir, &dst_dir, &[]) {
+                Ok(count) if count > 0 => outcome.synced_dirs.push(dir_name.to_string()),
+                Ok(_) => {}
+                Err(e) => outcome
+                    .warnings
+                    .push(format!("Failed to copy {}/: {}", dir_name, e)),
             }
         }
     }
@@ -139,7 +143,8 @@ fn merge_claude_permissions(src: &Path, dst: &Path) -> Result<bool> {
     Ok(true)
 }
 
-/// Merge two JSON values, with special handling for `permissions.allow` arrays.
+/// Merge two JSON values. Arrays under a key named `allow` or `deny` (at any
+/// nesting depth) are union-merged; everything else overlays recursively.
 fn merge_json_permissions(
     base: &serde_json::Value,
     overlay: &serde_json::Value,

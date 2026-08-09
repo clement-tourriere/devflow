@@ -191,7 +191,7 @@ The project is organized as a Cargo workspace with four crates:
 - `src/cli/mod.rs` — Command enum and dispatch
 - `src/cli/workspace/` — Workspace operations (switch, list, link, remove, cleanup)
 - `src/cli/service.rs` — Service operations (add, create, delete, start, stop, reset, seed, logs, discover)
-- `src/cli/agent.rs` — AI agent commands (start, status, context, skill, docs)
+- `src/cli/agent.rs` — AI agent commands (status, context, skill)
 - `src/cli/proxy.rs` — Proxy commands (start, stop, status, list, trust)
 - `src/cli/hook.rs` — Hook commands (show, run, explain, vars, render, approvals, triggers, actions, recipes, install)
 - `src/cli/sync_ai_configs.rs` — AI tool config sync command (merge .claude/.cursor settings back to main)
@@ -204,16 +204,19 @@ The project is organized as a Cargo workspace with four crates:
 - `src/services/factory.rs` — Backend creation, dispatch, orchestration
 - `src/services/plugin.rs` — Plugin backend (JSON-over-stdio protocol)
 - `src/services/postgres/local/` — Local Docker PostgreSQL backend with CoW storage
-- `src/services/clickhouse/` — ClickHouse backend
-- `src/services/mysql/` — MySQL backend
+- `src/services/local_engine.rs` — Shared per-workspace Docker lifecycle (`LocalEngineBackend` + `LocalEngineSpec`)
+- `src/services/clickhouse/` — ClickHouse backend (spec for the shared local engine)
+- `src/services/mysql/` — MySQL backend (spec for the shared local engine)
 - `src/services/generic/` — Generic Docker backend (Redis, etc.)
 - `src/vcs/mod.rs` — `VcsProvider` trait
 - `src/vcs/git.rs` — Git implementation (workspaces, worktrees, hooks)
 - `src/vcs/cow_worktree.rs` — Copy-on-Write worktree support (APFS, ZFS, Btrfs, XFS)
 - `src/vcs/jj.rs` — Jujutsu VCS implementation
 - `src/hooks/` — Hook engine (executor, approval, templates, recipes)
+- `src/ai_configs.rs` — AI tool config merge (sync-ai-configs command + hook action)
+- `src/detach.rs` — Detached-process/pidfile helpers (daemon, proxy, TUI)
 - `src/state/` — Local state persistence (`~/.local/share/devflow/`)
-- `src/docker.rs` — Docker helper utilities
+- `src/docker/` — Docker helper utilities (compose discovery, custom settings)
 - `src/agent.rs` — AI agent integration (skill generation, context, rules)
 - `src/llm.rs` — LLM integration for AI commit messages (CLI-first + API fallback)
 

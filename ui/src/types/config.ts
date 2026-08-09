@@ -11,7 +11,6 @@ export interface DevflowConfig {
   worktree?: WorktreeConfig;
   processes?: ProcessesConfig | null;
   hooks?: Record<string, Record<string, unknown>> | null;
-  triggers?: Record<string, unknown> | null;
   execute?: ExecuteConfig | null;
   agent?: AgentConfig | null;
   commit?: CommitConfig | null;

@@ -29,6 +29,8 @@ Run the TUI **without** the shell-integration wrapper (`command devflow tui`) �
 - Arrow keys — move within a tab
 - `Enter` — select / confirm
 - `o` — open the selected workspace: exits the TUI, switches to it (creating it if needed), and prints the worktree path — `cd` there to continue
-- `q` / `Esc` — quit
+- `q` (or `Ctrl+c`) — quit · `?` — help overlay with every keybinding
+- `1`–`5`, `[` / `]` — jump between tabs · `/` — filter workspaces (`Esc` clears)
+- `Space` — collapse/expand a workspace subtree
 
 Switching workspaces from the TUI runs the same core lifecycle as `devflow switch` — services follow and hooks fire.

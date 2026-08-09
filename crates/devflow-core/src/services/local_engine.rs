@@ -215,7 +215,48 @@ impl<E: LocalEngineSpec> LocalEngineBackend<E> {
             }
         }
 
+        // A stopped container has empty live network settings, but its
+        // configured bindings persist in HostConfig — report the port it
+        // WILL bind instead of falling back to a made-up default.
+        if let Some(bindings) = info.host_config.and_then(|hc| hc.port_bindings) {
+            if let Some(Some(bindings)) = bindings.get(container_port) {
+                for binding in bindings {
+                    if let Some(ref host_port) = binding.host_port {
+                        if let Ok(port) = host_port.parse::<u16>() {
+                            return Ok(Some(port));
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(None)
+    }
+
+    /// Bring an existing container to Running and wait for engine readiness.
+    /// Docker rejects `start` on a paused container, so paused resumes via
+    /// `unpause` instead.
+    async fn resume_container(
+        &self,
+        container_name: &str,
+        status: &ContainerStatus,
+    ) -> anyhow::Result<()> {
+        if matches!(status, ContainerStatus::Paused) {
+            self.client
+                .unpause_container(container_name)
+                .await
+                .with_context(|| format!("failed to unpause container '{container_name}'"))?;
+        } else {
+            self.client
+                .start_container(
+                    container_name,
+                    None::<bollard::query_parameters::StartContainerOptions>,
+                )
+                .await
+                .with_context(|| format!("failed to start container '{container_name}'"))?;
+        }
+        self.wait_ready(container_name, self.engine.restart_ready_timeout())
+            .await
     }
 
     async fn create_and_start(
@@ -369,17 +410,8 @@ impl<E: LocalEngineSpec> ServiceProvider for LocalEngineBackend<E> {
                     state: Some("running".to_string()),
                 });
             }
-            ContainerStatus::Exited | ContainerStatus::Paused => {
-                self.client
-                    .start_container(
-                        &container_name,
-                        None::<bollard::query_parameters::StartContainerOptions>,
-                    )
-                    .await
-                    .with_context(|| format!("failed to start container '{container_name}'"))?;
-
-                self.wait_ready(&container_name, self.engine.restart_ready_timeout())
-                    .await?;
+            status @ (ContainerStatus::Exited | ContainerStatus::Paused) => {
+                self.resume_container(&container_name, &status).await?;
 
                 return Ok(WorkspaceInfo {
                     name: workspace_name.to_string(),
@@ -505,16 +537,10 @@ impl<E: LocalEngineSpec> ServiceProvider for LocalEngineBackend<E> {
 
         match self.container_status(&container_name).await? {
             ContainerStatus::Running => {}
-            ContainerStatus::Exited | ContainerStatus::Paused | ContainerStatus::Other(_) => {
-                self.client
-                    .start_container(
-                        &container_name,
-                        None::<bollard::query_parameters::StartContainerOptions>,
-                    )
-                    .await
-                    .with_context(|| format!("failed to start container '{container_name}'"))?;
-                self.wait_ready(&container_name, Duration::from_secs(60))
-                    .await?;
+            status @ (ContainerStatus::Exited
+            | ContainerStatus::Paused
+            | ContainerStatus::Other(_)) => {
+                self.resume_container(&container_name, &status).await?;
             }
             ContainerStatus::NotFound => {
                 return Err(anyhow!(
@@ -549,6 +575,16 @@ impl<E: LocalEngineSpec> ServiceProvider for LocalEngineBackend<E> {
         true
     }
 
+    async fn reset_workspace(&self, workspace_name: &str) -> anyhow::Result<()> {
+        // Honest error instead of the trait default's silent no-op: these
+        // backends have no parent snapshot to reset from.
+        anyhow::bail!(
+            "reset is not implemented for {} local containers; delete and re-create \
+             the workspace to reset '{workspace_name}'",
+            self.engine.display_name()
+        )
+    }
+
     async fn start_workspace(&self, workspace_name: &str) -> anyhow::Result<()> {
         let container_name = self.container_name(workspace_name);
         match self.container_status(&container_name).await? {
@@ -557,17 +593,7 @@ impl<E: LocalEngineSpec> ServiceProvider for LocalEngineBackend<E> {
                 "no {} container for workspace '{workspace_name}'",
                 self.engine.display_name()
             )),
-            _ => {
-                self.client
-                    .start_container(
-                        &container_name,
-                        None::<bollard::query_parameters::StartContainerOptions>,
-                    )
-                    .await
-                    .with_context(|| format!("failed to start container '{container_name}'"))?;
-                self.wait_ready(&container_name, Duration::from_secs(60))
-                    .await
-            }
+            status => self.resume_container(&container_name, &status).await,
         }
     }
 

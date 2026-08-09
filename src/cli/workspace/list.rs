@@ -60,12 +60,12 @@ pub(crate) fn print_workspace_inventory(inventory: &WorkspaceInventory) {
     }
 }
 
-/// Continuation columns for the levels above this node (the root level
-/// renders flush left, so `ancestor_has_next[0]` never draws a column).
+/// Continuation columns for the levels above this node. `ancestor_has_next`
+/// carries one entry per non-root ancestor level, so every entry draws a
+/// column — the same interpretation the TUI uses.
 fn ancestor_columns(row: &devflow_core::workspace::inventory::FlatWorkspaceRow) -> String {
     row.ancestor_has_next
         .iter()
-        .skip(1)
         .map(|has_next| if *has_next { "│  " } else { "   " })
         .collect()
 }

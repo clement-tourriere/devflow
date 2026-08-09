@@ -70,6 +70,9 @@ pub struct WorkspaceInventory {
     pub project: InventoryProject,
     pub context_workspace: Option<String>,
     pub default_workspace: String,
+    /// Root workspace names. Part of the external `--json` contract
+    /// (documented in docs/CLI.md and AGENTS.md); internal consumers render
+    /// from `flat_order` instead — do not remove.
     pub roots: Vec<String>,
     pub workspaces: Vec<WorkspaceNode>,
     /// Canonical depth-first display order (see [`flatten_tree`]).
@@ -498,8 +501,11 @@ pub struct FlatWorkspaceRow {
     pub depth: usize,
     /// Whether this node is the last of its siblings (└─ vs ├─).
     pub is_last_sibling: bool,
-    /// Per ancestor level: whether that ancestor has further siblings
-    /// (drives │ continuation columns).
+    /// One entry per ancestor level BELOW the root (`len == depth - 1` for
+    /// `depth >= 1`, empty otherwise): whether that ancestor has further
+    /// siblings. Renderers draw one continuation column (│ or spaces) per
+    /// entry; roots render flush left, so the root level never contributes
+    /// a column.
     pub ancestor_has_next: Vec<bool>,
     pub has_children: bool,
 }
@@ -565,7 +571,11 @@ fn flatten_node<'a>(
 
     for (i, child) in children.iter().enumerate() {
         let mut child_ancestors = ancestor_has_next.to_vec();
-        child_ancestors.push(!is_last_sibling);
+        // Roots render flush left and contribute no continuation column, so
+        // only non-root levels record whether they have further siblings.
+        if depth > 0 {
+            child_ancestors.push(!is_last_sibling);
+        }
         flatten_node(
             child,
             depth + 1,
@@ -582,6 +592,75 @@ fn flatten_node<'a>(
 mod tests {
     use super::*;
     use crate::vcs::{GitRepository, VcsProvider};
+
+    fn bare_node(name: &str, parent: Option<&str>, children: &[&str]) -> WorkspaceNode {
+        WorkspaceNode {
+            name: name.to_string(),
+            service_key: name.to_string(),
+            canonical_service_key: name.to_string(),
+            identity_status: "canonical".to_string(),
+            parent: parent.map(str::to_string),
+            parent_state: parent.map(|_| "present".to_string()),
+            children: children.iter().map(|c| c.to_string()).collect(),
+            is_default: false,
+            is_context: false,
+            worktree_path: None,
+            health: "ready".to_string(),
+            created_at: String::new(),
+            executed_command: None,
+            execution_status: None,
+            services: Vec::new(),
+            processes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn flatten_tree_orders_depth_first_with_connector_data() {
+        // main ─┬─ a ─┬─ a1
+        //       │     └─ a2
+        //       └─ b
+        let nodes = vec![
+            bare_node("main", None, &["a", "b"]),
+            bare_node("a", Some("main"), &["a1", "a2"]),
+            bare_node("a1", Some("a"), &[]),
+            bare_node("a2", Some("a"), &[]),
+            bare_node("b", Some("main"), &[]),
+        ];
+        let rows = flatten_tree(&["main".to_string()], &nodes);
+
+        let order: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(order, vec!["main", "a", "a1", "a2", "b"]);
+
+        let a = &rows[1];
+        assert_eq!(
+            (a.depth, a.is_last_sibling, a.has_children),
+            (1, false, true)
+        );
+        // Roots contribute no continuation column.
+        assert_eq!(a.ancestor_has_next, Vec::<bool>::new());
+
+        // a1's only column-bearing ancestor is `a`, which has next sibling b.
+        let a1 = &rows[2];
+        assert_eq!((a1.depth, a1.is_last_sibling), (2, false));
+        assert_eq!(a1.ancestor_has_next, vec![true]);
+
+        let b = &rows[4];
+        assert!(b.is_last_sibling && !b.has_children && b.depth == 1);
+    }
+
+    #[test]
+    fn flatten_tree_keeps_cyclic_and_orphaned_nodes_visible() {
+        // `loop1` and `loop2` reference each other and are reachable from no
+        // root; the defensive pass must still emit both exactly once.
+        let nodes = vec![
+            bare_node("main", None, &[]),
+            bare_node("loop1", Some("loop2"), &["loop2"]),
+            bare_node("loop2", Some("loop1"), &["loop1"]),
+        ];
+        let rows = flatten_tree(&["main".to_string()], &nodes);
+        let order: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(order, vec!["main", "loop1", "loop2"]);
+    }
 
     #[tokio::test]
     async fn mismatch_is_warned_without_hiding_either_workspace() {

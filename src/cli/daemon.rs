@@ -145,9 +145,7 @@ pub(super) async fn handle_daemon_command(
             Ok(())
         }
         super::DaemonCommands::Status => {
-            let running = read_pid()
-                .map(devflow_core::detach::process_alive)
-                .unwrap_or(false);
+            let running = devflow_core::detach::pidfile_alive(&pid_path()?);
             let status: DaemonStatus = std::fs::read_to_string(status_path()?)
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())

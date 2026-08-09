@@ -284,21 +284,6 @@ impl TerminalManager {
         infos
     }
 
-    /// Get info for a single session.
-    pub async fn get_session(&self, session_id: &str) -> Option<TerminalSessionInfo> {
-        let sessions = self.sessions.read().await;
-        let session = sessions.get(session_id)?;
-        let s = session.lock().await;
-        Some(TerminalSessionInfo {
-            id: session_id.to_string(),
-            label: s.metadata.label.clone(),
-            project_path: s.metadata.project_path.clone(),
-            workspace_name: s.metadata.workspace_name.clone(),
-            working_directory: s.working_directory.clone(),
-            status: s.status.clone(),
-        })
-    }
-
     /// Close all sessions (used on app exit).
     pub async fn close_all(&self) {
         let ids: Vec<String> = self.sessions.read().await.keys().cloned().collect();

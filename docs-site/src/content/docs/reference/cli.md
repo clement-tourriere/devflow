@@ -57,7 +57,7 @@ devflow --json list     # versioned tree document with a stable shape
 devflow status          # current workspace, services, connections
 ```
 
-The list document contains `schema_version`, project/VCS metadata, `context_workspace`, `default_workspace`, `roots`, workspace nodes, and `warnings`. Nodes expose raw `name`, effective `service_key`, newly-derived `canonical_service_key`, `identity_status`, immutable `parent`, `children`, `worktree_path`, health, services, processes, `created_at`, `executed_command`, and `execution_status`. New keys are collision-safe; an unambiguously migrated workspace may retain its legacy key for data continuity. The shape is the same with zero, one, or many services.
+The list document contains `schema_version`, project/VCS metadata, `context_workspace`, `default_workspace`, `roots`, workspace nodes, `flat_order` (canonical depth-first display order with per-row depth/connector data), and `warnings`. Nodes expose raw `name`, effective `service_key`, newly-derived `canonical_service_key`, `identity_status`, immutable `parent`, `children`, `worktree_path`, health, services, processes, `created_at`, `executed_command`, and `execution_status`. New keys are collision-safe; an unambiguously migrated workspace may retain its legacy key for data continuity. The shape is the same with zero, one, or many services.
 
 ### `devflow connection <workspace>`
 

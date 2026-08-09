@@ -97,8 +97,8 @@ Shell hook commands also run with these variables exported, so external scripts 
 | `sanitize` | replace `/` and `\` with `-` | `{{ workspace \| sanitize }}` → `feature-auth` |
 | `sanitize_db` | database-safe identifier (≤63 chars, hash suffix) | `{{ workspace \| sanitize_db }}` → `feature_auth` |
 | `hash_port` | deterministic port in 10000–19999 | `{{ workspace \| hash_port }}` → `14523` |
-| `lower` / `upper` | case mapping | `{{ workspace \| upper }}` |
-| `replace` | string replacement | `{{ workspace \| replace("/", "-") }}` |
+| `lower` / `upper` | case mapping (MiniJinja built-in) | `{{ workspace \| upper }}` |
+| `replace` | string replacement (MiniJinja built-in) | `{{ workspace \| replace("/", "-") }}` |
 | `truncate` | first N characters | `{{ workspace \| truncate(20) }}` |
 
 ## Conditions
@@ -125,9 +125,9 @@ Conditions are template-rendered first, then evaluated. Built-ins:
 | `write-env` | create/merge an env file | `path`, `vars: {K: V}` |
 | `write-file` | write a file from a template | `path`, `content` |
 | `copy` | copy a file/dir | `from`, `to`, `overwrite` |
-| `replace` | in-file string/regex replacement | `path`, `find`, `replace` |
+| `replace` | in-file string/regex replacement | `file`, `pattern`, `replacement` |
 | `shell` | run a command (same as `command:`) | `command` |
-| `docker-exec` | exec inside a service container | `service`, `command` |
+| `docker-exec` | exec inside a container | `container`, `command`, `user` |
 | `http` | HTTP request (webhooks, health checks) | `url`, `method`, `body` |
 | `notify` | desktop notification | `message`, `title` |
 | `sync-ai-configs` | merge AI tool configs back to the main worktree | — |

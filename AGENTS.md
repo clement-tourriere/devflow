@@ -150,7 +150,7 @@ devflow commit --ai
 - `destroy` and `remove` require `--force` in `--non-interactive` or `--json` mode.
 - Unapproved hooks are skipped with a warning in non-interactive mode (the command completes; the JSON `hooks` summary reports them as `skipped`). Set `DEVFLOW_APPROVE_HOOKS=1` to auto-approve.
 - Git workspaces are always materialized as linked worktrees; the primary checkout is the default workspace. jj uses native workspaces.
-- `devflow --json list` always returns one versioned tree document, including `context_workspace`, `default_workspace`, `roots`, `workspaces`, and `warnings`.
+- `devflow --json list` always returns one versioned tree document, including `context_workspace`, `default_workspace`, `roots`, `workspaces`, `flat_order` (canonical depth-first display order), and `warnings`.
 - Treat `name` as the raw VCS identity. Use `service_key` (also exposed to hooks as `workspace_key` and the `workspace_sanitized` compatibility alias) for database, container, and path identifiers.
 - Read `service_key` from command/inventory output instead of reconstructing it; an unambiguously migrated workspace may retain a legacy key, while ambiguous legacy ownership is blocked.
 - A workspace's `parent` is immutable creation provenance. A missing/deleted parent remains visible in inventory rather than silently changing the child into a root.

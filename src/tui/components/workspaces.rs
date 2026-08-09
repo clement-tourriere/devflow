@@ -985,7 +985,8 @@ mod tests {
             name: name.to_string(),
             depth,
             is_last_sibling: true,
-            ancestor_has_next: vec![false; depth],
+            // Convention: one entry per non-root ancestor level.
+            ancestor_has_next: vec![true; depth.saturating_sub(1)],
             has_children,
         }
     }
@@ -997,17 +998,27 @@ mod tests {
             workspaces: vec![
                 workspace("child", Vec::new()),
                 workspace("root", Vec::new()),
+                workspace("grandchild", Vec::new()),
             ],
-            flat_order: vec![flat_row("root", 0, true), flat_row("child", 1, false)],
+            flat_order: vec![
+                flat_row("root", 0, true),
+                flat_row("child", 1, true),
+                flat_row("grandchild", 2, false),
+            ],
             warnings: Vec::new(),
         });
 
         let rows = component.visible_rows();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].workspace.name, "root");
         assert_eq!(rows[0].depth, 0);
         assert_eq!(rows[1].workspace.name, "child");
         assert_eq!(rows[1].depth, 1);
+        // Depth-1 rows carry no continuation column (roots render flush
+        // left); deeper rows carry one entry per non-root ancestor — the
+        // shared convention the CLI renderer relies on too.
+        assert!(rows[1].ancestor_has_next.is_empty());
+        assert_eq!(rows[2].ancestor_has_next.len(), 1);
     }
 
     #[test]

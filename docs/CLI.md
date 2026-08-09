@@ -106,7 +106,7 @@ devflow list
 devflow --json list
 ```
 
-JSON has one versioned shape for zero, one, or many services: `schema_version`, project/VCS metadata, `context_workspace`, `default_workspace`, `roots`, workspace nodes, and `warnings`. Nodes include raw `name`, effective `service_key`, newly-derived `canonical_service_key`, `identity_status`, immutable `parent`, `children`, `worktree_path`, health, services, processes, `created_at`, `executed_command`, and `execution_status`. New keys are collision-safe; unambiguously migrated workspaces may retain a legacy key for data continuity, while `legacy_unresolved` blocks service/process operations until ownership is repaired. Use raw names for VCS commands and the reported service key only for generated identifiers.
+JSON has one versioned shape for zero, one, or many services: `schema_version`, project/VCS metadata, `context_workspace`, `default_workspace`, `roots`, workspace nodes, `flat_order` (canonical depth-first display order with per-row depth/connector data), and `warnings`. Nodes include raw `name`, effective `service_key`, newly-derived `canonical_service_key`, `identity_status`, immutable `parent`, `children`, `worktree_path`, health, services, processes, `created_at`, `executed_command`, and `execution_status`. New keys are collision-safe; unambiguously migrated workspaces may retain a legacy key for data continuity, while `legacy_unresolved` blocks service/process operations until ownership is repaired. Use raw names for VCS commands and the reported service key only for generated identifiers.
 
 ### `devflow link <workspace>`
 

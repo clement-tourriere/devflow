@@ -4,13 +4,10 @@ use devflow_core::config::Config;
 /// Handle `devflow sync-ai-configs` — merge AI tool configs from current worktree
 /// back to the main worktree. The actual merge lives in `devflow_core::ai_configs`.
 pub(super) fn handle_sync_ai_configs(json_output: bool) -> Result<()> {
-    let config_path = Config::find_config_file()?;
-    let config = match &config_path {
-        Some(p) => Config::from_file(p)?,
-        None => Config::default(),
-    };
-
+    // Same effective-config resolution as the sync-ai-configs hook action,
+    // so both paths see the same worktree.extra_ai_dirs.
     let current_dir = std::env::current_dir()?;
+    let config = Config::load_effective_for_dir(&current_dir).unwrap_or_default();
     let outcome = devflow_core::ai_configs::sync_ai_configs(&config, &current_dir)?;
 
     for warning in &outcome.warnings {
