@@ -566,67 +566,40 @@ impl DevflowContext {
 
     /// Start the proxy in daemon mode.
     pub async fn start_proxy_bg() -> Result<String> {
-        // Only the ports are forwarded to the spawned `proxy start`; the suffix
-        // and mDNS use the CLI's own defaults.
-        let config = devflow_proxy::ProxyConfig {
-            https_port: 443,
-            http_port: 80,
-            api_port: 2019,
-            ..Default::default()
-        };
+        // Honor globally configured ports (the suffix and mDNS use the
+        // spawned CLI's own defaults, which read the same global config).
+        let proxy_cfg = devflow_core::config::GlobalConfig::load()
+            .ok()
+            .flatten()
+            .and_then(|g| g.proxy)
+            .unwrap_or_default();
+        let https_port = proxy_cfg.https_port.unwrap_or(443);
+        let http_port = proxy_cfg.http_port.unwrap_or(80);
+        let api_port = proxy_cfg.api_port.unwrap_or(2019);
 
-        let exe = std::env::current_exe()?;
-        let child = std::process::Command::new(exe)
-            .args([
+        let pid = devflow_core::detach::spawn_self_detached(
+            &devflow_proxy::ca::default_pid_path(),
+            &[
                 "proxy",
                 "start",
                 "--https-port",
-                &config.https_port.to_string(),
+                &https_port.to_string(),
                 "--http-port",
-                &config.http_port.to_string(),
+                &http_port.to_string(),
                 "--api-port",
-                &config.api_port.to_string(),
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
+                &api_port.to_string(),
+            ],
+        )?;
 
-        let pid_path = devflow_proxy::ca::default_ca_cert_path()
-            .parent()
-            .unwrap()
-            .join("proxy.pid");
-        std::fs::write(&pid_path, child.id().to_string())?;
-
-        Ok(format!("Proxy started (pid: {})", child.id()))
+        Ok(format!("Proxy started (pid: {})", pid))
     }
 
     /// Stop the proxy daemon.
     pub async fn stop_proxy_bg() -> Result<String> {
-        let pid_path = devflow_proxy::ca::default_ca_cert_path()
-            .parent()
-            .unwrap()
-            .join("proxy.pid");
-
-        if !pid_path.exists() {
-            anyhow::bail!("Proxy is not running (no PID file)");
+        match devflow_core::detach::stop(&devflow_proxy::ca::default_pid_path()) {
+            Some(pid) => Ok(format!("Proxy stopped (pid: {})", pid)),
+            None => anyhow::bail!("Proxy is not running (no PID file)"),
         }
-
-        let pid_str = std::fs::read_to_string(&pid_path)?;
-        let pid: i32 = pid_str
-            .trim()
-            .parse()
-            .map_err(|_| anyhow::anyhow!("Invalid PID file"))?;
-
-        #[cfg(unix)]
-        {
-            use nix::sys::signal::{kill, Signal};
-            use nix::unistd::Pid;
-            let _ = kill(Pid::from_raw(pid), Signal::SIGTERM);
-        }
-
-        std::fs::remove_file(&pid_path)?;
-        Ok(format!("Proxy stopped (pid: {})", pid))
     }
 }
 

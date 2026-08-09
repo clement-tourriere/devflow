@@ -59,21 +59,8 @@ struct DaemonProcessLine {
     success: bool,
 }
 
-/// Is a process with `pid` alive? (signal 0 probes without killing.)
-#[cfg(unix)]
-fn process_alive(pid: i32) -> bool {
-    use nix::sys::signal::kill;
-    use nix::unistd::Pid;
-    kill(Pid::from_raw(pid), None).is_ok()
-}
-#[cfg(not(unix))]
-fn process_alive(_pid: i32) -> bool {
-    false
-}
-
 fn read_pid() -> Option<i32> {
-    let path = pid_path().ok()?;
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    devflow_core::detach::read_pid(&pid_path().ok()?)
 }
 
 pub(super) async fn handle_daemon_command(
@@ -91,7 +78,7 @@ pub(super) async fn handle_daemon_command(
             // Refuse to double-start.
             if !once && !foreground {
                 if let Some(pid) = read_pid() {
-                    if process_alive(pid) {
+                    if devflow_core::detach::process_alive(pid) {
                         if json_output {
                             println!(
                                 "{}",
@@ -118,46 +105,33 @@ pub(super) async fn handle_daemon_command(
                 run_loop(interval).await
             } else {
                 // Detach: re-exec ourselves in foreground mode in the background.
-                let exe = std::env::current_exe()?;
-                let child = std::process::Command::new(exe)
-                    .args([
+                let pid = devflow_core::detach::spawn_self_detached(
+                    &pid_path()?,
+                    &[
                         "daemon",
                         "start",
                         "--foreground",
                         "--interval",
                         &interval.to_string(),
-                    ])
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                    .context("Failed to spawn daemon process")?;
-                std::fs::write(pid_path()?, child.id().to_string())?;
+                    ],
+                )
+                .context("Failed to spawn daemon process")?;
                 if json_output {
                     println!(
                         "{}",
-                        serde_json::json!({"status": "started", "pid": child.id(), "interval_secs": interval})
+                        serde_json::json!({"status": "started", "pid": pid, "interval_secs": interval})
                     );
                 } else {
                     println!(
                         "Controller daemon started (pid {}, reconcile every {}s)",
-                        child.id(),
-                        interval
+                        pid, interval
                     );
                 }
                 Ok(())
             }
         }
         super::DaemonCommands::Stop => {
-            let path = pid_path()?;
-            if let Some(pid) = read_pid() {
-                #[cfg(unix)]
-                {
-                    use nix::sys::signal::{kill, Signal};
-                    use nix::unistd::Pid;
-                    let _ = kill(Pid::from_raw(pid), Signal::SIGTERM);
-                }
-                let _ = std::fs::remove_file(&path);
+            if let Some(pid) = devflow_core::detach::stop(&pid_path()?) {
                 if json_output {
                     println!("{}", serde_json::json!({"status": "stopped", "pid": pid}));
                 } else {
@@ -171,7 +145,9 @@ pub(super) async fn handle_daemon_command(
             Ok(())
         }
         super::DaemonCommands::Status => {
-            let running = read_pid().map(process_alive).unwrap_or(false);
+            let running = read_pid()
+                .map(devflow_core::detach::process_alive)
+                .unwrap_or(false);
             let status: DaemonStatus = std::fs::read_to_string(status_path()?)
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())

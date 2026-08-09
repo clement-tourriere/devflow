@@ -12,4 +12,5 @@ pub mod vcs;
 
 pub mod agent;
 pub mod ai_configs;
+pub mod detach;
 pub mod workspace;

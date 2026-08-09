@@ -16,6 +16,15 @@ pub fn default_ca_cert_path() -> PathBuf {
         .join("ca.crt")
 }
 
+/// Default proxy pidfile path: ~/.devflow/proxy/proxy.pid
+pub fn default_pid_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".devflow")
+        .join("proxy")
+        .join("proxy.pid")
+}
+
 /// Default CA key path: ~/.devflow/proxy/ca.key
 pub fn default_ca_key_path() -> PathBuf {
     dirs::home_dir()

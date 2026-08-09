@@ -65,7 +65,6 @@ pub(super) async fn handle_proxy_command(
 
             if daemon {
                 // Fork to background
-                let exe = std::env::current_exe()?;
                 let mut args = vec![
                     "proxy".to_string(),
                     "start".to_string(),
@@ -85,26 +84,18 @@ pub(super) async fn handle_proxy_command(
                     args.push("--no-mdns".to_string());
                 }
 
-                let child = std::process::Command::new(exe)
-                    .args(&args)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                    .context("Failed to spawn daemon process")?;
-
-                let pid_path = devflow_proxy::ca::default_ca_cert_path()
-                    .parent()
-                    .unwrap()
-                    .join("proxy.pid");
-                std::fs::write(&pid_path, child.id().to_string())?;
+                let pid = devflow_core::detach::spawn_self_detached(
+                    &devflow_proxy::ca::default_pid_path(),
+                    &args,
+                )
+                .context("Failed to spawn daemon process")?;
 
                 if json_output {
                     println!(
                         "{}",
                         serde_json::json!({
                             "status": "started",
-                            "pid": child.id(),
+                            "pid": pid,
                             "https_port": https_port,
                             "http_port": http_port,
                             "api_port": api_port,
@@ -112,7 +103,7 @@ pub(super) async fn handle_proxy_command(
                         })
                     );
                 } else {
-                    println!("Proxy started (pid: {})", child.id());
+                    println!("Proxy started (pid: {})", pid);
                     println!("  HTTPS: https://localhost:{}", https_port);
                     println!("  HTTP:  http://localhost:{}", http_port);
                     println!("  API:   http://localhost:{}", api_port);
@@ -139,29 +130,11 @@ pub(super) async fn handle_proxy_command(
             }
         }
         super::ProxyCommands::Stop => {
-            let pid_path = devflow_proxy::ca::default_ca_cert_path()
-                .parent()
-                .unwrap()
-                .join("proxy.pid");
-
-            if pid_path.exists() {
-                let pid_str = std::fs::read_to_string(&pid_path)?;
-                if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                    #[cfg(unix)]
-                    {
-                        use nix::sys::signal::{kill, Signal};
-                        use nix::unistd::Pid;
-                        let _ = kill(Pid::from_raw(pid), Signal::SIGTERM);
-                    }
-                    std::fs::remove_file(&pid_path)?;
-
-                    if json_output {
-                        println!("{}", serde_json::json!({"status": "stopped", "pid": pid}));
-                    } else {
-                        println!("Proxy stopped (pid: {})", pid);
-                    }
+            if let Some(pid) = devflow_core::detach::stop(&devflow_proxy::ca::default_pid_path()) {
+                if json_output {
+                    println!("{}", serde_json::json!({"status": "stopped", "pid": pid}));
                 } else {
-                    anyhow::bail!("Invalid PID file");
+                    println!("Proxy stopped (pid: {})", pid);
                 }
             } else if json_output {
                 println!("{}", serde_json::json!({"status": "not_running"}));
