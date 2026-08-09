@@ -1111,9 +1111,11 @@ fn detect_sync_ai_configs(ctx: &DetectContext) -> RecipeDetection {
 
 fn build_sync_ai_configs() -> HooksConfig {
     let mut pre_remove = IndexMap::new();
+    // Built-in action (not a shell-out): runs natively in every frontend and
+    // needs no approval or devflow binary on PATH.
     pre_remove.insert(
         "sync-ai-configs".to_string(),
-        shell_hook("devflow sync-ai-configs", None, false),
+        action_hook(HookAction::SyncAiConfigs, None),
     );
     let mut hooks: HooksConfig = IndexMap::new();
     hooks.insert(HookPhase::PreRemove, pre_remove);
@@ -1525,11 +1527,14 @@ services:
             .unwrap()
             .get("sync-ai-configs")
             .unwrap();
-        let HookEntry::Extended(extended) = entry else {
-            panic!("expected extended hook");
+        let HookEntry::Action(action_entry) = entry else {
+            panic!("expected built-in action hook");
         };
-        assert_eq!(extended.command, "devflow sync-ai-configs");
-        assert_eq!(extended.continue_on_error, Some(true));
+        assert!(matches!(action_entry.action, HookAction::SyncAiConfigs));
+        assert!(
+            !entry.requires_approval(),
+            "built-in action needs no approval"
+        );
     }
 
     #[test]

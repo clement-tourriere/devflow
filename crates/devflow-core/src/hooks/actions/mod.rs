@@ -140,6 +140,32 @@ pub async fn execute_action(
             message,
             level,
         } => notify::execute(title, message, level, context, template_engine),
+        super::HookAction::SyncAiConfigs => {
+            // Self-contained: the project config (for extra_ai_dirs) is
+            // loaded from the worktree the hook runs in, so the GUI can
+            // execute this without the devflow binary on PATH.
+            let config =
+                crate::config::Config::load_effective_for_dir(working_dir).unwrap_or_default();
+            let outcome = crate::ai_configs::sync_ai_configs(&config, working_dir)?;
+            for warning in &outcome.warnings {
+                log::warn!("sync-ai-configs: {warning}");
+            }
+            let summary = if outcome.skipped_in_main {
+                "sync-ai-configs: already in main worktree, nothing to sync".to_string()
+            } else {
+                format!(
+                    "sync-ai-configs: merged {} file(s), synced {} dir(s){}",
+                    outcome.synced_files.len(),
+                    outcome.synced_dirs.len(),
+                    if outcome.warnings.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" — {} warning(s)", outcome.warnings.len())
+                    }
+                )
+            };
+            Ok(ActionResult { summary })
+        }
     }
 }
 

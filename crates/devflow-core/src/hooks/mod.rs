@@ -246,6 +246,9 @@ pub enum HookAction {
         #[serde(default)]
         level: NotifyLevel,
     },
+    /// Merge AI tool configs (`.claude/`, `.cursor/`, …) from the current
+    /// worktree back into the main worktree (see `crate::ai_configs`).
+    SyncAiConfigs,
 }
 
 fn default_true() -> bool {
@@ -282,6 +285,7 @@ impl HookAction {
             HookAction::DockerExec { .. } => "docker-exec",
             HookAction::Http { .. } => "http",
             HookAction::Notify { .. } => "notify",
+            HookAction::SyncAiConfigs => "sync-ai-configs",
         }
     }
 }

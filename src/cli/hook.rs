@@ -782,6 +782,7 @@ fn handle_hook_actions(json_output: bool) -> Result<()> {
         ("docker-exec", "Execute a command inside a Docker container", "action:\n  type: docker-exec\n  container: myapp-postgres\n  command: \"psql -U postgres -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto'\""),
         ("http", "Make an HTTP request", "action:\n  type: http\n  url: \"https://hooks.slack.com/services/XXX\"\n  method: POST\n  headers:\n    Content-Type: application/json\n  body: '{\"text\": \"Workspace {{ workspace }} ready\"}'"),
         ("notify", "Send a desktop notification", "action:\n  type: notify\n  title: devflow\n  message: \"Workspace {{ workspace }} is ready\"\n  level: success"),
+        ("sync-ai-configs", "Merge AI tool configs (.claude, .cursor, ...) back to the main worktree", "action:\n  type: sync-ai-configs"),
     ];
 
     if json_output {
