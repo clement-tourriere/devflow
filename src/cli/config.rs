@@ -14,7 +14,6 @@ const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "processes",
     "worktree",
     "hooks",
-    "triggers",
     "execute",
     "commit",
     "agent",

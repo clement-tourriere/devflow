@@ -780,13 +780,8 @@ fn write_hooks_yaml(config_path: &Path, hooks_config: &hooks::HooksConfig) -> Re
 
 /// Get VCS trigger mappings.
 #[tauri::command]
-pub async fn get_trigger_mappings(project_path: String) -> Result<serde_json::Value, String> {
-    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
-    let config = devflow_core::config::Config::from_file(&config_path)
-        .map_err(crate::commands::format_error)?;
-
-    let triggers = config.triggers.unwrap_or_default();
-    let mappings = triggers.git_mappings();
-
+pub async fn get_trigger_mappings(_project_path: String) -> Result<serde_json::Value, String> {
+    // The mapping is fixed; the parameter is kept for IPC-signature stability.
+    let mappings = devflow_core::hooks::triggers::git_trigger_mappings();
     serde_json::to_value(&mappings).map_err(|e| e.to_string())
 }

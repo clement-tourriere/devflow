@@ -79,7 +79,7 @@ pub(super) async fn handle_hook_command(
             handle_hook_render(config, &template, workspace.as_deref(), json_output).await?;
         }
         super::HookCommands::Triggers => {
-            handle_hook_triggers(config, json_output)?;
+            handle_hook_triggers(json_output)?;
         }
         super::HookCommands::Actions => {
             handle_hook_actions(json_output)?;
@@ -745,9 +745,8 @@ fn handle_hook_approvals(action: super::ApprovalCommands, json_output: bool) -> 
 }
 
 /// `devflow hook triggers` — show VCS event → devflow phase mapping.
-fn handle_hook_triggers(config: &Config, json_output: bool) -> Result<()> {
-    let triggers = config.triggers.clone().unwrap_or_default();
-    let mappings = triggers.git_mappings();
+fn handle_hook_triggers(json_output: bool) -> Result<()> {
+    let mappings = devflow_core::hooks::triggers::git_trigger_mappings();
 
     if json_output {
         println!(
@@ -764,17 +763,6 @@ fn handle_hook_triggers(config: &Config, json_output: bool) -> Result<()> {
     for mapping in &mappings {
         println!(
             "  git {:<18} → [{}]",
-            mapping.vcs_event,
-            mapping.phases.join(", ")
-        );
-    }
-    println!();
-    println!("Override in .devflow.yml:");
-    println!("  triggers:");
-    println!("    git:");
-    for mapping in &mappings {
-        println!(
-            "      {}: [{}]",
             mapping.vcs_event,
             mapping.phases.join(", ")
         );
