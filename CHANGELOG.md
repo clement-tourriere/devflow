@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.7.1 (2026-08-09)
+
+### Fix
+
+- address confirmed code-review findings on the consolidation range
+- apply round-2 review findings across the new consolidation code
+- **test**: serialize env-mutating switch tests on the shared lock
+
+### Refactor
+
+- sweep branch→workspace naming debt
+- **services**: extract shared LocalEngineBackend for clickhouse/mysql
+- **workspace**: single canonical tree flattening in core
+- **cli**: dedup the detach/pidfile pattern into core
+- **hooks**: move sync-ai-configs into core, add built-in action
+- **state**: finish the _by_dir local-state migration
+- **hooks**: drop the decoy configurable triggers section
+- sweep dead code, unify duplicated logic
+
 ## v0.7.0 (2026-07-18)
 
 ### BREAKING CHANGE
