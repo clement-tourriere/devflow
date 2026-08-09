@@ -10,6 +10,8 @@ pub mod generic;
 #[cfg(feature = "service-local")]
 pub mod local_docker;
 #[cfg(feature = "service-local")]
+pub mod local_engine;
+#[cfg(feature = "service-local")]
 pub mod mysql;
 #[cfg(feature = "service-local")]
 pub mod shared;

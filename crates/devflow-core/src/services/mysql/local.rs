@@ -2,161 +2,61 @@
 //!
 //! Each workspace gets its own MySQL container. Data is stored in bind-mounted
 //! directories under `data_root/mysql/{service_name}/{workspace_name}/`.
+//!
+//! The container lifecycle lives in the shared
+//! [`LocalEngineBackend`](crate::services::local_engine::LocalEngineBackend);
+//! this module only supplies the MySQL-specific [`LocalEngineSpec`].
 
-use std::collections::HashMap;
-use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
-use async_trait::async_trait;
-use bollard::models::{ContainerCreateBody, HostConfig, PortBinding, PortMap};
-use bollard::query_parameters::{
-    CreateContainerOptions, RemoveContainerOptions, StopContainerOptions,
-};
-use bollard::Docker;
-use chrono::Utc;
-use tokio::time::{sleep, Instant};
-
 use crate::config::{DockerCustomSettings, MySQLConfig};
-use crate::services::{
-    local_docker::{
-        bounded_container_name, collect_container_logs, inspect_container_status,
-        list_managed_service_containers, pick_available_port, sanitize_name_component,
-        service_workspace_prefix, ContainerStatus,
-    },
-    ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceCapabilities, ServiceProvider,
-    WorkspaceInfo,
-};
+use crate::services::local_engine::{LocalEngineBackend, LocalEngineSpec, PortLayout};
+use crate::services::ConnectionInfo;
 
 const MYSQL_PORT: u16 = 3306;
 
-pub struct MySQLLocalProvider {
-    project_name: String,
-    service_name: String,
+/// MySQL-specific engine behavior for [`LocalEngineBackend`].
+pub struct MySQLEngine {
     image: String,
     port_range_start: u16,
-    data_root: PathBuf,
     root_password: String,
     database: Option<String>,
     user: Option<String>,
     password: Option<String>,
-    client: Docker,
-    docker_settings: DockerCustomSettings,
 }
 
-impl MySQLLocalProvider {
-    pub fn new(
-        project_name: &str,
-        service_name: &str,
-        config: &MySQLConfig,
-        docker_settings: Option<&DockerCustomSettings>,
-    ) -> anyhow::Result<Self> {
-        let client =
-            Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon. Is Docker installed and running? Check with: docker info")?;
-
-        let data_root = if let Some(ref root) = config.data_root {
-            let expanded = crate::services::local_docker::expand_home(root);
-            PathBuf::from(expanded)
-        } else {
-            dirs::data_local_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("devflow")
-                .join("mysql")
-        };
-
-        Ok(Self {
-            project_name: project_name.to_string(),
-            service_name: service_name.to_string(),
-            image: config.image.clone(),
-            port_range_start: config.port_range_start.unwrap_or(53306),
-            data_root,
-            root_password: config.root_password.clone(),
-            database: config.database.clone(),
-            user: config.user.clone(),
-            password: config.password.clone(),
-            client,
-            docker_settings: docker_settings.cloned().unwrap_or_default(),
-        })
+impl LocalEngineSpec for MySQLEngine {
+    fn kind(&self) -> &'static str {
+        "mysql"
     }
 
-    fn container_name(&self, workspace_name: &str) -> String {
-        let raw = format!(
-            "devflow-{}-{}-{}",
-            sanitize_name_component(&self.project_name),
-            sanitize_name_component(&self.service_name),
-            sanitize_name_component(workspace_name)
-        );
-        bounded_container_name(&raw)
+    fn display_name(&self) -> &'static str {
+        "MySQL"
     }
 
-    fn branch_data_dir(&self, workspace_name: &str) -> PathBuf {
-        self.data_root
-            .join(&self.service_name)
-            .join(sanitize_name_component(workspace_name))
+    fn provider_name(&self) -> &'static str {
+        "MySQL (Docker)"
     }
 
-    async fn container_status(&self, container_name: &str) -> anyhow::Result<ContainerStatus> {
-        inspect_container_status(&self.client, container_name).await
+    fn image(&self) -> &str {
+        &self.image
     }
 
-    async fn ensure_image(&self) -> anyhow::Result<()> {
-        crate::services::shared::container::ensure_image(&self.client, &self.image).await
+    fn port_range_start(&self) -> u16 {
+        self.port_range_start
     }
 
-    async fn pick_port(&self) -> anyhow::Result<u16> {
-        pick_available_port(&self.client, self.port_range_start).await
+    fn data_mount_path(&self) -> &'static str {
+        "/var/lib/mysql"
     }
 
-    async fn get_container_port(&self, container_name: &str) -> anyhow::Result<Option<u16>> {
-        let info = self
-            .client
-            .inspect_container(
-                container_name,
-                None::<bollard::query_parameters::InspectContainerOptions>,
-            )
-            .await?;
-
-        if let Some(network) = info.network_settings {
-            if let Some(ports) = network.ports {
-                let key = format!("{MYSQL_PORT}/tcp");
-                if let Some(Some(bindings)) = ports.get(&key) {
-                    for binding in bindings {
-                        if let Some(ref host_port) = binding.host_port {
-                            if let Ok(port) = host_port.parse::<u16>() {
-                                return Ok(Some(port));
-                            }
-                        }
-                    }
-                }
-            }
+    fn port_layout(&self) -> PortLayout {
+        PortLayout::Single {
+            container_port: MYSQL_PORT,
         }
-
-        Ok(None)
     }
 
-    async fn create_and_start(
-        &self,
-        container_name: &str,
-        workspace_name: &str,
-        port: u16,
-    ) -> anyhow::Result<()> {
-        self.ensure_image().await?;
-
-        let data_dir = self.branch_data_dir(workspace_name);
-        std::fs::create_dir_all(&data_dir)
-            .with_context(|| format!("failed to create data dir: {}", data_dir.display()))?;
-
-        let mut port_bindings: PortMap = HashMap::new();
-        port_bindings.insert(
-            format!("{MYSQL_PORT}/tcp"),
-            Some(vec![PortBinding {
-                host_ip: Some("127.0.0.1".to_string()),
-                host_port: Some(port.to_string()),
-            }]),
-        );
-
-        let mount = format!("{}:/var/lib/mysql", data_dir.display());
-
+    fn env(&self) -> Vec<String> {
         let mut env = vec![format!("MYSQL_ROOT_PASSWORD={}", self.root_password)];
         if let Some(ref db) = self.database {
             env.push(format!("MYSQL_DATABASE={db}"));
@@ -167,486 +67,69 @@ impl MySQLLocalProvider {
         if let Some(ref password) = self.password {
             env.push(format!("MYSQL_PASSWORD={password}"));
         }
-
-        let mut labels = HashMap::new();
-        labels.insert("devflow.managed".to_string(), "true".to_string());
-        labels.insert("devflow.project".to_string(), self.project_name.clone());
-        labels.insert("devflow.service".to_string(), self.service_name.clone());
-        labels.insert("devflow.service-type".to_string(), "mysql".to_string());
-        labels.insert("devflow.workspace".to_string(), workspace_name.to_string());
-
-        let mut host_config = HostConfig {
-            binds: Some(vec![mount]),
-            port_bindings: Some(port_bindings),
-            ..Default::default()
-        };
-
-        let mut config = ContainerCreateBody {
-            image: Some(self.image.clone()),
-            env: Some(env),
-            labels: Some(labels),
-            ..Default::default()
-        };
-
-        if !self.docker_settings.is_empty() {
-            crate::docker::settings::apply_custom_settings(
-                &mut config,
-                &mut host_config,
-                &self.docker_settings,
-            );
-        }
-
-        config.host_config = Some(host_config);
-
-        let options = CreateContainerOptions {
-            name: Some(container_name.to_string()),
-            ..Default::default()
-        };
-
-        self.client
-            .create_container(Some(options), config)
-            .await
-            .with_context(|| format!("failed to create container '{container_name}'"))?;
-
-        self.client
-            .start_container(
-                container_name,
-                None::<bollard::query_parameters::StartContainerOptions>,
-            )
-            .await
-            .with_context(|| format!("failed to start container '{container_name}'"))?;
-
-        Ok(())
+        env
     }
 
-    async fn wait_ready(&self, container_name: &str, timeout: Duration) -> anyhow::Result<()> {
-        let deadline = Instant::now() + timeout;
-
-        loop {
-            if Instant::now() >= deadline {
-                return Err(anyhow!(
-                    "timed out waiting for MySQL readiness in '{container_name}'"
-                ));
-            }
-
-            match self.container_status(container_name).await? {
-                ContainerStatus::NotFound => {
-                    return Err(anyhow!("container '{container_name}' does not exist"));
-                }
-                ContainerStatus::Running
-                    // mysqladmin ping
-                    if self
-                        .exec_check(
-                            container_name,
-                            &[
-                                "mysqladmin",
-                                "ping",
-                                "-h",
-                                "127.0.0.1",
-                                &format!("-p{}", self.root_password),
-                                "--silent",
-                            ],
-                        )
-                        .await
-                    => {
-                        return Ok(());
-                    }
-                _ => {}
-            }
-
-            sleep(Duration::from_millis(500)).await;
-        }
+    fn readiness_command(&self) -> Vec<String> {
+        // mysqladmin ping
+        vec![
+            "mysqladmin".to_string(),
+            "ping".to_string(),
+            "-h".to_string(),
+            "127.0.0.1".to_string(),
+            format!("-p{}", self.root_password),
+            "--silent".to_string(),
+        ]
     }
 
-    async fn exec_check(&self, container_name: &str, cmd: &[&str]) -> bool {
-        crate::services::shared::container::exec_check(&self.client, container_name, cmd).await
+    fn restart_ready_timeout(&self) -> Duration {
+        Duration::from_secs(120)
     }
 
-    async fn list_managed_containers(&self) -> anyhow::Result<Vec<(String, String, bool)>> {
-        let prefix = service_workspace_prefix(&self.project_name, &self.service_name);
-        list_managed_service_containers(
-            &self.client,
-            &self.project_name,
-            &self.service_name,
-            &prefix,
-        )
-        .await
-    }
-}
-
-#[async_trait]
-impl ServiceProvider for MySQLLocalProvider {
-    async fn create_workspace(
-        &self,
-        workspace_name: &str,
-        from_workspace: Option<&str>,
-    ) -> anyhow::Result<WorkspaceInfo> {
-        let container_name = self.container_name(workspace_name);
-
-        match self.container_status(&container_name).await? {
-            ContainerStatus::Running => {
-                return Ok(WorkspaceInfo {
-                    name: workspace_name.to_string(),
-                    created_at: Some(Utc::now()),
-                    parent_workspace: from_workspace.map(|s| s.to_string()),
-                    database_name: container_name,
-                    state: Some("running".to_string()),
-                });
-            }
-            ContainerStatus::Exited | ContainerStatus::Paused => {
-                self.client
-                    .start_container(
-                        &container_name,
-                        None::<bollard::query_parameters::StartContainerOptions>,
-                    )
-                    .await
-                    .with_context(|| format!("failed to start container '{container_name}'"))?;
-
-                self.wait_ready(&container_name, Duration::from_secs(120))
-                    .await?;
-
-                return Ok(WorkspaceInfo {
-                    name: workspace_name.to_string(),
-                    created_at: Some(Utc::now()),
-                    parent_workspace: from_workspace.map(|s| s.to_string()),
-                    database_name: container_name,
-                    state: Some("running".to_string()),
-                });
-            }
-            ContainerStatus::NotFound | ContainerStatus::Other(_) => {}
-        }
-
-        // Clone data from parent workspace if specified
-        if let Some(parent_name) = from_workspace {
-            let parent_container = self.container_name(parent_name);
-            let parent_data_dir = self.branch_data_dir(parent_name);
-            let new_data_dir = self.branch_data_dir(workspace_name);
-
-            if parent_data_dir.exists() {
-                // Stop parent container to ensure data consistency
-                let parent_running = matches!(
-                    self.container_status(&parent_container).await?,
-                    ContainerStatus::Running
-                );
-                if parent_running {
-                    self.client
-                        .stop_container(
-                            &parent_container,
-                            Some(StopContainerOptions {
-                                t: Some(10),
-                                ..Default::default()
-                            }),
-                        )
-                        .await
-                        .with_context(|| {
-                            format!("failed to stop parent container '{parent_container}'")
-                        })?;
-                }
-
-                crate::services::clone_data_dir(&parent_data_dir, &new_data_dir).await?;
-
-                // Restart parent if it was running
-                if parent_running {
-                    self.client
-                        .start_container(
-                            &parent_container,
-                            None::<bollard::query_parameters::StartContainerOptions>,
-                        )
-                        .await
-                        .with_context(|| {
-                            format!("failed to restart parent container '{parent_container}'")
-                        })?;
-                }
-            }
-        }
-
-        let port = self.pick_port().await?;
-        self.create_and_start(&container_name, workspace_name, port)
-            .await?;
-        self.wait_ready(&container_name, Duration::from_secs(120))
-            .await?;
-
-        Ok(WorkspaceInfo {
-            name: workspace_name.to_string(),
-            created_at: Some(Utc::now()),
-            parent_workspace: from_workspace.map(|s| s.to_string()),
-            database_name: container_name,
-            state: Some("running".to_string()),
-        })
-    }
-
-    async fn delete_workspace(&self, workspace_name: &str) -> anyhow::Result<()> {
-        let container_name = self.container_name(workspace_name);
-
-        if !matches!(
-            self.container_status(&container_name).await?,
-            ContainerStatus::NotFound
-        ) {
-            let options = RemoveContainerOptions {
-                force: true,
-                ..Default::default()
-            };
-            self.client
-                .remove_container(&container_name, Some(options))
-                .await
-                .with_context(|| format!("failed to remove container '{container_name}'"))?;
-        }
-
-        let data_dir = self.branch_data_dir(workspace_name);
-        if data_dir.exists() {
-            std::fs::remove_dir_all(&data_dir)
-                .with_context(|| format!("failed to remove data dir: {}", data_dir.display()))?;
-        }
-
-        Ok(())
-    }
-
-    async fn list_workspaces(&self) -> anyhow::Result<Vec<WorkspaceInfo>> {
-        let containers = self.list_managed_containers().await?;
-        Ok(containers
-            .into_iter()
-            .map(|(workspace, container_name, is_running)| WorkspaceInfo {
-                name: workspace,
-                created_at: None,
-                parent_workspace: None,
-                database_name: container_name,
-                state: Some(if is_running { "running" } else { "stopped" }.to_string()),
-            })
-            .collect())
-    }
-
-    async fn workspace_exists(&self, workspace_name: &str) -> anyhow::Result<bool> {
-        let container_name = self.container_name(workspace_name);
-        Ok(!matches!(
-            self.container_status(&container_name).await?,
-            ContainerStatus::NotFound
-        ))
-    }
-
-    async fn switch_to_branch(&self, workspace_name: &str) -> anyhow::Result<WorkspaceInfo> {
-        let container_name = self.container_name(workspace_name);
-
-        match self.container_status(&container_name).await? {
-            ContainerStatus::Running => {}
-            ContainerStatus::Exited | ContainerStatus::Paused | ContainerStatus::Other(_) => {
-                self.client
-                    .start_container(
-                        &container_name,
-                        None::<bollard::query_parameters::StartContainerOptions>,
-                    )
-                    .await
-                    .with_context(|| format!("failed to start container '{container_name}'"))?;
-                self.wait_ready(&container_name, Duration::from_secs(60))
-                    .await?;
-            }
-            ContainerStatus::NotFound => {
-                return Err(anyhow!(
-                    "no MySQL container for workspace '{workspace_name}' on service '{}'",
-                    self.service_name
-                ));
-            }
-        }
-
-        Ok(WorkspaceInfo {
-            name: workspace_name.to_string(),
-            created_at: None,
-            parent_workspace: None,
-            database_name: container_name,
-            state: Some("running".to_string()),
-        })
-    }
-
-    async fn get_connection_info(&self, workspace_name: &str) -> anyhow::Result<ConnectionInfo> {
-        let container_name = self.container_name(workspace_name);
-        let port = self
-            .get_container_port(&container_name)
-            .await?
-            .unwrap_or(self.port_range_start);
-
+    fn connection_info(&self, host_port: u16) -> ConnectionInfo {
         let db = self.database.as_deref().unwrap_or("mysql");
         let user = self.user.as_deref().unwrap_or("root");
         let password = self.password.as_ref().or(Some(&self.root_password));
 
-        Ok(ConnectionInfo {
+        ConnectionInfo {
             host: "127.0.0.1".to_string(),
-            port,
+            port: host_port,
             database: db.to_string(),
             user: user.to_string(),
             password: password.cloned(),
             connection_string: Some(format!(
-                "mysql://{}:{}@127.0.0.1:{port}/{db}",
+                "mysql://{}:{}@127.0.0.1:{host_port}/{db}",
                 user,
                 password.map(|p| p.as_str()).unwrap_or(""),
             )),
-        })
-    }
-
-    fn supports_lifecycle(&self) -> bool {
-        true
-    }
-
-    async fn start_workspace(&self, workspace_name: &str) -> anyhow::Result<()> {
-        let container_name = self.container_name(workspace_name);
-        match self.container_status(&container_name).await? {
-            ContainerStatus::Running => Ok(()),
-            ContainerStatus::NotFound => Err(anyhow!(
-                "no MySQL container for workspace '{workspace_name}'"
-            )),
-            _ => {
-                self.client
-                    .start_container(
-                        &container_name,
-                        None::<bollard::query_parameters::StartContainerOptions>,
-                    )
-                    .await
-                    .with_context(|| format!("failed to start container '{container_name}'"))?;
-                self.wait_ready(&container_name, Duration::from_secs(60))
-                    .await
-            }
         }
     }
+}
 
-    async fn stop_workspace(&self, workspace_name: &str) -> anyhow::Result<()> {
-        let container_name = self.container_name(workspace_name);
-        match self.container_status(&container_name).await? {
-            ContainerStatus::NotFound | ContainerStatus::Exited => return Ok(()),
-            ContainerStatus::Paused => {
-                self.client.unpause_container(&container_name).await.ok();
-            }
-            _ => {}
-        }
+/// Per-workspace MySQL/MariaDB provider: the shared local-engine backend
+/// specialized with [`MySQLEngine`].
+pub type MySQLLocalProvider = LocalEngineBackend<MySQLEngine>;
 
-        let options = StopContainerOptions {
-            t: Some(20),
-            ..Default::default()
-        };
-        self.client
-            .stop_container(&container_name, Some(options))
-            .await
-            .with_context(|| format!("failed to stop container '{container_name}'"))?;
-        Ok(())
-    }
-
-    fn supports_destroy(&self) -> bool {
-        true
-    }
-
-    async fn destroy_preview(&self) -> anyhow::Result<Option<(String, Vec<String>)>> {
-        let containers = self.list_managed_containers().await?;
-        if containers.is_empty() {
-            return Ok(None);
-        }
-        let names: Vec<String> = containers.into_iter().map(|(b, _, _)| b).collect();
-        Ok(Some((self.service_name.clone(), names)))
-    }
-
-    async fn destroy_project(&self) -> anyhow::Result<Vec<String>> {
-        let containers = self.list_managed_containers().await?;
-        let mut deleted = Vec::new();
-
-        for (workspace_name, container_name, _) in &containers {
-            let options = RemoveContainerOptions {
-                force: true,
-                ..Default::default()
-            };
-            match self
-                .client
-                .remove_container(container_name, Some(options))
-                .await
-            {
-                Ok(()) => deleted.push(workspace_name.clone()),
-                Err(e) => log::warn!("failed to remove container '{}': {}", container_name, e),
-            }
-        }
-
-        let service_dir = self.data_root.join(&self.service_name);
-        if service_dir.exists() {
-            std::fs::remove_dir_all(&service_dir).ok();
-        }
-
-        Ok(deleted)
-    }
-
-    async fn doctor(&self) -> anyhow::Result<DoctorReport> {
-        let mut checks = Vec::new();
-
-        match self.client.version().await {
-            Ok(info) => {
-                checks.push(DoctorCheck {
-                    name: "Docker".to_string(),
-                    available: true,
-                    detail: format!("Docker {} reachable", info.version.unwrap_or_default()),
-                });
-            }
-            Err(err) => {
-                checks.push(DoctorCheck {
-                    name: "Docker".to_string(),
-                    available: false,
-                    detail: format!(
-                        "Docker unreachable: {err}. Is Docker running? Try: docker info"
-                    ),
-                });
-            }
-        }
-
-        let image_available = self.client.inspect_image(&self.image).await.is_ok();
-        checks.push(DoctorCheck {
-            name: format!("Image: {}", self.image),
-            available: image_available,
-            detail: if image_available {
-                "available locally".to_string()
-            } else {
-                "not pulled yet".to_string()
+impl MySQLLocalProvider {
+    pub fn new(
+        project_name: &str,
+        service_name: &str,
+        config: &MySQLConfig,
+        docker_settings: Option<&DockerCustomSettings>,
+    ) -> anyhow::Result<Self> {
+        Self::with_engine(
+            project_name,
+            service_name,
+            config.data_root.as_deref(),
+            docker_settings,
+            MySQLEngine {
+                image: config.image.clone(),
+                port_range_start: config.port_range_start.unwrap_or(53306),
+                root_password: config.root_password.clone(),
+                database: config.database.clone(),
+                user: config.user.clone(),
+                password: config.password.clone(),
             },
-        });
-
-        checks.push(DoctorCheck {
-            name: "Data root".to_string(),
-            available: true,
-            detail: self.data_root.display().to_string(),
-        });
-
-        Ok(DoctorReport { checks })
-    }
-
-    async fn test_connection(&self) -> anyhow::Result<()> {
-        self.client
-            .version()
-            .await
-            .context("Docker is not available")?;
-        Ok(())
-    }
-
-    fn project_info(&self) -> Option<ProjectInfo> {
-        Some(ProjectInfo {
-            name: self.service_name.clone(),
-            storage_driver: Some("docker-bind".to_string()),
-            image: Some(self.image.clone()),
-        })
-    }
-
-    async fn logs(&self, workspace_name: &str, tail: Option<usize>) -> anyhow::Result<String> {
-        let container = self.container_name(workspace_name);
-        collect_container_logs(&self.client, &container, tail).await
-    }
-
-    fn provider_name(&self) -> &'static str {
-        "MySQL (Docker)"
-    }
-
-    fn capabilities(&self) -> ServiceCapabilities {
-        ServiceCapabilities {
-            lifecycle: true,
-            logs: true,
-            destroy_project: true,
-            cleanup: true,
-            seed_from_source: false,
-            template_from_time: false,
-            max_workspace_name_length: 255,
-        }
-    }
-
-    fn max_workspace_name_length(&self) -> usize {
-        255
+        )
     }
 }
