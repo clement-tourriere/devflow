@@ -6,7 +6,7 @@ pub fn config_path(project_dir: &Path) -> PathBuf {
 }
 
 /// Load only the committed project config (for editors that write it back).
-pub fn load_project_config(project_dir: &Path) -> Result<Config, String> {
+fn load_project_config(project_dir: &Path) -> Result<Config, String> {
     let mut config = match Config::find_config_file_in(project_dir) {
         Some(path) => Config::from_file(&path).map_err(crate::commands::format_error)?,
         None => Config::default(),

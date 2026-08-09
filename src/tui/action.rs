@@ -2,7 +2,6 @@
 ///
 /// Components emit actions in response to events; the App dispatches
 /// them back to all components via `update()`.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum Action {
     // ── Navigation ──

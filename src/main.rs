@@ -47,23 +47,29 @@ Services:
   service connection  Show connection info for a service workspace
   service logs        Show container logs for a workspace
   service seed        Seed a workspace from an external source
+  service up          Reconcile shared global engines once
+  service discover    Discover running containers to import
 
 Processes:
   process start       Start workspace project processes
   process stop        Stop workspace project processes
   process restart     Restart workspace project processes
-  process status      Show workspace process status
+  process status      Show workspace process status (alias: list)
   process logs        Show process logs
 
 Setup & Config:
   config              Show current configuration (-v for precedence details)
+  config-validate     Validate a devflow config file
   destroy             Tear down the entire devflow project (inverse of init)
   install-hooks       Install Git hooks (adopt linked worktrees + lifecycle hooks)
   uninstall-hooks     Uninstall Git hooks
   shell-init          Print shell integration script (enables worktree cd)
+  completions         Generate shell completions
   worktree-setup      Set up devflow in a Git worktree
   setup-zfs           Set up a file-backed ZFS pool for CoW storage (Linux)
   gc                  Detect and clean up orphaned projects (leftover state)
+  daemon              Controller daemon for shared engines (start/stop/status)
+  sync-ai-configs     Merge AI tool configs from a worktree back to main
 
 Extensibility:
   hook show           Show configured hooks (filter by phase)
@@ -72,14 +78,16 @@ Extensibility:
   hook explain        Explain hook phases and template variables
   hook vars           Show available template variables with current values
   hook render         Render a template string with current context
+  hook triggers       Show VCS event → hook phase mappings
+  hook actions        List available extended hook action types
+  hook recipes        List installable hook recipes
+  hook install        Install a hook recipe into the project config
   plugin              Manage plugin services (list, check, init)
 
 AI Agents:
-  agent start         Start an AI agent in a new isolated workspace
   agent status        Show agent status across all workspaces
   agent context       Output project context for current workspace
   agent skill         Install workspace helper skills for AI tools
-  agent docs          Generate AGENTS.md for this project
 
 Proxy:
   proxy start         Start the local reverse proxy (auto-HTTPS)
@@ -161,17 +169,9 @@ async fn main() -> Result<()> {
         }
         None => {
             if cli.help_all {
-                // Show full help with all commands visible
-                let mut cmd = Cli::command();
-                // Unhide all subcommands for the full help view
-                let subcmds: Vec<clap::Command> = cmd
-                    .get_subcommands()
-                    .map(|s| s.clone().hide(false))
-                    .collect();
-                for sub in subcmds {
-                    cmd = cmd.mut_subcommand(sub.get_name(), |_| sub.clone());
-                }
-                cmd = cmd.help_template(FULL_HELP_TEMPLATE);
+                // Show full help. The template lists every command itself, so
+                // there is no need to unhide subcommands here.
+                let mut cmd = Cli::command().help_template(FULL_HELP_TEMPLATE);
                 cmd.print_help()?;
             } else {
                 // Print compact help when no command is provided

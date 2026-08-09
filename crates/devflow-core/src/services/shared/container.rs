@@ -251,6 +251,16 @@ pub async fn exec_capture(
     })
 }
 
+/// Run a command inside the container and report whether it exited 0.
+/// (`exec_capture` drains the output stream before `inspect_exec`, which is
+/// required for Docker to report the real exit code.)
+pub async fn exec_check(docker: &Docker, container_name: &str, cmd: &[&str]) -> bool {
+    exec_capture(docker, container_name, cmd, None)
+        .await
+        .map(|out| out.ok())
+        .unwrap_or(false)
+}
+
 /// Wait until `pg_isready` succeeds inside the container (TCP loopback, so the
 /// initdb temp-socket server can't false-positive).
 pub async fn wait_ready_pg(

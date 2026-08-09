@@ -44,8 +44,9 @@ pub fn extract_proxy_targets(
 /// Extract pretty domains for Docker-network DNS aliases.
 ///
 /// This intentionally includes non-HTTP services so containers on the shared
-/// devflow Docker network can still reach databases by the full `.localhost`
-/// alias (for example `postgres.my-workspace.my-project.localhost:5432`).
+/// devflow Docker network can still reach databases by the full domain alias
+/// (for example `postgres.my-workspace.my-project.local:5432` with the
+/// default `.local` suffix).
 pub fn extract_network_domains(
     container: &ContainerInspectResponse,
     domain_suffix: &str,

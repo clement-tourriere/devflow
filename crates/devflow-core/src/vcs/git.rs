@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use git2::{ErrorCode, Repository, WorktreeAddOptions, WorktreeLockStatus, WorktreePruneOptions};
+use git2::{ErrorCode, Repository, WorktreeAddOptions, WorktreePruneOptions};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -423,7 +423,6 @@ impl VcsProvider for GitRepository {
             path: self.primary_root.clone(),
             workspace: Self::workspace_at(&self.primary_root)?,
             is_main: true,
-            is_locked: false,
         });
 
         // List linked worktrees
@@ -445,13 +444,10 @@ impl VcsProvider for GitRepository {
                 // workspace whenever a worktree is mid-rebase/bisect.
                 let wt_branch = Self::workspace_at(&wt_path).ok().flatten();
 
-                let is_locked = matches!(wt.is_locked(), Ok(WorktreeLockStatus::Locked(_)));
-
                 result.push(WorktreeInfo {
                     path: wt_path,
                     workspace: wt_branch,
                     is_main: false,
-                    is_locked,
                 });
             }
         }
@@ -654,41 +650,6 @@ impl VcsProvider for GitRepository {
         "git"
     }
 
-    fn repo_root(&self) -> &Path {
-        self.get_repo_root()
-    }
-
-    fn list_ignored_files(&self) -> Result<Vec<PathBuf>> {
-        let mut opts = git2::StatusOptions::new();
-        opts.include_ignored(true)
-            .include_untracked(false)
-            .exclude_submodules(true)
-            // Only show files, not directories
-            .recurse_ignored_dirs(true);
-
-        let statuses = self
-            .repo
-            .statuses(Some(&mut opts))
-            .context("Failed to enumerate git statuses")?;
-
-        let root = self.get_repo_root().to_path_buf();
-        let mut ignored = Vec::new();
-
-        for entry in statuses.iter() {
-            if entry.status().contains(git2::Status::IGNORED) {
-                if let Ok(path_str) = entry.path() {
-                    let full_path = root.join(path_str);
-                    // Only include actual files (not directories)
-                    if full_path.is_file() {
-                        ignored.push(PathBuf::from(path_str));
-                    }
-                }
-            }
-        }
-
-        Ok(ignored)
-    }
-
     fn list_ignored_entries(&self) -> Result<Vec<PathBuf>> {
         let mut opts = git2::StatusOptions::new();
         opts.include_ignored(true)
@@ -861,7 +822,7 @@ mod tests {
             Some("feature/linked"),
             "the command context remains the linked checkout"
         );
-        assert_eq!(linked.repo_root(), root.as_path());
+        assert_eq!(linked.get_repo_root(), root.as_path());
         assert_eq!(linked.main_worktree_dir().as_deref(), Some(root.as_path()));
         assert_eq!(
             linked.worktree_path("main").unwrap().as_deref(),

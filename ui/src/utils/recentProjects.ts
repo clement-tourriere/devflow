@@ -18,10 +18,6 @@ export function recordProjectAccess(path: string) {
   save(data);
 }
 
-export function getLastAccessed(path: string): number {
-  return load()[path] ?? 0;
-}
-
 export function sortByRecent<T>(items: T[], getPath: (item: T) => string): T[] {
   const data = load();
   return [...items].sort(

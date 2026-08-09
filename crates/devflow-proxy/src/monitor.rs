@@ -166,14 +166,6 @@ impl DockerMonitor {
     pub async fn get_running_containers(&self) -> Result<Vec<ContainerInspectResponse>> {
         list_running_containers(&self.docker).await
     }
-
-    /// Inspect a single container by ID.
-    pub async fn inspect_container(&self, container_id: &str) -> Result<ContainerInspectResponse> {
-        self.docker
-            .inspect_container(container_id, None)
-            .await
-            .context("Failed to inspect container")
-    }
 }
 
 /// List and inspect all running containers — shared by initial discovery

@@ -53,6 +53,8 @@ pub fn render_help(frame: &mut Frame) {
                 ("n / p", "Cycle workspace within service"),
                 ("S", "Start service for focused workspace"),
                 ("x", "Stop service for focused workspace"),
+                ("a", "Add a service"),
+                ("D", "Remove service configuration"),
                 ("l", "View logs"),
             ],
         ),

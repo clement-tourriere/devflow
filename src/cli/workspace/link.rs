@@ -6,20 +6,17 @@ use std::path::PathBuf;
 
 use super::context::{ensure_default_workspace_registered, linked_workspace_exists};
 
-pub(super) type LinkBranchResult = LinkWorkspaceResult;
-
 fn services_failed(linked: &LinkWorkspaceResult) -> usize {
     linked.services.iter().filter(|r| !r.success).count()
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn link_branch_internal(
     config: &Config,
     config_path: &Option<PathBuf>,
     workspace_name: &str,
     from: Option<&str>,
     non_interactive: bool,
-) -> Result<LinkBranchResult> {
+) -> Result<LinkWorkspaceResult> {
     let project_dir = super::super::operation_project_dir(config_path);
 
     let options = LinkOptions {
@@ -39,7 +36,6 @@ pub(super) async fn link_branch_internal(
         .await
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_link_command(
     config: &Config,
     config_path: &Option<PathBuf>,
@@ -112,7 +108,6 @@ pub(super) async fn handle_link_command(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn resolve_parent_for_branch_creation(
     config: &Config,
     config_path: &Option<PathBuf>,

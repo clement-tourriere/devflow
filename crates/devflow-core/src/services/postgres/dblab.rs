@@ -39,8 +39,6 @@ struct DBLabClone {
     created_at: DateTime<Utc>,
     #[serde(rename = "snapshotID")]
     snapshot_id: String,
-    #[allow(dead_code)]
-    status: String,
     db: DBLabDatabase,
 }
 

@@ -9,7 +9,6 @@
 //! the devflow CA certificate via `Certificates.Install`.
 
 use anyhow::Result;
-use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
 use crate::ca::default_ca_cert_path;
@@ -203,18 +202,6 @@ pub fn firefox_policy_info() -> String {
         "Import the CA certificate manually in Firefox:\n\
         Settings > Privacy & Security > Certificates > View Certificates > Authorities > Import"
             .to_string()
-    }
-}
-
-/// Return the Firefox policy file path, if applicable.
-pub fn firefox_policy_path() -> Option<PathBuf> {
-    #[cfg(target_os = "linux")]
-    {
-        Some(PathBuf::from(LINUX_POLICY_FILE))
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
     }
 }
 

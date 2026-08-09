@@ -172,12 +172,6 @@ body {
   opacity: 1;
 }
 
-.nav-item-sub {
-  padding-left: 34px;
-  font-size: 12px;
-  font-weight: 400;
-}
-
 .nav-section {
   padding: 12px 10px 4px;
   font-size: 10.5px;
@@ -287,11 +281,6 @@ body {
   color: var(--accent);
 }
 
-.badge-muted {
-  background: rgba(139, 148, 158, 0.15);
-  color: var(--text-muted);
-}
-
 .btn {
   display: inline-flex;
   align-items: center;
@@ -352,16 +341,6 @@ body {
 .btn-danger:hover {
   background: var(--danger-soft);
   border-color: var(--danger);
-}
-
-.btn-ghost {
-  background: transparent;
-  border-color: transparent;
-}
-
-.btn-ghost:hover {
-  background: var(--bg-tertiary);
-  border-color: transparent;
 }
 
 /* Square icon-only button */
@@ -489,10 +468,6 @@ select option {
 
 .gap-2 {
   gap: 8px;
-}
-
-.gap-4 {
-  gap: 16px;
 }
 
 .items-center {
@@ -1043,17 +1018,6 @@ select {
   flex-shrink: 0;
 }
 
-.breadcrumb {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-muted);
-  margin-bottom: 10px;
-}
-.breadcrumb a { color: var(--text-secondary); text-decoration: none; }
-.breadcrumb a:hover { color: var(--accent); }
-
 /* ── Segmented tabs (project sub-nav) ───────────────────────────── */
 .tabs {
   display: flex;
@@ -1195,20 +1159,6 @@ tr:hover .row-actions .icon-btn { color: var(--text-secondary); }
 .empty-state-desc {
   font-size: 13px;
   max-width: 360px;
-}
-
-/* ── Inline error banner ────────────────────────────────────────── */
-.error-banner {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 12px 14px;
-  border: 1px solid var(--danger);
-  border-radius: var(--radius);
-  background: var(--danger-soft);
-  color: var(--text-primary);
-  font-size: 13px;
-  margin-bottom: 16px;
 }
 
 /* ── Focus rings on inputs ──────────────────────────────────────── */

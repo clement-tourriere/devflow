@@ -8,9 +8,7 @@ use std::path::{Path, PathBuf};
 mod loading;
 
 pub use loading::workspace_service_key;
-pub(crate) use loading::{
-    explicit_main_workspace_for_dir, legacy_normalize_workspace_name, normalize_workspace_name,
-};
+pub(crate) use loading::{explicit_main_workspace_for_dir, legacy_normalize_workspace_name};
 
 /// Default AI tool configuration directories to copy into new worktrees.
 pub const AI_TOOL_DIRS: &[&str] = &[".claude", ".cursor", ".opencode", ".agents"];
@@ -466,18 +464,18 @@ pub struct GitConfig {
     pub auto_create_on_workspace: bool,
     #[serde(default = "default_main_workspace", alias = "main_branch")]
     pub main_workspace: String,
-    #[serde(
-        default,
-        alias = "auto_create_branch_filter",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub auto_create_workspace_filter: Option<String>,
+    /// Hook-adopted worktrees only auto-provision services when the raw
+    /// branch name matches this (unanchored) regex. Explicit commands
+    /// (`devflow switch`, `devflow service create`) are never filtered.
     #[serde(
         default,
         alias = "branch_filter_regex",
+        alias = "auto_create_workspace_filter",
+        alias = "auto_create_branch_filter",
         skip_serializing_if = "Option::is_none"
     )]
     pub workspace_filter_regex: Option<String>,
+    /// Branch names that never auto-provision. Exact names or `*` globs.
     #[serde(default = "default_exclude_workspaces", alias = "exclude_branches")]
     pub exclude_workspaces: Vec<String>,
 }
@@ -487,7 +485,6 @@ impl Default for GitConfig {
         Self {
             auto_create_on_workspace: true,
             main_workspace: "main".to_string(),
-            auto_create_workspace_filter: None,
             workspace_filter_regex: None,
             exclude_workspaces: vec!["main".to_string(), "master".to_string()],
         }
@@ -555,9 +552,11 @@ pub struct LocalGitConfig {
     pub auto_create_on_workspace: Option<bool>,
     #[serde(alias = "main_branch")]
     pub main_workspace: Option<String>,
-    #[serde(alias = "auto_create_branch_filter")]
-    pub auto_create_workspace_filter: Option<String>,
-    #[serde(alias = "branch_filter_regex")]
+    #[serde(
+        alias = "branch_filter_regex",
+        alias = "auto_create_workspace_filter",
+        alias = "auto_create_branch_filter"
+    )]
     pub workspace_filter_regex: Option<String>,
     #[serde(alias = "exclude_branches")]
     pub exclude_workspaces: Option<Vec<String>>,
@@ -635,6 +634,25 @@ impl GlobalConfig {
     }
 }
 
+/// Match a workspace name against exact names or simple `*` globs (all other
+/// regex metacharacters are escaped to avoid surprising matches). Shared by
+/// `exclude_workspaces` and `DEVFLOW_DISABLED_BRANCHES` handling so both
+/// knobs accept the same syntax.
+pub(crate) fn workspace_matches_patterns(workspace_name: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|pattern| {
+        if pattern.contains('*') {
+            let escaped = regex::escape(pattern);
+            let regex_pattern = format!("^{}$", escaped.replace("\\*", ".*"));
+            match regex::Regex::new(&regex_pattern) {
+                Ok(re) => re.is_match(workspace_name),
+                Err(_) => false,
+            }
+        } else {
+            workspace_name == pattern
+        }
+    })
+}
+
 // The effective configuration after merging all sources
 #[derive(Debug, Clone)]
 pub struct EffectiveConfig {
@@ -652,13 +670,7 @@ impl Default for Config {
         Config {
             name: None,
             default_vcs: None,
-            git: GitConfig {
-                auto_create_on_workspace: true,
-                main_workspace: "main".to_string(),
-                auto_create_workspace_filter: None,
-                workspace_filter_regex: None,
-                exclude_workspaces: vec!["main".to_string(), "master".to_string()],
-            },
+            git: GitConfig::default(),
             behavior: BehaviorConfig {
                 max_workspaces: Some(10),
             },
@@ -781,7 +793,7 @@ impl EffectiveConfig {
     pub fn is_workspace_disabled(&self, workspace_name: &str) -> bool {
         // Check environment disabled workspaces
         if let Some(ref disabled_workspaces) = self.env_config.disabled_workspaces {
-            if Self::workspace_matches_patterns(workspace_name, disabled_workspaces) {
+            if workspace_matches_patterns(workspace_name, disabled_workspaces) {
                 return true;
             }
         }
@@ -789,31 +801,13 @@ impl EffectiveConfig {
         // Check local config disabled workspaces
         if let Some(ref local_config) = self.local_config {
             if let Some(ref disabled_workspaces) = local_config.disabled_workspaces {
-                if Self::workspace_matches_patterns(workspace_name, disabled_workspaces) {
+                if workspace_matches_patterns(workspace_name, disabled_workspaces) {
                     return true;
                 }
             }
         }
 
         false
-    }
-
-    fn workspace_matches_patterns(workspace_name: &str, patterns: &[String]) -> bool {
-        patterns.iter().any(|pattern| {
-            if pattern.contains('*') {
-                // Simple glob pattern matching (*), with all other regex
-                // metacharacters escaped to avoid surprising matches.
-                let escaped = regex::escape(pattern);
-                let regex_pattern = format!("^{}$", escaped.replace("\\*", ".*"));
-                match regex::Regex::new(&regex_pattern) {
-                    Ok(re) => re.is_match(workspace_name),
-                    Err(_) => false,
-                }
-            } else {
-                // Exact match
-                workspace_name == pattern
-            }
-        })
     }
 
     pub fn check_current_git_workspace_disabled(&self) -> Result<bool> {
@@ -861,9 +855,6 @@ impl EffectiveConfig {
                 }
                 if let Some(ref main_workspace) = local_git.main_workspace {
                     merged.git.main_workspace = main_workspace.clone();
-                }
-                if let Some(ref filter) = local_git.auto_create_workspace_filter {
-                    merged.git.auto_create_workspace_filter = Some(filter.clone());
                 }
                 if let Some(ref regex) = local_git.workspace_filter_regex {
                     merged.git.workspace_filter_regex = Some(regex.clone());

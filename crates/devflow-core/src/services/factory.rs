@@ -148,7 +148,6 @@ pub async fn create_provider_from_named_config(
             ) {
                 let provider = crate::services::shared::SharedClickHouseProvider::new(
                     &project_name,
-                    &named.name,
                     named.shared.as_ref(),
                 )
                 .context("Failed to create shared ClickHouse provider")?;
@@ -223,12 +222,9 @@ pub async fn create_provider_from_named_config(
         "rustfs" | "s3" | "objectstorage" => {
             // Object storage is inherently a shared global engine — there is
             // no per-workspace-container variant, so provider_type is ignored.
-            let provider = crate::services::shared::RustFsProvider::new(
-                &project_name,
-                &named.name,
-                named.shared.as_ref(),
-            )
-            .context("Failed to create RustFS provider")?;
+            let provider =
+                crate::services::shared::RustFsProvider::new(&project_name, named.shared.as_ref())
+                    .context("Failed to create RustFS provider")?;
             Ok(Box::new(provider))
         }
         #[cfg(not(feature = "service-local"))]
@@ -242,7 +238,6 @@ pub async fn create_provider_from_named_config(
             // workspace) is always shared; provider_type is ignored.
             let provider = crate::services::shared::SharedRedisProvider::new(
                 &project_name,
-                &named.name,
                 named.shared.as_ref(),
             )
             .context("Failed to create shared Redis provider")?;
@@ -296,7 +291,6 @@ async fn create_postgres_provider(
         ProviderType::Shared => {
             let provider = crate::services::shared::SharedPostgresProvider::new(
                 &config.project_name(),
-                &named.name,
                 named.shared.as_ref(),
             )
             .context("Failed to create shared postgres provider")?;
@@ -470,48 +464,23 @@ pub async fn resolve_provider(config: &Config, service_name: Option<&str>) -> Re
 
 /// Instantiate all configured service providers.
 pub async fn create_all_providers(config: &Config) -> Result<Vec<NamedService>> {
-    config.validate_services()?;
-
-    let named_configs = config.resolve_services();
-
-    if named_configs.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut result = Vec::with_capacity(named_configs.len());
-    for named in &named_configs {
-        let provider = create_provider_from_named_config(config, named).await?;
-        result.push(NamedService {
-            name: named.name.clone(),
-            provider,
-        });
-    }
-
-    Ok(result)
+    create_providers_where(config, |_| true).await
 }
 
-/// Instantiate only services with `auto_workspace: true`.
-///
-/// These are the services that should be automatically branched when a git
-/// workspace is created/switched/deleted.
-/// If no services are configured, returns an empty list.
-pub async fn create_auto_branch_providers(config: &Config) -> Result<Vec<NamedService>> {
+/// Instantiate only services with `auto_workspace: true` — the services that
+/// are automatically branched when a git workspace is created/switched/deleted.
+pub async fn create_auto_workspace_providers(config: &Config) -> Result<Vec<NamedService>> {
+    create_providers_where(config, |c| c.auto_workspace).await
+}
+
+async fn create_providers_where(
+    config: &Config,
+    keep: impl Fn(&NamedServiceConfig) -> bool,
+) -> Result<Vec<NamedService>> {
     config.validate_services()?;
 
-    let named_configs = config.resolve_services();
-
-    if named_configs.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let auto_configs: Vec<_> = named_configs.iter().filter(|c| c.auto_workspace).collect();
-
-    if auto_configs.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let mut result = Vec::with_capacity(auto_configs.len());
-    for named in auto_configs {
+    let mut result = Vec::new();
+    for named in config.resolve_services().iter().filter(|c| keep(c)) {
         let provider = create_provider_from_named_config(config, named).await?;
         result.push(NamedService {
             name: named.name.clone(),
@@ -541,7 +510,7 @@ pub async fn orchestrate_create(
     workspace_name: &str,
     from_workspace: Option<&str>,
 ) -> Result<Vec<OrchestrationResult>> {
-    let providers = create_auto_branch_providers(config).await?;
+    let providers = create_auto_workspace_providers(config).await?;
 
     // Services are independent (separate containers, ports, state rows), so
     // create them concurrently — total wall-clock becomes the slowest service
@@ -586,7 +555,7 @@ pub async fn orchestrate_delete(
     config: &Config,
     workspace_name: &str,
 ) -> Result<Vec<OrchestrationResult>> {
-    let providers = create_auto_branch_providers(config).await?;
+    let providers = create_auto_workspace_providers(config).await?;
     let mut results = Vec::with_capacity(providers.len());
 
     for named in &providers {
@@ -652,7 +621,7 @@ pub async fn orchestrate_switch(
     workspace_name: &str,
     from_workspace: Option<&str>,
 ) -> Result<Vec<OrchestrationResult>> {
-    let providers = create_auto_branch_providers(config).await?;
+    let providers = create_auto_workspace_providers(config).await?;
 
     // Services are independent (separate containers, ports, state rows), so
     // switch them concurrently — total wall-clock becomes the slowest service

@@ -52,10 +52,6 @@ pub(crate) fn resolve_branch_context() -> BranchContext {
     }
 }
 
-pub(crate) fn context_matches_branch(context_branch: Option<&str>, workspace_name: &str) -> bool {
-    context_branch == Some(workspace_name)
-}
-
 pub(super) fn linked_workspace_exists(config_path: &Option<PathBuf>, workspace_name: &str) -> bool {
     let Some(path) = config_path.as_ref() else {
         return false;

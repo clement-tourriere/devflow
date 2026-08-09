@@ -8,8 +8,9 @@
 //!
 //! # How it works
 //!
-//! - **Host → container**: `https://web.myapp.localhost` routes through the proxy.
-//! - **Container → container**: `http://web.myapp.localhost` resolves via
+//! - **Host → container**: `https://web.myapp.local` routes through the proxy
+//!   (`.local` is the default suffix; `.localhost` is an opt-in).
+//! - **Container → container**: `http://web.myapp.local` resolves via
 //!   Docker DNS directly, bypassing the proxy entirely. A suffix-stripped alias
 //!   (`web.myapp`) is also registered as a fallback for environments that
 //!   special-case `.localhost` before consulting Docker DNS.
@@ -38,6 +39,9 @@
 //! ```
 //!
 //! ## Test from host (goes through the proxy)
+//!
+//! The examples below assume `--domain-suffix localhost`; with the default
+//! `.local` suffix, substitute the suffix accordingly.
 //!
 //! ```sh
 //! # HTTPS via the proxy (requires CA trust installed: devflow proxy trust install)

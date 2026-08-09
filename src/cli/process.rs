@@ -1,22 +1,16 @@
 use anyhow::Result;
 use devflow_core::config::Config;
 use devflow_core::processes;
-use devflow_core::vcs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-fn project_dir(config_path: &Option<PathBuf>) -> PathBuf {
-    super::operation_project_dir(config_path)
-}
-
 fn current_workspace(config: &Config, workspace: Option<String>) -> String {
-    workspace.unwrap_or_else(|| {
-        vcs::detect_vcs_provider(".")
-            .ok()
-            .and_then(|repo| repo.current_workspace().ok().flatten())
-            .unwrap_or_else(|| config.git.main_workspace.clone())
-    })
+    // Same context resolution as `devflow switch` and friends —
+    // DEVFLOW_CONTEXT_BRANCH overrides, then the cwd checkout, then main.
+    workspace
+        .or_else(|| super::workspace::resolve_branch_context().context_branch)
+        .unwrap_or_else(|| config.git.main_workspace.clone())
 }
 
 pub(super) async fn handle_process_command(
@@ -25,7 +19,7 @@ pub(super) async fn handle_process_command(
     config_path: &Option<PathBuf>,
     json_output: bool,
 ) -> Result<()> {
-    let project_dir = project_dir(config_path);
+    let project_dir = super::operation_project_dir(config_path);
 
     match action {
         super::ProcessCommands::Start {
@@ -70,8 +64,7 @@ pub(super) async fn handle_process_command(
             print_results("restart", &workspace, &results, json_output)?;
             fail_on_process_errors(&results)?;
         }
-        super::ProcessCommands::Status { workspace }
-        | super::ProcessCommands::List { workspace } => {
+        super::ProcessCommands::Status { workspace } => {
             let statuses =
                 processes::list_workspace_processes(config, &project_dir, workspace.as_deref())?;
             if json_output {

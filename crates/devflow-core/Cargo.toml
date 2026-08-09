@@ -101,3 +101,7 @@ glob = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal", "process", "user"] }
+
+# rust-s3's lib target is named `s3`, which cargo-machete cannot map back.
+[package.metadata.cargo-machete]
+ignored = ["rust-s3"]

@@ -35,7 +35,6 @@ impl WorktreeCreateResult {
 
 /// Information about a Git worktree.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct WorktreeInfo {
     /// Filesystem path to the worktree
     pub path: PathBuf,
@@ -43,8 +42,6 @@ pub struct WorktreeInfo {
     pub workspace: Option<String>,
     /// Whether this is the main (bare) worktree
     pub is_main: bool,
-    /// Whether the worktree is locked
-    pub is_locked: bool,
 }
 
 /// Abstraction over version control systems.
@@ -89,17 +86,8 @@ pub trait VcsProvider: Send {
 
     // ── Meta ───────────────────────────────────────────────────────
     fn provider_name(&self) -> &'static str;
-    fn repo_root(&self) -> &Path;
 
     // ── File queries ───────────────────────────────────────────────
-    /// List files that are present on disk but ignored by VCS (e.g. `.env.local`).
-    ///
-    /// Returns paths relative to the repo root.  Used by `copy_ignored`
-    /// to replicate gitignored files into new worktrees.
-    fn list_ignored_files(&self) -> Result<Vec<PathBuf>> {
-        Ok(Vec::new())
-    }
-
     /// List ignored entries (files **and** directories) without recursing
     /// into ignored directories.
     ///

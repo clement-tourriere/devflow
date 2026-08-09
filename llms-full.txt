@@ -162,11 +162,11 @@ All sections are optional. An empty file is valid.
 git:
   auto_create_on_workspace: true         # Provision services when adopting a linked worktree
   main_workspace: main                   # Main git workspace (auto-detected on init)
-  workspace_filter_regex: "^feature/.*"  # Only workspace for matching patterns
-  exclude_workspaces: [main, master]    # Never create workspaces for these
+  workspace_filter_regex: "^feature/.*"  # Hook-adopted worktrees only provision services for matching branches
+  exclude_workspaces: [main, master]    # Never provision these (supports * globs)
 
 behavior:
-  max_workspaces: 10                    # Max workspaces before cleanup
+  max_workspaces: 10                    # Retention target for `devflow service cleanup` (not a creation cap)
 
 services:
   - name: app-db                      # Service identifier

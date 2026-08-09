@@ -423,7 +423,6 @@ impl VcsProvider for JjRepository {
                     default.as_deref(),
                 ),
                 path: entry.path,
-                is_locked: false,
             })
             .collect())
     }
@@ -697,37 +696,6 @@ impl VcsProvider for JjRepository {
 
     fn provider_name(&self) -> &'static str {
         "jj"
-    }
-
-    fn repo_root(&self) -> &Path {
-        &self.primary_root
-    }
-
-    fn list_ignored_files(&self) -> Result<Vec<PathBuf>> {
-        // For colocated repos (`.jj` + `.git`), shell out to git which
-        // understands .gitignore rules natively.
-        let git_dir = self.primary_root.join(".git");
-        if git_dir.exists() {
-            let output = Command::new("git")
-                .args(["ls-files", "--others", "--ignored", "--exclude-standard"])
-                .current_dir(&self.primary_root)
-                .output()
-                .context("Failed to run 'git ls-files' for ignored file enumeration")?;
-
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let files: Vec<PathBuf> = stdout
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    .map(PathBuf::from)
-                    .collect();
-                return Ok(files);
-            }
-        }
-
-        // Pure jj repos: no reliable way to enumerate ignored files yet.
-        // jj uses .gitignore patterns but doesn't expose a "list ignored" command.
-        Ok(Vec::new())
     }
 
     fn staged_diff(&self) -> Result<String> {

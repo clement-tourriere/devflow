@@ -89,6 +89,8 @@ impl Router {
     }
 
     /// Check if there are no active routes.
+    /// No callers today; kept because `len` without `is_empty` trips
+    /// `clippy::len_without_is_empty`.
     pub async fn is_empty(&self) -> bool {
         let routes = self.routes.read().await;
         routes.is_empty()

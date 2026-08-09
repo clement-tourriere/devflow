@@ -53,7 +53,6 @@ struct CreateBranchResponse {
 
 #[derive(Debug, Deserialize)]
 struct NeonEndpoint {
-    #[allow(dead_code)]
     id: String,
     database_host: String,
     database_name: String,

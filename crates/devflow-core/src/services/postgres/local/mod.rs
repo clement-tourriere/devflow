@@ -77,7 +77,7 @@ impl LocalProvider {
             .to_string();
 
         let data_root = if let Some(root) = local_config.and_then(|c| c.data_root.as_deref()) {
-            let expanded = shellexpand(root);
+            let expanded = crate::services::local_docker::expand_home(root);
             PathBuf::from(expanded)
         } else {
             dirs::data_local_dir()
@@ -746,11 +746,6 @@ impl ServiceProvider for LocalProvider {
         Ok(DoctorReport { checks })
     }
 
-    async fn init_project(&self, _project_name: &str) -> Result<()> {
-        let _project = self.ensure_project().await?;
-        Ok(())
-    }
-
     async fn seed_from_source(&self, workspace_name: &str, source: &str) -> Result<()> {
         let project = self.ensure_project().await?;
         let workspace = self
@@ -861,15 +856,6 @@ impl ServiceProvider for LocalProvider {
 
         Ok(workspace_names)
     }
-}
-
-fn shellexpand(path: &str) -> String {
-    if let Some(stripped) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return format!("{}/{}", home.display(), stripped);
-        }
-    }
-    path.to_string()
 }
 
 #[cfg(test)]

@@ -11,11 +11,10 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use bollard::models::{ContainerCreateBody, HostConfig, PortBinding, PortMap};
 use bollard::query_parameters::{
-    CreateContainerOptions, CreateImageOptions, RemoveContainerOptions, StopContainerOptions,
+    CreateContainerOptions, RemoveContainerOptions, StopContainerOptions,
 };
 use bollard::Docker;
 use chrono::Utc;
-use futures_util::TryStreamExt;
 use tokio::time::{sleep, Instant};
 
 use crate::config::{ClickHouseConfig, DockerCustomSettings};
@@ -56,7 +55,7 @@ impl ClickHouseLocalProvider {
             Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon. Is Docker installed and running? Check with: docker info")?;
 
         let data_root = if let Some(ref root) = config.data_root {
-            let expanded = shellexpand(root);
+            let expanded = crate::services::local_docker::expand_home(root);
             PathBuf::from(expanded)
         } else {
             dirs::data_local_dir()
@@ -99,29 +98,7 @@ impl ClickHouseLocalProvider {
     }
 
     async fn ensure_image(&self) -> anyhow::Result<()> {
-        if self.client.inspect_image(&self.image).await.is_ok() {
-            return Ok(());
-        }
-
-        let (from_image, tag) = if let Some((name, tag)) = self.image.rsplit_once(':') {
-            (name.to_string(), Some(tag.to_string()))
-        } else {
-            (self.image.clone(), None)
-        };
-
-        let options = CreateImageOptions {
-            from_image: Some(from_image),
-            tag,
-            ..Default::default()
-        };
-
-        self.client
-            .create_image(Some(options), None, None)
-            .try_collect::<Vec<_>>()
-            .await
-            .with_context(|| format!("failed to pull docker image '{}'", self.image))?;
-
-        Ok(())
+        crate::services::shared::container::ensure_image(&self.client, &self.image).await
     }
 
     async fn pick_port(&self) -> anyhow::Result<u16> {
@@ -285,35 +262,7 @@ impl ClickHouseLocalProvider {
     }
 
     async fn exec_check(&self, container_name: &str, cmd: &[&str]) -> bool {
-        let config = bollard::models::ExecConfig {
-            cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            ..Default::default()
-        };
-
-        let exec = match self.client.create_exec(container_name, config).await {
-            Ok(e) => e,
-            Err(_) => return false,
-        };
-
-        let start_opts = Some(bollard::exec::StartExecOptions {
-            detach: false,
-            ..Default::default()
-        });
-
-        match self.client.start_exec(&exec.id, start_opts).await {
-            Ok(bollard::exec::StartExecResults::Attached { mut output, .. }) => {
-                while output.try_next().await.ok().flatten().is_some() {}
-            }
-            Ok(bollard::exec::StartExecResults::Detached) => {}
-            Err(_) => return false,
-        }
-
-        match self.client.inspect_exec(&exec.id).await {
-            Ok(info) => info.exit_code == Some(0),
-            Err(_) => false,
-        }
+        crate::services::shared::container::exec_check(&self.client, container_name, cmd).await
     }
 
     async fn list_managed_containers(&self) -> anyhow::Result<Vec<(String, String, bool)>> {
@@ -702,13 +651,4 @@ impl ServiceProvider for ClickHouseLocalProvider {
     fn max_workspace_name_length(&self) -> usize {
         255
     }
-}
-
-fn shellexpand(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).display().to_string();
-        }
-    }
-    path.to_string()
 }

@@ -19,9 +19,9 @@ impl TemplateEngine {
         env.add_filter("sanitize", filter_sanitize);
         env.add_filter("sanitize_db", filter_sanitize_db);
         env.add_filter("hash_port", filter_hash_port);
-        env.add_filter("lower", filter_lower);
-        env.add_filter("upper", filter_upper);
-        env.add_filter("replace", filter_replace);
+        // `lower`, `upper` and `replace` come from MiniJinja's builtins
+        // feature with identical semantics; only `truncate` (hard cut, no
+        // ellipsis) is custom.
         env.add_filter("truncate", filter_truncate);
 
         Self { env }
@@ -141,21 +141,6 @@ fn filter_hash_port(value: &str) -> u16 {
     value.hash(&mut hasher);
     let hash = hasher.finish();
     10000 + (hash % 10000) as u16
-}
-
-/// Lowercase filter (in case users expect it beyond MiniJinja builtins).
-fn filter_lower(value: &str) -> String {
-    value.to_lowercase()
-}
-
-/// Uppercase filter.
-fn filter_upper(value: &str) -> String {
-    value.to_uppercase()
-}
-
-/// Replace occurrences of `from` with `to` in value.
-fn filter_replace(value: &str, from: &str, to: &str) -> String {
-    value.replace(from, to)
 }
 
 /// Truncate to max length.

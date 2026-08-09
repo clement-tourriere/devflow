@@ -57,7 +57,6 @@ pub async fn run_https_server(
                 };
                 let tls_acceptor = tls_acceptor.clone();
                 let router = router.clone();
-                let resolver = resolver.clone();
 
                 tokio::spawn(async move {
                     match tls_acceptor.accept(stream).await {
@@ -71,7 +70,6 @@ pub async fn run_https_server(
 
                             let io = TokioIo::new(tls_stream);
                             let router = router.clone();
-                            let _resolver = resolver.clone();
 
                             let service = service_fn(move |req| {
                                 let router = router.clone();

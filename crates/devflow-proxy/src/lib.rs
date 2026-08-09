@@ -13,7 +13,6 @@ pub mod server;
 pub mod tls;
 
 use anyhow::{Context, Result};
-use ca::CertificateCache;
 use discovery::{extract_network_domains, extract_proxy_targets};
 use monitor::DockerMonitor;
 use router::Router;
@@ -56,7 +55,7 @@ fn default_api_port() -> u16 {
 fn default_bind_address() -> String {
     "0.0.0.0".to_string()
 }
-fn default_domain_suffix() -> String {
+pub fn default_domain_suffix() -> String {
     // `.local` on every platform, so the SAME name works inside and outside
     // containers:
     // - From the host, the mDNS responder (Bonjour on macOS, Avahi on Linux)
@@ -110,7 +109,6 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
     // Load or generate CA
     let ca = ca::CertificateAuthority::load_or_generate()?;
     let ca = Arc::new(ca);
-    let cert_cache = Arc::new(CertificateCache::new(ca.clone()));
 
     // Create router
     let router = Router::new();
@@ -357,13 +355,11 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
 
     // Start API server
     let api_router = router.clone();
-    let api_cache = cert_cache.clone();
     let api_shutdown = shutdown_rx.clone();
     tokio::spawn(async move {
         if let Err(e) = api::run_api_server(
             api_listener,
             api_router,
-            api_cache,
             https_port,
             config.http_port,
             api_shutdown,

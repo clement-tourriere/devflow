@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use anyhow::Result;
 use devflow_core::config::Config;
 use devflow_core::hooks::{
@@ -7,15 +5,6 @@ use devflow_core::hooks::{
     TemplateEngine,
 };
 use devflow_core::vcs;
-
-fn resolve_project_dir_for_hooks() -> PathBuf {
-    Config::find_config_file()
-        .ok()
-        .flatten()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
-}
 
 fn parse_hook_phase_input(phase: &str) -> Result<HookPhase> {
     let trimmed = phase.trim();
@@ -35,14 +24,16 @@ fn parse_hook_phase_input(phase: &str) -> Result<HookPhase> {
 /// Inspection-only (vars/render/explain): unresolved identities render a
 /// sentinel key. Execution paths must use [`build_hook_context_strict`].
 async fn build_hook_context(config: &Config, workspace_name: &str) -> HookContext {
-    let project_dir = resolve_project_dir_for_hooks();
+    // cwd-first like every other context-sensitive operation — the config
+    // directory may be the primary checkout while we run in a linked worktree.
+    let project_dir = super::operation_project_dir(&None);
     devflow_core::hooks::build_hook_context(config, &project_dir, workspace_name).await
 }
 
 /// Fallible variant for paths that EXECUTE hooks: fails closed on an
 /// unresolved workspace identity instead of exporting the sentinel key.
 async fn build_hook_context_strict(config: &Config, workspace_name: &str) -> Result<HookContext> {
-    let project_dir = resolve_project_dir_for_hooks();
+    let project_dir = super::operation_project_dir(&None);
     devflow_core::hooks::build_hook_context_strict(config, &project_dir, workspace_name).await
 }
 
@@ -323,6 +314,7 @@ fn handle_hook_explain(phase: Option<&str>, json_output: bool) -> Result<()> {
             println!();
             println!("Available template variables:");
             println!("  {{{{ workspace }}}}              Current workspace name");
+            println!("  {{{{ workspace_key }}}}          Collision-safe service key");
             println!("  {{{{ name }}}}               Project name (from config.name)");
             println!("  {{{{ repo }}}}                Repository name");
             println!("  {{{{ default_workspace }}}}      Main workspace (e.g. main)");

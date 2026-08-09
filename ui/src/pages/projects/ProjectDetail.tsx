@@ -527,7 +527,7 @@ function ProjectDetail() {
           workspaceName,
           serviceName
         );
-        infos[serviceName] = info as unknown as ConnectionInfo;
+        infos[serviceName] = info;
       } catch {
         // service may not have connection info
       }

@@ -2,8 +2,7 @@ pub mod compose;
 #[cfg(feature = "service-local")]
 pub mod discovery;
 
-// Re-export compose functions for backward compatibility
-pub use compose::*;
+pub use compose::find_docker_compose_files;
 #[cfg(feature = "service-local")]
 pub use discovery::*;
 

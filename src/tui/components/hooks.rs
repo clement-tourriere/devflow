@@ -16,6 +16,10 @@ use crate::tui::theme;
 
 const TEMPLATE_VARIABLES: &[(&str, &str)] = &[
     ("{{ workspace }}", "Current workspace name"),
+    (
+        "{{ workspace_key }}",
+        "Collision-safe service key for the workspace",
+    ),
     ("{{ name }}", "Project name from config.name"),
     ("{{ repo }}", "Repository directory name"),
     (

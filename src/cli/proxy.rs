@@ -25,7 +25,7 @@ pub(super) async fn handle_proxy_command(
             let api_port = api_port.or(proxy_cfg.api_port).unwrap_or(2019);
             let domain_suffix = domain_suffix
                 .or(proxy_cfg.domain_suffix)
-                .unwrap_or_else(default_domain_suffix);
+                .unwrap_or_else(devflow_proxy::default_domain_suffix);
             // mDNS on by default; --no-mdns or `proxy.mdns: false` disables it.
             let mdns = !no_mdns && proxy_cfg.mdns.unwrap_or(true);
 
@@ -171,7 +171,8 @@ pub(super) async fn handle_proxy_command(
         }
         super::ProxyCommands::Status => {
             // Try to query the API
-            let api_url = "http://127.0.0.1:2019/api/status";
+            let api_url = format!("http://127.0.0.1:{}/api/status", configured_api_port());
+            let api_url = api_url.as_str();
             match reqwest_get_json(api_url).await {
                 Ok(status) => {
                     if json_output {
@@ -202,7 +203,8 @@ pub(super) async fn handle_proxy_command(
             }
         }
         super::ProxyCommands::List => {
-            let api_url = "http://127.0.0.1:2019/api/targets";
+            let api_url = format!("http://127.0.0.1:{}/api/targets", configured_api_port());
+            let api_url = api_url.as_str();
             match reqwest_get_json(api_url).await {
                 Ok(targets) => {
                     if json_output {
@@ -285,13 +287,15 @@ pub(super) async fn handle_proxy_command(
     Ok(())
 }
 
-/// Default domain suffix, matching `devflow_proxy::ProxyConfig`: `.local`
-/// (mDNS-resolvable) on macOS, `.localhost` (loopback-only) elsewhere.
-fn default_domain_suffix() -> String {
-    // `.local` everywhere — same name inside and outside containers (mDNS on
-    // the host, Docker DNS aliases inside). See devflow_proxy's
-    // default_domain_suffix for the full rationale.
-    "local".to_string()
+/// The API port `proxy status`/`proxy list` should query: the globally
+/// configured one, falling back to the built-in default.
+fn configured_api_port() -> u16 {
+    GlobalConfig::load()
+        .ok()
+        .flatten()
+        .and_then(|g| g.proxy)
+        .and_then(|p| p.api_port)
+        .unwrap_or(2019)
 }
 
 fn hostname_resolves_to(domain: &str, expected_ip: &str) -> bool {

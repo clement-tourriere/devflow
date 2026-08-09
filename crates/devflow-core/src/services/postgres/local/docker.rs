@@ -4,13 +4,12 @@ use std::{collections::HashSet, path::PathBuf, time::Duration};
 use crate::config::DockerCustomSettings;
 
 use anyhow::{anyhow, Context};
-use bollard::exec::StartExecOptions;
 use bollard::models::{
-    ContainerCreateBody, ContainerStateStatusEnum, ExecConfig, HostConfig, PortBinding, PortMap,
+    ContainerCreateBody, ContainerStateStatusEnum, HostConfig, PortBinding, PortMap,
 };
 use bollard::query_parameters::{
-    CreateContainerOptions, CreateImageOptions, ListContainersOptions, LogsOptionsBuilder,
-    RemoveContainerOptions, StopContainerOptions,
+    CreateContainerOptions, ListContainersOptions, LogsOptionsBuilder, RemoveContainerOptions,
+    StopContainerOptions,
 };
 use bollard::Docker;
 use futures_util::TryStreamExt;
@@ -112,32 +111,7 @@ impl DockerRuntime {
     }
 
     pub async fn ensure_image(&self, image: &str) -> anyhow::Result<()> {
-        // Check if image exists locally
-        if self.client.inspect_image(image).await.is_ok() {
-            return Ok(());
-        }
-
-        // Parse image:tag
-        let (from_image, tag) = if let Some((name, tag)) = image.rsplit_once(':') {
-            (name.to_string(), Some(tag.to_string()))
-        } else {
-            (image.to_string(), None)
-        };
-
-        let options = CreateImageOptions {
-            from_image: Some(from_image),
-            tag,
-            ..Default::default()
-        };
-
-        // Pull and consume the stream to completion
-        self.client
-            .create_image(Some(options), None, None)
-            .try_collect::<Vec<_>>()
-            .await
-            .with_context(|| format!("failed to pull docker image '{image}'"))?;
-
-        Ok(())
+        crate::services::shared::container::ensure_image(&self.client, image).await
     }
 
     pub async fn container_status(&self, container_name: &str) -> anyhow::Result<ContainerStatus> {
@@ -337,20 +311,6 @@ impl DockerRuntime {
         }
     }
 
-    pub async fn pause_branch(&self, container_name: &str) -> anyhow::Result<()> {
-        match self.container_status(container_name).await? {
-            ContainerStatus::Running => {}
-            _ => return Ok(()),
-        }
-
-        self.client
-            .pause_container(container_name)
-            .await
-            .with_context(|| format!("failed to pause container '{container_name}'"))?;
-
-        Ok(())
-    }
-
     pub async fn unpause_branch(&self, container_name: &str) -> anyhow::Result<()> {
         match self.container_status(container_name).await? {
             ContainerStatus::Paused => {}
@@ -465,38 +425,7 @@ impl DockerRuntime {
 
     /// Run a command inside a container and return true if it exits successfully.
     async fn exec_check(&self, container_name: &str, cmd: &[&str]) -> bool {
-        let config = ExecConfig {
-            cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            ..Default::default()
-        };
-
-        let exec = match self.client.create_exec(container_name, config).await {
-            Ok(e) => e,
-            Err(_) => return false,
-        };
-
-        let start_opts = Some(StartExecOptions {
-            detach: false,
-            ..Default::default()
-        });
-
-        // Must consume the output stream to completion before inspect_exec
-        // will report the correct exit code
-        match self.client.start_exec(&exec.id, start_opts).await {
-            Ok(bollard::exec::StartExecResults::Attached { mut output, .. }) => {
-                while output.try_next().await.ok().flatten().is_some() {}
-            }
-            Ok(bollard::exec::StartExecResults::Detached) => {}
-            Err(_) => return false,
-        }
-
-        // Check exit code
-        match self.client.inspect_exec(&exec.id).await {
-            Ok(info) => info.exit_code == Some(0),
-            Err(_) => false,
-        }
+        crate::services::shared::container::exec_check(&self.client, container_name, cmd).await
     }
 }
 

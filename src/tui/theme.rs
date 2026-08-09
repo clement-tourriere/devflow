@@ -99,8 +99,8 @@ pub fn highlight_style() -> Style {
 /// Status bar keybinding hints per tab.
 pub fn tab_hints(tab_index: usize) -> &'static str {
     match tab_index {
-        0 => "j/k:Navigate  n/p:Service  Enter:SvcAlign  o:Open  S/x:Svc  A/X:All  c:Create  d:Delete  Space:Expand  /:Filter  r:Refresh",
-        1 => "j/k:Navigate  n/p:Workspace  S:Start  x:Stop  l:Logs  r:Refresh",
+        0 => "j/k:Navigate  n/p:Service  Enter:SvcAlign  o:Open  S/x:Svc  R:Reset  A/X:All  c:Create  d:Delete  l:Logs  Space:Expand  /:Filter  r:Refresh",
+        1 => "j/k:Navigate  n/p:Workspace  S:Start  x:Stop  a:Add  D:Remove  l:Logs  r:Refresh",
         2 => "j/k:Navigate  s:Start  x:Stop  r:Refresh",
         3 => "1:Config  2:Hooks  3:Doctor  4:Caps  j/k:Scroll  v/s:HookTpl  r:Refresh",
         4 => "f:Focus  /:Filter  j/k:Scroll  g/G:Top/Bottom  PgUp/PgDn:Page  r:Refresh",

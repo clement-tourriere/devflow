@@ -106,10 +106,6 @@ fn print_configured_services(
     Ok(())
 }
 
-fn project_dir_for_config(config_path: &Option<PathBuf>) -> PathBuf {
-    super::operation_project_dir(config_path)
-}
-
 fn provider_uses_local_runtime(provider_type: &str) -> bool {
     matches!(
         provider_type.to_ascii_lowercase().as_str(),
@@ -152,8 +148,10 @@ fn resolve_effective_service_key(
     config_path: &Option<PathBuf>,
     raw_workspace: &str,
 ) -> Result<String> {
-    LocalStateManager::new()?
-        .resolve_workspace_service_key_by_dir(&project_dir_for_config(config_path), raw_workspace)
+    LocalStateManager::new()?.resolve_workspace_service_key_by_dir(
+        &super::operation_project_dir(config_path),
+        raw_workspace,
+    )
 }
 
 /// Resolution for operations that target an EXISTING service workspace
@@ -168,7 +166,7 @@ async fn resolve_operation_service_key(
     provider: &dyn devflow_core::services::ServiceProvider,
 ) -> Result<String> {
     services::factory::resolve_service_operation_key(
-        &project_dir_for_config(config_path),
+        &super::operation_project_dir(config_path),
         raw_workspace,
         provider,
     )
@@ -1092,7 +1090,7 @@ pub(super) async fn handle_service_provider_command(
                 .as_deref()
                 .map(|parent| resolve_effective_service_key(config_path, parent))
                 .transpose()?;
-            let project_dir = project_dir_for_config(config_path);
+            let project_dir = super::operation_project_dir(config_path);
             let hook_opts = devflow_core::workspace::LifecycleOptions {
                 hook_approval: if non_interactive || json_output {
                     devflow_core::workspace::hooks::HookApprovalMode::NonInteractive
@@ -1164,7 +1162,7 @@ pub(super) async fn handle_service_provider_command(
             let service_key =
                 resolve_operation_service_key(config_path, &workspace_name, provider.as_ref())
                     .await?;
-            let project_dir = project_dir_for_config(config_path);
+            let project_dir = super::operation_project_dir(config_path);
             let hook_opts = devflow_core::workspace::LifecycleOptions {
                 hook_approval: if non_interactive || json_output {
                     devflow_core::workspace::hooks::HookApprovalMode::NonInteractive
@@ -1980,7 +1978,7 @@ async fn handle_orchestrated_mutation(
     non_interactive: bool,
     config_path: &Option<PathBuf>,
 ) -> Result<()> {
-    let project_dir = project_dir_for_config(config_path);
+    let project_dir = super::operation_project_dir(config_path);
     let hook_opts = devflow_core::workspace::LifecycleOptions {
         hook_approval: if non_interactive || json_output {
             devflow_core::workspace::hooks::HookApprovalMode::NonInteractive

@@ -161,11 +161,6 @@ pub trait ServiceProvider: Send + Sync {
     // Test connection
     async fn test_connection(&self) -> Result<()>;
 
-    // Init project (for local provider)
-    async fn init_project(&self, _project_name: &str) -> Result<()> {
-        Ok(())
-    }
-
     // Project metadata (optional, implemented by local provider)
     fn project_info(&self) -> Option<ProjectInfo> {
         None

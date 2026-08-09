@@ -1211,13 +1211,3 @@ enum ServiceOp {
     Stop,
     Reset,
 }
-
-impl std::fmt::Display for ServiceOp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ServiceOp::Start => write!(f, "Start"),
-            ServiceOp::Stop => write!(f, "Stop"),
-            ServiceOp::Reset => write!(f, "Reset"),
-        }
-    }
-}

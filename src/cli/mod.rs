@@ -420,7 +420,11 @@ pub enum ProcessCommands {
     Start {
         #[arg(help = "Process names to start (omit with --all for every process)")]
         names: Vec<String>,
-        #[arg(long, help = "Start all configured processes")]
+        #[arg(
+            long,
+            help = "Start all configured processes",
+            conflicts_with = "names"
+        )]
         all: bool,
         #[arg(long, help = "Workspace name (defaults to current workspace)")]
         workspace: Option<String>,
@@ -431,7 +435,11 @@ pub enum ProcessCommands {
     Stop {
         #[arg(help = "Process names to stop (omit with --all for every process)")]
         names: Vec<String>,
-        #[arg(long, help = "Stop all configured/running processes")]
+        #[arg(
+            long,
+            help = "Stop all configured/running processes",
+            conflicts_with = "names"
+        )]
         all: bool,
         #[arg(long, help = "Workspace name (defaults to current workspace)")]
         workspace: Option<String>,
@@ -440,17 +448,16 @@ pub enum ProcessCommands {
     Restart {
         #[arg(help = "Process names to restart (omit with --all for every process)")]
         names: Vec<String>,
-        #[arg(long, help = "Restart all configured processes")]
+        #[arg(
+            long,
+            help = "Restart all configured processes",
+            conflicts_with = "names"
+        )]
         all: bool,
         #[arg(long, help = "Workspace name (defaults to current workspace)")]
         workspace: Option<String>,
     },
-    #[command(about = "List process status")]
-    List {
-        #[arg(long, help = "Filter by workspace")]
-        workspace: Option<String>,
-    },
-    #[command(about = "Show process status")]
+    #[command(about = "Show process status", visible_alias = "list")]
     Status {
         #[arg(long, help = "Filter by workspace")]
         workspace: Option<String>,
@@ -1768,9 +1775,6 @@ pub async fn handle_command(
         }
         Commands::SyncAiConfigs => {
             sync_ai_configs::handle_sync_ai_configs(json_output)?;
-        }
-        Commands::Gc { list, all, force } => {
-            gc::handle_gc_command(list, all, force, json_output, non_interactive).await?;
         }
         Commands::Completions { shell } => {
             use clap::CommandFactory;

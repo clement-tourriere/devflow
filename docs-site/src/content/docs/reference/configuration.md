@@ -36,12 +36,25 @@ git:
   auto_create_on_workspace: true        # provision services for manually added worktrees
   main_workspace: main                  # auto-detected on init
   workspace_filter_regex: "^feature/.*" # only branches matching this pattern
-  exclude_workspaces: [main, master]    # never create workspaces for these
+  exclude_workspaces: [main, master]    # never provision these (supports * globs)
 ```
 
 For Git, the branch checked out in the physical primary checkout is the default workspace; initialization refuses a detached primary checkout. This keeps the configured root aligned with Git's actual worktree graph instead of guessing from `origin/HEAD` or branch-name conventions.
 
 These toggles apply to installed VCS-hook handling for materialized worktrees. Ordinary in-place `git checkout` no longer provisions devflow environments; use `devflow switch`, or create a linked worktree manually and let the hook adopt it.
+
+### Opt-in provisioning with a branch marker
+
+By default every adopted worktree gets services. To make hook-driven provisioning opt-in instead, set a marker pattern:
+
+```yaml
+git:
+  workspace_filter_regex: "df_"   # unanchored regex — matches anywhere in the branch name
+```
+
+Now `git worktree add ../repo.df_login df_login` provisions databases, while a scratch worktree like `quickfix` is adopted without services (worktree files are still copied). The filter only gates the *automatic* path: explicit commands — `devflow switch -c <branch>`, `devflow service create` — always provision, whatever the branch is called.
+
+The pattern is a search regex matched against the raw branch name, so anchor it (`^df/`) if the marker must be a prefix. An invalid regex fails closed — nothing auto-provisions — and `devflow doctor` reports it. `workspace_filter_regex` also accepts the legacy spellings `branch_filter_regex`, `auto_create_workspace_filter`, and `auto_create_branch_filter`.
 
 ## `behavior`
 

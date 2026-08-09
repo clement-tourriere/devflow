@@ -3,6 +3,7 @@ import type {
   ProjectEntry,
   ProjectDetail,
   WorkspacesResponse,
+  ConnectionInfo,
   ServiceEntry,
   ServiceWorkspaceInfo,
   AddServiceRequest,
@@ -13,7 +14,6 @@ import type {
   ActionTypeInfo,
   HookRunResult,
   TriggerMapping,
-  RecipeInfo,
   RecipeDetectionInfo,
   RecipeHookPreview,
   InstallRecipeResult,
@@ -61,7 +61,7 @@ export const getConnectionInfo = (
   workspaceName: string,
   serviceName?: string
 ) =>
-  invoke<Record<string, unknown>>("get_connection_info", {
+  invoke<ConnectionInfo>("get_connection_info", {
     projectPath,
     workspaceName,
     serviceName,
@@ -265,8 +265,6 @@ export const runHook = (
   });
 export const getTriggerMappings = (projectPath: string) =>
   invoke<TriggerMapping[]>("get_trigger_mappings", { projectPath });
-export const getRecipes = () =>
-  invoke<RecipeInfo[]>("get_recipes");
 export const detectRecipes = (projectPath: string) =>
   invoke<RecipeDetectionInfo[]>("detect_recipes", { projectPath });
 export const previewRecipe = (
@@ -319,9 +317,10 @@ export const getConfigYaml = (projectPath: string) =>
 export const saveConfigYaml = (projectPath: string, content: string) =>
   invoke<void>("save_config_yaml", { projectPath, content });
 export const validateConfigYaml = (content: string) =>
-  invoke<{ valid: boolean; error?: string }>("validate_config_yaml", {
-    content,
-  });
+  invoke<{ valid: boolean; error?: string; services?: number; hooks?: number }>(
+    "validate_config_yaml",
+    { content }
+  );
 
 // Destroy
 export const destroyProject = (projectPath: string) =>

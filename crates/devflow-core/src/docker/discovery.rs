@@ -1,6 +1,6 @@
 use bollard::query_parameters::{InspectContainerOptions, ListContainersOptions};
 use bollard::Docker;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -10,7 +10,7 @@ const LABEL_COMPOSE_SERVICE: &str = "com.docker.compose.service";
 const LABEL_COMPOSE_WORKING_DIR: &str = "com.docker.compose.project.working_dir";
 const LABEL_COMPOSE_CONFIG_FILES: &str = "com.docker.compose.project.config_files";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DiscoveredServiceType {
     Postgres,

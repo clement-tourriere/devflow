@@ -31,11 +31,6 @@ impl Config {
             .unwrap_or_else(|| "default".to_string())
     }
 
-    pub fn load_with_path_info() -> Result<(Self, Option<std::path::PathBuf>)> {
-        let current_dir = std::env::current_dir().context("Failed to get current directory")?;
-        Self::load_project_config_for_start(&current_dir, true)
-    }
-
     fn load_project_config_for_start(
         start: &Path,
         search_ancestors: bool,
@@ -303,32 +298,28 @@ impl Config {
         workspace_service_key(workspace_name)
     }
 
+    /// Whether hook-driven adoption may auto-provision services for this raw
+    /// branch/workspace name. Explicit paths (`devflow switch`, `devflow
+    /// service create`) intentionally never consult this.
     pub fn should_create_workspace(&self, workspace_name: &str) -> bool {
         if !self.git.auto_create_on_workspace {
             return false;
         }
 
-        if self
-            .git
-            .exclude_workspaces
-            .contains(&workspace_name.to_string())
-        {
+        if super::workspace_matches_patterns(workspace_name, &self.git.exclude_workspaces) {
             return false;
         }
 
-        // Prefer the newer workspace_filter_regex, but keep supporting
-        // auto_create_workspace_filter for backward compatibility.
-        let create_filter = self
-            .git
-            .workspace_filter_regex
-            .as_ref()
-            .or(self.git.auto_create_workspace_filter.as_ref());
-
-        if let Some(filter) = create_filter {
+        if let Some(filter) = self.git.workspace_filter_regex.as_ref() {
             match regex::Regex::new(filter) {
                 Ok(re) => re.is_match(workspace_name),
-                Err(_) => {
-                    log::warn!("Invalid regex filter: {}", filter);
+                Err(err) => {
+                    // Fail closed, loudly: a typo here silently stops all
+                    // auto-provisioning otherwise. `devflow doctor` surfaces it.
+                    log::error!(
+                        "git.workspace_filter_regex {filter:?} is not a valid regex ({err}); \
+                         auto-provisioning is disabled until it is fixed"
+                    );
                     false
                 }
             }
@@ -563,16 +554,6 @@ fn explicit_main_workspace(config_path: &Path) -> Result<Option<String>> {
         })?
     };
     Ok(probe.git.and_then(|git| git.main_workspace))
-}
-
-/// Canonical service-workspace name for a raw VCS branch/workspace name.
-///
-/// Service backends key their per-workspace state by this normalized form
-/// (the switch pipeline normalizes before orchestration). Lookups must apply
-/// the same normalization so raw branch names like `feature/foo-bar` resolve
-/// to the stored workspace.
-pub(crate) fn normalize_workspace_name(workspace_name: &str) -> String {
-    workspace_service_key(workspace_name)
 }
 
 /// Build a stable service/filesystem key without conflating distinct VCS

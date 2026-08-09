@@ -37,7 +37,7 @@ async fn shared_postgres_lifecycle() {
         port: Some(55990),
         ..Default::default()
     };
-    let provider = SharedPostgresProvider::new("itest_proj", "db", Some(&cfg)).unwrap();
+    let provider = SharedPostgresProvider::new("itest_proj", Some(&cfg)).unwrap();
 
     // Create a workspace database.
     let info = provider.create_workspace("main", None).await.unwrap();
@@ -94,7 +94,7 @@ async fn shared_redis_lifecycle() {
         image: Some("redis:7-alpine".to_string()),
         ..Default::default()
     };
-    let provider = SharedRedisProvider::new("itest_proj", "cache", Some(&cfg)).unwrap();
+    let provider = SharedRedisProvider::new("itest_proj", Some(&cfg)).unwrap();
 
     // Allocate an index for a workspace.
     let info = provider.create_workspace("main", None).await.unwrap();
@@ -147,7 +147,7 @@ async fn shared_clickhouse_lifecycle() {
         image: Some("clickhouse/clickhouse-server:25.8".to_string()),
         ..Default::default()
     };
-    let provider = SharedClickHouseProvider::new("itest_proj", "olap", Some(&cfg)).unwrap();
+    let provider = SharedClickHouseProvider::new("itest_proj", Some(&cfg)).unwrap();
 
     let info = provider.create_workspace("main", None).await.unwrap();
     assert_eq!(info.database_name, "itest_proj_main");
@@ -182,7 +182,7 @@ async fn shared_rustfs_lifecycle() {
         port: Some(59000),
         ..Default::default()
     };
-    let provider = RustFsProvider::new("itest-proj", "storage", Some(&cfg)).unwrap();
+    let provider = RustFsProvider::new("itest-proj", Some(&cfg)).unwrap();
 
     // Create a bucket for a workspace.
     let info = provider.create_workspace("main", None).await.unwrap();

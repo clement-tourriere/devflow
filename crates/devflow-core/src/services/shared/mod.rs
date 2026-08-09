@@ -35,10 +35,6 @@ const READY_TIMEOUT: Duration = Duration::from_secs(60);
 /// workspace its own logical database inside it.
 pub struct SharedPostgresProvider {
     project_name: String,
-    /// Retained for future per-service disambiguation; the global container
-    /// is currently shared across all `shared` postgres services.
-    #[allow(dead_code)]
-    service_name: String,
     image: String,
     container_name: String,
     host_port: u16,
@@ -48,15 +44,10 @@ pub struct SharedPostgresProvider {
 }
 
 impl SharedPostgresProvider {
-    pub fn new(
-        project_name: &str,
-        service_name: &str,
-        config: Option<&SharedServiceConfig>,
-    ) -> Result<Self> {
+    pub fn new(project_name: &str, config: Option<&SharedServiceConfig>) -> Result<Self> {
         let c = config.cloned().unwrap_or_default();
         Ok(Self {
             project_name: project_name.to_string(),
-            service_name: service_name.to_string(),
             image: c.image.unwrap_or_else(|| DEFAULT_IMAGE.to_string()),
             container_name: c
                 .container_name

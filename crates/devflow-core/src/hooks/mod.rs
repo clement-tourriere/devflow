@@ -8,7 +8,6 @@ pub mod triggers;
 
 // Re-export hook engine types
 pub use executor::{wait_for_background_hooks, HookEngine};
-#[allow(unused_imports)] // Public API — used by consumers for advanced template rendering
 pub use template::TemplateEngine;
 
 use serde::{Deserialize, Serialize};
@@ -361,7 +360,6 @@ pub struct HookContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_workspace: Option<String>,
     /// What triggered this hook execution: "vcs", "cli", "gui", "auto"
-    #[serde(default = "default_trigger_source")]
     pub trigger_source: String,
     /// The VCS event that triggered this hook, if any (e.g. "post-checkout")
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -370,11 +368,6 @@ pub struct HookContext {
     /// Each service exposes: host, port, database, user, password, url
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub service: HashMap<String, ServiceContext>,
-}
-
-#[allow(dead_code)] // Used by serde(default)
-fn default_trigger_source() -> String {
-    "cli".to_string()
 }
 
 /// Connection information for a single service, exposed to templates.

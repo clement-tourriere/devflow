@@ -518,13 +518,55 @@ fn test_should_create_workspace_uses_workspace_filter_regex() {
 }
 
 #[test]
-fn test_should_create_workspace_falls_back_to_auto_create_workspace_filter() {
-    let mut config = Config::default();
-    config.git.workspace_filter_regex = None;
-    config.git.auto_create_workspace_filter = Some("^chore/.*".to_string());
+fn test_workspace_filter_regex_accepts_legacy_alias_keys() {
+    // Configs written before the workspace naming migration keep working.
+    for legacy_key in [
+        "auto_create_workspace_filter",
+        "auto_create_branch_filter",
+        "branch_filter_regex",
+    ] {
+        let yaml = format!("git:\n  {legacy_key}: \"^chore/.*\"\n");
+        let config: Config = serde_yaml_ng::from_str(&yaml).expect("legacy key should parse");
+        assert_eq!(
+            config.git.workspace_filter_regex.as_deref(),
+            Some("^chore/.*"),
+            "{legacy_key} should alias workspace_filter_regex"
+        );
+        assert!(config.should_create_workspace("chore/deps"));
+        assert!(!config.should_create_workspace("feature/deps"));
+    }
+}
 
-    assert!(config.should_create_workspace("chore/deps"));
-    assert!(!config.should_create_workspace("feature/deps"));
+#[test]
+fn test_workspace_filter_regex_marker_matches_anywhere() {
+    // The opt-in marker workflow: only branches carrying the marker
+    // auto-provision services from the git hook.
+    let mut config = Config::default();
+    config.git.workspace_filter_regex = Some("df_".to_string());
+
+    assert!(config.should_create_workspace("feature/df_login"));
+    assert!(config.should_create_workspace("df_quick"));
+    assert!(!config.should_create_workspace("feature/login"));
+}
+
+#[test]
+fn test_exclude_workspaces_supports_globs() {
+    let mut config = Config::default();
+    config.git.exclude_workspaces = vec!["release/*".to_string(), "staging".to_string()];
+
+    assert!(!config.should_create_workspace("release/1.2"));
+    assert!(!config.should_create_workspace("staging"));
+    assert!(config.should_create_workspace("feature/x"));
+    // No accidental substring semantics: pattern must span the whole name.
+    assert!(config.should_create_workspace("prerelease/1.2"));
+}
+
+#[test]
+fn test_invalid_workspace_filter_regex_fails_closed() {
+    let mut config = Config::default();
+    config.git.workspace_filter_regex = Some("df_(".to_string());
+
+    assert!(!config.should_create_workspace("df_feature"));
 }
 
 #[test]

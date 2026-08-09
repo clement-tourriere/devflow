@@ -20,7 +20,6 @@ export interface DevflowConfig {
 export interface GitConfig {
   auto_create_on_workspace: boolean;
   main_workspace: string;
-  auto_create_workspace_filter?: string | null;
   workspace_filter_regex?: string | null;
   exclude_workspaces: string[];
 }
@@ -196,7 +195,6 @@ export interface CommitGenerationConfig {
 const DEFAULT_GIT: GitConfig = {
   auto_create_on_workspace: true,
   main_workspace: "main",
-  auto_create_workspace_filter: null,
   workspace_filter_regex: null,
   exclude_workspaces: ["main", "master"],
 };

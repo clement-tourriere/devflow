@@ -8,7 +8,7 @@ license = "MIT"
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.46", features = ["rt-multi-thread", "net", "time", "macros", "process", "fs", "signal", "sync", "io-util"] }
+tokio = { version = "1.46", features = ["rt-multi-thread", "net", "time", "macros", "sync", "io-util"] }
 
 # HTTP server & reverse proxy
 hyper = { version = "1.8", features = ["full"] }

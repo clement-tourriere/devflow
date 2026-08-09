@@ -33,7 +33,6 @@ fn captured_text(bytes: &[u8]) -> Option<String> {
 
 /// Execute a command inside a workspace's worktree, optionally detached via a
 /// terminal multiplexer (tmux/zellij), and record execution state in the local store.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_in_workspace(
     config: &Config,
     config_path: &Option<PathBuf>,

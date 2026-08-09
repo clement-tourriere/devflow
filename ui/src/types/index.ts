@@ -71,12 +71,6 @@ export interface ServiceEntry {
   source: "config" | "local_state" | string;
 }
 
-export interface ServiceWorkspaceStatus {
-  service_name: string;
-  workspace_name: string;
-  state: string | null;
-}
-
 export interface ServiceWorkspaceInfo {
   name: string;
   created_at: string | null;
@@ -126,8 +120,8 @@ export interface ProcessResult {
   success: boolean;
   message: string;
   required: boolean;
-  pid: number | null;
-  ports: number[];
+  pid?: number;
+  ports?: number[];
 }
 
 export interface ProcessStatus {
@@ -254,18 +248,14 @@ export interface ActionFieldInfo {
 }
 
 export interface HookRunResult {
+  // Present on lifecycle results (HookRunResultDto); absent on `run_hook`'s
+  // hand-built payload, which reuses this shape without a phase.
+  phase?: string;
   succeeded: number;
   failed: number;
   skipped: number;
   background: number;
   errors: string[];
-}
-
-export interface HookPreview {
-  type: string;
-  rendered_command?: string;
-  action_type?: string;
-  requires_approval?: boolean;
 }
 
 export interface TriggerMapping {
@@ -380,6 +370,9 @@ export interface AppSettings {
     http_port: number;
     api_port: number;
     domain_suffix: string;
+    auto_network?: boolean;
+    mdns?: boolean;
+    bind_address?: string;
   } | null;
   terminal_renderer: TerminalRenderer;
   terminal_font_size: number;

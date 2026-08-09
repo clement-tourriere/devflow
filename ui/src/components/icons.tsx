@@ -65,13 +65,6 @@ export const IconSettings = svg(
   </>,
 );
 
-export const IconDoctor = svg(
-  <>
-    <path d="M11 2a2 2 0 0 0-2 2v1H6a2 2 0 0 0-2 2v3a6 6 0 0 0 6 6 6 6 0 0 0 6-6V7a2 2 0 0 0-2-2h-3V4a2 2 0 0 0-2-2z" />
-    <circle cx="18" cy="18" r="3" />
-  </>,
-);
-
 export const IconDatabase = svg(
   <>
     <ellipse cx="12" cy="5" rx="8" ry="3" />
@@ -80,12 +73,6 @@ export const IconDatabase = svg(
 );
 
 export const IconPlus = svg(<path d="M12 5v14M5 12h14" />);
-
-export const IconSwitch = svg(
-  <>
-    <path d="M21 8H3M17 4l4 4-4 4M3 16h18M7 12l-4 4 4 4" />
-  </>,
-);
 
 export const IconTrash = svg(
   <>
@@ -116,8 +103,3 @@ export const IconCopy = svg(
   </>,
 );
 
-export const IconReset = svg(
-  <>
-    <path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5" />
-  </>,
-);

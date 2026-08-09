@@ -35,11 +35,6 @@ struct XataBranch {
     name: String,
     #[serde(rename = "createdAt")]
     created_at: Option<DateTime<Utc>>,
-    #[serde(rename = "parentID")]
-    #[allow(dead_code)]
-    parent_id: Option<String>,
-    #[allow(dead_code)]
-    region: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

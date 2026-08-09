@@ -1,4 +1,4 @@
-use crate::ca::{default_ca_cert_path, CertificateCache};
+use crate::ca::default_ca_cert_path;
 use crate::platform;
 use crate::router::Router;
 use bytes::Bytes;
@@ -20,6 +20,7 @@ struct StatusResponse {
     targets: usize,
     https_port: u16,
     http_port: u16,
+    api_port: u16,
     ca_installed: bool,
 }
 
@@ -34,11 +35,11 @@ struct CaResponse {
 pub async fn run_api_server(
     listener: TcpListener,
     router: Arc<Router>,
-    cert_cache: Arc<CertificateCache>,
     https_port: u16,
     http_port: u16,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
+    let api_port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
     if let Ok(addr) = listener.local_addr() {
         log::info!("API server listening on {}", addr);
     }
@@ -55,18 +56,15 @@ pub async fn run_api_server(
                     }
                 };
                 let router = router.clone();
-                let cert_cache = cert_cache.clone();
 
                 tokio::spawn(async move {
                     let io = TokioIo::new(stream);
                     let router = router.clone();
-                    let cert_cache = cert_cache.clone();
 
                     let service = service_fn(move |req: Request<Incoming>| {
                         let router = router.clone();
-                        let cert_cache = cert_cache.clone();
                         async move {
-                            handle_api(req, &router, &cert_cache, https_port, http_port).await
+                            handle_api(req, &router, https_port, http_port, api_port).await
                         }
                     });
 
@@ -91,9 +89,9 @@ pub async fn run_api_server(
 async fn handle_api(
     req: Request<Incoming>,
     router: &Router,
-    _cert_cache: &CertificateCache,
     https_port: u16,
     http_port: u16,
+    api_port: u16,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let path = req.uri().path();
 
@@ -106,6 +104,7 @@ async fn handle_api(
                 targets,
                 https_port,
                 http_port,
+                api_port,
                 ca_installed,
             };
             json_response(&resp)

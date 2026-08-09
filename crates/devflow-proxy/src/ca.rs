@@ -3,12 +3,9 @@ use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
     KeyPair, KeyUsagePurpose, SanType,
 };
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use time::{Duration, OffsetDateTime};
-use tokio::sync::RwLock;
 
 /// Default CA certificate path: ~/.devflow/proxy/ca.crt
 pub fn default_ca_cert_path() -> PathBuf {
@@ -180,52 +177,6 @@ impl CertificateAuthority {
 pub struct SignedCertificate {
     pub cert_pem: String,
     pub key_pem: String,
-}
-
-/// Thread-safe certificate cache for signed server certificates.
-pub struct CertificateCache {
-    ca: Arc<CertificateAuthority>,
-    cache: RwLock<HashMap<String, Arc<SignedCertificate>>>,
-}
-
-impl CertificateCache {
-    /// Create a new certificate cache with the given CA.
-    pub fn new(ca: Arc<CertificateAuthority>) -> Self {
-        Self {
-            ca,
-            cache: RwLock::new(HashMap::new()),
-        }
-    }
-
-    /// Get or create a signed certificate for the given hostname.
-    pub async fn get_cert(&self, hostname: &str) -> Result<Arc<SignedCertificate>> {
-        {
-            let cache = self.cache.read().await;
-            if let Some(cert) = cache.get(hostname) {
-                return Ok(cert.clone());
-            }
-        }
-
-        let cert = self.ca.sign_server_cert(hostname)?;
-        let cert = Arc::new(cert);
-
-        {
-            let mut cache = self.cache.write().await;
-            cache.insert(hostname.to_string(), cert.clone());
-        }
-
-        Ok(cert)
-    }
-
-    /// Get the CA certificate PEM.
-    pub fn ca_cert_pem(&self) -> &str {
-        self.ca.cert_pem()
-    }
-
-    /// Get reference to the CA.
-    pub fn ca(&self) -> &CertificateAuthority {
-        &self.ca
-    }
 }
 
 #[cfg(test)]

@@ -355,12 +355,6 @@ impl ServiceProvider for PluginProvider {
         Ok(())
     }
 
-    async fn init_project(&self, project_name: &str) -> Result<()> {
-        self.invoke("init_project", json!({ "project_name": project_name }))
-            .await?;
-        Ok(())
-    }
-
     fn project_info(&self) -> Option<ProjectInfo> {
         // Sync method — can't invoke async plugin. Return basic info.
         Some(ProjectInfo {

@@ -13,6 +13,16 @@ pub enum ContainerStatus {
     Other(String),
 }
 
+/// Expand a leading `~/` to the user's home directory.
+pub fn expand_home(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).display().to_string();
+        }
+    }
+    path.to_string()
+}
+
 pub fn sanitize_name_component(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     for ch in input.chars() {

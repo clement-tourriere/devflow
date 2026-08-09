@@ -28,8 +28,6 @@ const READY_TIMEOUT: Duration = Duration::from_secs(60);
 /// workspace).
 pub struct RustFsProvider {
     project_name: String,
-    #[allow(dead_code)]
-    service_name: String,
     image: String,
     container_name: String,
     s3_port: u16,
@@ -39,15 +37,10 @@ pub struct RustFsProvider {
 }
 
 impl RustFsProvider {
-    pub fn new(
-        project_name: &str,
-        service_name: &str,
-        config: Option<&SharedServiceConfig>,
-    ) -> Result<Self> {
+    pub fn new(project_name: &str, config: Option<&SharedServiceConfig>) -> Result<Self> {
         let c = config.cloned().unwrap_or_default();
         Ok(Self {
             project_name: project_name.to_string(),
-            service_name: service_name.to_string(),
             image: c.image.unwrap_or_else(|| DEFAULT_IMAGE.to_string()),
             container_name: c
                 .container_name

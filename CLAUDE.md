@@ -58,8 +58,11 @@ A lightweight `devflow.toml` / `.devflow.toml` is also supported and parsed by e
 git:
   auto_create_on_workspace: true       # Provision services when adopting a linked worktree
   main_workspace: main                 # Main git workspace
-  workspace_filter_regex: "^feature/.*"  # Only workspace for matching patterns
-  exclude_workspaces: [main, master]  # Never create workspaces for these
+  workspace_filter_regex: "^feature/.*"  # Hook-adopted worktrees only provision services for matching
+                                         # branches (unanchored search regex — e.g. "df_" makes
+                                         # provisioning opt-in by branch marker). Explicit commands
+                                         # (devflow switch, service create) are never filtered.
+  exclude_workspaces: [main, master]  # Never provision these (exact names or * globs)
 
 behavior:
   max_workspaces: 10

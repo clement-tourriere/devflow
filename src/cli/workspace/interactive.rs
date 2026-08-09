@@ -4,7 +4,7 @@ use devflow_core::services;
 use devflow_core::state::LocalStateManager;
 use devflow_core::vcs;
 
-use super::context::{context_matches_branch, resolve_branch_context};
+use super::context::resolve_branch_context;
 
 /// Returns the workspace that was switched to, or `None` when the picker was
 /// cancelled/failed — callers must not run follow-up actions (e.g. `-x`) in
@@ -67,7 +67,7 @@ pub(super) async fn handle_interactive_switch(
         .iter()
         .map(|workspace| {
             let is_cwd = current_git.as_deref() == Some(workspace.as_str());
-            let is_context = context_matches_branch(context.context_branch.as_deref(), workspace);
+            let is_context = context.context_branch.as_deref() == Some(workspace.as_str());
 
             BranchItem {
                 name: workspace.clone(),

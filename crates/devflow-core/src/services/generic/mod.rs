@@ -11,11 +11,10 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use bollard::models::{ContainerCreateBody, HostConfig, PortBinding, PortMap};
 use bollard::query_parameters::{
-    CreateContainerOptions, CreateImageOptions, RemoveContainerOptions, StopContainerOptions,
+    CreateContainerOptions, RemoveContainerOptions, StopContainerOptions,
 };
 use bollard::Docker;
 use chrono::Utc;
-use futures_util::TryStreamExt;
 use tokio::time::{sleep, Instant};
 
 use crate::config::{DockerCustomSettings, GenericDockerConfig};
@@ -95,29 +94,7 @@ impl GenericDockerProvider {
     }
 
     async fn ensure_image(&self) -> anyhow::Result<()> {
-        if self.client.inspect_image(&self.image).await.is_ok() {
-            return Ok(());
-        }
-
-        let (from_image, tag) = if let Some((name, tag)) = self.image.rsplit_once(':') {
-            (name.to_string(), Some(tag.to_string()))
-        } else {
-            (self.image.clone(), None)
-        };
-
-        let options = CreateImageOptions {
-            from_image: Some(from_image),
-            tag,
-            ..Default::default()
-        };
-
-        self.client
-            .create_image(Some(options), None, None)
-            .try_collect::<Vec<_>>()
-            .await
-            .with_context(|| format!("failed to pull docker image '{}'", self.image))?;
-
-        Ok(())
+        crate::services::shared::container::ensure_image(&self.client, &self.image).await
     }
 
     /// Pick a port for a workspace. Uses port_range_start + offset based on existing containers.
@@ -299,39 +276,12 @@ impl GenericDockerProvider {
 
     /// Run a shell command inside a container and return true if it exits successfully.
     async fn exec_check(&self, container_name: &str, cmd: &str) -> bool {
-        let config = bollard::models::ExecConfig {
-            cmd: Some(vec![
-                "/bin/sh".to_string(),
-                "-c".to_string(),
-                cmd.to_string(),
-            ]),
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            ..Default::default()
-        };
-
-        let exec = match self.client.create_exec(container_name, config).await {
-            Ok(e) => e,
-            Err(_) => return false,
-        };
-
-        let start_opts = Some(bollard::exec::StartExecOptions {
-            detach: false,
-            ..Default::default()
-        });
-
-        match self.client.start_exec(&exec.id, start_opts).await {
-            Ok(bollard::exec::StartExecResults::Attached { mut output, .. }) => {
-                while output.try_next().await.ok().flatten().is_some() {}
-            }
-            Ok(bollard::exec::StartExecResults::Detached) => {}
-            Err(_) => return false,
-        }
-
-        match self.client.inspect_exec(&exec.id).await {
-            Ok(info) => info.exit_code == Some(0),
-            Err(_) => false,
-        }
+        crate::services::shared::container::exec_check(
+            &self.client,
+            container_name,
+            &["/bin/sh", "-c", cmd],
+        )
+        .await
     }
 
     /// List all devflow-managed containers for this service.

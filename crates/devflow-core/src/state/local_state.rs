@@ -912,7 +912,7 @@ impl LocalStateManager {
     }
 
     /// Remove a workspace from the registry by name.
-    pub fn unregister_workspace(&mut self, project_path: &Path, name: &str) -> Result<()> {
+    fn unregister_workspace(&mut self, project_path: &Path, name: &str) -> Result<()> {
         let project_key = self.get_project_key(project_path).ok_or_else(|| {
             anyhow::anyhow!(
                 "Failed to get project key for path: {}",
@@ -929,30 +929,6 @@ impl LocalStateManager {
             }
             Ok(())
         })
-    }
-
-    // ── Workspace relationship queries ──────────────────────────────
-
-    /// Get child workspaces (workspaces whose parent is `workspace`).
-    pub fn get_children(&self, project_dir: &Path, workspace: &str) -> Vec<DevflowWorkspace> {
-        self.get_workspaces_by_dir(project_dir)
-            .into_iter()
-            .filter(|w| w.parent.as_deref() == Some(workspace))
-            .collect()
-    }
-
-    /// Get sibling workspaces (workspaces with the same parent).
-    pub fn get_siblings(&self, project_dir: &Path, workspace: &str) -> Vec<DevflowWorkspace> {
-        let workspaces = self.get_workspaces_by_dir(project_dir);
-        let parent = workspaces
-            .iter()
-            .find(|w| w.name == workspace)
-            .and_then(|w| w.parent.clone());
-
-        workspaces
-            .into_iter()
-            .filter(|w| w.parent == parent && w.name != workspace)
-            .collect()
     }
 
     fn get_project_key(&self, project_path: &Path) -> Option<String> {

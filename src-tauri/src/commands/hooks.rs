@@ -654,15 +654,6 @@ pub async fn run_hook(
 
 // ── Hook recipes ───────────────────────────────────────────────────────
 
-/// Static recipe catalog (params metadata, no project probing).
-#[tauri::command]
-pub async fn get_recipes() -> Result<Vec<recipes::RecipeInfo>, String> {
-    Ok(recipes::RecipeId::ALL
-        .iter()
-        .map(|id| id.to_info())
-        .collect())
-}
-
 /// Probe a project: applicability, evidence, suggested params, install state.
 #[tauri::command]
 pub async fn detect_recipes(

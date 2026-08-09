@@ -211,7 +211,7 @@ impl Store {
         }
         drop(rows);
 
-        let normalized = crate::config::normalize_workspace_name(workspace_name);
+        let normalized = crate::config::workspace_service_key(workspace_name);
         if normalized != workspace_name {
             let mut rows = stmt.query(rusqlite::params![project_id, normalized])?;
             if let Some(row) = rows.next()? {
@@ -225,7 +225,7 @@ impl Store {
     pub fn create_workspace(&self, input: NewBranch) -> anyhow::Result<Workspace> {
         let created_at = now_epoch_millis();
         // Store under the normalized name so lookups by raw VCS names match.
-        let name = crate::config::normalize_workspace_name(&input.name);
+        let name = crate::config::workspace_service_key(&input.name);
 
         self.conn.execute(
             r#"

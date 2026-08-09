@@ -18,7 +18,6 @@ const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "execute",
     "commit",
     "agent",
-    "proxy",
 ];
 
 /// Validate the configuration file for errors and unknown fields.
