@@ -490,6 +490,11 @@ mod tests {
     use tempfile::TempDir;
 
     struct TestEnv {
+        // Env vars are process-global while tests run in parallel threads:
+        // without this crate-wide guard, one test's TempDir is dropped (and
+        // its HOME restored) while another is still resolving state paths
+        // under it, so local_state.yml's lock file lands in a deleted dir.
+        _env_guard: std::sync::MutexGuard<'static, ()>,
         _config_home: TempDir,
         _project_home: TempDir,
         _old_xdg_config_home: Option<String>,
@@ -498,6 +503,9 @@ mod tests {
 
     impl TestEnv {
         fn new() -> Self {
+            let env_guard = crate::processes::PROCESS_TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let config_home = tempfile::tempdir().unwrap();
             let project_home = tempfile::tempdir().unwrap();
             let old_xdg_config_home = std::env::var("XDG_CONFIG_HOME").ok();
@@ -505,6 +513,7 @@ mod tests {
             std::env::set_var("XDG_CONFIG_HOME", config_home.path());
             std::env::set_var("HOME", project_home.path());
             Self {
+                _env_guard: env_guard,
                 _config_home: config_home,
                 _project_home: project_home,
                 _old_xdg_config_home: old_xdg_config_home,

@@ -458,6 +458,10 @@ async fn handle_hook_vars(
     println!("Template Variables (current context):");
     println!();
     println!("  {{{{ workspace }}}}              = {}", context.workspace);
+    println!(
+        "  {{{{ workspace_key }}}}          = {}",
+        context.workspace_key
+    );
     println!("  {{{{ name }}}}               = {}", context.name);
     println!("  {{{{ repo }}}}                = {}", context.repo);
     println!(
