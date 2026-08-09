@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -44,15 +44,11 @@ pub(crate) fn print_workspace_inventory(inventory: &WorkspaceInventory) {
         .iter()
         .map(|node| (node.name.as_str(), node))
         .collect();
-    let mut visited = HashSet::new();
-    for root in &inventory.roots {
-        print_node(root, "", "", &nodes, &mut visited);
-    }
-
-    // Defensive fallback for corrupt/cyclic lineage: never hide a workspace.
-    for node in &inventory.workspaces {
-        if !visited.contains(node.name.as_str()) {
-            print_node(&node.name, "", "", &nodes, &mut visited);
+    // The canonical order and connector data come from the shared flatten
+    // in devflow-core, so CLI, TUI, and GUI render identical trees.
+    for row in &inventory.flat_order {
+        if let Some(node) = nodes.get(row.name.as_str()) {
+            print_node(node, row);
         }
     }
 
@@ -64,19 +60,36 @@ pub(crate) fn print_workspace_inventory(inventory: &WorkspaceInventory) {
     }
 }
 
-fn print_node<'a>(
-    name: &'a str,
-    prefix: &str,
-    connector: &str,
-    nodes: &HashMap<&'a str, &'a WorkspaceNode>,
-    visited: &mut HashSet<&'a str>,
-) {
-    let Some(node) = nodes.get(name).copied() else {
-        return;
+/// Continuation columns for the levels above this node (the root level
+/// renders flush left, so `ancestor_has_next[0]` never draws a column).
+fn ancestor_columns(row: &devflow_core::workspace::inventory::FlatWorkspaceRow) -> String {
+    row.ancestor_has_next
+        .iter()
+        .skip(1)
+        .map(|has_next| if *has_next { "│  " } else { "   " })
+        .collect()
+}
+
+fn print_node(node: &WorkspaceNode, row: &devflow_core::workspace::inventory::FlatWorkspaceRow) {
+    let columns = ancestor_columns(row);
+    let (connector, prefix) = if row.depth == 0 {
+        (String::new(), String::new())
+    } else {
+        (
+            format!(
+                "{columns}{}",
+                if row.is_last_sibling {
+                    "└─ "
+                } else {
+                    "├─ "
+                }
+            ),
+            format!(
+                "{columns}{}",
+                if row.is_last_sibling { "   " } else { "│  " }
+            ),
+        )
     };
-    if !visited.insert(name) {
-        return;
-    }
 
     let marker = if node.is_context { "* " } else { "  " };
     let mut tags = Vec::new();
@@ -108,20 +121,5 @@ fn print_node<'a>(
             "{prefix}   ◦ process {}: {}",
             process.process, process.status
         );
-    }
-
-    for (index, child) in node.children.iter().enumerate() {
-        let last = index + 1 == node.children.len();
-        let child_connector = if last {
-            format!("{prefix}└─ ")
-        } else {
-            format!("{prefix}├─ ")
-        };
-        let child_prefix = if last {
-            format!("{prefix}   ")
-        } else {
-            format!("{prefix}│  ")
-        };
-        print_node(child, &child_prefix, &child_connector, nodes, visited);
     }
 }

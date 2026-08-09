@@ -89,114 +89,45 @@ impl WorkspacesComponent {
             .map(|b| (b.name.as_str(), b))
             .collect();
 
-        // Flatten the tree via DFS
-        let collapsed = &self.collapsed;
-        let filter = &self.filter;
+        // Walk the canonical flat order from devflow-core (shared with the
+        // CLI and GUI); collapse and filter are display concerns applied here.
+        let filter_lower = self.filter.to_lowercase();
         let mut tree_rows = Vec::new();
-        let mut visited = HashSet::new();
+        let mut collapse_below: Option<usize> = None;
 
-        for (i, root_name) in data.roots.iter().enumerate() {
-            if let Some(root) = branch_map.get(root_name.as_str()) {
-                let is_last = i == data.roots.len() - 1;
-                Self::flatten_node_static(
-                    root,
-                    0,
-                    is_last,
-                    &[],
-                    &branch_map,
-                    collapsed,
-                    filter,
-                    &mut visited,
-                    &mut tree_rows,
-                );
+        for row in &data.flat_order {
+            if let Some(depth) = collapse_below {
+                if row.depth > depth {
+                    continue;
+                }
+                collapse_below = None;
             }
-        }
+            let Some(workspace) = branch_map.get(row.name.as_str()) else {
+                continue;
+            };
 
-        // Corrupt/cyclic state should remain inspectable instead of disappearing.
-        // Inventory order is stable, and no lineage is invented for these nodes.
-        for workspace in &branches_owned {
-            if !visited.contains(&workspace.name) {
-                Self::flatten_node_static(
-                    workspace,
-                    0,
-                    true,
-                    &[],
-                    &branch_map,
-                    collapsed,
-                    filter,
-                    &mut visited,
-                    &mut tree_rows,
-                );
+            let is_collapsed = self.collapsed.contains(&row.name);
+            let matches_filter =
+                filter_lower.is_empty() || row.name.to_lowercase().contains(&filter_lower);
+
+            if matches_filter || row.has_children {
+                tree_rows.push(TreeRow {
+                    workspace: (*workspace).clone(),
+                    depth: row.depth,
+                    is_last_sibling: row.is_last_sibling,
+                    ancestor_has_next: row.ancestor_has_next.clone(),
+                    collapsed: is_collapsed,
+                    has_children: row.has_children,
+                });
+            }
+
+            if is_collapsed && row.has_children {
+                collapse_below = Some(row.depth);
             }
         }
 
         self.tree_rows = tree_rows;
         self.normalize_service_focus();
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn flatten_node_static(
-        workspace: &EnrichedBranch,
-        depth: usize,
-        is_last_sibling: bool,
-        ancestor_has_next: &[bool],
-        branch_map: &HashMap<&str, &EnrichedBranch>,
-        collapsed: &HashSet<String>,
-        filter: &str,
-        visited: &mut HashSet<String>,
-        tree_rows: &mut Vec<TreeRow>,
-    ) {
-        if !visited.insert(workspace.name.clone()) {
-            return;
-        }
-
-        let children = workspace
-            .children
-            .iter()
-            .filter(|name| branch_map.contains_key(name.as_str()))
-            .collect::<Vec<_>>();
-        let has_children = !children.is_empty();
-        let is_collapsed = collapsed.contains(&workspace.name);
-
-        // Apply filter
-        let matches_filter = filter.is_empty()
-            || workspace
-                .name
-                .to_lowercase()
-                .contains(&filter.to_lowercase());
-
-        if matches_filter || has_children {
-            tree_rows.push(TreeRow {
-                workspace: workspace.clone(),
-                depth,
-                is_last_sibling,
-                ancestor_has_next: ancestor_has_next.to_vec(),
-                collapsed: is_collapsed,
-                has_children,
-            });
-        }
-
-        // Recurse into children if not collapsed
-        if has_children && !is_collapsed {
-            for (i, child_name) in children.iter().enumerate() {
-                if let Some(child_branch) = branch_map.get(child_name.as_str()) {
-                    let child_is_last = i == children.len() - 1;
-                    let mut child_ancestors = ancestor_has_next.to_vec();
-                    child_ancestors.push(!is_last_sibling);
-                    Self::flatten_node_static(
-                        child_branch,
-                        depth + 1,
-                        child_is_last,
-                        &child_ancestors,
-                        branch_map,
-                        collapsed,
-                        filter,
-                        visited,
-                        tree_rows,
-                    );
-                }
-            }
-        }
     }
 
     fn visible_rows(&self) -> &[TreeRow] {

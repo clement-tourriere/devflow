@@ -155,8 +155,6 @@ pub struct EnrichedBranch {
     /// Parent workspace name from the devflow workspace registry.
     pub parent: Option<String>,
     pub parent_state: Option<String>,
-    /// Canonical raw-name children from the workspace inventory.
-    pub children: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -172,9 +170,9 @@ pub struct BranchServiceState {
 
 #[derive(Debug, Clone)]
 pub struct BranchesData {
-    /// Canonical ordered roots from the workspace inventory.
-    pub roots: Vec<String>,
     pub workspaces: Vec<EnrichedBranch>,
+    /// Canonical depth-first display order shared with the CLI and GUI.
+    pub flat_order: Vec<devflow_core::workspace::inventory::FlatWorkspaceRow>,
     pub warnings: Vec<String>,
 }
 

@@ -53,6 +53,14 @@ export interface WorkspaceEntry {
   processes: ProcessStatus[];
 }
 
+export interface FlatWorkspaceRow {
+  name: string;
+  depth: number;
+  is_last_sibling: boolean;
+  ancestor_has_next: boolean[];
+  has_children: boolean;
+}
+
 export interface WorkspacesResponse {
   schema_version: number;
   project: WorkspaceInventoryProject;
@@ -60,6 +68,8 @@ export interface WorkspacesResponse {
   default_workspace: string;
   roots: string[];
   workspaces: WorkspaceEntry[];
+  /** Canonical depth-first display order shared with the CLI and TUI. */
+  flat_order: FlatWorkspaceRow[];
   warnings: string[];
 }
 

@@ -72,6 +72,9 @@ pub struct WorkspaceInventory {
     pub default_workspace: String,
     pub roots: Vec<String>,
     pub workspaces: Vec<WorkspaceNode>,
+    /// Canonical depth-first display order (see [`flatten_tree`]).
+    #[serde(default)]
+    pub flat_order: Vec<FlatWorkspaceRow>,
     pub warnings: Vec<String>,
 }
 
@@ -468,6 +471,8 @@ pub async fn build_workspace_inventory(
         b_default.cmp(&a_default).then_with(|| a.cmp(b))
     });
 
+    let flat_order = flatten_tree(&roots, &nodes);
+
     Ok(WorkspaceInventory {
         schema_version: INVENTORY_SCHEMA_VERSION,
         project: InventoryProject {
@@ -479,8 +484,98 @@ pub async fn build_workspace_inventory(
         default_workspace,
         roots,
         workspaces: nodes,
+        flat_order,
         warnings,
     })
+}
+
+/// One row of the canonical depth-first display order for the workspace
+/// tree. Computed once here so the CLI, TUI, and GUI all render the same
+/// order and the same connector glyphs instead of re-deriving the tree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlatWorkspaceRow {
+    pub name: String,
+    pub depth: usize,
+    /// Whether this node is the last of its siblings (└─ vs ├─).
+    pub is_last_sibling: bool,
+    /// Per ancestor level: whether that ancestor has further siblings
+    /// (drives │ continuation columns).
+    pub ancestor_has_next: Vec<bool>,
+    pub has_children: bool,
+}
+
+/// Flatten the workspace graph depth-first: roots in inventory order, then a
+/// defensive pass so corrupt/cyclic lineage stays visible instead of hidden.
+pub fn flatten_tree(roots: &[String], workspaces: &[WorkspaceNode]) -> Vec<FlatWorkspaceRow> {
+    let map: HashMap<&str, &WorkspaceNode> = workspaces
+        .iter()
+        .map(|node| (node.name.as_str(), node))
+        .collect();
+    let mut rows = Vec::new();
+    let mut visited: HashSet<&str> = HashSet::new();
+
+    for (i, root) in roots.iter().enumerate() {
+        flatten_node(
+            root,
+            0,
+            i + 1 == roots.len(),
+            &[],
+            &map,
+            &mut visited,
+            &mut rows,
+        );
+    }
+    for node in workspaces {
+        if !visited.contains(node.name.as_str()) {
+            flatten_node(&node.name, 0, true, &[], &map, &mut visited, &mut rows);
+        }
+    }
+    rows
+}
+
+fn flatten_node<'a>(
+    name: &'a str,
+    depth: usize,
+    is_last_sibling: bool,
+    ancestor_has_next: &[bool],
+    map: &HashMap<&'a str, &'a WorkspaceNode>,
+    visited: &mut HashSet<&'a str>,
+    rows: &mut Vec<FlatWorkspaceRow>,
+) {
+    let Some(node) = map.get(name).copied() else {
+        return;
+    };
+    if !visited.insert(&node.name) {
+        return;
+    }
+
+    let children: Vec<&String> = node
+        .children
+        .iter()
+        .filter(|child| map.contains_key(child.as_str()))
+        .collect();
+
+    rows.push(FlatWorkspaceRow {
+        name: node.name.clone(),
+        depth,
+        is_last_sibling,
+        ancestor_has_next: ancestor_has_next.to_vec(),
+        has_children: !children.is_empty(),
+    });
+
+    for (i, child) in children.iter().enumerate() {
+        let mut child_ancestors = ancestor_has_next.to_vec();
+        child_ancestors.push(!is_last_sibling);
+        flatten_node(
+            child,
+            depth + 1,
+            i + 1 == children.len(),
+            &child_ancestors,
+            map,
+            visited,
+            rows,
+        );
+    }
 }
 
 #[cfg(test)]

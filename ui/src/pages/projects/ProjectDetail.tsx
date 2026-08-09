@@ -38,6 +38,7 @@ import {
 import type {
   ProjectDetail as ProjectDetailType,
   WorkspaceEntry,
+  FlatWorkspaceRow,
   ServiceEntry,
   ServiceWorkspaceInfo,
   ConnectionInfo,
@@ -123,64 +124,29 @@ interface WorkspaceTreeRow {
   hasChildren: boolean;
 }
 
+// Walk the canonical flat order computed by devflow-core (shared with the
+// CLI and TUI) instead of re-deriving the tree; collapse is applied here.
 function buildWorkspaceTree(
   workspaces: WorkspaceEntry[],
-  roots: string[],
+  flatOrder: FlatWorkspaceRow[],
   collapsed: Set<string>,
 ): WorkspaceTreeRow[] {
   const byName = new Map(workspaces.map((workspace) => [workspace.name, workspace]));
-  const children = new Map<string, Set<string>>();
-  for (const workspace of workspaces) {
-    children.set(workspace.name, new Set(workspace.children || []));
-  }
-  for (const workspace of workspaces) {
-    if (workspace.parent && byName.has(workspace.parent)) {
-      const parentChildren = children.get(workspace.parent) ?? new Set<string>();
-      parentChildren.add(workspace.name);
-      children.set(workspace.parent, parentChildren);
-    }
-  }
-
-  const sortNames = (names: string[]) =>
-    names
-      .filter((name) => byName.has(name))
-      .sort((a, b) => {
-        const left = byName.get(a)!;
-        const right = byName.get(b)!;
-        if (left.is_default !== right.is_default) return left.is_default ? -1 : 1;
-        return left.name.localeCompare(right.name);
-      });
-
-  const inferredRoots = workspaces
-    .filter((workspace) => !workspace.parent || !byName.has(workspace.parent))
-    .map((workspace) => workspace.name);
-  const rootNames = sortNames([...new Set([...roots, ...inferredRoots])]);
-  const visited = new Set<string>();
   const rows: WorkspaceTreeRow[] = [];
+  let collapseBelow: number | null = null;
 
-  const hideDescendants = (name: string) => {
-    if (visited.has(name)) return;
-    visited.add(name);
-    for (const child of children.get(name) ?? []) {
-      hideDescendants(child);
+  for (const row of flatOrder) {
+    if (collapseBelow !== null) {
+      if (row.depth > collapseBelow) continue;
+      collapseBelow = null;
     }
-  };
-
-  const visit = (name: string, depth: number) => {
-    const workspace = byName.get(name);
-    if (!workspace || visited.has(name)) return;
-    visited.add(name);
-    const childNames = sortNames([...(children.get(name) ?? [])]);
-    rows.push({ workspace, depth, hasChildren: childNames.length > 0 });
-    if (collapsed.has(name)) {
-      childNames.forEach(hideDescendants);
-    } else {
-      childNames.forEach((child) => visit(child, depth + 1));
+    const workspace = byName.get(row.name);
+    if (!workspace) continue;
+    rows.push({ workspace, depth: row.depth, hasChildren: row.has_children });
+    if (collapsed.has(row.name) && row.has_children) {
+      collapseBelow = row.depth;
     }
-  };
-
-  rootNames.forEach((root) => visit(root, 0));
-  sortNames(workspaces.map((workspace) => workspace.name)).forEach((name) => visit(name, 0));
+  }
   return rows;
 }
 
@@ -192,7 +158,7 @@ function ProjectDetail() {
 
   const [detail, setDetail] = useState<ProjectDetailType | null>(null);
   const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([]);
-  const [workspaceRoots, setWorkspaceRoots] = useState<string[]>([]);
+  const [workspaceFlatOrder, setWorkspaceFlatOrder] = useState<FlatWorkspaceRow[]>([]);
   const [inventoryWarnings, setInventoryWarnings] = useState<string[]>([]);
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(new Set());
   const [services, setServices] = useState<ServiceEntry[]>([]);
@@ -321,7 +287,7 @@ function ProjectDetail() {
       listWorkspaces(projectPath)
         .then((b) => {
           setWorkspaces(b.workspaces);
-          setWorkspaceRoots(b.roots);
+          setWorkspaceFlatOrder(b.flat_order);
           setInventoryWarnings(b.warnings);
           setCurrentWorkspace(b.context_workspace);
           const preferredWorkspace =
@@ -339,7 +305,7 @@ function ProjectDetail() {
         })
         .catch(() => {
           setWorkspaces([]);
-          setWorkspaceRoots([]);
+          setWorkspaceFlatOrder([]);
           setInventoryWarnings([]);
           setCurrentWorkspace(null);
         }),
@@ -983,7 +949,7 @@ function ProjectDetail() {
 
   const workspaceTreeRows = buildWorkspaceTree(
     workspaces,
-    workspaceRoots,
+    workspaceFlatOrder,
     collapsedWorkspaces,
   );
   const rawWorkspaceName = (serviceIdentity: string | null | undefined) => {

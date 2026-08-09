@@ -193,7 +193,6 @@ impl DevflowContext {
         let inventory =
             devflow_core::workspace::inventory::build_workspace_inventory(config, project_dir)
                 .await?;
-        let roots = inventory.roots;
         let workspaces = inventory
             .workspaces
             .into_iter()
@@ -217,13 +216,12 @@ impl DevflowContext {
                 processes: workspace.processes,
                 parent: workspace.parent,
                 parent_state: workspace.parent_state,
-                children: workspace.children,
             })
             .collect();
 
         Ok(BranchesData {
-            roots,
             workspaces,
+            flat_order: inventory.flat_order,
             warnings: inventory.warnings,
         })
     }
