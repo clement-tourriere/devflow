@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## v0.8.0 (2026-09-14)
+
 ### Added
 
 - **Workspace plans and desktop recovery** — Inspect code/data selections before effects, retain exact selections on retry, and inspect/resume/cancel eligible operations from shared CLI and desktop APIs.

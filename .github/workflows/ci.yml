@@ -540,7 +540,7 @@ jobs:
             dist/${{ matrix.artifact_name }}-proxy.sha256
             dist/${{ matrix.artifact_name }}-proxy.sig
             dist/${{ matrix.artifact_name }}-proxy.pem
-          generate_release_notes: true
+          body_path: docs/releases/${{ github.ref_name }}.md
 
   verify-install:
     name: Verify install script
