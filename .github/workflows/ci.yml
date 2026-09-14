@@ -21,7 +21,7 @@ jobs:
     env:
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -104,7 +104,7 @@ jobs:
     env:
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install mold linker
         run: sudo apt-get install -y mold
@@ -165,7 +165,7 @@ jobs:
     needs: build-and-test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install pinned Rust toolchain
         run: |
@@ -197,7 +197,7 @@ jobs:
         # the latest published release may not have an arm64 asset yet.
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Lint with shellcheck
         if: runner.os == 'Linux'
@@ -236,7 +236,7 @@ jobs:
     if: ${{ false }}
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install pinned Rust toolchain
         run: |
@@ -278,7 +278,7 @@ jobs:
     env:
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install mold linker
         run: sudo apt-get install -y mold
@@ -338,7 +338,7 @@ jobs:
     env:
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install mold linker
         run: sudo apt-get install -y mold
@@ -384,7 +384,7 @@ jobs:
     env:
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install mold linker
         run: sudo apt-get install -y mold
@@ -450,7 +450,7 @@ jobs:
           - os: macos-latest
             artifact_name: devflow-macos-arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install mold linker (Linux)
         if: runner.os == 'Linux'
@@ -552,7 +552,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install just-released version
         run: DEVFLOW_VERSION="${{ github.ref_name }}" DEVFLOW_INSTALL_PROXY=1 sh scripts/install.sh
