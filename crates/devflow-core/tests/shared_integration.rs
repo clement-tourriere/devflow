@@ -9,6 +9,7 @@
 //! `devflow-shared-*` engines.
 
 #![cfg(feature = "service-local")]
+mod support;
 
 use devflow_core::config::SharedServiceConfig;
 use devflow_core::services::shared::{
@@ -29,6 +30,7 @@ fn docker_cleanup(container: &str) {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn shared_postgres_lifecycle() {
+    let _environment = support::isolated_config();
     let container = "devflow-itest-postgres";
     docker_cleanup(container);
 
@@ -41,7 +43,7 @@ async fn shared_postgres_lifecycle() {
 
     // Create a workspace database.
     let info = provider.create_workspace("main", None).await.unwrap();
-    assert_eq!(info.database_name, "itest_proj_main");
+    assert!(info.database_name.starts_with("df-"));
     assert!(provider.workspace_exists("main").await.unwrap());
 
     // Idempotent re-create is a no-op.
@@ -52,7 +54,7 @@ async fn shared_postgres_lifecycle() {
         .create_workspace("feature/x", Some("main"))
         .await
         .unwrap();
-    assert_eq!(child.database_name, "itest_proj_feature_x");
+    assert_ne!(child.database_name, info.database_name);
     assert!(provider.workspace_exists("feature/x").await.unwrap());
 
     // Both appear in the listing.
@@ -63,13 +65,13 @@ async fn shared_postgres_lifecycle() {
         .into_iter()
         .map(|w| w.database_name)
         .collect();
-    assert!(names.contains(&"itest_proj_main".to_string()));
-    assert!(names.contains(&"itest_proj_feature_x".to_string()));
+    assert!(names.contains(&info.database_name));
+    assert!(names.contains(&child.database_name));
 
     // Connection info points at the fixed port + the right db.
     let conn = provider.get_connection_info("main").await.unwrap();
     assert_eq!(conn.port, 55990);
-    assert_eq!(conn.database, "itest_proj_main");
+    assert_eq!(conn.database, info.database_name);
 
     // Delete one; it disappears.
     provider.delete_workspace("feature/x").await.unwrap();
@@ -77,7 +79,7 @@ async fn shared_postgres_lifecycle() {
 
     // Destroy drops the rest.
     let dropped = provider.destroy_project().await.unwrap();
-    assert!(dropped.contains(&"itest_proj_main".to_string()));
+    assert!(dropped.contains(&info.database_name));
 
     docker_cleanup(container);
 }
@@ -85,6 +87,7 @@ async fn shared_postgres_lifecycle() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn shared_redis_lifecycle() {
+    let _environment = support::isolated_config();
     let container = "devflow-itest-redis";
     docker_cleanup(container);
 
@@ -119,7 +122,7 @@ async fn shared_redis_lifecycle() {
         .map(|w| w.name)
         .collect();
     names.sort();
-    assert_eq!(names, vec!["feature-x".to_string(), "main".to_string()]);
+    assert_eq!(names, vec!["feature/x".to_string(), "main".to_string()]);
 
     // Connection string carries the index.
     let conn = provider.get_connection_info("main").await.unwrap();
@@ -138,6 +141,7 @@ async fn shared_redis_lifecycle() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn shared_clickhouse_lifecycle() {
+    let _environment = support::isolated_config();
     let container = "devflow-itest-clickhouse";
     docker_cleanup(container);
 
@@ -150,7 +154,7 @@ async fn shared_clickhouse_lifecycle() {
     let provider = SharedClickHouseProvider::new("itest_proj", Some(&cfg)).unwrap();
 
     let info = provider.create_workspace("main", None).await.unwrap();
-    assert_eq!(info.database_name, "itest_proj_main");
+    assert!(info.database_name.starts_with("df-"));
     assert!(provider.workspace_exists("main").await.unwrap());
 
     // Idempotent.
@@ -163,7 +167,7 @@ async fn shared_clickhouse_lifecycle() {
         .into_iter()
         .map(|w| w.database_name)
         .collect();
-    assert!(names.contains(&"itest_proj_main".to_string()));
+    assert!(names.contains(&info.database_name));
 
     provider.delete_workspace("main").await.unwrap();
     assert!(!provider.workspace_exists("main").await.unwrap());
@@ -174,6 +178,7 @@ async fn shared_clickhouse_lifecycle() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn shared_rustfs_lifecycle() {
+    let _environment = support::isolated_config();
     let container = "devflow-itest-rustfs";
     docker_cleanup(container);
 
@@ -186,14 +191,14 @@ async fn shared_rustfs_lifecycle() {
 
     // Create a bucket for a workspace.
     let info = provider.create_workspace("main", None).await.unwrap();
-    assert_eq!(info.database_name, "itest-proj-main");
+    assert!(info.database_name.starts_with("df-"));
     assert!(provider.workspace_exists("main").await.unwrap());
 
     // Idempotent.
     provider.create_workspace("main", None).await.unwrap();
 
     // A second workspace -> a second bucket.
-    provider.create_workspace("feature/x", None).await.unwrap();
+    let child = provider.create_workspace("feature/x", None).await.unwrap();
     let mut names: Vec<String> = provider
         .list_workspaces()
         .await
@@ -202,13 +207,9 @@ async fn shared_rustfs_lifecycle() {
         .map(|w| w.database_name)
         .collect();
     names.sort();
-    assert_eq!(
-        names,
-        vec![
-            "itest-proj-feature-x".to_string(),
-            "itest-proj-main".to_string()
-        ]
-    );
+    let mut expected = vec![info.database_name.clone(), child.database_name];
+    expected.sort();
+    assert_eq!(names, expected);
 
     // Connection info exposes the endpoint + bucket.
     let conn = provider.get_connection_info("main").await.unwrap();
@@ -216,7 +217,7 @@ async fn shared_rustfs_lifecycle() {
     assert!(conn
         .connection_string
         .unwrap()
-        .ends_with("/itest-proj-main"));
+        .ends_with(&format!("/{}", info.database_name)));
 
     // Delete removes the bucket.
     provider.delete_workspace("feature/x").await.unwrap();

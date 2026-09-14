@@ -11,9 +11,7 @@
 //! implementation. The concrete providers are thin type aliases:
 //! `LocalEngineBackend<ClickHouseEngine>` / `LocalEngineBackend<MySQLEngine>`.
 //!
-//! NOTE: container names, labels, env vars, mounts and connection strings
-//! produced here must stay byte-identical to the pre-refactor providers —
-//! existing user containers and data depend on them.
+//! Legacy unscoped storage is never automatically adopted or removed.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -32,9 +30,8 @@ use tokio::time::{sleep, Instant};
 use crate::config::DockerCustomSettings;
 use crate::services::{
     local_docker::{
-        bounded_container_name, collect_container_logs, expand_home, inspect_container_status,
-        list_managed_service_containers, pick_available_port, pick_available_port_pair,
-        sanitize_name_component, service_workspace_prefix, ContainerStatus,
+        collect_container_logs, expand_home, inspect_container_status, pick_available_port,
+        pick_available_port_pair, sanitize_name_component, ContainerStatus,
     },
     shared::container::{ensure_image, exec_check},
     ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceCapabilities, ServiceProvider,
@@ -116,6 +113,8 @@ fn host_binding(host_port: u16) -> Option<Vec<PortBinding>> {
 /// workspace, parameterized by a [`LocalEngineSpec`].
 pub struct LocalEngineBackend<E: LocalEngineSpec> {
     project_name: String,
+    project_identity: String,
+    resources: crate::services::ownership::ResourceRegistry,
     service_name: String,
     data_root: PathBuf,
     client: Docker,
@@ -149,6 +148,13 @@ impl<E: LocalEngineSpec> LocalEngineBackend<E> {
 
         Ok(Self {
             project_name: project_name.to_string(),
+            project_identity: project_name.to_string(),
+            resources: crate::services::ownership::ResourceRegistry::new(
+                project_name,
+                service_name,
+                &format!("local:{}:{}", engine.kind(), data_root.display()),
+                HashMap::new(),
+            )?,
             service_name: service_name.to_string(),
             data_root,
             client,
@@ -157,27 +163,58 @@ impl<E: LocalEngineSpec> LocalEngineBackend<E> {
         })
     }
 
+    pub fn with_project_identity(mut self, identity: &str) -> anyhow::Result<Self> {
+        self.project_identity = identity.to_string();
+        self.resources = crate::services::ownership::ResourceRegistry::new(
+            identity,
+            &self.service_name,
+            &format!("local:{}:{}", self.engine.kind(), self.data_root.display()),
+            HashMap::new(),
+        )?;
+        Ok(self)
+    }
+
     fn container_name(&self, workspace_name: &str) -> String {
-        let raw = format!(
-            "devflow-{}-{}-{}",
-            sanitize_name_component(&self.project_name),
-            sanitize_name_component(&self.service_name),
-            sanitize_name_component(workspace_name)
-        );
-        bounded_container_name(&raw)
+        format!("devflow-{}", self.resources.resource_name(workspace_name))
     }
 
     fn workspace_data_dir(&self, workspace_name: &str) -> PathBuf {
+        use crate::services::ownership::identity_digest;
         self.data_root
+            .join("projects")
+            .join(identity_digest(&[&self.project_identity]))
+            .join("services")
+            .join(identity_digest(&[&self.service_name]))
+            .join("workspaces")
+            .join(identity_digest(&[workspace_name]))
+    }
+
+    fn check_legacy_storage(&self, workspace: &str) -> anyhow::Result<()> {
+        let legacy = self
+            .data_root
             .join(&self.service_name)
-            .join(sanitize_name_component(workspace_name))
+            .join(sanitize_name_component(workspace));
+        anyhow::ensure!(!legacy.exists() || self.resources.record(workspace)?.is_some(),
+            "legacy data at '{}' has ambiguous project ownership; it was left untouched. Use a separate data_root, then import a verified backup into the new workspace", legacy.display());
+        Ok(())
     }
 
     async fn container_status(&self, container_name: &str) -> anyhow::Result<ContainerStatus> {
-        inspect_container_status(&self.client, container_name).await
+        let status = inspect_container_status(&self.client, container_name).await?;
+        if status != ContainerStatus::NotFound {
+            let info = self.client.inspect_container(container_name, None).await?;
+            let labels = info.config.and_then(|c| c.labels).unwrap_or_default();
+            anyhow::ensure!(
+                labels.get("devflow.project-id") == Some(&self.project_identity)
+                    && labels.get("devflow.service") == Some(&self.service_name),
+                "container '{}' has incompatible ownership; refusing to mount or modify its data",
+                container_name
+            );
+        }
+        Ok(status)
     }
 
-    async fn pick_port(&self) -> anyhow::Result<u16> {
+    async fn pick_port(&self) -> anyhow::Result<crate::services::local_docker::PortReservation> {
         match self.engine.port_layout() {
             PortLayout::Single { .. } => {
                 pick_available_port(&self.client, self.engine.port_range_start()).await
@@ -299,6 +336,10 @@ impl<E: LocalEngineSpec> LocalEngineBackend<E> {
         let mut labels = HashMap::new();
         labels.insert("devflow.managed".to_string(), "true".to_string());
         labels.insert("devflow.project".to_string(), self.project_name.clone());
+        labels.insert(
+            "devflow.project-id".to_string(),
+            self.project_identity.clone(),
+        );
         labels.insert("devflow.service".to_string(), self.service_name.clone());
         labels.insert(
             "devflow.service-type".to_string(),
@@ -380,14 +421,17 @@ impl<E: LocalEngineSpec> LocalEngineBackend<E> {
     }
 
     async fn list_managed_containers(&self) -> anyhow::Result<Vec<(String, String, bool)>> {
-        let prefix = service_workspace_prefix(&self.project_name, &self.service_name);
-        list_managed_service_containers(
-            &self.client,
-            &self.project_name,
-            &self.service_name,
-            &prefix,
-        )
-        .await
+        let mut result = Vec::new();
+        for record in self.resources.list()? {
+            let container = self.container_name(&record.workspace);
+            let status = self.container_status(&container).await?;
+            result.push((
+                record.workspace,
+                container,
+                status == ContainerStatus::Running,
+            ));
+        }
+        Ok(result)
     }
 }
 
@@ -398,10 +442,22 @@ impl<E: LocalEngineSpec> ServiceProvider for LocalEngineBackend<E> {
         workspace_name: &str,
         from_workspace: Option<&str>,
     ) -> anyhow::Result<WorkspaceInfo> {
+        let _lease = std::sync::Arc::new(self.resources.lease(workspace_name).await?);
+        self.check_legacy_storage(workspace_name)?;
+        if self.resources.record(workspace_name)?.is_none() {
+            anyhow::ensure!(
+                !self.workspace_data_dir(workspace_name).exists(),
+                "data exists without an ownership record; refusing adoption"
+            );
+        }
+        self.resources.claim(workspace_name, from_workspace)?;
         let container_name = self.container_name(workspace_name);
 
         match self.container_status(&container_name).await? {
             ContainerStatus::Running => {
+                self.wait_ready(&container_name, self.engine.restart_ready_timeout())
+                    .await?;
+                self.resources.complete(workspace_name)?;
                 return Ok(WorkspaceInfo {
                     name: workspace_name.to_string(),
                     created_at: Some(Utc::now()),
@@ -412,6 +468,7 @@ impl<E: LocalEngineSpec> ServiceProvider for LocalEngineBackend<E> {
             }
             status @ (ContainerStatus::Exited | ContainerStatus::Paused) => {
                 self.resume_container(&container_name, &status).await?;
+                self.resources.complete(workspace_name)?;
 
                 return Ok(WorkspaceInfo {
                     name: workspace_name.to_string(),
@@ -430,49 +487,39 @@ impl<E: LocalEngineSpec> ServiceProvider for LocalEngineBackend<E> {
             let parent_data_dir = self.workspace_data_dir(parent_name);
             let new_data_dir = self.workspace_data_dir(workspace_name);
 
-            if parent_data_dir.exists() {
-                // Stop parent container to ensure data consistency
-                let parent_running = matches!(
-                    self.container_status(&parent_container).await?,
-                    ContainerStatus::Running
+            anyhow::ensure!(parent_data_dir.is_dir(), "data parent directory is missing");
+            {
+                anyhow::ensure!(
+                    parent_name != workspace_name,
+                    "cannot clone a workspace onto itself"
                 );
-                if parent_running {
-                    self.client
-                        .stop_container(
-                            &parent_container,
-                            Some(StopContainerOptions {
-                                t: Some(10),
-                                ..Default::default()
-                            }),
-                        )
-                        .await
-                        .with_context(|| {
-                            format!("failed to stop parent container '{parent_container}'")
-                        })?;
-                }
-
-                crate::services::clone_data_dir(&parent_data_dir, &new_data_dir).await?;
-
-                // Restart parent if it was running
-                if parent_running {
-                    self.client
-                        .start_container(
-                            &parent_container,
-                            None::<bollard::query_parameters::StartContainerOptions>,
-                        )
-                        .await
-                        .with_context(|| {
-                            format!("failed to restart parent container '{parent_container}'")
-                        })?;
-                }
+                let parent = self
+                    .resources
+                    .record(parent_name)?
+                    .context("parent data has no ownership record")?;
+                anyhow::ensure!(parent.ready, "parent data is not ready");
+                let target_lease = _lease.clone();
+                crate::services::local_docker::quiesced_operation(
+                    self.client.clone(),
+                    parent_container,
+                    self.resources.operation_path(parent_name),
+                    self.engine.readiness_command(),
+                    async move {
+                        let _target_lease = target_lease;
+                        crate::services::clone_data_dir(&parent_data_dir, &new_data_dir).await
+                    },
+                )
+                .await?;
             }
         }
 
-        let host_port = self.pick_port().await?;
+        let _port_reservation = self.pick_port().await?;
+        let host_port = _port_reservation.port;
         self.create_and_start(&container_name, workspace_name, host_port)
             .await?;
         self.wait_ready(&container_name, Duration::from_secs(120))
             .await?;
+        self.resources.complete(workspace_name)?;
 
         Ok(WorkspaceInfo {
             name: workspace_name.to_string(),
@@ -484,6 +531,11 @@ impl<E: LocalEngineSpec> ServiceProvider for LocalEngineBackend<E> {
     }
 
     async fn delete_workspace(&self, workspace_name: &str) -> anyhow::Result<()> {
+        let _lease = std::sync::Arc::new(self.resources.lease(workspace_name).await?);
+        self.check_legacy_storage(workspace_name)?;
+        if self.resources.record(workspace_name)?.is_none() {
+            return Ok(());
+        }
         let container_name = self.container_name(workspace_name);
 
         if !matches!(
@@ -507,7 +559,7 @@ impl<E: LocalEngineSpec> ServiceProvider for LocalEngineBackend<E> {
                 .with_context(|| format!("failed to remove data dir: {}", data_dir.display()))?;
         }
 
-        Ok(())
+        self.resources.release(workspace_name)
     }
 
     async fn list_workspaces(&self) -> anyhow::Result<Vec<WorkspaceInfo>> {
@@ -533,6 +585,10 @@ impl<E: LocalEngineSpec> ServiceProvider for LocalEngineBackend<E> {
     }
 
     async fn switch_to_branch(&self, workspace_name: &str) -> anyhow::Result<WorkspaceInfo> {
+        let _lease = std::sync::Arc::new(self.resources.lease(workspace_name).await?);
+        self.resources
+            .record(workspace_name)?
+            .context("workspace has no resource ownership record")?;
         let container_name = self.container_name(workspace_name);
 
         match self.container_status(&container_name).await? {
@@ -561,18 +617,32 @@ impl<E: LocalEngineSpec> ServiceProvider for LocalEngineBackend<E> {
     }
 
     async fn get_connection_info(&self, workspace_name: &str) -> anyhow::Result<ConnectionInfo> {
+        self.resources
+            .record(workspace_name)?
+            .context("workspace has no resource ownership record")?;
         let container_name = self.container_name(workspace_name);
+        anyhow::ensure!(
+            self.container_status(&container_name).await? == ContainerStatus::Running,
+            "workspace container is not running"
+        );
         let primary_port = self.engine.port_layout().primary_container_port();
         let host_port = self
             .get_container_port(&container_name, &format!("{primary_port}/tcp"))
             .await?
-            .unwrap_or(self.engine.port_range_start());
+            .context("workspace container has no published connection port")?;
 
         Ok(self.engine.connection_info(host_port))
     }
 
-    fn supports_lifecycle(&self) -> bool {
-        true
+    fn operations(&self) -> crate::services::OperationCapabilities {
+        crate::services::OperationCapabilities {
+            start: true,
+            stop: true,
+            logs: true,
+            reset: false,
+            seed: false,
+            snapshot: false,
+        }
     }
 
     async fn reset_workspace(&self, workspace_name: &str) -> anyhow::Result<()> {
@@ -586,6 +656,10 @@ impl<E: LocalEngineSpec> ServiceProvider for LocalEngineBackend<E> {
     }
 
     async fn start_workspace(&self, workspace_name: &str) -> anyhow::Result<()> {
+        let _lease = std::sync::Arc::new(self.resources.lease(workspace_name).await?);
+        self.resources
+            .record(workspace_name)?
+            .context("workspace has no resource ownership record")?;
         let container_name = self.container_name(workspace_name);
         match self.container_status(&container_name).await? {
             ContainerStatus::Running => Ok(()),
@@ -598,6 +672,10 @@ impl<E: LocalEngineSpec> ServiceProvider for LocalEngineBackend<E> {
     }
 
     async fn stop_workspace(&self, workspace_name: &str) -> anyhow::Result<()> {
+        let _lease = std::sync::Arc::new(self.resources.lease(workspace_name).await?);
+        self.resources
+            .record(workspace_name)?
+            .context("workspace has no resource ownership record")?;
         let container_name = self.container_name(workspace_name);
         match self.container_status(&container_name).await? {
             ContainerStatus::NotFound | ContainerStatus::Exited => return Ok(()),
@@ -635,30 +713,11 @@ impl<E: LocalEngineSpec> ServiceProvider for LocalEngineBackend<E> {
     }
 
     async fn destroy_project(&self) -> anyhow::Result<Vec<String>> {
-        let containers = self.list_managed_containers().await?;
         let mut deleted = Vec::new();
-
-        for (workspace_name, container_name, _) in &containers {
-            let options = RemoveContainerOptions {
-                force: true,
-                ..Default::default()
-            };
-            match self
-                .client
-                .remove_container(container_name, Some(options))
-                .await
-            {
-                Ok(()) => deleted.push(workspace_name.clone()),
-                Err(e) => log::warn!("failed to remove container '{}': {}", container_name, e),
-            }
+        for record in self.resources.list()? {
+            self.delete_workspace(&record.workspace).await?;
+            deleted.push(record.workspace);
         }
-
-        // Clean up all data
-        let service_dir = self.data_root.join(&self.service_name);
-        if service_dir.exists() {
-            std::fs::remove_dir_all(&service_dir).ok();
-        }
-
         Ok(deleted)
     }
 
@@ -729,14 +788,19 @@ impl<E: LocalEngineSpec> ServiceProvider for LocalEngineBackend<E> {
         self.engine.provider_name()
     }
 
+    fn data_strategy(&self) -> &'static str {
+        "physical_copy"
+    }
+
     fn capabilities(&self) -> ServiceCapabilities {
         ServiceCapabilities {
+            data_strategy: self.data_strategy().into(),
             lifecycle: true,
             logs: true,
             destroy_project: true,
             cleanup: true,
             seed_from_source: false,
-            template_from_time: false,
+            operations: self.operations(),
             max_workspace_name_length: 255,
         }
     }

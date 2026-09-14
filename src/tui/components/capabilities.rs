@@ -208,7 +208,7 @@ impl Component for CapabilitiesComponent {
                 ("seed_from_source", caps.seed_from_source),
                 ("destroy_project", caps.destroy_project),
                 ("cleanup", caps.cleanup),
-                ("template_from_time", caps.template_from_time),
+                ("reset", caps.operations.reset),
             ];
 
             for (name, enabled) in rows {

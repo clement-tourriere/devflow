@@ -76,6 +76,7 @@ pub struct HookEngine {
     auto_approve: bool,
     /// Whether to suppress hook stdout-friendly output.
     quiet_output: bool,
+    lifecycle_readiness: bool,
 }
 
 /// Result of running hooks for a phase.
@@ -85,10 +86,14 @@ pub struct HookRunResult {
     pub succeeded: usize,
     /// Number of hooks that were skipped (condition false, unapproved, etc.)
     pub skipped: usize,
+    pub skipped_reasons: Vec<String>,
     /// Number of hooks that failed (but continued due to continue_on_error)
     pub failed: usize,
     /// Number of hooks spawned in the background
     pub background: usize,
+    pub background_records: Vec<String>,
+    pub required_failed: usize,
+    pub required_skipped: usize,
     /// Error messages from failed hooks
     pub errors: Vec<String>,
 }
@@ -113,6 +118,7 @@ impl HookEngine {
             non_interactive: false,
             auto_approve: env_auto_approve(),
             quiet_output: false,
+            lifecycle_readiness: false,
         }
     }
 
@@ -131,6 +137,7 @@ impl HookEngine {
             non_interactive: true,
             auto_approve: env_auto_approve(),
             quiet_output: false,
+            lifecycle_readiness: false,
         }
     }
 
@@ -145,10 +152,16 @@ impl HookEngine {
             non_interactive: false,
             auto_approve: env_auto_approve(),
             quiet_output: false,
+            lifecycle_readiness: false,
         }
     }
 
     /// Return a cloned engine configuration with output verbosity configured.
+    pub fn with_lifecycle_readiness(mut self) -> Self {
+        self.lifecycle_readiness = true;
+        self
+    }
+
     pub fn with_quiet_output(mut self, quiet: bool) -> Self {
         self.quiet_output = quiet;
         self
@@ -179,6 +192,16 @@ impl HookEngine {
         log::info!("Running hooks for phase: {}", phase);
 
         for (name, entry) in hooks {
+            let required = entry.required();
+            let mut effective = entry.clone();
+            if self.lifecycle_readiness && required {
+                match &mut effective {
+                    HookEntry::Extended(e) => e.background = false,
+                    HookEntry::Action(a) => a.background = false,
+                    _ => {}
+                }
+            }
+            let entry = &effective;
             match self
                 .run_single_hook(name, entry, context, phase_blocking)
                 .await
@@ -189,9 +212,14 @@ impl HookEngine {
                 Ok(HookOutcome::Skipped(reason)) => {
                     log::debug!("Hook '{}' skipped: {}", name, reason);
                     result.skipped += 1;
+                    if required && !reason.starts_with("condition") {
+                        result.required_skipped += 1;
+                    }
+                    result.skipped_reasons.push(format!("{name}: {reason}"));
                 }
-                Ok(HookOutcome::Background) => {
+                Ok(HookOutcome::Background(id)) => {
                     result.background += 1;
+                    result.background_records.push(id);
                 }
                 Err(e) => {
                     let continue_on_error = match entry {
@@ -202,10 +230,13 @@ impl HookEngine {
                         HookEntry::Action(act) => act.continue_on_error.unwrap_or(!phase_blocking),
                     };
 
-                    if continue_on_error {
+                    if continue_on_error || !required {
                         log::warn!("Hook '{}' failed (continuing): {}", name, e);
                         eprintln!("  Warning: hook '{}' failed: {}", name, e);
                         result.failed += 1;
+                        if required {
+                            result.required_failed += 1;
+                        }
                         result.errors.push(format!("{}: {}", name, e));
                     } else {
                         return Err(e).with_context(|| format!("Hook '{}' failed", name));
@@ -317,28 +348,26 @@ impl HookEngine {
         if run_background {
             let cmd = rendered_command.clone();
             let wd = working_dir.clone();
-            let hook_name = name.to_string();
             let env_vars = extended.and_then(|e| e.environment.clone());
             let ctx_clone = context.clone();
-            let te = TemplateEngine::new();
             let quiet_output = self.quiet_output;
-
+            let mut receipt =
+                super::background::Receipt::begin(&self.working_dir, &context.workspace, name)?;
+            let id = receipt.id();
             let handle = tokio::spawn(async move {
-                match run_shell_command(
+                let result = run_shell_command(
                     &cmd,
                     &wd,
                     env_vars.as_ref(),
                     &ctx_clone,
-                    &te,
+                    &TemplateEngine::new(),
                     !quiet_output,
-                ) {
-                    Ok(_) => log::debug!("Background hook '{}' completed", hook_name),
-                    Err(e) => log::warn!("Background hook '{}' failed: {}", hook_name, e),
-                }
+                )
+                .map(|_| ());
+                receipt.complete(result);
             });
             track_background_hook(name, handle);
-
-            return Ok(HookOutcome::Background);
+            return Ok(HookOutcome::Background(id));
         }
 
         // Blocking execution
@@ -429,22 +458,25 @@ impl HookEngine {
         if run_background {
             let action = act.action.clone();
             let ctx_clone = context.clone();
-            let te = TemplateEngine::new();
-            let hook_name = name.to_string();
             let wd = working_dir.clone();
             let quiet_output = self.quiet_output;
-
+            let mut receipt =
+                super::background::Receipt::begin(&self.working_dir, &context.workspace, name)?;
+            let id = receipt.id();
             let handle = tokio::spawn(async move {
-                match actions::execute_action(&action, &ctx_clone, &te, &wd, !quiet_output).await {
-                    Ok(r) => {
-                        log::debug!("Background hook '{}' completed: {}", hook_name, r.summary)
-                    }
-                    Err(e) => log::warn!("Background hook '{}' failed: {}", hook_name, e),
-                }
+                let result = actions::execute_action(
+                    &action,
+                    &ctx_clone,
+                    &TemplateEngine::new(),
+                    &wd,
+                    !quiet_output,
+                )
+                .await
+                .map(|_| ());
+                receipt.complete(result);
             });
             track_background_hook(name, handle);
-
-            return Ok(HookOutcome::Background);
+            return Ok(HookOutcome::Background(id));
         }
 
         // Blocking execution
@@ -765,7 +797,7 @@ enum HookApprovalChoice {
 enum HookOutcome {
     Succeeded,
     Skipped(String),
-    Background,
+    Background(String),
 }
 
 #[cfg(test)]
@@ -825,6 +857,7 @@ mod tests {
         phase_hooks.insert(
             "skip-me".to_string(),
             HookEntry::Extended(ExtendedHookEntry {
+                required: true,
                 command: "echo should not run".to_string(),
                 working_dir: None,
                 continue_on_error: None,
@@ -851,6 +884,7 @@ mod tests {
         phase_hooks.insert(
             "fail-ok".to_string(),
             HookEntry::Extended(ExtendedHookEntry {
+                required: true,
                 command: "exit 1".to_string(),
                 working_dir: None,
                 continue_on_error: Some(true),
@@ -890,6 +924,7 @@ mod tests {
         phase_hooks.insert(
             "write-test".to_string(),
             HookEntry::Action(crate::hooks::ActionHookEntry {
+                required: true,
                 action: crate::hooks::HookAction::WriteFile {
                     path: "test-output.txt".to_string(),
                     content: "workspace={{ workspace }}".to_string(),
@@ -1086,6 +1121,7 @@ mod tests {
         phase_hooks.insert(
             "bg-marker".to_string(),
             HookEntry::Extended(super::super::ExtendedHookEntry {
+                required: true,
                 command: "sleep 0.2 && touch bg-done.txt".to_string(),
                 background: true,
                 continue_on_error: Some(false),
@@ -1152,6 +1188,7 @@ mod tests {
         phase_hooks.insert(
             "skip-action".to_string(),
             HookEntry::Action(crate::hooks::ActionHookEntry {
+                required: true,
                 action: crate::hooks::HookAction::WriteFile {
                     path: "should-not-exist.txt".to_string(),
                     content: "nope".to_string(),

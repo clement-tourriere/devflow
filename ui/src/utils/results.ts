@@ -2,6 +2,7 @@ import { toast } from "./notify";
 import type { OrchestrationResult, HookRunResult, ProcessResult } from "../types";
 
 interface WorkspaceOpResult {
+  operation?: {status: string; phase: string};
   services?: OrchestrationResult[];
   hooks?: HookRunResult[];
   processes?: ProcessResult[];
@@ -23,8 +24,10 @@ export function reportWorkspaceResult(action: string, result: WorkspaceOpResult)
   const hookErrors: string[] = [];
   let hooksFailed = 0;
   let hooksSkipped = 0;
+  let optionalHooksFailed = 0;
   for (const h of result.hooks ?? []) {
-    hooksFailed += h.failed;
+    hooksFailed += h.required_failed ?? h.failed;
+    optionalHooksFailed += h.failed - (h.required_failed ?? h.failed);
     hooksSkipped += h.skipped;
     hookErrors.push(...h.errors);
   }
@@ -50,10 +53,15 @@ export function reportWorkspaceResult(action: string, result: WorkspaceOpResult)
       }`,
     );
   }
+  if (optionalHooksFailed > 0) {
+    warnings.push(`${optionalHooksFailed} optional hooks failed`);
+  }
   if (hooksSkipped > 0) {
-    warnings.push(
-      `${hooksSkipped} hook${hooksSkipped > 1 ? "s" : ""} skipped (needs approval — run from a terminal once, or set DEVFLOW_APPROVE_HOOKS=1)`,
-    );
+    const reasons = (result.hooks ?? []).flatMap((hook) => hook.skipped_reasons ?? []);
+    warnings.push(`${hooksSkipped} hooks skipped${reasons.length ? `: ${reasons.join("; ")}` : ""}`);
+  }
+  if (result.operation && result.operation.status !== "ready" && blockingProblems.length === 0) {
+    warnings.push(`Setup needs attention at ${result.operation.phase}; retry after resolving the reported issues.`);
   }
 
   if (blockingProblems.length > 0) {

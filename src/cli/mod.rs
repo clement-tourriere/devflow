@@ -1,4 +1,5 @@
 mod agent;
+mod application;
 mod commit;
 mod config;
 mod daemon;
@@ -8,9 +9,9 @@ mod hook;
 mod init;
 mod plugin;
 mod process;
+#[cfg(feature = "proxy")]
 mod proxy;
 mod service;
-mod sync_ai_configs;
 mod update;
 pub mod workspace;
 
@@ -50,6 +51,37 @@ pub(crate) fn operation_project_dir(config_path: &Option<PathBuf>) -> PathBuf {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Run a program in a ready workspace, preserving its argument vector.
+    Exec {
+        #[arg(long)]
+        workspace: Option<String>,
+        #[arg(long)]
+        shell: Option<String>,
+        #[arg(long)]
+        detach: bool,
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+    /// Manage immutable, versioned PostgreSQL data baselines.
+    Baseline {
+        #[command(subcommand)]
+        action: application::BaselineCommands,
+    },
+    /// Inspect saved lifecycle intent and resume interrupted operations.
+    Operation {
+        #[command(subcommand)]
+        action: application::OperationCommands,
+    },
+    /// Preview or apply retention policy, pins and expiry.
+    Retention {
+        #[command(subcommand)]
+        action: application::RetentionCommands,
+    },
+    /// Inspect the shared registry or explicitly relocate a project.
+    Project {
+        #[command(subcommand)]
+        action: application::ProjectCommands,
+    },
     // ── Workspace Management ──
     #[command(about = "List the workspace tree with service and process status")]
     List,
@@ -94,6 +126,8 @@ Examples:
             help = "Parent workspace for new workspace creation (defaults to current context workspace)"
         )]
         from: Option<String>,
+        #[arg(long, help = "Data source workspace (defaults to the code parent)")]
+        data_from: Option<String>,
         #[arg(short = 'x', long, help = "Run a command after switching")]
         execute: Option<String>,
         #[arg(
@@ -123,8 +157,12 @@ Examples:
         template: bool,
         #[arg(long, help = "Simulate switching without actual operations")]
         dry_run: bool,
-        #[arg(long, help = "Include gitignored files in worktree (overrides config)")]
-        no_respect_gitignore: bool,
+        #[arg(
+            long,
+            alias = "no-respect-gitignore",
+            help = "Include gitignored files in worktree (overrides config)"
+        )]
+        copy_ignored: bool,
     },
     #[command(
         about = "Remove a workspace, its worktree, and associated service workspaces",
@@ -394,7 +432,6 @@ Examples:
     // ── AI Tool Config Sync ──
     #[command(
         about = "Sync AI tool configs from current worktree back to main",
-        long_about = "Merge AI tool configuration directories (.claude, .cursor, .opencode, .agents)\nfrom the current worktree back to the main worktree.\n\nFor .claude/settings.local.json: union-merges permission arrays (deduplicated).\nFor other dirs: copies files that don't exist in main (additive only).\n\nExamples:\n  devflow sync-ai-configs",
         hide = true,
         name = "sync-ai-configs"
     )]
@@ -890,7 +927,13 @@ pub async fn handle_command(
 
     // Proxy commands — no config needed
     if let Commands::Proxy { action } = cmd {
+        #[cfg(feature = "proxy")]
         return proxy::handle_proxy_command(action, json_output).await;
+        #[cfg(not(feature = "proxy"))]
+        {
+            let _ = action;
+            anyhow::bail!("Proxy support is not compiled in; rebuild with --features proxy");
+        }
     }
 
     // Daemon commands — operate on global state, no project config needed
@@ -963,6 +1006,51 @@ pub async fn handle_command(
         }
     }
 
+    if matches!(
+        cmd,
+        Commands::Exec { .. }
+            | Commands::Baseline { .. }
+            | Commands::Operation { .. }
+            | Commands::Retention { .. }
+            | Commands::Project { .. }
+    ) {
+        if let Some(path) = &config_path {
+            config_merged.overlay_local_state_services(path);
+        }
+        if let Some(value) = application::handle(
+            &cmd,
+            &config_merged,
+            &operation_project_dir(&config_path),
+            json_output,
+        )
+        .await?
+        {
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            if value
+                .get("exit_code")
+                .and_then(|v| v.as_i64())
+                .is_some_and(|code| code != 0)
+            {
+                anyhow::bail!("workspace command failed");
+            }
+            if value
+                .get("failures")
+                .and_then(|v| v.as_object())
+                .is_some_and(|f| !f.is_empty())
+            {
+                anyhow::bail!("retention cleanup has failures");
+            }
+            if value
+                .get("operation")
+                .and_then(|v| v.get("status"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s != "ready")
+            {
+                anyhow::bail!("operation needs attention");
+            }
+            return Ok(());
+        }
+    }
     // Handle service-based commands
     if uses_service {
         // For GitHook, check if hooks are disabled early
@@ -1378,32 +1466,6 @@ pub async fn handle_command(
                         }
                     }
 
-                    // Step 2.5: Offer sync-ai-configs recipe
-                    use devflow_core::hooks::recipes;
-
-                    println!();
-                    let install_recipe = inquire::Confirm::new(
-                            "Install AI config sync recipe? (copy .claude/.cursor settings back on workspace removal)",
-                        )
-                        .with_default(true)
-                        .with_help_message("Recommended for AI coding tools. Syncs permissions and settings back to main worktree.")
-                        .prompt()
-                        .unwrap_or(false);
-
-                    if install_recipe {
-                        let generated =
-                            recipes::RecipeId::SyncAiConfigs.build(&recipes::RecipeParams::new())?;
-                        let mut hooks_config = init_config.hooks.clone().unwrap_or_default();
-                        let result =
-                            recipes::merge_hooks_into_config(&mut hooks_config, &generated);
-                        init_config.hooks = Some(hooks_config);
-                        init_config.save_to_file(&init_config_path)?;
-                        println!(
-                            "Installed recipe 'sync-ai-configs': {} hook(s) added",
-                            result.hooks_added
-                        );
-                    }
-
                     // Step 3: Offer shell integration
                     println!();
                     let setup_shell = inquire::Confirm::new(
@@ -1671,6 +1733,12 @@ pub async fn handle_command(
 
             let payload = serde_json::json!({
                 "schema_version": "1.0",
+                "build_features": {
+                    "service_local": cfg!(feature = "service-local"), "tui": cfg!(feature = "tui"),
+                    "proxy": cfg!(feature = "proxy"), "pitchfork": false,
+                    "llm_api": false, "external_commit_command": true,
+                    "neon": cfg!(feature = "service-neon"), "xata": cfg!(feature = "service-xata"), "dblab": cfg!(feature = "service-dblab"),
+                },
                 "json_mode": {
                     "stdout_single_json_document": true,
                     "diagnostics_on_stderr": true,
@@ -1684,6 +1752,9 @@ pub async fn handle_command(
                 },
                 "workspaces": {
                     "model": "materialized_only",
+                    "independent_data_parent": true,
+                    "operation_journal": true,
+                    "ready_field": "operation.status",
                     "git": "linked_worktree",
                     "jj": "native_workspace",
                     "raw_identity_field": "name",
@@ -1714,6 +1785,7 @@ pub async fn handle_command(
                     "recommendation": "use the agent harness, containers, VMs, or a dedicated sandbox for hard isolation"
                 },
                 "service_capabilities": service_capabilities,
+                    "providers": services::descriptor::providers(),
                 "service_capabilities_error": service_capabilities_error,
             });
 
@@ -1808,7 +1880,7 @@ pub async fn handle_command(
                 .await?;
         }
         Commands::SyncAiConfigs => {
-            sync_ai_configs::handle_sync_ai_configs(json_output)?;
+            anyhow::bail!("sync-ai-configs was retired; use explicit worktree.copy_files entries instead of merging tool permissions");
         }
         Commands::Completions { shell } => {
             use clap::CommandFactory;
@@ -1822,3 +1894,4 @@ pub async fn handle_command(
 
     Ok(())
 }
+pub(crate) mod output;

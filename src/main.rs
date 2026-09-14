@@ -1,6 +1,11 @@
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
 
+macro_rules! println {
+    () => { $crate::cli::output::println(format_args!("")) };
+    ($($arg:tt)*) => { $crate::cli::output::println(format_args!($($arg)*)) };
+}
+
 mod cli;
 #[cfg(feature = "tui")]
 mod tui;
@@ -69,7 +74,6 @@ Setup & Config:
   setup-zfs           Set up a file-backed ZFS pool for CoW storage (Linux)
   gc                  Detect and clean up orphaned projects (leftover state)
   daemon              Controller daemon for shared engines (start/stop/status)
-  sync-ai-configs     Merge AI tool configs from a worktree back to main
 
 Extensibility:
   hook show           Show configured hooks (filter by phase)
@@ -161,7 +165,24 @@ async fn main() -> Result<()> {
     // full copies happening) reach users; RUST_LOG still overrides.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
-    let cli = Cli::parse();
+    let json_requested = std::env::args()
+        .take_while(|a| a != "--")
+        .any(|a| a == "--json");
+    cli::output::configure(json_requested);
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) if json_requested => {
+            let result = if error.use_stderr() {
+                Err(anyhow::anyhow!(error.to_string()))
+            } else {
+                println!("{}", serde_json::json!({"help": error.to_string()}));
+                Ok(())
+            };
+            cli::output::finish(&result);
+            return result;
+        }
+        Err(error) => error.exit(),
+    };
 
     let run_result = match cli.command {
         Some(cmd) => {
@@ -172,11 +193,25 @@ async fn main() -> Result<()> {
                 // Show full help. The template lists every command itself, so
                 // there is no need to unhide subcommands here.
                 let mut cmd = Cli::command().help_template(FULL_HELP_TEMPLATE);
-                cmd.print_help()?;
+                if cli.json {
+                    println!(
+                        "{}",
+                        serde_json::json!({"help": cmd.render_help().to_string()})
+                    );
+                } else {
+                    cmd.print_help()?;
+                }
             } else {
                 // Print compact help when no command is provided
                 let mut cmd = Cli::command();
-                cmd.print_help()?;
+                if cli.json {
+                    println!(
+                        "{}",
+                        serde_json::json!({"help": cmd.render_help().to_string()})
+                    );
+                } else {
+                    cmd.print_help()?;
+                }
             }
             Ok(())
         }
@@ -197,5 +232,6 @@ async fn main() -> Result<()> {
         log::debug!("Background hooks completed before exit: {}/{}", done, total);
     }
 
+    cli::output::finish(&run_result);
     run_result
 }

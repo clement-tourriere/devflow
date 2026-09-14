@@ -12,7 +12,7 @@ use super::context::resolve_workspace_context;
 pub(super) async fn handle_interactive_switch(
     config: &Config,
     config_path: &Option<std::path::PathBuf>,
-) -> Result<Option<String>> {
+) -> Result<Option<super::SwitchPresentation>> {
     let mut workspace_names = std::collections::BTreeSet::new();
     let mut vcs_workspace_names = std::collections::HashSet::new();
 
@@ -105,12 +105,13 @@ pub(super) async fn handle_interactive_switch(
                 (selected_workspace, false)
             };
             let (workspace, create) = target;
-            super::handle_switch_command(
+            let presentation = super::handle_switch_command(
                 config,
                 &workspace,
                 config_path,
                 create,
                 None,  // from
+                None,  // data_from
                 false, // no_services
                 false, // no_processes
                 false, // no_verify
@@ -121,7 +122,7 @@ pub(super) async fn handle_interactive_switch(
                 None, // copy_ignored — use config default
             )
             .await?;
-            Ok(Some(workspace))
+            Ok(Some(presentation))
         }
         Err(e) => {
             match e {

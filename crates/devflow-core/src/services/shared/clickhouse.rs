@@ -11,9 +11,7 @@ use bollard::Docker;
 use super::container::{self, GlobalContainerSpec};
 use super::naming;
 use crate::config::SharedServiceConfig;
-use crate::services::{
-    ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceProvider, WorkspaceInfo,
-};
+use crate::services::{ConnectionInfo, DoctorReport, ProjectInfo, ServiceProvider, WorkspaceInfo};
 
 const DEFAULT_IMAGE: &str = "clickhouse/clickhouse-server:latest";
 const DEFAULT_HTTP_PORT: u16 = 8123;
@@ -25,6 +23,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(60);
 /// its own database inside it.
 pub struct SharedClickHouseProvider {
     project_name: String,
+    resources: crate::services::ownership::ResourceRegistry,
     image: String,
     container_name: String,
     http_port: u16,
@@ -34,9 +33,24 @@ pub struct SharedClickHouseProvider {
 
 impl SharedClickHouseProvider {
     pub fn new(project_name: &str, config: Option<&SharedServiceConfig>) -> Result<Self> {
+        Self::new_scoped(project_name, project_name, "db", config)
+    }
+
+    pub fn new_scoped(
+        project_name: &str,
+        project_identity: &str,
+        service_name: &str,
+        config: Option<&SharedServiceConfig>,
+    ) -> Result<Self> {
         let c = config.cloned().unwrap_or_default();
         Ok(Self {
             project_name: project_name.to_string(),
+            resources: crate::services::ownership::ResourceRegistry::new(
+                project_identity,
+                service_name,
+                c.container_name.as_deref().unwrap_or(DEFAULT_CONTAINER),
+                c.legacy_resources.clone(),
+            )?,
             image: c.image.unwrap_or_else(|| DEFAULT_IMAGE.to_string()),
             container_name: c
                 .container_name
@@ -48,7 +62,7 @@ impl SharedClickHouseProvider {
     }
 
     fn db_name(&self, workspace: &str) -> String {
-        naming::logical_db_name(&self.project_name, workspace)
+        self.resources.resource_name(workspace)
     }
 
     fn container_spec(&self) -> GlobalContainerSpec {
@@ -119,6 +133,14 @@ impl SharedClickHouseProvider {
         }
     }
 
+    async fn database_exists(&self, docker: &Docker, name: &str) -> Result<bool> {
+        let sql = format!(
+            "SELECT count() FROM system.databases WHERE name = {}",
+            naming::quote_literal(name)
+        );
+        Ok(self.query(docker, &sql).await?.trim() == "1")
+    }
+
     /// Backtick-quote a ClickHouse identifier (names are already sanitized).
     fn quote(name: &str) -> String {
         format!("`{}`", name.replace('`', "\\`"))
@@ -132,86 +154,85 @@ impl ServiceProvider for SharedClickHouseProvider {
         workspace_name: &str,
         _from_workspace: Option<&str>,
     ) -> Result<WorkspaceInfo> {
+        let _lease = self.resources.lease(workspace_name).await?;
         let docker = container::connect()?;
         self.ensure_ready(&docker).await?;
         let db = self.db_name(workspace_name);
-        // ClickHouse has no CREATE DATABASE ... TEMPLATE, so branch-from-parent
-        // is not supported here; the database is simply created if missing.
+        self.resources
+            .check_existing(workspace_name, self.database_exists(&docker, &db).await?)?;
+        let legacy = naming::logical_db_name(&self.project_name, workspace_name);
+        self.resources.check_legacy(
+            workspace_name,
+            &legacy,
+            self.database_exists(&docker, &legacy).await?,
+        )?;
+        self.resources.claim(workspace_name, None)?;
         self.query(
             &docker,
             &format!("CREATE DATABASE IF NOT EXISTS {}", Self::quote(&db)),
         )
-        .await
-        .with_context(|| format!("failed to create ClickHouse database '{db}'"))?;
-
-        Ok(WorkspaceInfo {
-            name: workspace_name.to_string(),
-            created_at: None,
-            parent_workspace: None,
-            database_name: db,
-            state: Some("running".to_string()),
-        })
+        .await?;
+        self.resources.complete(workspace_name)?;
+        Ok(self
+            .resources
+            .record(workspace_name)?
+            .context("missing resource ownership")?
+            .into_workspace_info("running"))
     }
 
     async fn delete_workspace(&self, workspace_name: &str) -> Result<()> {
-        let docker = container::connect()?;
-        if container::ensure_running_container(&docker, &self.container_spec())
-            .await
-            .is_err()
-        {
+        let _lease = self.resources.lease(workspace_name).await?;
+        if self.resources.was_deleted(workspace_name)? {
             return Ok(());
         }
-        let db = self.db_name(workspace_name);
+        let record = self
+            .resources
+            .record(workspace_name)?
+            .context("no ownership record; adopt legacy resources explicitly before deletion")?;
+        let docker = container::connect()?;
+        self.ensure_ready(&docker).await?;
         self.query(
             &docker,
-            &format!("DROP DATABASE IF EXISTS {}", Self::quote(&db)),
+            &format!("DROP DATABASE IF EXISTS {}", Self::quote(&record.resource)),
         )
-        .await
-        .with_context(|| format!("failed to drop ClickHouse database '{db}'"))?;
-        Ok(())
+        .await?;
+        self.resources.release(workspace_name)
     }
 
     async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
         let docker = container::connect()?;
-        self.ensure_ready(&docker).await?;
-        let prefix = naming::project_db_prefix(&self.project_name);
-        let escaped = prefix.replace('_', "\\_");
-        let sql = format!(
-            "SELECT name FROM system.databases WHERE name LIKE '{}%' ORDER BY name",
-            escaped.replace('\'', "''")
-        );
-        let out = self.query(&docker, &sql).await?;
-        Ok(out
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(|db| {
-                let ws = db.strip_prefix(&prefix).unwrap_or(db).to_string();
-                WorkspaceInfo {
-                    name: ws,
-                    created_at: None,
-                    parent_workspace: None,
-                    database_name: db.to_string(),
-                    state: Some("running".to_string()),
+        let status = container::observe_container(&docker, &self.container_spec()).await?;
+        let mut result = Vec::new();
+        for record in self.resources.list()? {
+            let state = match status {
+                crate::services::local_docker::ContainerStatus::NotFound => "missing",
+                crate::services::local_docker::ContainerStatus::Running => {
+                    if self.database_exists(&docker, &record.resource).await? {
+                        "running"
+                    } else {
+                        "missing"
+                    }
                 }
-            })
-            .collect())
+                _ => "stopped",
+            };
+            result.push(record.into_workspace_info(state));
+        }
+        Ok(result)
     }
 
     async fn workspace_exists(&self, workspace_name: &str) -> Result<bool> {
         let docker = container::connect()?;
-        self.ensure_ready(&docker).await?;
-        let db = self.db_name(workspace_name);
-        let out = self
-            .query(
-                &docker,
-                &format!(
-                    "SELECT count() FROM system.databases WHERE name = '{}'",
-                    db.replace('\'', "''")
-                ),
-            )
-            .await?;
-        Ok(out.trim() != "0" && !out.trim().is_empty())
+        let status = container::observe_container(&docker, &self.container_spec()).await?;
+        let Some(record) = self.resources.record(workspace_name)? else {
+            return Ok(false);
+        };
+        match status {
+            crate::services::local_docker::ContainerStatus::NotFound => Ok(false),
+            crate::services::local_docker::ContainerStatus::Running => {
+                self.database_exists(&docker, &record.resource).await
+            }
+            _ => Ok(record.ready),
+        }
     }
 
     async fn switch_to_branch(&self, workspace_name: &str) -> Result<WorkspaceInfo> {
@@ -219,6 +240,8 @@ impl ServiceProvider for SharedClickHouseProvider {
     }
 
     async fn get_connection_info(&self, workspace_name: &str) -> Result<ConnectionInfo> {
+        let docker = container::connect()?;
+        container::observe_container(&docker, &self.container_spec()).await?;
         let db = self.db_name(workspace_name);
         let pw = if self.password.is_empty() {
             String::new()
@@ -247,7 +270,7 @@ impl ServiceProvider for SharedClickHouseProvider {
     }
 
     async fn destroy_preview(&self) -> Result<Option<(String, Vec<String>)>> {
-        let workspaces = self.list_workspaces().await.unwrap_or_default();
+        let workspaces = self.list_workspaces().await?;
         Ok(Some((
             self.container_name.clone(),
             workspaces.into_iter().map(|w| w.database_name).collect(),
@@ -255,67 +278,31 @@ impl ServiceProvider for SharedClickHouseProvider {
     }
 
     async fn destroy_project(&self) -> Result<Vec<String>> {
-        let docker = container::connect()?;
-        self.ensure_ready(&docker).await?;
         let mut dropped = Vec::new();
-        for w in self.list_workspaces().await? {
-            match self
-                .query(
-                    &docker,
-                    &format!("DROP DATABASE IF EXISTS {}", Self::quote(&w.database_name)),
-                )
-                .await
-            {
-                Ok(_) => dropped.push(w.database_name),
-                Err(e) => log::warn!("Failed to drop '{}': {}", w.database_name, e),
-            }
+        for record in self.resources.list()? {
+            self.delete_workspace(&record.workspace).await?;
+            dropped.push(record.resource);
         }
         Ok(dropped)
     }
 
     async fn doctor(&self) -> Result<DoctorReport> {
-        let mut checks = Vec::new();
-        match container::connect() {
-            Ok(docker) => {
-                checks.push(DoctorCheck {
-                    name: "docker".to_string(),
-                    available: true,
-                    detail: "Connected to Docker daemon".to_string(),
-                });
-                let running = matches!(
-                    crate::services::local_docker::inspect_container_status(
-                        &docker,
-                        &self.container_name
-                    )
-                    .await,
-                    Ok(crate::services::local_docker::ContainerStatus::Running)
-                );
-                checks.push(DoctorCheck {
-                    name: "clickhouse-container".to_string(),
-                    available: running,
-                    detail: if running {
-                        format!(
-                            "'{}' running (HTTP {})",
-                            self.container_name, self.http_port
-                        )
-                    } else {
-                        format!(
-                            "'{}' not running (started on first use)",
-                            self.container_name
-                        )
-                    },
-                });
-            }
-            Err(e) => checks.push(DoctorCheck {
-                name: "docker".to_string(),
-                available: false,
-                detail: format!("Docker unavailable: {e}"),
-            }),
-        }
-        Ok(DoctorReport { checks })
+        Ok(container::doctor(&self.container_spec()).await)
     }
 
     async fn test_connection(&self) -> Result<()> {
+        let docker = container::connect()?;
+        let status = container::observe_container(&docker, &self.container_spec()).await?;
+        anyhow::ensure!(
+            matches!(
+                status,
+                crate::services::local_docker::ContainerStatus::Running
+            ),
+            "shared engine is stopped or missing; run devflow service up"
+        );
+        Ok(())
+    }
+    async fn ensure_engine_ready(&self) -> Result<()> {
         let docker = container::connect()?;
         self.ensure_ready(&docker).await
     }

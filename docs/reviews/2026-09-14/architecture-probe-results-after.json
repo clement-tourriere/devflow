@@ -1,0 +1,424 @@
+{
+  "build_features": {
+    "dblab": true,
+    "external_commit_command": true,
+    "llm_api": false,
+    "neon": true,
+    "pitchfork": false,
+    "proxy": true,
+    "service_local": true,
+    "tui": true,
+    "xata": true
+  },
+  "argument_boundaries": {
+    "exit_code": 0,
+    "stderr": "Running: './capture-argv' 'hello world'\n",
+    "document": {
+      "agent_workdir": "/Users/clementtourriere/workspace/devflow/.devflow-architecture-c5wf7ngt/worktrees/argv",
+      "cd_hint": "cd /Users/clementtourriere/workspace/devflow/.devflow-architecture-c5wf7ngt/worktrees/argv",
+      "execution": {
+        "command": "'./capture-argv' 'hello world'",
+        "detached": false,
+        "exit_code": 0,
+        "service_key": "argv",
+        "stdout": "[\"hello world\"]\n",
+        "workspace": "argv",
+        "worktree": "/Users/clementtourriere/workspace/devflow/.devflow-architecture-c5wf7ngt/worktrees/argv"
+      },
+      "hook_results": [],
+      "hooks_failed": 0,
+      "operation": {
+        "attempt": 1,
+        "code_parent": "main",
+        "completed_phases": [
+          "materialize",
+          "services"
+        ],
+        "config_fingerprint": "e5765c7696fd476a451dee7f777a8c6f8a5d497e39f2d761446b9e4f7932b560",
+        "data_parent": "main",
+        "error": null,
+        "id": "e706ce1d-ef09-4822-9787-f717316af630",
+        "kind": "switch",
+        "phase": "processes",
+        "post_create_pending": true,
+        "project": "/Users/clementtourriere/workspace/devflow/.devflow-architecture-c5wf7ngt/repo",
+        "project_id": "f5b151cadda904426af8fe9195f880404785b4654c03544d484a505484c4d6d6",
+        "request": {
+          "options": {
+            "copy_files": null,
+            "copy_ignored": null,
+            "create_if_missing": true,
+            "data_from_workspace": null,
+            "from_workspace": "main",
+            "lifecycle": {
+              "hook_approval": "NonInteractive",
+              "skip_hooks": true,
+              "skip_processes": true,
+              "skip_services": true,
+              "trigger_source": null,
+              "vcs_event": null,
+              "verbose_hooks": false
+            }
+          },
+          "workspace": "argv"
+        },
+        "schema_version": 2,
+        "status": "ready",
+        "steps": [
+          {
+            "attempts": 1,
+            "detail": null,
+            "kind": "other",
+            "name": "preflight",
+            "status": "succeeded"
+          },
+          {
+            "attempts": 1,
+            "detail": null,
+            "kind": "hook",
+            "name": "pre-switch",
+            "status": "succeeded"
+          },
+          {
+            "attempts": 1,
+            "detail": null,
+            "kind": "materialize",
+            "name": "materialize",
+            "status": "succeeded"
+          },
+          {
+            "attempts": 1,
+            "detail": null,
+            "kind": "service",
+            "name": "services",
+            "status": "succeeded"
+          },
+          {
+            "attempts": 1,
+            "detail": null,
+            "kind": "other",
+            "name": "environment",
+            "status": "succeeded"
+          },
+          {
+            "attempts": 1,
+            "detail": null,
+            "kind": "process",
+            "name": "processes",
+            "status": "succeeded"
+          }
+        ],
+        "updated_at": "2026-09-14T13:13:50.710470Z",
+        "workspace": "argv",
+        "worktree_path": "/Users/clementtourriere/workspace/devflow/.devflow-architecture-c5wf7ngt/worktrees/argv"
+      },
+      "parent": "main",
+      "process_results": [],
+      "processes_failed": 0,
+      "processes_skipped": true,
+      "processes_started": 0,
+      "schema_version": 1,
+      "service_key": "argv",
+      "service_results": [],
+      "services_failed": 0,
+      "services_skipped": true,
+      "services_switched": 0,
+      "status": "ok",
+      "workspace": "argv",
+      "worktree_created": true,
+      "worktree_path": "/Users/clementtourriere/workspace/devflow/.devflow-architecture-c5wf7ngt/worktrees/argv"
+    }
+  },
+  "reset_absent_generic_workspace": {
+    "exit_code": 1,
+    "stderr": "Error: Generic Docker does not support reset\n",
+    "document": {
+      "error": {
+        "message": "Generic Docker does not support reset"
+      },
+      "schema_version": 1,
+      "status": "error"
+    }
+  },
+  "readiness_depends_on_output_mode": {
+    "json": {
+      "exit_code": 0,
+      "stderr": "  Warning: hook 'approval-needed' skipped \u2014 not approved for non-interactive mode.\n    command: printf UNAPPROVED\n    Approve it once interactively, or set DEVFLOW_APPROVE_HOOKS=1 for automated runs.\n",
+      "document": {
+        "agent_workdir": "/Users/clementtourriere/workspace/devflow/.devflow-architecture-ed8lix1b/worktrees/json_task_1b4a6b387a29",
+        "cd_hint": "cd /Users/clementtourriere/workspace/devflow/.devflow-architecture-ed8lix1b/worktrees/json_task_1b4a6b387a29",
+        "execution": {
+          "reason": "workspace setup needs attention",
+          "status": "skipped"
+        },
+        "hook_results": [
+          {
+            "background": 0,
+            "background_records": [],
+            "errors": [],
+            "failed": 0,
+            "phase": "pre-switch",
+            "required_failed": 0,
+            "required_skipped": 1,
+            "skipped": 1,
+            "skipped_reasons": [
+              "approval-needed: requires approval (non-interactive mode)"
+            ],
+            "succeeded": 0
+          },
+          {
+            "background": 0,
+            "background_records": [],
+            "errors": [],
+            "failed": 0,
+            "phase": "post-create",
+            "required_failed": 0,
+            "required_skipped": 1,
+            "skipped": 1,
+            "skipped_reasons": [
+              "required services, generated environment, or an earlier hook failed"
+            ],
+            "succeeded": 0
+          },
+          {
+            "background": 0,
+            "background_records": [],
+            "errors": [],
+            "failed": 0,
+            "phase": "post-switch",
+            "required_failed": 0,
+            "required_skipped": 1,
+            "skipped": 1,
+            "skipped_reasons": [
+              "required services, generated environment, or an earlier hook failed"
+            ],
+            "succeeded": 0
+          }
+        ],
+        "hooks_failed": 0,
+        "operation": {
+          "attempt": 1,
+          "code_parent": "main",
+          "completed_phases": [
+            "materialize",
+            "services"
+          ],
+          "config_fingerprint": "e3eec07681d234ae044c5c57d32c80638eb89e53184253553f5e52418470a279",
+          "data_parent": "main",
+          "error": null,
+          "id": "878c2041-fb08-4481-a654-546f717a7a20",
+          "kind": "switch",
+          "phase": "processes",
+          "post_create_pending": true,
+          "project": "/Users/clementtourriere/workspace/devflow/.devflow-architecture-ed8lix1b/repo",
+          "project_id": "5418ff3d2f88c701a37d47388f2178145ce905bd2b61e75844c9a59a1be71d76",
+          "request": {
+            "options": {
+              "copy_files": null,
+              "copy_ignored": null,
+              "create_if_missing": true,
+              "data_from_workspace": null,
+              "from_workspace": "main",
+              "lifecycle": {
+                "hook_approval": "NonInteractive",
+                "skip_hooks": false,
+                "skip_processes": true,
+                "skip_services": true,
+                "trigger_source": null,
+                "vcs_event": null,
+                "verbose_hooks": false
+              }
+            },
+            "workspace": "json-task"
+          },
+          "schema_version": 2,
+          "status": "needs_attention",
+          "steps": [
+            {
+              "attempts": 1,
+              "detail": null,
+              "kind": "other",
+              "name": "preflight",
+              "status": "needs_attention"
+            },
+            {
+              "attempts": 1,
+              "detail": null,
+              "kind": "hook",
+              "name": "pre-switch",
+              "status": "needs_attention"
+            },
+            {
+              "attempts": 1,
+              "detail": null,
+              "kind": "materialize",
+              "name": "materialize",
+              "status": "succeeded"
+            },
+            {
+              "attempts": 1,
+              "detail": null,
+              "kind": "service",
+              "name": "services",
+              "status": "succeeded"
+            },
+            {
+              "attempts": 1,
+              "detail": null,
+              "kind": "other",
+              "name": "environment",
+              "status": "needs_attention"
+            },
+            {
+              "attempts": 1,
+              "detail": null,
+              "kind": "hook",
+              "name": "post-create",
+              "status": "needs_attention"
+            },
+            {
+              "attempts": 1,
+              "detail": null,
+              "kind": "hook",
+              "name": "post-switch",
+              "status": "needs_attention"
+            },
+            {
+              "attempts": 1,
+              "detail": null,
+              "kind": "process",
+              "name": "processes",
+              "status": "needs_attention"
+            }
+          ],
+          "updated_at": "2026-09-14T13:13:51.279030Z",
+          "workspace": "json-task",
+          "worktree_path": "/Users/clementtourriere/workspace/devflow/.devflow-architecture-ed8lix1b/worktrees/json_task_1b4a6b387a29"
+        },
+        "parent": "main",
+        "process_results": [],
+        "processes_failed": 0,
+        "processes_skipped": true,
+        "processes_started": 0,
+        "schema_version": 1,
+        "service_key": "json_task_1b4a6b387a29",
+        "service_results": [],
+        "services_failed": 0,
+        "services_skipped": true,
+        "services_switched": 0,
+        "status": "ok",
+        "workspace": "json-task",
+        "worktree_created": true,
+        "worktree_path": "/Users/clementtourriere/workspace/devflow/.devflow-architecture-ed8lix1b/worktrees/json_task_1b4a6b387a29"
+      }
+    },
+    "human": {
+      "exit_code": 0,
+      "stderr": "  Warning: hook 'approval-needed' skipped \u2014 not approved for non-interactive mode.\n    command: printf UNAPPROVED\n    Approve it once interactively, or set DEVFLOW_APPROVE_HOOKS=1 for automated runs.\nCommand skipped: workspace setup needs attention; retry after resolving the reported prerequisites.\n",
+      "stdout": "Running pre-switch hooks...\nCreated worktree for 'human-task' at /Users/clementtourriere/workspace/devflow/.devflow-architecture-ed8lix1b/worktrees/human_task_1308e35a6b6f\nDEVFLOW_CD=/Users/clementtourriere/workspace/devflow/.devflow-architecture-ed8lix1b/worktrees/human_task_1308e35a6b6f\nShell integration not detected. Run: cd \"/Users/clementtourriere/workspace/devflow/.devflow-architecture-ed8lix1b/worktrees/human_task_1308e35a6b6f\"\nNote: devflow cannot change your parent shell directory without shell integration.\nTip: add `eval \"$(devflow shell-init)\"` to your shell profile for auto-cd.\n"
+    },
+    "json_executed": false,
+    "human_executed": false
+  },
+  "cleanup_configured_default": {
+    "exit_code": 0,
+    "stderr": "",
+    "document": {
+      "deleted": [
+        "scratch"
+      ],
+      "failures": {},
+      "max_count": 0,
+      "operation": {
+        "attempt": 1,
+        "code_parent": null,
+        "completed_phases": [],
+        "config_fingerprint": "b1e6a9f17ddb9ffafd4fb4f7699e51509e17332f8e6d1d419d62f70ab8c98d3e",
+        "data_parent": null,
+        "error": null,
+        "id": "fd38b0b3-3769-4065-8917-2c165a188c08",
+        "kind": "cleanup:db",
+        "phase": "delete",
+        "post_create_pending": false,
+        "project": "/Users/clementtourriere/workspace/devflow/.devflow-architecture-antazltz/repo",
+        "project_id": "a2d3dd2ca57e13c6db1b1102bd3534282b933c7a2a2416560b45374ce6c99ea6",
+        "request": {
+          "max_count": 0,
+          "service": "db"
+        },
+        "schema_version": 2,
+        "status": "ready",
+        "steps": [
+          {
+            "attempts": 1,
+            "detail": null,
+            "kind": "other",
+            "name": "preflight",
+            "status": "succeeded"
+          },
+          {
+            "attempts": 1,
+            "detail": null,
+            "kind": "other",
+            "name": "delete",
+            "status": "succeeded"
+          },
+          {
+            "attempts": 1,
+            "detail": null,
+            "kind": "cleanup",
+            "name": "delete:scratch",
+            "status": "succeeded"
+          }
+        ],
+        "updated_at": "2026-09-14T13:13:51.542066Z",
+        "workspace": "__retention__",
+        "worktree_path": null
+      },
+      "plan": {
+        "entries": [
+          {
+            "delete": true,
+            "reasons": [],
+            "service_key": "scratch",
+            "workspace": "scratch"
+          },
+          {
+            "delete": false,
+            "reasons": [
+              "configured default workspace",
+              "current workspace",
+              "primary checkout"
+            ],
+            "service_key": "trunk",
+            "workspace": "trunk"
+          }
+        ],
+        "max_count": 0,
+        "service": "db"
+      },
+      "schema_version": 1,
+      "service": "db",
+      "status": "ok"
+    },
+    "requests": [
+      {
+        "method": "GET",
+        "path": "/projects/fake/branches"
+      },
+      {
+        "method": "GET",
+        "path": "/projects/fake/branches"
+      },
+      {
+        "method": "GET",
+        "path": "/projects/fake/branches"
+      },
+      {
+        "method": "DELETE",
+        "path": "/projects/fake/branches/br-scratch"
+      }
+    ]
+  },
+  "binary_sha256": "d31eb8ce9eccd0be7672523983148ae094e9afbe9c2591eb88c7c5bfe085a5f9"
+}

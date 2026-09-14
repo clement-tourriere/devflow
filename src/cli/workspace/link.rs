@@ -26,7 +26,7 @@ pub(super) async fn link_workspace_internal(
             } else {
                 devflow_core::workspace::hooks::HookApprovalMode::Interactive
             },
-            verbose_hooks: true,
+            verbose_hooks: !non_interactive,
             ..Default::default()
         },
         from_workspace: from.map(ToString::to_string),
@@ -44,8 +44,14 @@ pub(super) async fn handle_link_command(
     json_output: bool,
     non_interactive: bool,
 ) -> Result<()> {
-    let linked =
-        link_workspace_internal(config, config_path, workspace_name, from, non_interactive).await?;
+    let linked = link_workspace_internal(
+        config,
+        config_path,
+        workspace_name,
+        from,
+        non_interactive || json_output,
+    )
+    .await?;
 
     let failed = services_failed(&linked);
 

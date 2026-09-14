@@ -1,162 +1,34 @@
-# Architecture
+# Architecture and compatibility
 
-This document describes the high-level architecture of devflow. It is intended for contributors and anyone who wants to understand how the codebase is organized.
+The core application layer owns lifecycle policy. CLI/TUI and desktop commands collect typed input and render outcomes. Provider adapters implement resource operations; they do not decide retention policy.
 
-## Crate Structure
+- `application`: service operations, seed, retention plans/apply, and operation recovery.
+- `workspace`: VCS materialization, lifecycle hooks, processes, inventory, and durable operations.
+- `state`: stable project/workspace/service/resource identities, desired state, data bindings, pins, and baseline references. Provider SQLite/files contain backend observations and exact ownership records.
+- `baseline`: local PostgreSQL prepare, seal, version binding, and dependency-aware deletion.
+- `execution`: explicit program/argv or shell requests in a ready materialized workspace.
+- `services::descriptor`: versioned supported-provider/build manifest; runtime operation capabilities are negotiated for plugins.
+- `companion`: optional proxy executable and loopback API. The desktop does not embed proxy networking.
 
-```
-devflow (workspace)
-├── devflow           CLI binary + TUI (src/)
-├── devflow-core      Shared library (crates/devflow-core/)
-├── devflow-proxy     Reverse proxy (crates/devflow-proxy/)
-├── devflow-terminal  PTY manager (crates/devflow-terminal/)
-└── devflow-app       Tauri desktop backend (src-tauri/)
-```
+Existing service keys and resource namespaces are retained. `devflow project relocate OLD NEW` explicitly updates a registered path without renaming resources. The desktop project list comes from the core registry; hiding a project does not delete its data or ownership records.
 
-### Dependency graph
+Operations persist intent before external effects, checkpoint typed steps and per-service outcomes, and keep the most recent 100 operation-history records per project. Unfinished active records are retained separately. `devflow operation inspect ID` shows the saved request and checkpoints; `resume ID` supports switch, remove, service lifecycle operations, and cleanup. SQL imports and baseline preparation require inspecting partial effects and retrying their original explicit command or replacing the failed generation. Shell hooks must tolerate retries; devflow makes no exactly-once guarantee.
 
-```
-devflow (CLI)  ──→  devflow-core
-    │               devflow-proxy
-    │
-devflow-app  ──→  devflow-core
-    │             devflow-proxy
-    │             devflow-terminal
-```
+Required hooks run to completion during lifecycle setup, including hooks previously marked `background: true`. `required: false` opts out of readiness gating. Optional background hooks write completion receipts under the config directory's `hook-runs` directory. A process killed before it can update a receipt may leave a running receipt; its PID and lifecycle receipt ID provide the recovery context.
 
-`devflow-core` is the shared library — it knows nothing about the CLI, TUI, or GUI. `devflow-proxy` is also standalone and reusable.
+## Retired surface
 
-## Core Architecture (`devflow-core`)
+| Old interface | Replacement |
+| --- | --- |
+| `agent.auto_context` | Explicit `agent context`; old settings are accepted with a migration warning and omitted on save. |
+| `worktree.respect_gitignore` / `--no-respect-gitignore` | `worktree.copy_ignored` / `--copy-ignored`; the old CLI spelling remains an alias. |
+| `template_from_time` | No advertised timestamp-clone capability; use an exact baseline version. |
+| `sync-ai-configs` and its hook action | Generated guides and explicit file allowlists. Old configured actions are removed with a warning. No permission arrays are merged. |
+| Commit API credentials/model/base URL | `commit.generation.command` or `DEVFLOW_COMMIT_COMMAND`. No embedded LLM API backend. |
+| Embedded Pitchfork and GUI web bridge | Native processes; a narrow adapter stops exact legacy external-daemon records. |
+| Duplicate structured config/recipe GUI | Source-format-preserving raw editor and hook inspection. |
+| Desktop-owned proxy | Optional `devflow-proxy` companion, shared with CLI clients. |
 
-### Layered Design
+Cloud providers remain optional/experimental; Jujutsu remains behind the existing VCS adapter. Breadth expansion is paused until platform/live-service contract coverage establishes the required behavior. Ownership migrations are deliberately retained.
 
-```
-┌──────────────────────────────────────────────────────┐
-│  Workspace Lifecycle (workspace/)                    │
-│  create, switch, delete — orchestrates everything    │
-├──────────┬──────────────┬──────────────┬─────────────┤
-│  VCS     │  Services    │  Hooks       │  State      │
-│  (vcs/)  │  (services/) │  (hooks/)    │  (state/)   │
-├──────────┴──────────────┴──────────────┴─────────────┤
-│  Config (config/)                                    │
-│  .devflow.yml + .devflow.local.yml + env vars        │
-└──────────────────────────────────────────────────────┘
-```
-
-### Key Traits
-
-**`ServiceProvider`** (`services/mod.rs`) — The core abstraction for all service backends. Every provider (PostgreSQL, ClickHouse, MySQL, generic Docker, Neon, DBLab, Xata, plugin) implements this trait. Methods are capability-driven: optional methods have default no-op implementations, and `capabilities()` advertises what the provider supports.
-
-**`VcsProvider`** (`vcs/mod.rs`) — Abstraction over version control systems. Git is the primary implementation (via `git2` library). Jujutsu is also supported. Detection is automatic via `detect_vcs_provider()`.
-
-### Service Provider Dispatch
-
-```
-NamedServiceConfig
-    │
-    ▼
-factory::create_provider_from_named_config()
-    │
-    ├─ service_type == "postgres"
-    │   ├─ provider_type == "local"  → LocalProvider (Docker + CoW)
-    │   ├─ provider_type == "neon"   → NeonProvider (API)
-    │   ├─ provider_type == "dblab"  → DBLabProvider (API)
-    │   └─ provider_type == "xata"   → XataProvider (API)
-    │
-    ├─ service_type == "clickhouse" → ClickHouseLocalProvider
-    ├─ service_type == "mysql"      → MySQLLocalProvider
-    ├─ service_type == "generic"    → GenericDockerProvider
-    └─ plugin config present        → PluginProvider (JSON-over-stdio)
-```
-
-### Workspace Lifecycle
-
-A `switch -c` (create + switch) executes this sequence:
-
-```
-1. Pre-switch hooks
-2. VCS branch creation
-3. Linked worktree setup + file copying
-4. Register the workspace and its immutable parent in local state
-5. Service orchestration and service lifecycle hooks
-6. Post-create hooks
-7. Post-switch hooks
-8. Process orchestration (after generated environment files exist)
-```
-
-`workspace/create.rs` delegates to the shared lifecycle in `workspace/switch.rs`, which also registers workspace state.
-
-### Hook Engine
-
-The hook engine (`hooks/`) is MiniJinja-based:
-
-- **Phases**: 12 built-in lifecycle phases + custom phases
-- **Entry types**: Simple (shell command string) or Action (structured: `write-env`, `copy`, `docker-exec`, `http`, `notify`, etc.)
-- **Approval**: Shell commands from project config require approval; non-interactive runs skip unapproved hooks and report them
-- **Execution**: Hooks run synchronously unless `background: true`; the phase determines the default failure policy
-- **Templates**: Full MiniJinja with custom filters (`sanitize`, `sanitize_db`, `hash_port`)
-
-### Configuration
-
-Configuration precedence (highest to lowest):
-1. Environment variables (`DEVFLOW_*`)
-2. `.devflow.local.yml` (gitignored, per-developer)
-3. `.devflow.yml` or `devflow.toml` (committed, team-shared)
-4. Global devflow configuration
-
-CLI-managed service definitions in local state are overlaid on the effective configuration.
-
-Configuration types and merging live in `config/mod.rs`; loading and validation live in `config/loading.rs`.
-
-### State Management
-
-The platform devflow configuration directory contains `local_state.yml` for
-project/workspace metadata and `hook_approvals.yml` for hook approvals. Set
-`DEVFLOW_CONFIG_DIR` to override that directory. Local PostgreSQL providers keep
-their service state separately in `state.db` under the configured data root.
-
-## Proxy Architecture (`devflow-proxy`)
-
-```
-Docker Events (bollard)
-    │
-    ▼
-Monitor → Discovery → Router → Server
-                         │        │
-                         │        ├─ TLS (rustls + rcgen CA)
-                         │        └─ HTTP reverse proxy (hyper)
-                         │
-                         └─ JSON API (/api/status, /api/targets)
-```
-
-The proxy watches Docker events and routes service and process HTTPS requests
-using the configured domain suffix (`.local` by default).
-
-## GUI Architecture (`src-tauri/` + `ui/`)
-
-```
-React Frontend (ui/src/)
-    │
-    │  Tauri IPC (invoke)
-    ▼
-Rust Backend (src-tauri/src/)
-    │
-    ├─ devflow-core (workspace/service/hook operations)
-    ├─ devflow-proxy (proxy management)
-    └─ devflow-terminal (PTY sessions)
-```
-
-The desktop app uses Tauri 2 with a React frontend. IPC commands in `src-tauri/src/commands/` wrap `devflow-core` calls. Project-level doctor diagnostics live in `crates/devflow-core/src/doctor.rs` so the CLI, TUI, and GUI report the same setup checks.
-
-## Feature Flags
-
-All optional backends and UI components are feature-gated:
-
-| Flag | What it enables | Key dependency |
-|---|---|---|
-| `service-local` | Docker-based local providers | `bollard`, `rusqlite` |
-| `service-neon` | Neon cloud provider | `reqwest` |
-| `service-dblab` | DBLab provider | `reqwest` |
-| `service-xata` | Xata provider | `reqwest` |
-| `llm` | AI commit messages | `reqwest` |
-| `tui` | Terminal UI | `ratatui`, `crossterm` |
+Provider types and the reference catalog are generated with `scripts/generate-provider-manifest.py` from `devflow --json capabilities`; CI checks them for drift. SQL baseline bundles and prepared-clone pools remain separate future extensions.

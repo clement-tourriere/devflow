@@ -555,14 +555,6 @@ pub async fn get_action_types() -> Result<Vec<ActionTypeInfo>, String> {
                 },
             ],
         },
-        ActionTypeInfo {
-            action_type: "sync-ai-configs".to_string(),
-            label: "Sync AI Configs".to_string(),
-            description: "Merge AI tool configs (.claude, .cursor, ...) back to the main worktree"
-                .to_string(),
-            requires_approval: false,
-            fields: vec![],
-        },
     ])
 }
 

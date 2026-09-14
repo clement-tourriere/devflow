@@ -4,7 +4,7 @@
 # - Move stateful dependencies (Postgres/Redis) to devflow services.
 # - Generate .env.local on every workspace switch.
 # - Run app/worker/scheduler commands as devflow processes, optionally backed by
-#   Pitchfork's embedded supervisor.
+#   the native process supervisor.
 # - Keep non-critical containers hybrid until you are ready to migrate them.
 
 name: existing-app
@@ -43,7 +43,7 @@ worktree:
   path_template: "../{repo}.{workspace}"
   copy_files:
     - .env
-  copy_ai_configs: true
+  copy_ai_configs: false
 
 hooks:
   post-create:
@@ -74,19 +74,10 @@ hooks:
     #   condition: "file_exists:manage.py"
 
 processes:
-  # Use `pitchfork` to embed Pitchfork's Rust supervisor directly; use `native`
-  # or omit this key for devflow's built-in process runner.
-  provider: pitchfork
+  # Native supervision runs each command in its workspace.
+  provider: native
   auto_start: false
   auto_stop: true
-  pitchfork:
-    config_policy: devflow-owned
-    external_daemons: show
-    web_ui:
-      enabled: false
-      bind_address: 127.0.0.1
-      bind_port: 3120
-      edit_mode: warn
   daemons:
     web:
       # Replace with your host dev command: npm, bun, cargo, uv, pdm, rails, etc.

@@ -49,6 +49,7 @@ pub(super) async fn handle_workspace_command(
             workspace_name,
             create,
             from,
+            data_from,
             execute,
             detach,
             open,
@@ -58,9 +59,10 @@ pub(super) async fn handle_workspace_command(
             no_verify,
             template,
             dry_run,
-            no_respect_gitignore,
+            copy_ignored,
         } => {
             let mut machine_output = None;
+            let mut switch_outcome = None;
             // The workspace actually switched to, for -x/--open targeting.
             let mut switched_workspace: Option<String> = None;
             if dry_run {
@@ -188,12 +190,13 @@ pub(super) async fn handle_workspace_command(
                     println!("Switching to main workspace: {}", main_workspace);
                 }
                 switched_workspace = Some(main_workspace.clone());
-                machine_output = handle_switch_command(
+                let presentation = handle_switch_command(
                     config,
                     &main_workspace,
                     config_path,
                     false, // create — the default workspace always exists
                     None,  // from
+                    None,  // data_from
                     no_services,
                     no_processes,
                     no_verify,
@@ -204,14 +207,17 @@ pub(super) async fn handle_workspace_command(
                     None, // copy_ignored — use config default
                 )
                 .await?;
+                machine_output = presentation.output;
+                switch_outcome = Some(presentation.result);
             } else if let Some(ref workspace) = workspace_name {
                 switched_workspace = Some(workspace.clone());
-                machine_output = handle_switch_command(
+                let presentation = handle_switch_command(
                     config,
                     workspace,
                     config_path,
                     create,
                     from.as_deref(),
+                    data_from.as_deref(),
                     no_services,
                     no_processes,
                     no_verify,
@@ -219,13 +225,11 @@ pub(super) async fn handle_workspace_command(
                     non_interactive,
                     None,
                     None,
-                    if no_respect_gitignore {
-                        Some(true)
-                    } else {
-                        None
-                    },
+                    if copy_ignored { Some(true) } else { None },
                 )
                 .await?;
+                machine_output = presentation.output;
+                switch_outcome = Some(presentation.result);
             } else if non_interactive || json_output {
                 anyhow::bail!(
                     "No workspace specified. Use 'devflow switch <workspace>' in non-interactive or JSON mode."
@@ -234,12 +238,25 @@ pub(super) async fn handle_workspace_command(
                 // The picked (or newly created) workspace is the target for
                 // -x/--open below; a cancelled picker must not fall back to
                 // executing in the default workspace.
-                switched_workspace = handle_interactive_switch(config, config_path).await?;
+                if let Some(presentation) = handle_interactive_switch(config, config_path).await? {
+                    switched_workspace = Some(presentation.result.workspace.clone());
+                    machine_output = presentation.output;
+                    switch_outcome = Some(presentation.result);
+                }
             }
 
             // Execute command or open interactive session in workspace
-            let switch_failed = machine_output.as_ref().is_some_and(machine_switch_failed);
+            let switch_failed = switch_outcome
+                .as_ref()
+                .is_some_and(|result| result.failed());
+            let setup_incomplete = switch_outcome
+                .as_ref()
+                .is_some_and(|result| !result.ready());
+            if setup_incomplete && !json_output && (open || execute.is_some()) {
+                eprintln!("Command skipped: workspace setup needs attention; retry after resolving the reported prerequisites.");
+            }
             let execution_output = if !dry_run
+                && !setup_incomplete
                 && !switch_failed
                 && (open || execute.is_some())
                 && switched_workspace.is_some()
@@ -271,7 +288,10 @@ pub(super) async fn handle_workspace_command(
                 let execution_failed = execution_output
                     .as_ref()
                     .is_some_and(|execution| execution.exit_code.is_some_and(|code| code != 0));
-                let output = compose_switch_output(output, execution_output)?;
+                let mut output = compose_switch_output(output, execution_output)?;
+                if setup_incomplete && (open || execute.is_some()) {
+                    output["execution"] = serde_json::json!({"status":"skipped", "reason":"workspace setup needs attention"});
+                }
                 println!("{}", serde_json::to_string_pretty(&output)?);
                 if switch_failed {
                     anyhow::bail!("Workspace switch completed with orchestration failures");
@@ -512,8 +532,14 @@ fn compose_switch_output(
     Ok(switch_output)
 }
 
+#[cfg(test)]
 fn machine_switch_failed(output: &serde_json::Value) -> bool {
     output.get("status").and_then(serde_json::Value::as_str) == Some("error")
+}
+
+pub(super) struct SwitchPresentation {
+    pub result: devflow_core::workspace::SwitchWorkspaceResult,
+    pub output: Option<serde_json::Value>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -523,6 +549,7 @@ pub(super) async fn handle_switch_command(
     config_path: &Option<std::path::PathBuf>,
     create: bool,
     from: Option<&str>,
+    data_from: Option<&str>,
     no_services: bool,
     no_processes: bool,
     no_verify: bool,
@@ -531,7 +558,8 @@ pub(super) async fn handle_switch_command(
     trigger_source: Option<&str>,
     vcs_event: Option<&str>,
     copy_ignored_override: Option<bool>,
-) -> Result<Option<serde_json::Value>> {
+) -> Result<SwitchPresentation> {
+    ensure_default_workspace_registered(config, config_path)?;
     // Resolve parent via CLI-specific interactive prompt (if needed)
     let from_workspace = if create {
         let context = resolve_workspace_context();
@@ -569,17 +597,14 @@ pub(super) async fn handle_switch_command(
         },
         create_if_missing: create,
         from_workspace,
+        data_from_workspace: data_from.map(String::from),
         copy_files: None,
         copy_ignored: copy_ignored_override,
     };
 
-    let result = devflow_core::workspace::switch::switch_workspace(
-        config,
-        &project_dir,
-        workspace_name,
-        &options,
-    )
-    .await?;
+    let result =
+        devflow_core::application::switch_workspace(config, &project_dir, workspace_name, &options)
+            .await?;
 
     // ── CLI-specific output ──────────────────────────────────────────
     let shell_integration = super::config::shell_integration_enabled();
@@ -657,12 +682,17 @@ pub(super) async fn handle_switch_command(
                     "succeeded": r.succeeded,
                     "failed": r.failed,
                     "skipped": r.skipped,
+                    "skipped_reasons": r.skipped_reasons,
                     "background": r.background,
+                        "background_records": r.background_records,
+                        "required_failed": r.required_failed,
+                        "required_skipped": r.required_skipped,
                     "errors": r.errors,
                 })
             })
             .collect();
         let summary = serde_json::json!({
+            "operation": result.operation,
             "status": if fail_count == 0 && process_fail_count == 0 && hook_fail_count == 0 { "ok" } else { "error" },
             "workspace": result.workspace,
             "service_key": result.service_key,
@@ -677,7 +707,7 @@ pub(super) async fn handle_switch_command(
             "service_results": service_results,
             "processes_started": process_success_count,
             "processes_failed": process_fail_count,
-            "processes_skipped": no_processes,
+            "processes_skipped": no_processes || result.operation.as_ref().is_some_and(|o| o.status != "ready") && result.processes.is_empty(),
             "process_results": process_results,
             "hooks_failed": hook_fail_count,
             "hook_results": hook_results,
@@ -755,7 +785,10 @@ pub(super) async fn handle_switch_command(
         );
     }
 
-    Ok(machine_output)
+    Ok(SwitchPresentation {
+        result,
+        output: machine_output,
+    })
 }
 
 #[cfg(test)]

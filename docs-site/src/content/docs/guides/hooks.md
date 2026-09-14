@@ -76,7 +76,6 @@ devflow hook install install-deps --yes   # accept detected values (CI/agents)
 | `db-migrate` | run migrations after create/switch (one editable command) | prisma, Rails, Django, alembic, sqlx, diesel, dbmate |
 | `install-deps` | install dependencies with *the* package manager the project uses | lockfile **and** binary installed (bun > pnpm > yarn > npm, uv, cargo) |
 | `workspace-setup` | copy `.env.example` → `.env.local`, `mise trust`, `direnv allow` | only the parts that apply (file present + tool installed) |
-| `sync-ai-configs` | sync AI tool configs back to main before workspace removal | `.claude`/`.cursor`/… dirs |
 | `multiplexer-session` | auto-open a tmux/zellij session in the worktree after creation | tmux/zellij installed or `execute` configured |
 
 :::note

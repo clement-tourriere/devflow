@@ -67,40 +67,9 @@ pub(super) fn validate_config(config_path: &Option<PathBuf>, json_output: bool) 
             if let Some(provider) = processes.get("provider").and_then(|v| v.as_str()) {
                 if !["native", "pitchfork"].contains(&provider) {
                     errors.push(format!(
-                        "processes.provider '{}' is not supported (use 'native' or 'pitchfork')",
+                        "processes.provider '{}' is not supported (use 'native')",
                         provider
                     ));
-                }
-            }
-            if let Some(serde_yaml_ng::Value::Mapping(pitchfork)) = processes.get("pitchfork") {
-                if let Some(policy) = pitchfork.get("config_policy").and_then(|v| v.as_str()) {
-                    let known = ["devflow-owned", "import", "mirror", "merge"];
-                    if !known.contains(&policy) {
-                        errors.push(format!(
-                            "processes.pitchfork.config_policy '{}' is not supported (use devflow-owned, import, mirror, or merge)",
-                            policy
-                        ));
-                    }
-                }
-                if let Some(external) = pitchfork.get("external_daemons").and_then(|v| v.as_str()) {
-                    let known = ["hide", "show", "importable"];
-                    if !known.contains(&external) {
-                        errors.push(format!(
-                            "processes.pitchfork.external_daemons '{}' is not supported (use hide, show, or importable)",
-                            external
-                        ));
-                    }
-                }
-                if let Some(serde_yaml_ng::Value::Mapping(web_ui)) = pitchfork.get("web_ui") {
-                    if let Some(edit_mode) = web_ui.get("edit_mode").and_then(|v| v.as_str()) {
-                        let known = ["readonly", "warn", "merge"];
-                        if !known.contains(&edit_mode) {
-                            errors.push(format!(
-                                "processes.pitchfork.web_ui.edit_mode '{}' is not supported (use readonly, warn, or merge)",
-                                edit_mode
-                            ));
-                        }
-                    }
                 }
             }
             if let Some(serde_yaml_ng::Value::Mapping(daemons)) = processes.get("daemons") {

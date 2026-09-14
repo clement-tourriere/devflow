@@ -39,9 +39,6 @@ devflow also **exports** variables into the processes it spawns — shell hook c
 | Variable | Description | Default |
 | --- | --- | --- |
 | `DEVFLOW_COMMIT_COMMAND=…` | external CLI for message generation (e.g. `claude -p`) — preferred path | — |
-| `DEVFLOW_LLM_API_KEY=…` | API key for the OpenAI-compatible fallback | — (not required for localhost URLs) |
-| `DEVFLOW_LLM_API_URL=…` | endpoint URL (e.g. `http://localhost:11434/v1` for Ollama) | OpenAI |
-| `DEVFLOW_LLM_MODEL=…` | model name | `gpt-4o-mini` |
 
 ## Internal
 
@@ -50,3 +47,5 @@ devflow also **exports** variables into the processes it spawns — shell hook c
 | `DEVFLOW_SHELL_INTEGRATION=1` | set by the shell wrapper when invoking devflow; enables `DEVFLOW_CD` emission paths |
 
 AWS credentials for [S3 seeding](/devflow/guides/seeding/) use the standard `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` (or `AWS_REGION`) variables.
+
+`DEVFLOW_PROXY_DIR` optionally isolates the companion's CA files, PID file and runtime lease. Without it the existing `~/.devflow/proxy` location is retained. This does not install or trust a certificate.

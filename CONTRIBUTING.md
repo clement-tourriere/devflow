@@ -111,8 +111,7 @@ When adding new functionality, consider whether it should be feature-gated:
 | `service-neon` | Neon cloud provider |
 | `service-dblab` | DBLab provider |
 | `service-xata` | Xata provider |
-| `llm` | AI commit message generation |
-| `skills` | Skill management system |
+| `proxy` | Optional proxy companion binary |
 | `tui` | Terminal UI dashboard |
 
 ## Reporting Issues

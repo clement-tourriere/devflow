@@ -1,9 +1,10 @@
+import { lazy, Suspense } from "react";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Outlet, NavLink, useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
 import { getProxyStatus, listProjects } from "../utils/invoke";
 import type { ProjectEntry, ProxyStatus } from "../types";
-import TerminalPanel from "./TerminalPanel";
+const TerminalPanel = lazy(() => import("./TerminalPanel"));
 import { useTerminal } from "../context/TerminalContext";
 import { sortByRecent } from "../utils/recentProjects";
 import {
@@ -25,6 +26,8 @@ function Layout() {
   const navigateRef = useRef(navigate);
   navigateRef.current = navigate;
   const { isVisible, toggle, pendingTerminal, clearPending } = useTerminal();
+  const [terminalLoaded, setTerminalLoaded] = useState(false);
+  useEffect(() => { if (isVisible || pendingTerminal) setTerminalLoaded(true); }, [isVisible, pendingTerminal]);
 
   // Merge new project list into sidebar: keep existing order, append new ones, remove deleted
   const updateProjectList = useCallback((list: ProjectEntry[]) => {
@@ -166,12 +169,14 @@ function Layout() {
         <main className="content">
           <Outlet />
         </main>
+        {terminalLoaded && <Suspense fallback={<p role="status">Loading terminal…</p>}>
         <TerminalPanel
           isVisible={isVisible}
           onToggle={toggle}
           pendingTerminal={pendingTerminal}
           onPendingTerminalHandled={clearPending}
         />
+        </Suspense>}
       </div>
     </div>
   );

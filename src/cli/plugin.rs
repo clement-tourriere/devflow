@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use devflow_core::config::Config;
 use devflow_core::services::ServiceProvider;
 
@@ -98,7 +98,16 @@ pub(super) async fn handle_plugin_command(
             })?;
 
             // Try to create the provider and invoke provider_name
-            match devflow_core::services::plugin::PluginProvider::new(&name, plugin_cfg) {
+            match devflow_core::services::plugin::PluginProvider::connect(
+                &name,
+                plugin_cfg,
+                config
+                    .project_root
+                    .as_deref()
+                    .context("plugin requires a project root")?,
+            )
+            .await
+            {
                 Ok(provider) => {
                     // Try test_connection as a health check
                     match provider.test_connection().await {
@@ -216,6 +225,9 @@ ok()    {{ echo "{{\\"ok\\": true,  \\"result\\": $1}}"; }}
 error() {{ echo "{{\\"ok\\": false, \\"error\\": \\"$1\\"}}"; }}
 
 case "$METHOD" in
+  negotiate)
+    ok '{{"protocol_version":1,"operations":{{}},"destroy":false}}'
+    ;;
   provider_name)
     ok "\"{name}\""
     ;;
@@ -296,7 +308,9 @@ def main():
     config = request.get("config", {{}})
     service_name = request.get("service_name", "")
 
-    if method == "provider_name":
+    if method == "negotiate":
+        ok({{"protocol_version": 1, "operations": {{}}, "destroy": False}})
+    elif method == "provider_name":
         ok("{name}")
     elif method == "test_connection":
         ok(None)

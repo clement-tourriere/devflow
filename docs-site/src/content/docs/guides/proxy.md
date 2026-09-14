@@ -30,7 +30,7 @@ On Linux, mDNS publishing needs `avahi-daemon` + `avahi-utils` (preinstalled on 
 The proxy monitors Docker events in real time and polls devflow process records. When a target starts it derives a domain, then:
 
 - **HTTP services** — TLS is terminated with a per-domain certificate signed by the local CA; requests forward to the container. The name resolves to the proxy on `127.0.0.1`. Plain-HTTP requests get a 301 to HTTPS.
-- **Host processes, including Pitchfork-managed processes** — devflow-managed native or Pitchfork processes with resolved ports are exposed as `https://<process>.<workspace>.<project>.<suffix>` (for example `.local`) and forward to `127.0.0.1:<port>`.
+- **Host processes, managed by devflow** — devflow-managed native processes with resolved ports are exposed as `https://<process>.<workspace>.<project>.<suffix>` (for example `.local`) and forward to `127.0.0.1:<port>`.
 - **TCP services (databases)** — well-known ports (PostgreSQL 5432, MySQL 3306, Redis 6379, …) are exposed as **native direct endpoints** like `postgresql://postgres.myapp.local:5432`; the name resolves to the container's own IP.
 
 :::caution
@@ -44,7 +44,7 @@ Direct database endpoints need the container IP to be **routable from the host**
 | 1 | `devproxy.domains` label | `app.local, api.local` |
 | 2 | `devproxy.domain` label | `myapp.test` |
 | 3 | `VIRTUAL_HOST` env var (nginx-proxy compatible) | `myapp.local` |
-| 4 | devflow process state, native or Pitchfork: `{process}.{workspace}.{project}.{suffix}` | `api.feat-1.myapp.local` |
+| 4 | devflow process state, native: `{process}.{workspace}.{project}.{suffix}` | `api.feat-1.myapp.local` |
 | 5 | devflow labels: `{service}.{workspace}.{project}.{suffix}` | `postgres.feat-1.myapp.local` |
 | 6 | Compose labels: `{service}.{project}.{suffix}` | `web.myapp.local` |
 | 7 | Container name: `{name}.{suffix}` | `myapp.local` |
@@ -63,18 +63,18 @@ services:
 docker compose -p myapp up -d     # → https://web.myapp.local
 ```
 
-For Pitchfork-backed project processes, keep the proxy config in devflow and set the process runtime in `.devflow.yml`:
+For project processes, keep the proxy config in devflow and set the process runtime in `.devflow.yml`:
 
 ```yaml
 processes:
-  provider: pitchfork
+  provider: native
   daemons:
     api:
       run: npm run dev
       port: { expect: [3000], bump: 50 }
 ```
 
-When `api` starts in workspace `feat-1` for project `myapp`, the devflow proxy publishes the same unified URL shape as native processes:
+When `api` starts in workspace `feat-1` for project `myapp`, the devflow proxy publishes a workspace-specific URL:
 
 ```text
 https://api.feat-1.myapp.local -> 127.0.0.1:<resolved-port>
@@ -134,3 +134,14 @@ A localhost-only JSON API serves dashboards: `GET /api/status`, `GET /api/target
 | `devflow.project` / `devflow.workspace` / `devflow.service` | label | components for auto-generated devflow domains |
 | `VIRTUAL_HOST` / `VIRTUAL_PORT` | env | nginx-proxy-compatible domain/port |
 | `DEVPROXY_PORT` | env | override upstream port |
+
+## Optional desktop companion
+
+The desktop connects to one loopback proxy endpoint and invokes `devflow-proxy` for explicit lifecycle and CA commands. Install the companion on `PATH`:
+
+```sh
+cargo install --path . --no-default-features --features proxy --bin devflow-proxy
+devflow-proxy --json proxy status
+```
+
+CLI and desktop use the same global proxy configuration and runtime owner lease. A second proxy process cannot acquire ownership while the first holds it. Existing desktop-only proxy settings are retired; copy customized ports/suffixes into the global devflow proxy configuration. Workspace and database operations work without the companion.

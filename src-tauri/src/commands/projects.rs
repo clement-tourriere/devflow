@@ -19,8 +19,8 @@ pub struct ProjectDetail {
 
 #[tauri::command]
 pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<ProjectEntry>, String> {
-    let settings = state.settings.read().await;
-    Ok(settings.projects.clone())
+    let _ = state;
+    crate::state::registered_projects().map_err(crate::commands::format_error)
 }
 
 #[tauri::command]
@@ -29,9 +29,15 @@ pub async fn remove_project(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<(), String> {
-    let mut settings = state.settings.write().await;
-    settings.projects.retain(|p| p.path != path);
-    settings.save().map_err(crate::commands::format_error)?;
+    let _ = state;
+    devflow_core::state::LocalStateManager::new()
+        .and_then(|mut registry| {
+            registry.update_control(std::path::Path::new(&path), |c| {
+                c.visible = false;
+                Ok(())
+            })
+        })
+        .map_err(crate::commands::format_error)?;
 
     // Update tray menu to remove project
     crate::update_tray_menu(&app);
@@ -212,11 +218,10 @@ pub async fn add_or_init_project(
         name: project_name,
     };
 
-    let mut settings = state.settings.write().await;
-    if !settings.projects.iter().any(|p| p.path == entry.path) {
-        settings.projects.push(entry.clone());
-        settings.save().map_err(crate::commands::format_error)?;
-    }
+    let _ = state;
+    devflow_core::state::LocalStateManager::new()
+        .and_then(|mut registry| registry.register_project(&abs_path, Some(&entry.name)))
+        .map_err(crate::commands::format_error)?;
 
     crate::update_tray_menu(&app);
 
@@ -336,9 +341,23 @@ pub async fn destroy_project(
     project_path: String,
 ) -> Result<devflow_core::project::DestroyOutcome, String> {
     let path = std::path::Path::new(&project_path);
-    devflow_core::project::destroy(path, devflow_core::project::DestroyOptions::default(), None)
-        .await
-        .map_err(crate::commands::format_error)
+    let result = devflow_core::project::destroy(
+        path,
+        devflow_core::project::DestroyOptions::default(),
+        None,
+    )
+    .await
+    .map_err(crate::commands::format_error)?;
+    if !result.succeeded() {
+        let errors = result
+            .services_destroyed
+            .iter()
+            .filter_map(|s| s.error.as_deref())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!("Project cleanup incomplete; configuration and ownership state retained for retry. {errors}"));
+    }
+    Ok(result)
 }
 
 // ── Orphan detection and cleanup ────────────────────────────────────

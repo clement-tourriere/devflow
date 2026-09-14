@@ -20,6 +20,8 @@ pub const INVENTORY_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InventoryProject {
+    #[serde(default)]
+    pub id: crate::state::ProjectId,
     pub name: String,
     pub root: String,
     pub vcs_provider: String,
@@ -27,6 +29,8 @@ pub struct InventoryProject {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceService {
+    #[serde(default)]
+    pub operations: crate::services::OperationCapabilities,
     pub name: String,
     pub provider: String,
     pub state: Option<String>,
@@ -38,6 +42,8 @@ pub struct WorkspaceService {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceNode {
+    #[serde(default)]
+    pub control: crate::state::control::WorkspaceControl,
     /// Exact branch/bookmark name used for every VCS operation.
     pub name: String,
     /// Collision-resistant key used by service backends and filesystem paths.
@@ -49,6 +55,8 @@ pub struct WorkspaceNode {
     pub identity_status: String,
     /// Immutable raw-name creation source.
     pub parent: Option<String>,
+    #[serde(default)]
+    pub data_parent: Option<String>,
     /// `present` or `missing` when `parent` is set.
     pub parent_state: Option<String>,
     pub children: Vec<String>,
@@ -162,6 +170,7 @@ pub async fn build_workspace_inventory(
             continue;
         }
         let mut workspace = DevflowWorkspace {
+            data_parent: None,
             name: name.clone(),
             service_key: config.get_service_workspace_key(name),
             raw_identity_verified: true,
@@ -297,6 +306,7 @@ pub async fn build_workspace_inventory(
                     database_name: None,
                     parent_workspace: None,
                     provisioned: false,
+                    operations: service_provider.operations(),
                     supports_lifecycle: service_provider.supports_lifecycle(),
                 };
                 match service_provider.list_workspaces().await {
@@ -328,6 +338,7 @@ pub async fn build_workspace_inventory(
                                     database_name: Some(service_workspace.database_name),
                                     parent_workspace,
                                     provisioned: true,
+                                    operations: service_provider.operations(),
                                     supports_lifecycle: service_provider.supports_lifecycle(),
                                 });
                         }
@@ -351,6 +362,7 @@ pub async fn build_workspace_inventory(
                     database_name: None,
                     parent_workspace: None,
                     provisioned: false,
+                    operations: Default::default(),
                     supports_lifecycle: false,
                 });
             }
@@ -433,7 +445,14 @@ pub async fn build_workspace_inventory(
             }
         });
 
+        let control = LocalStateManager::new()?
+            .control(project_dir)
+            .workspaces
+            .get(&workspace.name)
+            .cloned()
+            .unwrap_or_default();
         nodes.push(WorkspaceNode {
+            control,
             children: children.remove(&workspace.name).unwrap_or_default(),
             is_default: workspace.name == default_workspace,
             is_context: context_workspace.as_deref() == Some(workspace.name.as_str()),
@@ -448,6 +467,7 @@ pub async fn build_workspace_inventory(
             service_key: workspace.service_key,
             canonical_service_key,
             identity_status: identity_status.to_string(),
+            data_parent: workspace.data_parent.or_else(|| workspace.parent.clone()),
             parent: workspace.parent,
             parent_state,
         });
@@ -479,6 +499,7 @@ pub async fn build_workspace_inventory(
     Ok(WorkspaceInventory {
         schema_version: INVENTORY_SCHEMA_VERSION,
         project: InventoryProject {
+            id: LocalStateManager::new()?.control(project_dir).id,
             name: config.project_name(),
             root: project_root.display().to_string(),
             vcs_provider: provider_name,
@@ -595,6 +616,8 @@ mod tests {
 
     fn bare_node(name: &str, parent: Option<&str>, children: &[&str]) -> WorkspaceNode {
         WorkspaceNode {
+            control: Default::default(),
+            data_parent: parent.map(str::to_string),
             name: name.to_string(),
             service_key: name.to_string(),
             canonical_service_key: name.to_string(),

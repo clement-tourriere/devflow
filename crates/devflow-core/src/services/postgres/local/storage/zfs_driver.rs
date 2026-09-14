@@ -178,70 +178,41 @@ impl ZfsDriver {
     ) -> anyhow::Result<Option<String>> {
         let parent_metadata = parse_zfs_branch_metadata(parent)?;
         let child_branch_root = branch_root_from_data_dir(child_data_dir)?;
+        anyhow::ensure!(
+            Path::new(&parent.data_dir).is_dir(),
+            "parent data directory is missing"
+        );
+        anyhow::ensure!(
+            Path::new(&parent.data_dir).file_name() == child_data_dir.file_name(),
+            "parent and child data layouts differ"
+        );
 
         let child_dataset = branch_dataset_name(config, &project.id, child_branch_id);
 
-        // Snapshot name must be unique per clone OPERATION, not per child id:
-        // reset re-clones with the same child id, and a deterministic name
-        // collides with the snapshot from the original clone (and used to
-        // fail after the child dataset was already destroyed).
-        let snapshot_name = format!(
-            "devflow_{}_{}",
-            short_id(child_branch_id),
-            short_id(&Uuid::new_v4().to_string())
+        let journal = crate::paths::devflow_config_dir()?
+            .join("storage-operations")
+            .join(format!(
+                "{}.json",
+                crate::services::ownership::identity_digest(&[&child_dataset])
+            ));
+        super::replacement::recover(&ZfsCommands, &journal, &child_dataset).await?;
+        let operation = Uuid::new_v4().to_string();
+        let snapshot_full = format!("{}@devflow_{}", parent_metadata.dataset, operation);
+        let mut replacement = super::replacement::Replacement {
+            target: child_dataset.clone(),
+            staged: format!("{child_dataset}-staged-{operation}"),
+            backup: format!("{child_dataset}-previous-{operation}"),
+            snapshot: snapshot_full.clone(),
+            mountpoint: child_branch_root.into(),
+            had_original: dataset_exists(&child_dataset).await?,
+            committed: false,
+        };
+        super::replacement::replace(&ZfsCommands, &mut replacement, &journal).await?;
+        anyhow::ensure!(
+            child_data_dir.is_dir(),
+            "cloned data directory is missing: {}",
+            child_data_dir.display()
         );
-        let snapshot_full = format!("{}@{}", parent_metadata.dataset, snapshot_name);
-
-        // Order matters: create the new snapshot FIRST so a failure leaves
-        // any existing child dataset untouched; only then drop the previous
-        // incarnation of the child (reset path) and clone.
-        zfs_output_os(vec![
-            OsString::from("snapshot"),
-            OsString::from(snapshot_full.clone()),
-        ])
-        .await
-        .with_context(|| format!("failed to create ZFS snapshot '{snapshot_full}'"))?
-        .success_or_stderr()?;
-
-        // Note: on reset, the replaced child's old origin snapshot stays on
-        // the parent dataset until the parent is destroyed (small leak,
-        // cleaned up by `zfs destroy -r`).
-        if let Err(e) = ensure_dataset_absent(&child_dataset).await {
-            let _ = zfs_output_os(vec![
-                OsString::from("destroy"),
-                OsString::from(snapshot_full.clone()),
-            ])
-            .await;
-            return Err(e);
-        }
-
-        let clone_result = zfs_output_os(vec![
-            OsString::from("clone"),
-            OsString::from("-o"),
-            OsString::from(format!("mountpoint={}", child_branch_root.display())),
-            OsString::from(snapshot_full.clone()),
-            OsString::from(child_dataset.clone()),
-        ])
-        .await
-        .with_context(|| format!("failed to create ZFS clone '{child_dataset}'"))
-        .and_then(|out| out.success_or_stderr());
-        if let Err(e) = clone_result {
-            let _ = zfs_output_os(vec![
-                OsString::from("destroy"),
-                OsString::from(snapshot_full.clone()),
-            ])
-            .await;
-            return Err(e);
-        }
-
-        tokio::fs::create_dir_all(child_data_dir)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to ensure cloned data dir '{}'",
-                    child_data_dir.display()
-                )
-            })?;
 
         let metadata = ZfsBranchMetadata {
             dataset: child_dataset,
@@ -414,18 +385,28 @@ async fn ensure_dataset_absent(dataset: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn dataset_exists(dataset: &str) -> anyhow::Result<bool> {
-    let output = zfs_output_os(vec![
-        OsString::from("list"),
-        OsString::from("-H"),
-        OsString::from("-o"),
-        OsString::from("name"),
-        OsString::from(dataset.to_string()),
-    ])
-    .await
-    .context("failed to run zfs list")?;
+struct ZfsCommands;
+#[async_trait::async_trait]
+impl super::replacement::DatasetCommands for ZfsCommands {
+    async fn run(&self, args: &[String]) -> anyhow::Result<String> {
+        let output = Command::new("zfs")
+            .args(args)
+            .output()
+            .await
+            .context("failed to execute zfs")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "zfs {:?}: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        Ok(String::from_utf8(output.stdout)?)
+    }
+}
 
-    Ok(output.status.success())
+async fn dataset_exists(dataset: &str) -> anyhow::Result<bool> {
+    use super::replacement::DatasetCommands;
+    ZfsCommands.exists(dataset).await
 }
 
 async fn zfs_output<const N: usize>(args: [&str; N]) -> anyhow::Result<std::process::Output> {
@@ -442,10 +423,6 @@ async fn zfs_output_os(args: Vec<OsString>) -> anyhow::Result<std::process::Outp
         .output()
         .await
         .context("failed to execute zfs command")
-}
-
-fn short_id(value: &str) -> String {
-    value.chars().take(8).collect()
 }
 
 trait OutputExt {

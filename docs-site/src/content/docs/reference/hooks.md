@@ -130,7 +130,6 @@ Conditions are template-rendered first, then evaluated. Built-ins:
 | `docker-exec` | exec inside a container | `container`, `command`, `user` |
 | `http` | HTTP request (webhooks, health checks) | `url`, `method`, `body` |
 | `notify` | desktop notification | `message`, `title` |
-| `sync-ai-configs` | merge AI tool configs back to the main worktree | — |
 
 `devflow hook actions` lists the authoritative set with all fields. Actions are shell-free and skip the approval system.
 
@@ -143,7 +142,7 @@ devflow hook install <name>                 # interactive params (detected value
 devflow hook install <name> --param k=v --yes   # non-interactive; never overwrites your entries
 ```
 
-`env-file` · `patch-config` · `db-migrate` · `install-deps` · `workspace-setup` · `sync-ai-configs` · `multiplexer-session` — descriptions in the [hooks guide](/devflow/guides/hooks/#recipes). (`docker-compose` was removed in favor of process daemons; `local-dev-setup` is now `workspace-setup`.)
+`env-file` · `patch-config` · `db-migrate` · `install-deps` · `workspace-setup` · `multiplexer-session` — descriptions in the [hooks guide](/devflow/guides/hooks/#recipes). (`docker-compose` was removed in favor of process daemons; `local-dev-setup` is now `workspace-setup`.)
 
 ## VCS trigger mapping
 

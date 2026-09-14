@@ -75,6 +75,13 @@ pub trait VcsProvider: Send {
     fn worktree_is_dirty(&self, _path: &Path) -> Result<bool> {
         Ok(false)
     }
+    fn worktree_is_locked(&self, path: &Path) -> Result<bool> {
+        if self.provider_name() == "git" {
+            let repository = git2::Repository::open(path)?;
+            return Ok(repository.is_worktree() && repository.path().join("locked").exists());
+        }
+        Ok(false)
+    }
     fn worktree_path(&self, workspace: &str) -> Result<Option<PathBuf>>;
     fn main_worktree_dir(&self) -> Option<PathBuf>;
 

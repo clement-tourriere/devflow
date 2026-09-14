@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use super::{confine_path, ActionResult};
+use super::ActionResult;
+use crate::files::{WorkspaceFiles, WritePolicy};
 use crate::hooks::template::TemplateEngine;
 use crate::hooks::HookContext;
 
@@ -21,15 +22,11 @@ pub fn execute(
     let pattern = template_engine.render(pattern_template, context)?;
     let replacement = template_engine.render(replacement_template, context)?;
 
-    let path = confine_path(working_dir, &file)?;
-
-    let content = if path.exists() {
-        std::fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read file: {}", path.display()))?
-    } else if create_if_missing {
-        String::new()
-    } else {
-        anyhow::bail!("File not found: {}", path.display());
+    let files = WorkspaceFiles::open(working_dir)?;
+    let content = match files.read(&file)? {
+        Some(content) => content,
+        None if create_if_missing => String::new(),
+        None => anyhow::bail!("File not found: {}", file),
     };
 
     let new_content = if use_regex {
@@ -40,13 +37,7 @@ pub fn execute(
         content.replace(&pattern, &replacement)
     };
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-    }
-
-    std::fs::write(&path, &new_content)
-        .with_context(|| format!("Failed to write file: {}", path.display()))?;
+    files.write(&file, new_content.as_bytes(), WritePolicy::Replace)?;
 
     Ok(ActionResult {
         summary: format!("replace in {}", file),

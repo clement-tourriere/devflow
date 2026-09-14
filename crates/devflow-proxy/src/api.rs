@@ -111,6 +111,24 @@ async fn handle_api(
         }
         "/api/targets" => {
             let targets = router.list().await;
+            let targets = targets
+                .into_iter()
+                .map(|target| {
+                    let mut value = serde_json::to_value(&target).unwrap_or_default();
+                    value["endpoint_url"] = serde_json::json!(crate::endpoint::display_endpoint(
+                        &target.domain,
+                        target.port
+                    ));
+                    value["source"] = serde_json::json!(if target.workspace.is_some() {
+                        "devflow-service"
+                    } else if target.project.is_some() {
+                        "docker-compose"
+                    } else {
+                        "standalone-container"
+                    });
+                    value
+                })
+                .collect::<Vec<_>>();
             json_response(&targets)
         }
         "/api/ca" => {

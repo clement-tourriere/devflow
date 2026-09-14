@@ -127,6 +127,26 @@ pub fn project_doctor_checks(
     project_dir: &Path,
 ) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
+    match crate::workspace::operation::OperationJournal::pending(project_dir) {
+        Ok(pending) => {
+            let detail = if pending.is_empty() {
+                "No incomplete operations".into()
+            } else {
+                pending
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "{} {}: {} at {}; retry the operation",
+                            r.kind, r.workspace, r.status, r.phase
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            };
+            checks.push(check("Workspace operations", pending.is_empty(), detail));
+        }
+        Err(error) => checks.push(check("Workspace operations", false, error.to_string())),
+    }
 
     checks.push(match config_path {
         Some(path) => check("Config file", true, path.display().to_string()),

@@ -4,8 +4,8 @@
 
 devflow gives each Git workspace its own isolated development environment. Running
 `devflow switch -c feature-auth` creates (or switches to) a dedicated worktree and
-service instances that belong to that workspace. Data is cloned using Copy-on-Write
-for near-instant, space-efficient workspace creation.
+service instances that belong to that workspace. Select code and data origins
+independently; local providers use Copy-on-Write where the filesystem supports it.
 
 ## Automation defaults
 
@@ -17,12 +17,22 @@ for near-instant, space-efficient workspace creation.
 - Note: `--no-verify` skips ALL hooks entirely — only use when hooks are genuinely unwanted.
 - Git uses linked worktrees for every additional workspace; jj uses native workspaces.
 - Consume raw `name`, reported `service_key`, and `worktree_path` from `devflow --json list`; never reconstruct legacy keys.
+- Use `switch -c task --from main --data-from baseline:clean@v1` to choose independent code and data origins.
+- Use `baseline prepare NAME --service SERVICE --from FILE` to seal reusable local PostgreSQL data.
+- Use `exec --workspace TASK -- PROGRAM ARGS` for literal arguments; use `--shell` for shell syntax.
+- Inspect saved operations with `operation list --history` and `operation inspect ID`; resume supported operations with `operation resume ID`.
+- Check `operation.status` before starting dependent work: `ready` confirms setup; `needs_attention` requires inspecting skipped or failed phases.
+- Retry incomplete setup with the same command. `doctor` reports pending operations; failed seeds require a successful seed retry.
 - Run `remove` from a different workspace; current/default workspaces remain protected even with `--force`.
 
 ## Docs
 
 - [README.md](README.md): Product overview, quickstart, configuration reference, CLI reference, and install guide.
 - [AGENTS.md](AGENTS.md): Agent-first onboarding, bootstrap flow, suggested agent loop, and automation contract.
+- [Data baselines](docs-site/src/content/docs/guides/baselines.md): Prepare sealed PostgreSQL generations and reset children to a recorded version.
+- [Retention and caches](docs-site/src/content/docs/guides/retention-and-caches.md): Pins, expiry, cleanup plans and fingerprinted artifact reuse.
+- [Provider catalog](docs-site/src/content/docs/reference/provider-catalog.md): Generated operation capabilities and required configuration.
+- [Ownership and recovery](docs-site/src/content/docs/guides/ownership-and-recovery.md): Independent code/data origins, resource migration, readiness, and recovery.
 - [CLAUDE.md](CLAUDE.md): Project structure, config schema, development commands, and AI agent context.
 - [CHANGELOG.md](CHANGELOG.md): Version history and release notes.
 - [Documentation site](https://clement-tourriere.github.io/devflow/): Full documentation site (Astro Starlight; source in docs-site/).

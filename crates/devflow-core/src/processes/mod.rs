@@ -6,6 +6,8 @@
 //! semantics, while processes model long-running commands with PID/log/status
 //! semantics.
 
+mod external;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use indexmap::IndexMap;
@@ -27,22 +29,32 @@ use crate::vcs;
 const DEFAULT_READY_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_STOP_TIMEOUT_SECS: u64 = 3;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessStartPolicy {
+    #[default]
+    Configured,
+    InheritParent,
+}
+
 /// Top-level process runtime configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProcessesConfig {
-    /// Runtime provider. `native` uses devflow's built-in process runner;
-    /// `pitchfork` embeds Pitchfork's Rust supervisor/log APIs directly.
+    /// Runtime provider. The built-in runtime is native.
     #[serde(default = "default_process_provider")]
     pub provider: String,
     /// Start all configured processes after a successful workspace switch.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto_start: bool,
+    /// Start configured daemons by default; opt into inheriting an active parent selection.
+    #[serde(default)]
+    pub start_policy: ProcessStartPolicy,
     /// Stop all workspace processes when a workspace is removed.
     #[serde(default = "default_true")]
     pub auto_stop: bool,
     /// Pitchfork-specific integration/reconciliation settings.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pitchfork: Option<PitchforkProcessConfig>,
+    #[serde(default, skip_serializing)]
+    pub pitchfork: Option<serde_json::Value>,
     /// Process definitions keyed by process name.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub daemons: IndexMap<String, ProcessDaemonConfig>,
@@ -54,69 +66,6 @@ fn default_process_provider() -> String {
 
 fn default_true() -> bool {
     true
-}
-
-/// Pitchfork-specific integration/reconciliation settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PitchforkProcessConfig {
-    /// How devflow reconciles `.devflow.yml` with Pitchfork config files.
-    #[serde(default = "default_pitchfork_config_policy")]
-    pub config_policy: String,
-    /// How external Pitchfork daemons are surfaced in devflow UX.
-    #[serde(default = "default_pitchfork_external_daemons")]
-    pub external_daemons: String,
-    /// Optional Pitchfork Web UI bridge settings.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub web_ui: Option<PitchforkWebUiConfig>,
-}
-
-impl Default for PitchforkProcessConfig {
-    fn default() -> Self {
-        Self {
-            config_policy: default_pitchfork_config_policy(),
-            external_daemons: default_pitchfork_external_daemons(),
-            web_ui: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PitchforkWebUiConfig {
-    /// Whether devflow should show/open the Pitchfork Web UI bridge.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Loopback port for Pitchfork's Web UI (default: Pitchfork's 3120).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bind_port: Option<u16>,
-    /// Bind address. Keep this loopback-only for devflow-managed bridges.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bind_address: Option<String>,
-    /// How to treat edits made through Pitchfork's Web UI.
-    #[serde(default = "default_pitchfork_web_edit_mode")]
-    pub edit_mode: String,
-}
-
-impl Default for PitchforkWebUiConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            bind_port: None,
-            bind_address: None,
-            edit_mode: default_pitchfork_web_edit_mode(),
-        }
-    }
-}
-
-fn default_pitchfork_config_policy() -> String {
-    "devflow-owned".to_string()
-}
-
-fn default_pitchfork_external_daemons() -> String {
-    "show".to_string()
-}
-
-fn default_pitchfork_web_edit_mode() -> String {
-    "warn".to_string()
 }
 
 fn is_true(value: &bool) -> bool {
@@ -353,7 +302,7 @@ pub enum ProcessApprovalMode {
 
 /// Runtime abstraction for process supervision.
 ///
-/// devflow ships a built-in native runner and a direct Pitchfork-backed runner.
+/// devflow ships one native runner; external integrations implement this port.
 /// The trait keeps lifecycle/CLI code decoupled from the underlying supervisor.
 #[async_trait]
 pub trait ProcessRuntime: Send + Sync {
@@ -504,101 +453,6 @@ impl ProcessRuntime for NativeProcessRuntime {
     }
 }
 
-/// Runtime that embeds Pitchfork's Rust supervisor/log APIs directly.
-#[derive(Debug, Default)]
-pub struct PitchforkRuntime;
-
-#[async_trait]
-impl ProcessRuntime for PitchforkRuntime {
-    async fn start(
-        &self,
-        config: &Config,
-        project_dir: &Path,
-        workspace: &str,
-        names: &[String],
-        force: bool,
-    ) -> Result<Vec<ProcessResult>> {
-        start_workspace_processes_pitchfork_inner(
-            config,
-            project_dir,
-            workspace,
-            names,
-            force,
-            ProcessApprovalMode::NoApproval,
-        )
-        .await
-    }
-
-    async fn start_with_approval(
-        &self,
-        config: &Config,
-        project_dir: &Path,
-        workspace: &str,
-        names: &[String],
-        force: bool,
-        approval_mode: ProcessApprovalMode,
-    ) -> Result<Vec<ProcessResult>> {
-        start_workspace_processes_pitchfork_inner(
-            config,
-            project_dir,
-            workspace,
-            names,
-            force,
-            approval_mode,
-        )
-        .await
-    }
-
-    async fn stop(
-        &self,
-        config: &Config,
-        project_dir: &Path,
-        workspace: &str,
-        names: &[String],
-    ) -> Result<Vec<ProcessResult>> {
-        stop_workspace_processes_pitchfork(config, project_dir, workspace, names).await
-    }
-
-    async fn restart(
-        &self,
-        config: &Config,
-        project_dir: &Path,
-        workspace: &str,
-        names: &[String],
-    ) -> Result<Vec<ProcessResult>> {
-        restart_workspace_processes_pitchfork(config, project_dir, workspace, names).await
-    }
-
-    fn status(
-        &self,
-        config: &Config,
-        project_dir: &Path,
-        workspace: Option<&str>,
-    ) -> Result<Vec<ProcessStatus>> {
-        list_workspace_processes_native(config, project_dir, workspace)
-    }
-
-    fn logs(
-        &self,
-        config: &Config,
-        project_dir: &Path,
-        workspace: &str,
-        name: &str,
-        tail: Option<usize>,
-    ) -> Result<String> {
-        process_logs_pitchfork(config, project_dir, workspace, name, tail)
-    }
-
-    fn cleanup_workspace_state(
-        &self,
-        config: &Config,
-        project_dir: &Path,
-        workspace: &str,
-    ) -> Result<()> {
-        cleanup_workspace_process_state_native(config, project_dir, workspace)
-    }
-}
-
 /// Resolve the configured process runtime.
 pub fn runtime_for_config(config: &Config) -> Result<Box<dyn ProcessRuntime>> {
     let provider = config
@@ -609,9 +463,9 @@ pub fn runtime_for_config(config: &Config) -> Result<Box<dyn ProcessRuntime>> {
         .to_ascii_lowercase();
     match provider.as_str() {
         "native" => Ok(Box::new(NativeProcessRuntime)),
-        "pitchfork" => Ok(Box::new(PitchforkRuntime)),
+        "pitchfork" => anyhow::bail!("Embedded Pitchfork was retired; use processes.provider: native or an external supervisor command"),
         other => anyhow::bail!(
-            "unknown process provider '{}'; expected native or pitchfork",
+            "unknown process provider '{}'; expected native",
             other
         ),
     }
@@ -903,13 +757,7 @@ pub async fn destroy_project_process_state(
         if !was_alive && !is_pitchfork {
             continue;
         }
-        let stop = async {
-            if is_pitchfork {
-                stop_one_pitchfork(config, project_dir, &record.workspace, &record.process).await
-            } else {
-                stop_one(config, project_dir, &record.workspace, &record.process).await
-            }
-        };
+        let stop = stop_one(config, project_dir, &record.workspace, &record.process);
         match tokio::time::timeout(Duration::from_secs(15), stop).await {
             Ok(Ok(result)) => {
                 if was_alive {
@@ -1110,121 +958,6 @@ async fn restart_workspace_processes_native(
 ) -> Result<Vec<ProcessResult>> {
     let _ = stop_workspace_processes_native(config, project_dir, workspace, names).await?;
     start_workspace_processes_inner(
-        config,
-        project_dir,
-        workspace,
-        names,
-        true,
-        ProcessApprovalMode::NoApproval,
-    )
-    .await
-}
-
-async fn start_workspace_processes_pitchfork_inner(
-    config: &Config,
-    project_dir: &Path,
-    workspace: &str,
-    names: &[String],
-    force: bool,
-    approval_mode: ProcessApprovalMode,
-) -> Result<Vec<ProcessResult>> {
-    let process_names = ordered_process_names(config, names)?;
-    let mut results = Vec::with_capacity(process_names.len());
-    let mut failed = HashSet::new();
-    let mut skipped = HashSet::new();
-
-    for name in process_names {
-        let daemon = config
-            .processes
-            .as_ref()
-            .and_then(|p| p.daemons.get(&name))
-            .context("process disappeared during pitchfork start ordering")?;
-        if let Some(dep) = daemon.depends.iter().find(|dep| skipped.contains(*dep)) {
-            skipped.insert(name.clone());
-            results.push(ProcessResult {
-                process: name,
-                success: true,
-                message: format!("skipped because dependency '{}' was skipped", dep),
-                required: daemon.required,
-                pid: None,
-                ports: Vec::new(),
-            });
-            continue;
-        }
-        if let Some(dep) = daemon.depends.iter().find(|dep| failed.contains(*dep)) {
-            failed.insert(name.clone());
-            results.push(ProcessResult {
-                process: name,
-                success: false,
-                message: format!("not started because dependency '{}' failed", dep),
-                required: daemon.required,
-                pid: None,
-                ports: Vec::new(),
-            });
-            continue;
-        }
-        if !force && process_already_running(config, project_dir, workspace, &name)? {
-            write_desired_state_record(config, project_dir, workspace, &name, "running")?;
-            results.push(start_one_pitchfork(config, project_dir, workspace, &name, force).await?);
-            continue;
-        }
-        if let Some(result) =
-            check_process_approval(config, project_dir, workspace, &name, approval_mode).await?
-        {
-            skipped.insert(name.clone());
-            results.push(result);
-            continue;
-        }
-
-        write_desired_state_record(config, project_dir, workspace, &name, "running")?;
-        let result = start_one_pitchfork(config, project_dir, workspace, &name, force).await?;
-        if !result.success {
-            failed.insert(name.clone());
-        }
-        results.push(result);
-    }
-    Ok(results)
-}
-
-async fn stop_workspace_processes_pitchfork(
-    config: &Config,
-    project_dir: &Path,
-    workspace: &str,
-    names: &[String],
-) -> Result<Vec<ProcessResult>> {
-    let names_to_stop = if names.is_empty() {
-        let mut names = config
-            .processes
-            .as_ref()
-            .map(|p| p.daemons.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        for status in list_workspace_processes(config, project_dir, Some(workspace))? {
-            if !names.contains(&status.process) {
-                names.push(status.process);
-            }
-        }
-        names.reverse();
-        names
-    } else {
-        names.to_vec()
-    };
-
-    let mut results = Vec::with_capacity(names_to_stop.len());
-    for name in names_to_stop {
-        write_desired_state_record(config, project_dir, workspace, &name, "stopped")?;
-        results.push(stop_one_pitchfork(config, project_dir, workspace, &name).await?);
-    }
-    Ok(results)
-}
-
-async fn restart_workspace_processes_pitchfork(
-    config: &Config,
-    project_dir: &Path,
-    workspace: &str,
-    names: &[String],
-) -> Result<Vec<ProcessResult>> {
-    let _ = stop_workspace_processes_pitchfork(config, project_dir, workspace, names).await?;
-    start_workspace_processes_pitchfork_inner(
         config,
         project_dir,
         workspace,
@@ -1438,9 +1171,9 @@ fn list_workspace_processes_native(
                     desired_state: None,
                     runtime: Some(provider.clone()),
                     pitchfork_id: if provider == "pitchfork" {
-                        pitchfork_daemon_id(config, project_dir.as_path(), workspace_name, name)
-                            .ok()
-                            .map(|id| id.qualified())
+                        {
+                            None
+                        }
                     } else {
                         None
                     },
@@ -1485,36 +1218,6 @@ fn process_logs_native(
         )
     })?;
     read_tail(Path::new(&record.log_path), tail)
-}
-
-fn process_logs_pitchfork(
-    config: &Config,
-    project_dir: &Path,
-    workspace: &str,
-    name: &str,
-    tail: Option<usize>,
-) -> Result<String> {
-    let paths = runtime_paths(config, project_dir, workspace)?;
-    let record = read_record(&paths, name)?.with_context(|| {
-        format!(
-            "pitchfork process '{}' has not been started in workspace '{}'",
-            name, workspace
-        )
-    })?;
-    let daemon_id = record
-        .pitchfork_id
-        .as_deref()
-        .map(pitchfork_cli::daemon_id::DaemonId::parse)
-        .transpose()
-        .map_err(|e| anyhow::anyhow!("invalid recorded pitchfork id: {e:#}"))?
-        .unwrap_or(pitchfork_daemon_id(config, project_dir, workspace, name)?);
-    let logs = pitchfork_logs_for_id(&daemon_id, tail)?;
-    let _ = sync_pitchfork_logs_to_file(&daemon_id, Path::new(&record.log_path));
-    if logs.trim().is_empty() {
-        read_tail(Path::new(&record.log_path), tail)
-    } else {
-        Ok(logs)
-    }
 }
 
 /// Remove process records/logs for a deleted workspace.
@@ -1927,9 +1630,9 @@ fn write_desired_state_record(
                 desired_state: None,
                 runtime: Some(provider.clone()),
                 pitchfork_id: if provider == "pitchfork" {
-                    pitchfork_daemon_id(config, project_dir, workspace, name)
-                        .ok()
-                        .map(|id| id.qualified())
+                    {
+                        None
+                    }
                 } else {
                     None
                 },
@@ -1949,432 +1652,6 @@ fn write_desired_state_record(
     }
     record.runtime.get_or_insert(provider);
     write_record(&paths, &record)
-}
-
-async fn start_one_pitchfork(
-    config: &Config,
-    project_dir: &Path,
-    workspace: &str,
-    name: &str,
-    force: bool,
-) -> Result<ProcessResult> {
-    let paths = runtime_paths(config, project_dir, workspace)?;
-    fs::create_dir_all(&paths.processes_dir)?;
-    fs::create_dir_all(&paths.logs_dir)?;
-    let required = daemon_required(config, name).unwrap_or(true);
-
-    if let Some(record) = read_record(&paths, name)? {
-        if let Some(pid) = record.pid {
-            if process_alive(pid) {
-                if !force {
-                    return Ok(ProcessResult {
-                        process: name.to_string(),
-                        success: true,
-                        message: format!("pitchfork process '{}' already running", name),
-                        required: record.required,
-                        pid: Some(pid),
-                        ports: record.ports,
-                    });
-                }
-                let _ = stop_one_pitchfork(config, project_dir, workspace, name).await;
-            }
-        }
-    }
-
-    let rendered = render_process(config, project_dir, workspace, name).await?;
-    if !rendered.workdir.is_dir() {
-        anyhow::bail!(
-            "working directory for process '{}' does not exist: {}",
-            name,
-            rendered.workdir.display()
-        );
-    }
-
-    let daemon_id = pitchfork_daemon_id(config, project_dir, workspace, name)?;
-    let log_path = paths
-        .logs_dir
-        .join(format!("{}.pitchfork.log", sanitize_component(name)));
-    append_log_header(&log_path, name, &rendered.command)?;
-    let mut run_options = pitchfork_run_options(
-        config,
-        project_dir,
-        workspace,
-        name,
-        &rendered,
-        &log_path,
-        force,
-    )?;
-    // Use Pitchfork for supervision, but keep readiness waiting in devflow.
-    // Pitchfork's direct `Supervisor::run(wait_ready=true)` can wait forever
-    // for long-running commands whose readiness signal never arrives, which
-    // blocks workspace create/switch in every frontend. Starting first and then
-    // running devflow's bounded readiness checks gives CLI/TUI/GUI the same
-    // behavior as the native runtime.
-    run_options.wait_ready = false;
-
-    let response = pitchfork_cli::supervisor::SUPERVISOR
-        .run(run_options)
-        .await
-        .map_err(|e| anyhow::anyhow!("pitchfork supervisor start failed: {e:#}"))?;
-
-    let started_at = chrono::Utc::now().to_rfc3339();
-    match response {
-        pitchfork_cli::ipc::IpcResponse::DaemonReady { daemon }
-        | pitchfork_cli::ipc::IpcResponse::DaemonStart { daemon } => {
-            let ports = if daemon.resolved_port.is_empty() {
-                rendered.ports.clone()
-            } else {
-                daemon.resolved_port.clone()
-            };
-            let mut record = ProcessStateRecord {
-                process: name.to_string(),
-                workspace: paths.workspace.clone(),
-                project_key: paths.project_root.display().to_string(),
-                project_name: config.project_name(),
-                pid: daemon.pid,
-                command: rendered.command.clone(),
-                workdir: rendered.workdir.display().to_string(),
-                log_path: log_path.display().to_string(),
-                ports: ports.clone(),
-                status: "running".to_string(),
-                desired_state: Some("running".to_string()),
-                runtime: Some("pitchfork".to_string()),
-                pitchfork_id: Some(daemon_id.qualified()),
-                required,
-                started_at,
-                watch_signature: watch_signature(
-                    &rendered.workdir,
-                    &daemon_watch_patterns(config, name),
-                )
-                .ok()
-                .flatten(),
-                retry_count: 0,
-                last_error: None,
-            };
-            if daemon.pid.is_none() {
-                record.status = "failed".to_string();
-                record.last_error = Some("pitchfork did not report a pid".to_string());
-                write_record(&paths, &record)?;
-                let _ = sync_pitchfork_logs_to_file(&daemon_id, &log_path);
-                return Ok(ProcessResult {
-                    process: name.to_string(),
-                    success: false,
-                    message: format!(
-                        "started pitchfork process '{}' but no pid was reported",
-                        name
-                    ),
-                    required,
-                    pid: None,
-                    ports,
-                });
-            }
-            write_record(&paths, &record)?;
-
-            let mut wait_rendered = rendered.clone();
-            let no_ready_check = wait_rendered.ready_delay.is_none()
-                && wait_rendered.ready_output.is_none()
-                && wait_rendered.ready_http.is_none()
-                && wait_rendered.ready_port.is_none()
-                && wait_rendered.ready_cmd.is_none();
-            if no_ready_check {
-                if let Some(port) = ports.first().copied() {
-                    wait_rendered.ready_port = Some(port);
-                } else {
-                    wait_rendered.ready_delay = Some(0);
-                }
-            }
-
-            let ready = wait_ready(&wait_rendered, &log_path, record.pid).await;
-            match ready {
-                Ok(()) => {
-                    record.status = "ready".to_string();
-                    record.last_error = None;
-                    write_record(&paths, &record)?;
-                    let _ = sync_pitchfork_logs_to_file(&daemon_id, &log_path);
-                    Ok(ProcessResult {
-                        process: name.to_string(),
-                        success: true,
-                        message: format!("started pitchfork process '{}'", name),
-                        required,
-                        pid: record.pid,
-                        ports,
-                    })
-                }
-                Err(e) => {
-                    let error = format!("{e:#}");
-                    record.status = if record.pid.is_some_and(process_alive) {
-                        "running".to_string()
-                    } else {
-                        "failed".to_string()
-                    };
-                    record.last_error = Some(error.clone());
-                    write_record(&paths, &record)?;
-                    let _ = sync_pitchfork_logs_to_file(&daemon_id, &log_path);
-                    Ok(ProcessResult {
-                        process: name.to_string(),
-                        success: false,
-                        message: format!(
-                            "started pitchfork process '{}' but readiness failed: {}",
-                            name, error
-                        ),
-                        required,
-                        pid: record.pid,
-                        ports,
-                    })
-                }
-            }
-        }
-        pitchfork_cli::ipc::IpcResponse::DaemonAlreadyRunning => {
-            let existing = read_record(&paths, name)?;
-            let ports = existing
-                .as_ref()
-                .map(|r| r.ports.clone())
-                .filter(|ports| !ports.is_empty())
-                .unwrap_or_else(|| rendered.ports.clone());
-            let pid = existing
-                .as_ref()
-                .and_then(|r| r.pid)
-                .or_else(|| listening_pid_for_ports(&ports));
-
-            if let Some(mut record) = existing {
-                record.pid = pid;
-                record.ports = ports.clone();
-                record.command = rendered.command.clone();
-                record.workdir = rendered.workdir.display().to_string();
-                record.log_path = log_path.display().to_string();
-                record.desired_state = Some("running".to_string());
-                record.status = if pid.is_some() {
-                    "ready".to_string()
-                } else {
-                    "pending".to_string()
-                };
-                record.runtime = Some("pitchfork".to_string());
-                record.pitchfork_id = Some(daemon_id.qualified());
-                record.last_error = None;
-                write_record(&paths, &record)?;
-            }
-
-            Ok(ProcessResult {
-                process: name.to_string(),
-                success: true,
-                message: format!("pitchfork process '{}' already running", name),
-                required,
-                pid,
-                ports,
-            })
-        }
-        pitchfork_cli::ipc::IpcResponse::DaemonFailed { error } => {
-            write_pitchfork_failure_record(
-                config,
-                &paths,
-                name,
-                &rendered,
-                &log_path,
-                &daemon_id,
-                required,
-                format!("pitchfork failed to start: {error}"),
-            )?;
-            Ok(ProcessResult {
-                process: name.to_string(),
-                success: false,
-                message: format!("pitchfork failed to start process '{}': {}", name, error),
-                required,
-                pid: None,
-                ports: rendered.ports,
-            })
-        }
-        pitchfork_cli::ipc::IpcResponse::DaemonFailedWithCode { exit_code } => {
-            let message = format!(
-                "pitchfork process '{}' exited before ready (exit code {:?})",
-                name, exit_code
-            );
-            write_pitchfork_failure_record(
-                config,
-                &paths,
-                name,
-                &rendered,
-                &log_path,
-                &daemon_id,
-                required,
-                message.clone(),
-            )?;
-            Ok(ProcessResult {
-                process: name.to_string(),
-                success: false,
-                message,
-                required,
-                pid: None,
-                ports: rendered.ports,
-            })
-        }
-        pitchfork_cli::ipc::IpcResponse::PortConflict { port, process, pid } => {
-            let message = format!(
-                "pitchfork port {} is already used by '{}' (pid {})",
-                port, process, pid
-            );
-            write_pitchfork_failure_record(
-                config,
-                &paths,
-                name,
-                &rendered,
-                &log_path,
-                &daemon_id,
-                required,
-                message.clone(),
-            )?;
-            Ok(ProcessResult {
-                process: name.to_string(),
-                success: false,
-                message,
-                required,
-                pid: None,
-                ports: Vec::new(),
-            })
-        }
-        pitchfork_cli::ipc::IpcResponse::NoAvailablePort {
-            start_port,
-            attempts,
-        } => {
-            let message = format!(
-                "pitchfork found no available port after {} attempt(s) starting at {}",
-                attempts, start_port
-            );
-            write_pitchfork_failure_record(
-                config,
-                &paths,
-                name,
-                &rendered,
-                &log_path,
-                &daemon_id,
-                required,
-                message.clone(),
-            )?;
-            Ok(ProcessResult {
-                process: name.to_string(),
-                success: false,
-                message,
-                required,
-                pid: None,
-                ports: Vec::new(),
-            })
-        }
-        other => {
-            let message = format!(
-                "unexpected pitchfork response while starting '{}': {:?}",
-                name, other
-            );
-            write_pitchfork_failure_record(
-                config,
-                &paths,
-                name,
-                &rendered,
-                &log_path,
-                &daemon_id,
-                required,
-                message.clone(),
-            )?;
-            Ok(ProcessResult {
-                process: name.to_string(),
-                success: false,
-                message,
-                required,
-                pid: None,
-                ports: rendered.ports,
-            })
-        }
-    }
-}
-
-async fn stop_one_pitchfork(
-    config: &Config,
-    project_dir: &Path,
-    workspace: &str,
-    name: &str,
-) -> Result<ProcessResult> {
-    let paths = runtime_paths(config, project_dir, workspace)?;
-    let required = daemon_required(config, name).unwrap_or(true);
-    let Some(mut record) = read_record(&paths, name)? else {
-        return Ok(ProcessResult {
-            process: name.to_string(),
-            success: true,
-            message: format!("pitchfork process '{}' not recorded", name),
-            required,
-            pid: None,
-            ports: Vec::new(),
-        });
-    };
-    let pid = record.pid;
-    let ports = record.ports.clone();
-    let daemon_id = record
-        .pitchfork_id
-        .as_deref()
-        .and_then(|id| pitchfork_cli::daemon_id::DaemonId::parse(id).ok())
-        .or_else(|| pitchfork_daemon_id(config, project_dir, workspace, name).ok());
-
-    let mut stopped_by_pitchfork = false;
-    if let Some(id) = daemon_id.as_ref() {
-        match pitchfork_cli::supervisor::SUPERVISOR.stop(id).await {
-            Ok(pitchfork_cli::ipc::IpcResponse::Ok) => {
-                stopped_by_pitchfork = true;
-            }
-            Ok(pitchfork_cli::ipc::IpcResponse::DaemonWasNotRunning)
-            | Ok(pitchfork_cli::ipc::IpcResponse::DaemonNotRunning)
-            | Ok(pitchfork_cli::ipc::IpcResponse::DaemonNotFound) => {
-                // A fresh CLI/GUI process can have a persisted devflow record
-                // for a process that Pitchfork's in-memory supervisor no
-                // longer knows about. If we still have a live pid, fall back to
-                // devflow's process-group termination below instead of treating
-                // the Pitchfork "not found" response as a successful stop.
-                stopped_by_pitchfork = pid.is_none_or(|pid| !process_alive(pid));
-            }
-            Ok(pitchfork_cli::ipc::IpcResponse::DaemonStopFailed { error }) => {
-                record.last_error = Some(error.clone());
-                write_record(&paths, &record)?;
-                return Ok(ProcessResult {
-                    process: name.to_string(),
-                    success: false,
-                    message: format!("pitchfork failed to stop process '{}': {}", name, error),
-                    required: record.required,
-                    pid,
-                    ports,
-                });
-            }
-            Ok(other) => {
-                log::debug!(
-                    "unexpected pitchfork stop response for {}: {:?}",
-                    name,
-                    other
-                );
-            }
-            Err(e) => {
-                log::debug!("pitchfork stop failed for {}: {e:#}", name);
-            }
-        }
-    }
-
-    if !stopped_by_pitchfork {
-        if let Some(pid) = pid {
-            if process_alive(pid) {
-                let stop_timeout = daemon_stop_timeout(config, name);
-                let shutdown_signal = daemon_shutdown_signal(config, name);
-                terminate_process(pid, stop_timeout, shutdown_signal.as_deref()).await?;
-            }
-        }
-    }
-
-    record.status = "stopped".to_string();
-    record.pid = None;
-    record.desired_state = Some("stopped".to_string());
-    record.last_error = None;
-    write_record(&paths, &record)?;
-    Ok(ProcessResult {
-        process: name.to_string(),
-        success: true,
-        message: format!("stopped pitchfork process '{}'", name),
-        required: record.required,
-        pid,
-        ports,
-    })
 }
 
 async fn start_one(
@@ -2532,6 +1809,9 @@ async fn stop_one(
             ports: Vec::new(),
         });
     };
+    if record.runtime.as_deref() == Some("pitchfork") {
+        external::stop_legacy_pitchfork(record.pitchfork_id.as_deref(), project_dir).await?;
+    }
     let pid = record.pid;
     let ports = record.ports.clone();
 
@@ -2650,249 +1930,7 @@ async fn render_process(
     })
 }
 
-fn pitchfork_daemon_id(
-    config: &Config,
-    project_dir: &Path,
-    workspace: &str,
-    name: &str,
-) -> Result<pitchfork_cli::daemon_id::DaemonId> {
-    let project_root = vcs::resolve_project_root(project_dir)
-        .canonicalize()
-        .unwrap_or_else(|_| vcs::resolve_project_root(project_dir));
-    let project_hash = project_hash(&project_root);
-    let workspace = dns_label(&resolve_runtime_workspace_key(
-        config,
-        &project_root,
-        workspace,
-    )?);
-    let namespace = if workspace.is_empty() {
-        format!("df{}", &project_hash[..12.min(project_hash.len())])
-    } else {
-        format!(
-            "df{}-{}",
-            &project_hash[..12.min(project_hash.len())],
-            workspace
-        )
-    };
-    let process_name = dns_label(name);
-    pitchfork_cli::daemon_id::DaemonId::try_new(namespace, process_name)
-        .map_err(|e| anyhow::anyhow!("invalid pitchfork daemon id for '{}': {e:#}", name))
-}
-
-fn pitchfork_run_script(rendered: &RenderedProcess, log_path: &Path) -> String {
-    // Directly embedded Pitchfork supervisors live only as long as the devflow
-    // CLI/GUI process that started them. If stdout/stderr are only captured by
-    // Pitchfork's in-memory reader task, logs disappear when a short-lived CLI
-    // command exits. Redirect process output inside the shell command as well,
-    // so devflow's per-process log file remains authoritative and searchable.
-    // Redirect the shell's own file descriptors with `exec` before running the
-    // command; otherwise command-substitution/GUI callers can keep waiting for
-    // EOF on inherited pipes while the daemon is still alive.
-    // devflow performs bounded readiness checks itself, including ready_output
-    // regexes, so the Pitchfork reader does not need to see stdout/stderr.
-    format!(
-        "exec >> {} 2>&1; {{ {}; }}",
-        shell_single_quote(&log_path.display().to_string()),
-        rendered.command
-    )
-}
-
-fn shell_single_quote(value: &str) -> String {
-    if value.is_empty() {
-        return "''".to_string();
-    }
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn command_looks_pythonish(command: &str) -> bool {
-    command.contains("python") || command.contains("celery") || command.contains("manage.py")
-}
-
-fn pitchfork_run_options(
-    config: &Config,
-    project_dir: &Path,
-    workspace: &str,
-    name: &str,
-    rendered: &RenderedProcess,
-    log_path: &Path,
-    force: bool,
-) -> Result<pitchfork_cli::daemon::RunOptions> {
-    let daemon = config
-        .processes
-        .as_ref()
-        .and_then(|p| p.daemons.get(name))
-        .with_context(|| format!("process '{}' not found in config", name))?;
-    let id = pitchfork_daemon_id(config, project_dir, workspace, name)?;
-    let depends = daemon
-        .depends
-        .iter()
-        .map(|dep| pitchfork_daemon_id(config, project_dir, workspace, dep))
-        .collect::<Result<Vec<_>>>()?;
-    let mut env_map = rendered.env.clone();
-    if command_looks_pythonish(&rendered.command) {
-        env_map
-            .entry("PYTHONUNBUFFERED".to_string())
-            .or_insert_with(|| "1".to_string());
-    }
-    let env = if env_map.is_empty() {
-        None
-    } else {
-        Some(env_map)
-    };
-    let stop_signal = pitchfork_stop_config(daemon)?;
-    let port = pitchfork_cli::pitchfork_toml::PortConfig::from_parts(
-        rendered.ports.clone(),
-        pitchfork_cli::pitchfork_toml::PortBump(0),
-    );
-
-    let no_ready_check = rendered.ready_delay.is_none()
-        && rendered.ready_output.is_none()
-        && rendered.ready_http.is_none()
-        && rendered.ready_port.is_none()
-        && rendered.ready_cmd.is_none();
-    let implicit_ready_port = no_ready_check
-        .then(|| rendered.ports.first().copied())
-        .flatten();
-    let run_script = pitchfork_run_script(rendered, log_path);
-
-    Ok(pitchfork_cli::daemon::RunOptions {
-        id,
-        cmd: vec![run_script.clone()],
-        run: Some(run_script),
-        force,
-        shell_pid: None,
-        dir: pitchfork_cli::pitchfork_toml::Dir(rendered.workdir.clone()),
-        autostop: false,
-        cron_schedule: None,
-        cron_retrigger: None,
-        cron_immediate: None,
-        retry: pitchfork_cli::pitchfork_toml::Retry(daemon.retry.unwrap_or(0)),
-        retry_count: 0,
-        // Pitchfork's direct Supervisor::run waits forever when wait_ready=true
-        // and no readiness signal is configured. For portless daemons, a
-        // zero-second delay preserves devflow's native semantics. For daemons
-        // with expected ports, use the first resolved port as the readiness
-        // probe so crashed web servers do not appear "ready".
-        ready_delay: rendered
-            .ready_delay
-            .or_else(|| (no_ready_check && implicit_ready_port.is_none()).then_some(0)),
-        ready_output: rendered.ready_output.clone(),
-        ready_http: rendered
-            .ready_http
-            .as_ref()
-            .map(|url| pitchfork_cli::pitchfork_toml::ReadyHttp::new(url.clone())),
-        ready_port: rendered.ready_port.or(implicit_ready_port),
-        ready_cmd: rendered.ready_cmd.clone(),
-        port,
-        wait_ready: true,
-        depends,
-        env,
-        watch: daemon.watch.clone(),
-        watch_mode: pitchfork_cli::pitchfork_toml::WatchMode::Native,
-        watch_base_dir: Some(rendered.workdir.clone()),
-        mise: None,
-        slug: None,
-        proxy: Some(false),
-        user: None,
-        memory_limit: None,
-        cpu_limit: None,
-        stop_signal,
-        on_output_hook: None,
-        pty: None,
-    })
-}
-
-fn pitchfork_stop_config(
-    daemon: &ProcessDaemonConfig,
-) -> Result<Option<pitchfork_cli::pitchfork_toml::StopConfig>> {
-    if daemon.shutdown_signal.is_none() && daemon.stop_timeout.is_none() {
-        return Ok(None);
-    }
-    let signal = daemon
-        .shutdown_signal
-        .as_ref()
-        .map(|signal| pitchfork_cli::pitchfork_toml::StopSignal::try_from(signal.clone()))
-        .transpose()
-        .map_err(|e| anyhow::anyhow!("invalid shutdown_signal: {e}"))?
-        .unwrap_or_default();
-    Ok(Some(pitchfork_cli::pitchfork_toml::StopConfig {
-        signal,
-        timeout: daemon.stop_timeout.map(Duration::from_secs),
-    }))
-}
-
 #[allow(clippy::too_many_arguments)]
-fn write_pitchfork_failure_record(
-    config: &Config,
-    paths: &RuntimePaths,
-    name: &str,
-    rendered: &RenderedProcess,
-    log_path: &Path,
-    daemon_id: &pitchfork_cli::daemon_id::DaemonId,
-    required: bool,
-    error: String,
-) -> Result<()> {
-    let record = ProcessStateRecord {
-        process: name.to_string(),
-        workspace: paths.workspace.clone(),
-        project_key: paths.project_root.display().to_string(),
-        project_name: config.project_name(),
-        pid: None,
-        command: rendered.command.clone(),
-        workdir: rendered.workdir.display().to_string(),
-        log_path: log_path.display().to_string(),
-        ports: rendered.ports.clone(),
-        status: "failed".to_string(),
-        desired_state: Some("running".to_string()),
-        runtime: Some("pitchfork".to_string()),
-        pitchfork_id: Some(daemon_id.qualified()),
-        required,
-        started_at: chrono::Utc::now().to_rfc3339(),
-        watch_signature: None,
-        retry_count: 0,
-        last_error: Some(error),
-    };
-    write_record(paths, &record)
-}
-
-fn pitchfork_logs_for_id(
-    daemon_id: &pitchfork_cli::daemon_id::DaemonId,
-    tail: Option<usize>,
-) -> Result<String> {
-    use pitchfork_cli::log_store::{LogQuery, LogStore};
-
-    let mut entries = pitchfork_cli::log_store::sqlite::LOG_STORE
-        .query(&LogQuery {
-            daemon_ids: vec![daemon_id.qualified()],
-            limit: tail,
-            order_desc: tail.is_some(),
-            ..Default::default()
-        })
-        .map_err(|e| anyhow::anyhow!("failed to read pitchfork logs: {e:#}"))?;
-    if tail.is_some() {
-        entries.reverse();
-    }
-    let mut out = String::new();
-    for entry in entries {
-        out.push_str(&entry.message);
-        if !entry.message.ends_with('\n') {
-            out.push('\n');
-        }
-    }
-    Ok(out)
-}
-
-fn sync_pitchfork_logs_to_file(
-    daemon_id: &pitchfork_cli::daemon_id::DaemonId,
-    log_path: &Path,
-) -> Result<()> {
-    let logs = pitchfork_logs_for_id(daemon_id, None)?;
-    if !logs.trim().is_empty() {
-        fs::write(log_path, logs)?;
-    }
-    Ok(())
-}
-
 async fn build_process_context(
     config: &Config,
     project_dir: &Path,
@@ -3107,6 +2145,11 @@ fn parse_http_url(url: &str) -> Option<(String, u16, String)> {
 async fn command_ready(cmd: &str, workdir: &Path, env: &IndexMap<String, String>) -> bool {
     let mut command = Command::new("sh");
     command.arg("-c").arg(cmd).current_dir(workdir);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
     for (k, v) in env {
         command.env(k, v);
     }
@@ -3615,7 +2658,7 @@ mod tests {
         let yaml = r#"
 name: myapp
 processes:
-  provider: pitchfork
+  provider: native
   auto_start: true
   daemons:
     web:
@@ -3654,39 +2697,9 @@ processes:
     fn runtime_provider_accepts_pitchfork_alias_and_rejects_unknown() {
         let mut config = test_config();
         config.processes.as_mut().unwrap().provider = "pitchfork".to_string();
-        assert!(runtime_for_config(&config).is_ok());
+        assert!(runtime_for_config(&config).is_err());
         config.processes.as_mut().unwrap().provider = "unknown".to_string();
         assert!(runtime_for_config(&config).is_err());
-    }
-
-    #[test]
-    fn pitchfork_run_script_redirects_output_for_devflow_readiness() {
-        let rendered = RenderedProcess {
-            command: "python manage.py runserver 127.0.0.1:$PORT".to_string(),
-            workdir: PathBuf::from("/tmp/project"),
-            env: IndexMap::new(),
-            ports: vec![8000],
-            ready_delay: None,
-            ready_port: None,
-            ready_http: None,
-            ready_cmd: None,
-            ready_output: None,
-            ready_timeout: None,
-        };
-        let script = pitchfork_run_script(&rendered, Path::new("/tmp/log's/app.log"));
-        assert_eq!(
-            script,
-            "exec >> '/tmp/log'\\''s/app.log' 2>&1; { python manage.py runserver 127.0.0.1:$PORT; }"
-        );
-
-        let with_output_readiness = RenderedProcess {
-            ready_output: Some("ready".to_string()),
-            ..rendered
-        };
-        assert_eq!(
-            pitchfork_run_script(&with_output_readiness, Path::new("/tmp/app.log")),
-            "exec >> '/tmp/app.log' 2>&1; { python manage.py runserver 127.0.0.1:$PORT; }"
-        );
     }
 
     #[test]
@@ -3828,61 +2841,6 @@ processes:
             list_workspace_processes(&config, project.path(), Some("feature/desired")).unwrap();
         let web = statuses.iter().find(|s| s.process == "web").unwrap();
         assert_eq!(web.status, "stopped");
-        std::env::remove_var("DEVFLOW_PROCESS_STATE_DIR");
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    #[allow(clippy::await_holding_lock)]
-    async fn pitchfork_readiness_timeout_is_bounded() {
-        let _guard = PROCESS_TEST_ENV_LOCK.lock().unwrap();
-        let project = TempDir::new().unwrap();
-        let state = TempDir::new().unwrap();
-        std::env::set_var("DEVFLOW_PROCESS_STATE_DIR", state.path());
-        let unique = format!("devflow-pitchfork-timeout-{}", std::process::id());
-        let yaml = format!(
-            r#"
-name: myapp
-processes:
-  provider: pitchfork
-  daemons:
-    slow:
-      run: "while true; do sleep 1; done # {}"
-      ready_output: "READY_NEVER"
-      ready_timeout: 1
-"#,
-            unique
-        );
-        let config: Config = serde_yaml_ng::from_str(&yaml).unwrap();
-
-        let results = tokio::time::timeout(
-            Duration::from_secs(5),
-            start_workspace_processes(
-                &config,
-                project.path(),
-                "feature/timeout",
-                &["slow".to_string()],
-                true,
-            ),
-        )
-        .await
-        .expect("pitchfork readiness must be bounded")
-        .unwrap();
-        assert_eq!(results.len(), 1);
-        assert!(!results[0].success, "{:?}", results[0]);
-        assert!(
-            results[0].message.contains("readiness failed"),
-            "{:?}",
-            results[0]
-        );
-
-        let _ = stop_workspace_processes(
-            &config,
-            project.path(),
-            "feature/timeout",
-            &["slow".to_string()],
-        )
-        .await;
         std::env::remove_var("DEVFLOW_PROCESS_STATE_DIR");
     }
 

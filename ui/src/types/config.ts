@@ -3,6 +3,7 @@
 export type VcsKind = "git" | "jj";
 
 export interface DevflowConfig {
+  project_id?: string | null;
   name?: string | null;
   default_vcs?: VcsKind | null;
   git?: GitConfig;
@@ -12,7 +13,6 @@ export interface DevflowConfig {
   processes?: ProcessesConfig | null;
   hooks?: Record<string, Record<string, unknown>> | null;
   execute?: ExecuteConfig | null;
-  agent?: AgentConfig | null;
   commit?: CommitConfig | null;
 }
 
@@ -31,7 +31,6 @@ export interface WorktreeConfig {
   path_template: string;
   copy_files: string[];
   copy_ignored: boolean;
-  respect_gitignore: boolean;
   copy_ai_configs: boolean;
   extra_ai_dirs: string[];
 }
@@ -116,37 +115,17 @@ export interface PluginConfig {
   config?: unknown | null;
 }
 
-export type ProcessProvider = "native" | "pitchfork";
-export type PitchforkConfigPolicy = "devflow-owned" | "import" | "mirror" | "merge";
-export type PitchforkExternalDaemons = "hide" | "show" | "importable";
-export type PitchforkWebEditMode = "readonly" | "warn" | "merge";
+export type ProcessProvider = "native";
 export type ProcessPortBump = boolean | number;
-export type ProcessPortConfig =
-  | number
-  | number[]
-  | {
-      expect: number[];
-      bump?: ProcessPortBump;
-    };
+export type ProcessPortConfig = number | number[] | { expect: number[]; bump?: ProcessPortBump };
 
-export interface PitchforkWebUiConfig {
-  enabled: boolean;
-  bind_port?: number | null;
-  bind_address?: string | null;
-  edit_mode: PitchforkWebEditMode;
-}
 
-export interface PitchforkProcessConfig {
-  config_policy: PitchforkConfigPolicy;
-  external_daemons: PitchforkExternalDaemons;
-  web_ui?: PitchforkWebUiConfig | null;
-}
 
 export interface ProcessesConfig {
+  start_policy?: "config" | "inherit_parent";
   provider: ProcessProvider;
   auto_start: boolean;
   auto_stop: boolean;
-  pitchfork?: PitchforkProcessConfig | null;
   daemons: Record<string, ProcessDaemonConfig>;
 }
 
@@ -174,9 +153,7 @@ export interface ExecuteConfig {
   multiplexer?: string | null;
 }
 
-export interface AgentConfig {
-  auto_context: boolean;
-}
+
 
 export interface CommitConfig {
   generation?: CommitGenerationConfig | null;
@@ -184,50 +161,11 @@ export interface CommitConfig {
 
 export interface CommitGenerationConfig {
   command?: string | null;
-  api_key?: string | null;
-  api_url?: string | null;
-  model?: string | null;
 }
 
 // Defaults matching Rust Default impls — used to fill fields omitted by skip_serializing_if
 
-const DEFAULT_GIT: GitConfig = {
-  auto_create_on_workspace: true,
-  main_workspace: "main",
-  workspace_filter_regex: null,
-  exclude_workspaces: ["main", "master"],
-};
 
-const DEFAULT_BEHAVIOR: BehaviorConfig = {
-  max_workspaces: 10,
-};
 
-const DEFAULT_WORKTREE: WorktreeConfig = {
-  path_template: "../{repo}.{workspace}",
-  copy_files: [".env", ".env.local"],
-  copy_ignored: false,
-  respect_gitignore: true,
-  copy_ai_configs: true,
-  extra_ai_dirs: [],
-};
 
 /** DevflowConfig with all required fields filled in */
-export type FilledConfig = DevflowConfig & {
-  git: GitConfig;
-  behavior: BehaviorConfig;
-  worktree: WorktreeConfig;
-};
-
-/** Fill in defaults for fields that serde may omit via skip_serializing_if */
-export function withDefaults(cfg: DevflowConfig): FilledConfig {
-  return {
-    ...cfg,
-    git: cfg.git ? { ...DEFAULT_GIT, ...cfg.git } : { ...DEFAULT_GIT },
-    behavior: cfg.behavior
-      ? { ...DEFAULT_BEHAVIOR, ...cfg.behavior }
-      : { ...DEFAULT_BEHAVIOR },
-    worktree: cfg.worktree
-      ? { ...DEFAULT_WORKTREE, ...cfg.worktree }
-      : { ...DEFAULT_WORKTREE },
-  };
-}

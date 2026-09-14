@@ -243,6 +243,7 @@ fn register_linked_workspace(
 
     let existing = state_mgr.get_workspace_by_dir(project_dir, workspace_name);
     let workspace = DevflowWorkspace {
+        data_parent: None,
         name: workspace_name.to_string(),
         service_key: service_key.to_string(),
         raw_identity_verified: true,

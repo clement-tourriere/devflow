@@ -3,11 +3,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::fs::OpenOptions;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::Duration;
 
 const CURRENT_STATE_SCHEMA_VERSION: u32 = 2;
 
@@ -50,6 +46,9 @@ pub struct DevflowWorkspace {
     /// Immutable creation/clone provenance, stored as a raw VCS name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// Independent immutable data origin (legacy records fall back to parent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_parent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -66,6 +65,8 @@ pub struct DevflowWorkspace {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectState {
+    #[serde(default)]
+    pub control: super::control::ProjectControl,
     pub last_updated: chrono::DateTime<chrono::Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub services: Option<Vec<NamedServiceConfig>>,
@@ -76,17 +77,7 @@ pub struct ProjectState {
 
 pub struct LocalStateManager {
     state_file_path: PathBuf,
-    state: LocalState,
-}
-
-struct FileLockGuard {
-    path: PathBuf,
-}
-
-impl Drop for FileLockGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
+    pub(super) state: LocalState,
 }
 
 fn lock_file_path(path: &Path) -> PathBuf {
@@ -102,41 +93,8 @@ fn scan_project_worktrees(project_dir: &Path) -> Vec<crate::vcs::WorktreeInfo> {
         .unwrap_or_default()
 }
 
-fn acquire_file_lock(lock_path: &Path) -> Result<FileLockGuard> {
-    const MAX_ATTEMPTS: usize = 200;
-    const SLEEP_MS: u64 = 25;
-    const STALE_LOCK_SECS: u64 = 30;
-
-    for _ in 0..MAX_ATTEMPTS {
-        match OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(lock_path)
-        {
-            Ok(_) => {
-                return Ok(FileLockGuard {
-                    path: lock_path.to_path_buf(),
-                });
-            }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                if let Ok(metadata) = fs::metadata(lock_path) {
-                    if let Ok(modified) = metadata.modified() {
-                        if modified.elapsed().unwrap_or_default().as_secs() > STALE_LOCK_SECS {
-                            let _ = fs::remove_file(lock_path);
-                            continue;
-                        }
-                    }
-                }
-                thread::sleep(Duration::from_millis(SLEEP_MS));
-            }
-            Err(e) => {
-                let msg = format!("Failed to acquire lock '{}': {}", lock_path.display(), e);
-                return Err(e).context(msg);
-            }
-        }
-    }
-
-    anyhow::bail!("Timed out waiting for lock file '{}'", lock_path.display())
+fn acquire_file_lock(path: &Path) -> Result<crate::services::ownership::OperationLease> {
+    crate::services::ownership::OperationLease::acquire_sync(path)
 }
 
 impl LocalStateManager {
@@ -150,14 +108,8 @@ impl LocalStateManager {
         };
 
         if mgr.requires_state_migration() {
-            // Dry-run the migration on a snapshot first, with every VCS scan
-            // done BEFORE the transaction lock is taken. Worktree enumeration
-            // can be slow (a subprocess per jj project, network filesystems),
-            // and `acquire_file_lock` steals locks older than 30s as stale —
-            // holding the lock across the scans would let a concurrent
-            // process steal it mid-migration and reintroduce the lost-update
-            // race the lock exists to prevent. Scans read VCS metadata, not
-            // local state, so they need no lock.
+            // Scan VCS metadata before the OS-backed transaction lease so slow
+            // worktree enumeration does not block unrelated registry updates.
             let mut probe = Self {
                 state_file_path: mgr.state_file_path.clone(),
                 state: mgr.state.clone(),
@@ -176,7 +128,7 @@ impl LocalStateManager {
                 // while holding the same transaction lock used by normal
                 // CRUD so an old snapshot cannot overwrite that concurrent
                 // update. The locked section is now pure in-memory work plus
-                // one atomic write — far inside the stale-lock window.
+                // one atomic write.
                 let lock_path = lock_file_path(&mgr.state_file_path);
                 let _lock = acquire_file_lock(&lock_path)?;
                 mgr.refresh_state()?;
@@ -194,12 +146,31 @@ impl LocalStateManager {
             }
         }
 
+        if mgr
+            .state
+            .projects
+            .values()
+            .any(|p| p.control.id.0.is_empty())
+        {
+            mgr.mutate_state(|state| {
+                for (path, project) in &mut state.projects {
+                    project.control.initialize(path);
+                    for workspace in project.workspaces.iter().flatten() {
+                        project.control.workspace(&workspace.name);
+                    }
+                    for service in project.services.iter().flatten() {
+                        project.control.service(&service.name);
+                    }
+                }
+                Ok(())
+            })?;
+        }
         Ok(mgr)
     }
 
     /// Enumerate live worktrees for every project that still has unresolved
     /// workspace identities. Run before taking the state lock: this is the
-    /// expensive part of migration and must not count against the stale-lock
+    /// expensive part of migration and should not extend the transaction-lock
     /// window.
     fn scan_worktrees_for_identity_migration(
         &self,
@@ -478,7 +449,7 @@ impl LocalStateManager {
     /// so concurrent agents could both mutate the same snapshot and the later
     /// serialized write silently discarded the earlier update. Keep the lock
     /// across refresh, mutation, and atomic rename instead.
-    fn mutate_state<T>(
+    pub(super) fn mutate_state<T>(
         &mut self,
         mutation: impl FnOnce(&mut LocalState) -> Result<T>,
     ) -> Result<T> {
@@ -528,6 +499,7 @@ impl LocalStateManager {
         self.mutate_state(move |state| {
             let existing = state.projects.get(&project_key);
             let existing_branches = existing.and_then(|p| p.workspaces.clone());
+            let existing_control = existing.map(|p| p.control.clone()).unwrap_or_default();
             let mut services = existing
                 .and_then(|p| p.services.clone())
                 .unwrap_or_default();
@@ -553,6 +525,7 @@ impl LocalStateManager {
             state.projects.insert(
                 project_key,
                 ProjectState {
+                    control: existing_control,
                     last_updated: chrono::Utc::now(),
                     services: Some(services),
                     workspaces: existing_branches,
@@ -651,11 +624,14 @@ impl LocalStateManager {
             .projects
             .entry(project_key)
             .or_insert_with(|| ProjectState {
+                control: Default::default(),
                 last_updated: chrono::Utc::now(),
                 services: None,
                 workspaces: None,
             });
 
+        project.control.initialize(&crate::vcs::resolve_project_root(project_path).display().to_string());
+        project.control.workspace(&workspace.name);
         let workspaces = project.workspaces.get_or_insert_with(Vec::new);
 
         if let Some(pos) = workspaces.iter().position(|b| b.name == workspace.name) {
@@ -897,6 +873,7 @@ impl LocalStateManager {
         }
 
         let workspace = DevflowWorkspace {
+            data_parent: None,
             name: main_workspace.to_string(),
             service_key: crate::config::workspace_service_key(main_workspace),
             raw_identity_verified: true,
@@ -1121,6 +1098,7 @@ mod tests {
 
     fn ws(name: &str) -> DevflowWorkspace {
         DevflowWorkspace {
+            data_parent: None,
             name: name.to_string(),
             service_key: crate::config::workspace_service_key(name),
             raw_identity_verified: true,
@@ -1155,11 +1133,13 @@ mod tests {
         // Destination (main repo) has workspace "main"; source (worktree silo)
         // has "main" (duplicate) and "feature" (unique).
         let mut dst = ProjectState {
+            control: Default::default(),
             last_updated: chrono::Utc::now() - chrono::Duration::hours(1),
             services: None,
             workspaces: Some(vec![ws("main")]),
         };
         let src = ProjectState {
+            control: Default::default(),
             last_updated: chrono::Utc::now(),
             services: None,
             workspaces: Some(vec![ws("main"), ws("feature")]),
@@ -1218,6 +1198,7 @@ mod tests {
             .to_string_lossy()
             .to_string();
         let old_workspace = DevflowWorkspace {
+            data_parent: None,
             name: crate::config::legacy_normalize_workspace_name("feature/auth"),
             service_key: String::new(),
             raw_identity_verified: false,
@@ -1235,6 +1216,7 @@ mod tests {
                 projects: HashMap::from([(
                     project_key,
                     ProjectState {
+                        control: Default::default(),
                         last_updated: chrono::Utc::now(),
                         services: None,
                         workspaces: Some(vec![old_workspace]),
@@ -1284,6 +1266,7 @@ mod tests {
             .to_string_lossy()
             .to_string();
         let old_workspace = DevflowWorkspace {
+            data_parent: None,
             name: "feature/auth".to_string(),
             service_key: String::new(),
             raw_identity_verified: false,
@@ -1301,6 +1284,7 @@ mod tests {
                 projects: HashMap::from([(
                     project_key,
                     ProjectState {
+                        control: Default::default(),
                         last_updated: chrono::Utc::now(),
                         services: None,
                         workspaces: Some(vec![old_workspace]),
@@ -1348,6 +1332,7 @@ mod tests {
             .to_string_lossy()
             .to_string();
         let adoptable = DevflowWorkspace {
+            data_parent: None,
             name: crate::config::legacy_normalize_workspace_name("feature/auth"),
             service_key: String::new(),
             raw_identity_verified: false,
@@ -1361,6 +1346,7 @@ mod tests {
         // A legacy entry with no matching live worktree stays unverified
         // forever and keeps re-triggering migration.
         let unresolved = DevflowWorkspace {
+            data_parent: None,
             name: "stale_orphan".to_string(),
             service_key: String::new(),
             raw_identity_verified: false,
@@ -1378,6 +1364,7 @@ mod tests {
                 projects: HashMap::from([(
                     project_key,
                     ProjectState {
+                        control: Default::default(),
                         last_updated: chrono::Utc::now(),
                         services: None,
                         workspaces: Some(vec![adoptable, unresolved]),
@@ -1422,6 +1409,7 @@ mod tests {
         let project_path = container.path().join("temporarily-unavailable");
         let project_key = project_path.to_string_lossy().to_string();
         let old_workspace = DevflowWorkspace {
+            data_parent: None,
             name: crate::config::legacy_normalize_workspace_name("feature/auth"),
             service_key: String::new(),
             raw_identity_verified: false,
@@ -1439,6 +1427,7 @@ mod tests {
                 projects: HashMap::from([(
                     project_key,
                     ProjectState {
+                        control: Default::default(),
                         last_updated: chrono::Utc::now(),
                         services: None,
                         workspaces: Some(vec![old_workspace]),
@@ -1519,9 +1508,11 @@ mod tests {
                 projects: HashMap::from([(
                     project_key,
                     ProjectState {
+                        control: Default::default(),
                         last_updated: chrono::Utc::now(),
                         services: None,
                         workspaces: Some(vec![DevflowWorkspace {
+                            data_parent: None,
                             name: legacy_key.clone(),
                             service_key: String::new(),
                             raw_identity_verified: false,
@@ -1576,9 +1567,11 @@ mod tests {
                 projects: HashMap::from([(
                     project_key,
                     ProjectState {
+                        control: Default::default(),
                         last_updated: chrono::Utc::now(),
                         services: None,
                         workspaces: Some(vec![DevflowWorkspace {
+                            data_parent: None,
                             name: "feature/auth".to_string(),
                             service_key: "feature_auth".to_string(),
                             raw_identity_verified: true,
@@ -1624,6 +1617,7 @@ mod tests {
                 projects: HashMap::from([(
                     project_key,
                     ProjectState {
+                        control: Default::default(),
                         last_updated: chrono::Utc::now(),
                         services: None,
                         workspaces: Some(vec![ws("feature/adopted")]),

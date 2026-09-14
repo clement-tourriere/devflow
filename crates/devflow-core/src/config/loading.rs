@@ -11,6 +11,20 @@ struct WorkspaceConfigDirs {
 }
 
 impl Config {
+    pub fn resource_project_identity(&self) -> String {
+        if let Some(id) = self.project_id.as_ref().filter(|id| !id.trim().is_empty()) {
+            return format!("id:{id}");
+        }
+        match self.project_root.as_ref() {
+            Some(root) => crate::state::LocalStateManager::new()
+                .map(|state| state.control(root).resource_identity)
+                .unwrap_or_else(|_| {
+                    format!("path:{}", crate::vcs::resolve_project_root(root).display())
+                }),
+            None => format!("name:{}", self.project_name()),
+        }
+    }
+
     /// Return the project name, falling back to the directory name of the
     /// config file (or the current working directory).
     pub fn project_name(&self) -> String {
@@ -95,6 +109,47 @@ impl Config {
             }
         }
 
+        if config.worktree.respect_gitignore.take().is_some() {
+            log::warn!(
+                "{}: worktree.respect_gitignore was retired; use worktree.copy_ignored explicitly",
+                path.display()
+            );
+        }
+        if config.agent.take().is_some() {
+            log::warn!("{}: agent.auto_context was never implemented and has been removed; use devflow agent context", path.display());
+        }
+        if let Some(generation) = config.commit.as_mut().and_then(|c| c.generation.as_mut()) {
+            if !generation.legacy.is_empty() {
+                log::warn!(
+                    "{}: API commit generation was removed; configure commit.generation.command",
+                    path.display()
+                );
+                generation.legacy.clear();
+            }
+        }
+        if let Some(hooks) = &mut config.hooks {
+            for entries in hooks.values_mut() {
+                entries.retain(|name, entry| {
+                    let retired = matches!(entry, crate::hooks::HookEntry::Action(action) if matches!(action.action, crate::hooks::HookAction::SyncAiConfigs));
+                    if retired { log::warn!("{}: removed retired AI configuration merge hook '{}' from the effective configuration", path.display(), name); }
+                    !retired
+                });
+            }
+        }
+
+        if let Some(processes) = &mut config.processes {
+            if processes.provider.eq_ignore_ascii_case("pitchfork") {
+                log::warn!("{}: embedded Pitchfork was retired; process commands now use the native runtime. Existing runtime records remain available for explicit stop/cleanup.", path.display());
+                processes.provider = "native".into();
+            }
+            if processes.pitchfork.take().is_some() {
+                log::warn!(
+                    "{}: removed retired processes.pitchfork integration settings",
+                    path.display()
+                );
+            }
+        }
+
         // Remember where this project lives. `parent()` of a relative path
         // like ".devflow.yml" is "", which must not shadow the cwd fallback.
         config.project_root = path
@@ -110,13 +165,7 @@ impl Config {
     }
 
     pub fn save_to_file(&self, path: &Path) -> Result<()> {
-        let content =
-            serde_yaml_ng::to_string(self).context("Failed to serialize config to YAML")?;
-
-        fs::write(path, content)
-            .with_context(|| format!("Failed to write config file: {}", path.display()))?;
-
-        Ok(())
+        super::document::ConfigDocument::write_config(path, self)
     }
 
     pub fn find_config_file() -> Result<Option<PathBuf>> {
@@ -248,7 +297,7 @@ impl Config {
     /// especially important immediately after `devflow init`, where the
     /// generated `.devflow.yml` can still be untracked and therefore absent
     /// from newly-created linked worktrees.
-    fn resolve_config_path(start: &Path, search_ancestors: bool) -> Option<PathBuf> {
+    pub(crate) fn resolve_config_path(start: &Path, search_ancestors: bool) -> Option<PathBuf> {
         let workspace_dirs = Self::workspace_config_dirs(start);
         let local = match (search_ancestors, workspace_dirs.as_ref()) {
             // A linked workspace is a project boundary. Searching beyond its

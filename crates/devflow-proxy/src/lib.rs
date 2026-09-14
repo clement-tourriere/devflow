@@ -92,6 +92,7 @@ impl Default for ProxyConfig {
 /// Handle to a running proxy — can be used to stop it.
 pub struct ProxyHandle {
     shutdown_tx: watch::Sender<bool>,
+    _owner: std::fs::File,
 }
 
 impl ProxyHandle {
@@ -103,6 +104,19 @@ impl ProxyHandle {
 
 /// Start the proxy and return a handle to control it.
 pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
+    let lock_path = ca::default_pid_path().with_extension("owner.lock");
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let owner = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    owner
+        .try_lock()
+        .map_err(|e| anyhow::anyhow!("another devflow proxy owns the runtime: {e}"))?;
     // Install rustls crypto provider (required by rustls 0.23+)
     let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -387,5 +401,8 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
         },
     );
 
-    Ok(ProxyHandle { shutdown_tx })
+    Ok(ProxyHandle {
+        shutdown_tx,
+        _owner: owner,
+    })
 }

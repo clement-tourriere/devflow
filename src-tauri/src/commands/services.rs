@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 #[derive(Serialize)]
 pub struct ServiceEntry {
+    pub operations: services::OperationCapabilities,
     pub name: String,
     pub service_type: String,
     pub provider_type: String,
@@ -34,6 +35,14 @@ pub struct AddServiceRequest {
 
 fn service_entry(named: &NamedServiceConfig, source: &str) -> ServiceEntry {
     ServiceEntry {
+        operations: services::descriptor::providers()
+            .into_iter()
+            .find(|d| {
+                d.provider == named.provider_type
+                    && d.service_types.contains(&named.service_type.as_str())
+            })
+            .map(|d| d.operations)
+            .unwrap_or_default(),
         name: named.name.clone(),
         service_type: named.service_type.clone(),
         provider_type: named.provider_type.clone(),
@@ -77,6 +86,10 @@ pub async fn add_service(
     request: AddServiceRequest,
 ) -> Result<ServiceEntry, String> {
     let project_dir = std::path::Path::new(&project_path);
+    let _policy_lease =
+        devflow_core::workspace::operation::project_policy_lease(project_dir, false)
+            .await
+            .map_err(crate::commands::format_error)?;
     let config_path = crate::commands::project_config::config_path(project_dir);
     let named = build_named_config(&request)?;
 
@@ -92,24 +105,26 @@ pub async fn add_service(
     let config =
         crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
 
-    // For local providers, initialize the service.
     if services::factory::ProviderType::is_local(&named.provider_type) {
-        if let Ok(provider) =
-            services::factory::create_provider_from_named_config(&config, &named).await
+        let provider = services::factory::create_provider_from_named_config(&config, &named)
+            .await
+            .map_err(crate::commands::format_error)?;
+        let key = resolve_effective_service_key(project_dir, &config.git.main_workspace)?;
+        if !provider
+            .workspace_exists(&key)
+            .await
+            .map_err(crate::commands::format_error)?
         {
-            let default_workspace_key =
-                resolve_effective_service_key(project_dir, &config.git.main_workspace)?;
-            let _ = provider
-                .create_workspace(&default_workspace_key, None)
-                .await;
-
-            if let Some(ref seed) = request.seed_from {
-                if !seed.is_empty() {
-                    let _ = provider
-                        .seed_from_source(&default_workspace_key, seed)
-                        .await;
-                }
-            }
+            provider
+                .create_workspace(&key, None)
+                .await
+                .map_err(crate::commands::format_error)?;
+        }
+        if let Some(seed) = request.seed_from.as_deref().filter(|s| !s.is_empty()) {
+            provider
+                .seed_from_source(&key, seed)
+                .await
+                .map_err(crate::commands::format_error)?;
         }
     }
 
@@ -201,6 +216,14 @@ fn build_named_config(request: &AddServiceRequest) -> Result<NamedServiceConfig,
         request.provider_type.clone()
     };
 
+    let descriptor = services::descriptor::validate_choice(&provider_type, &request.service_type)
+        .map_err(crate::commands::format_error)?;
+    if !descriptor.required_configuration.is_empty() {
+        return Err(format!(
+            "Configure {} in the raw project configuration before adding this provider",
+            descriptor.required_configuration.join(", ")
+        ));
+    }
     let auto_workspace = request.auto_workspace.unwrap_or(true);
     let storage = normalize_storage_preference(
         request.storage.as_deref(),
@@ -253,6 +276,7 @@ fn build_named_config(request: &AddServiceRequest) -> Result<NamedServiceConfig,
         "postgres" => {
             if provider_type == "local" {
                 named.local = Some(LocalServiceConfig {
+                    legacy_project_id: None,
                     image: Some(
                         request
                             .image
@@ -283,8 +307,18 @@ fn build_named_config(request: &AddServiceRequest) -> Result<NamedServiceConfig,
             });
         }
         "redis" => {
-            // Shared Redis uses one global container and allocates a DB index
-            // per devflow workspace.
+            if provider_type == "local" {
+                named.shared = None;
+                named.generic = Some(GenericDockerConfig {
+                    image: request.image.clone().unwrap_or_else(|| "redis:7".into()),
+                    port_mapping: Some("6379:6379".into()),
+                    port_range_start: Some(56379),
+                    environment: Default::default(),
+                    volumes: Vec::new(),
+                    command: None,
+                    healthcheck: Some("redis-cli ping".into()),
+                });
+            }
         }
         "mysql" => {
             named.mysql = Some(MySQLConfig {
@@ -355,12 +389,17 @@ pub async fn start_service(
         .await
         .map_err(crate::commands::format_error)?;
 
-    let service_key =
-        resolve_operation_service_key(project_dir, &workspace_name, provider.as_ref()).await?;
-    provider
-        .start_workspace(&service_key)
-        .await
-        .map_err(crate::commands::format_error)
+    devflow_core::application::service_operation(
+        &config,
+        project_dir,
+        &service_name,
+        &workspace_name,
+        provider.as_ref(),
+        services::ServiceOperation::Start,
+    )
+    .await
+    .map(|_| ())
+    .map_err(crate::commands::format_error)
 }
 
 #[tauri::command]
@@ -383,12 +422,17 @@ pub async fn stop_service(
         .await
         .map_err(crate::commands::format_error)?;
 
-    let service_key =
-        resolve_operation_service_key(project_dir, &workspace_name, provider.as_ref()).await?;
-    provider
-        .stop_workspace(&service_key)
-        .await
-        .map_err(crate::commands::format_error)
+    devflow_core::application::service_operation(
+        &config,
+        project_dir,
+        &service_name,
+        &workspace_name,
+        provider.as_ref(),
+        services::ServiceOperation::Stop,
+    )
+    .await
+    .map(|_| ())
+    .map_err(crate::commands::format_error)
 }
 
 #[tauri::command]
@@ -563,12 +607,17 @@ pub async fn reset_service(
         .await
         .map_err(crate::commands::format_error)?;
 
-    let service_key =
-        resolve_operation_service_key(project_dir, &workspace_name, provider.as_ref()).await?;
-    provider
-        .reset_workspace(&service_key)
-        .await
-        .map_err(crate::commands::format_error)
+    devflow_core::application::service_operation(
+        &config,
+        project_dir,
+        &service_name,
+        &workspace_name,
+        provider.as_ref(),
+        services::ServiceOperation::Reset,
+    )
+    .await
+    .map(|_| ())
+    .map_err(crate::commands::format_error)
 }
 
 #[tauri::command]
@@ -578,6 +627,9 @@ pub async fn delete_service_workspace(
     workspace_name: String,
 ) -> Result<(), String> {
     let project_dir = std::path::Path::new(&project_path);
+    let _policy_lease = devflow_core::workspace::operation::project_policy_lease(project_dir, true)
+        .await
+        .map_err(crate::commands::format_error)?;
     let config =
         crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
 
@@ -611,6 +663,9 @@ pub async fn destroy_service(
     service_name: String,
 ) -> Result<DestroyServiceResult, String> {
     let project_dir = std::path::Path::new(&project_path);
+    let _policy_lease = devflow_core::workspace::operation::project_policy_lease(project_dir, true)
+        .await
+        .map_err(crate::commands::format_error)?;
     let config_path = crate::commands::project_config::config_path(project_dir);
     let config =
         crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
@@ -771,13 +826,12 @@ pub async fn generate_agent_guides(project_path: String) -> Result<Vec<String>, 
     let project_dir = std::path::Path::new(&project_path);
     let config =
         crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
-    devflow_core::agent::install_agent_skills(&config, project_dir)
-        .map_err(crate::commands::format_error)
-}
-
-#[tauri::command]
-pub async fn install_agent_skills(project_path: String) -> Result<Vec<String>, String> {
-    generate_agent_guides(project_path).await
+    devflow_core::agent::install_agent_guides(
+        &config,
+        project_dir,
+        &devflow_core::agent::default_agent_guide_targets(),
+    )
+    .map_err(crate::commands::format_error)
 }
 
 #[tauri::command]
@@ -791,14 +845,10 @@ pub async fn check_agent_guides(
     project_path: String,
 ) -> Result<devflow_core::agent::SkillInstallStatus, String> {
     let project_dir = std::path::Path::new(&project_path);
-    Ok(devflow_core::agent::check_agent_skills_installed(
-        project_dir,
-    ))
+    Ok(devflow_core::agent::check_agent_guides(project_dir))
 }
 
 #[tauri::command]
-pub async fn check_agent_skills(
-    project_path: String,
-) -> Result<devflow_core::agent::SkillInstallStatus, String> {
-    check_agent_guides(project_path).await
+pub fn provider_descriptors() -> Vec<services::descriptor::ProviderDescriptor> {
+    services::descriptor::providers()
 }

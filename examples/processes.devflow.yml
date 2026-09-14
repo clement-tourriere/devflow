@@ -25,8 +25,8 @@ hooks:
           DATABASE_URL: "{{ service['app-db'].url }}"
 
 processes:
-  # Use `pitchfork` to embed Pitchfork's Rust supervisor directly; omit for native.
-  provider: pitchfork
+  # The native supervisor is included in devflow.
+  provider: native
   auto_start: true
   auto_stop: true
   daemons:

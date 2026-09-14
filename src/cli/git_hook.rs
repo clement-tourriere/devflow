@@ -117,6 +117,7 @@ pub(super) async fn handle_git_hook(
                 config_path,
                 false, // create — workspace already exists from git
                 None,  // from
+                None,  // data_from
                 false, // no_services
                 false, // no_processes
                 false, // no_verify

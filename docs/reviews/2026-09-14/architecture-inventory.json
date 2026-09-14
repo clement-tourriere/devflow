@@ -1,0 +1,215 @@
+{
+  "date": "2026-09-14",
+  "head_commit": "16c15243acd2116ebdd0e67185221bfa98e95e41",
+  "scope": "Current working-tree Rust, TypeScript and TSX source under the listed roots; includes inline tests, excludes external tests, docs, styles and generated output.",
+  "sections": [
+    {
+      "root": "crates/devflow-core/src",
+      "files": 82,
+      "lines": 35923,
+      "largest_files": [
+        {
+          "path": "crates/devflow-core/src/processes/mod.rs",
+          "lines": 4102
+        },
+        {
+          "path": "crates/devflow-core/src/state/local_state.rs",
+          "lines": 1724
+        },
+        {
+          "path": "crates/devflow-core/src/hooks/recipes.rs",
+          "lines": 1647
+        },
+        {
+          "path": "crates/devflow-core/src/hooks/executor.rs",
+          "lines": 1204
+        },
+        {
+          "path": "crates/devflow-core/src/services/postgres/local/mod.rs",
+          "lines": 1183
+        },
+        {
+          "path": "crates/devflow-core/src/vcs/jj.rs",
+          "lines": 1047
+        },
+        {
+          "path": "crates/devflow-core/src/vcs/git.rs",
+          "lines": 1019
+        },
+        {
+          "path": "crates/devflow-core/src/services/factory.rs",
+          "lines": 963
+        }
+      ]
+    },
+    {
+      "root": "src",
+      "files": 41,
+      "lines": 17965,
+      "largest_files": [
+        {
+          "path": "src/cli/service.rs",
+          "lines": 2687
+        },
+        {
+          "path": "src/cli/mod.rs",
+          "lines": 1843
+        },
+        {
+          "path": "src/cli/hook.rs",
+          "lines": 1344
+        },
+        {
+          "path": "src/tui/app.rs",
+          "lines": 1211
+        },
+        {
+          "path": "src/tui/components/workspaces.rs",
+          "lines": 1052
+        },
+        {
+          "path": "src/cli/workspace/mod.rs",
+          "lines": 848
+        },
+        {
+          "path": "src/tui/context.rs",
+          "lines": 699
+        },
+        {
+          "path": "src/cli/init.rs",
+          "lines": 641
+        }
+      ]
+    },
+    {
+      "root": "src-tauri/src",
+      "files": 13,
+      "lines": 3994,
+      "largest_files": [
+        {
+          "path": "src-tauri/src/commands/services.rs",
+          "lines": 807
+        },
+        {
+          "path": "src-tauri/src/commands/hooks.rs",
+          "lines": 795
+        },
+        {
+          "path": "src-tauri/src/main.rs",
+          "lines": 621
+        },
+        {
+          "path": "src-tauri/src/commands/projects.rs",
+          "lines": 418
+        },
+        {
+          "path": "src-tauri/src/commands/workspaces.rs",
+          "lines": 412
+        },
+        {
+          "path": "src-tauri/src/commands/terminal.rs",
+          "lines": 270
+        },
+        {
+          "path": "src-tauri/src/commands/processes.rs",
+          "lines": 213
+        },
+        {
+          "path": "src-tauri/src/commands/proxy.rs",
+          "lines": 191
+        }
+      ]
+    },
+    {
+      "root": "ui/src",
+      "files": 41,
+      "lines": 13119,
+      "largest_files": [
+        {
+          "path": "ui/src/pages/projects/ProjectDetail.tsx",
+          "lines": 2881
+        },
+        {
+          "path": "ui/src/pages/hooks/HookManager.tsx",
+          "lines": 1348
+        },
+        {
+          "path": "ui/src/pages/hooks/HookEditModal.tsx",
+          "lines": 1193
+        },
+        {
+          "path": "ui/src/components/TerminalPanel.tsx",
+          "lines": 708
+        },
+        {
+          "path": "ui/src/pages/config/sections/ProcessesSection.tsx",
+          "lines": 581
+        },
+        {
+          "path": "ui/src/components/AddServiceModal.tsx",
+          "lines": 538
+        },
+        {
+          "path": "ui/src/types/index.ts",
+          "lines": 494
+        },
+        {
+          "path": "ui/src/pages/settings/Settings.tsx",
+          "lines": 420
+        }
+      ]
+    },
+    {
+      "root": "crates/devflow-proxy/src",
+      "files": 14,
+      "lines": 3999,
+      "largest_files": [
+        {
+          "path": "crates/devflow-proxy/src/server.rs",
+          "lines": 614
+        },
+        {
+          "path": "crates/devflow-proxy/src/discovery.rs",
+          "lines": 594
+        },
+        {
+          "path": "crates/devflow-proxy/src/mdns.rs",
+          "lines": 536
+        },
+        {
+          "path": "crates/devflow-proxy/src/lib.rs",
+          "lines": 391
+        },
+        {
+          "path": "crates/devflow-proxy/src/platform.rs",
+          "lines": 336
+        },
+        {
+          "path": "crates/devflow-proxy/src/network.rs",
+          "lines": 256
+        },
+        {
+          "path": "crates/devflow-proxy/src/nss.rs",
+          "lines": 241
+        },
+        {
+          "path": "crates/devflow-proxy/src/ca.rs",
+          "lines": 222
+        }
+      ]
+    },
+    {
+      "root": "crates/devflow-terminal/src",
+      "files": 1,
+      "lines": 305,
+      "largest_files": [
+        {
+          "path": "crates/devflow-terminal/src/lib.rs",
+          "lines": 305
+        }
+      ]
+    }
+  ],
+  "total_files": 192,
+  "total_lines": 75305
+}

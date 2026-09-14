@@ -131,6 +131,18 @@ pub async fn create_provider_from_named_config(
     config: &Config,
     named: &NamedServiceConfig,
 ) -> Result<Box<dyn ServiceProvider>> {
+    if matches!(named.service_type.as_str(), "mysql" | "mariadb")
+        && matches!(
+            named.provider_type.to_lowercase().as_str(),
+            "shared" | "global"
+        )
+    {
+        anyhow::bail!(
+            "Service '{}': mysql does not support `type: shared` — use `type: local`",
+            named.name
+        );
+    }
+    #[cfg(feature = "service-local")]
     let project_name = config.project_name();
 
     match named.service_type.as_str() {
@@ -147,8 +159,10 @@ pub async fn create_provider_from_named_config(
                 named.provider_type.to_lowercase().as_str(),
                 "shared" | "global"
             ) {
-                let provider = crate::services::shared::SharedClickHouseProvider::new(
+                let provider = crate::services::shared::SharedClickHouseProvider::new_scoped(
                     &project_name,
+                    &config.resource_project_identity(),
+                    &named.name,
                     named.shared.as_ref(),
                 )
                 .context("Failed to create shared ClickHouse provider")?;
@@ -166,7 +180,8 @@ pub async fn create_provider_from_named_config(
                 ch_config,
                 named.docker.as_ref(),
             )
-            .context("Failed to create ClickHouse provider")?;
+            .context("Failed to create ClickHouse provider")?
+            .with_project_identity(&config.resource_project_identity())?;
             Ok(Box::new(provider))
         }
         #[cfg(not(feature = "service-local"))]
@@ -176,19 +191,6 @@ pub async fn create_provider_from_named_config(
 
         #[cfg(feature = "service-local")]
         "mysql" | "mariadb" => {
-            // No shared-engine MySQL backend exists. Bailing here keeps this
-            // dispatch consistent with `is_shared_service`, which would
-            // otherwise have the daemon reconcile a phantom shared engine
-            // while a per-workspace local container was silently built.
-            if matches!(
-                named.provider_type.to_lowercase().as_str(),
-                "shared" | "global"
-            ) {
-                anyhow::bail!(
-                    "Service '{}': mysql does not support `type: shared` — use `type: local`",
-                    named.name
-                );
-            }
             let mysql_config = named.mysql.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
                     "Service '{}' has type '{}' but no mysql config section",
@@ -202,7 +204,8 @@ pub async fn create_provider_from_named_config(
                 mysql_config,
                 named.docker.as_ref(),
             )
-            .context("Failed to create MySQL provider")?;
+            .context("Failed to create MySQL provider")?
+            .with_project_identity(&config.resource_project_identity())?;
             Ok(Box::new(provider))
         }
         #[cfg(not(feature = "service-local"))]
@@ -224,7 +227,8 @@ pub async fn create_provider_from_named_config(
                 generic_config,
                 named.docker.as_ref(),
             )
-            .context("Failed to create generic Docker provider")?;
+            .context("Failed to create generic Docker provider")?
+            .with_project_identity(&config.resource_project_identity());
             Ok(Box::new(provider))
         }
         #[cfg(not(feature = "service-local"))]
@@ -236,9 +240,13 @@ pub async fn create_provider_from_named_config(
         "rustfs" | "s3" | "objectstorage" => {
             // Object storage is inherently a shared global engine — there is
             // no per-workspace-container variant, so provider_type is ignored.
-            let provider =
-                crate::services::shared::RustFsProvider::new(&project_name, named.shared.as_ref())
-                    .context("Failed to create RustFS provider")?;
+            let provider = crate::services::shared::RustFsProvider::new_scoped(
+                &project_name,
+                &config.resource_project_identity(),
+                &named.name,
+                named.shared.as_ref(),
+            )
+            .context("Failed to create RustFS provider")?;
             Ok(Box::new(provider))
         }
         #[cfg(not(feature = "service-local"))]
@@ -248,10 +256,24 @@ pub async fn create_provider_from_named_config(
 
         #[cfg(feature = "service-local")]
         "redis" => {
-            // Redis logical isolation (one global container, a DB index per
-            // workspace) is always shared; provider_type is ignored.
-            let provider = crate::services::shared::SharedRedisProvider::new(
+            if matches!(named.provider_type.as_str(), "local" | "docker") {
+                if let Some(generic) = &named.generic {
+                    let provider = GenericDockerProvider::new(
+                        &project_name,
+                        &named.name,
+                        generic,
+                        named.docker.as_ref(),
+                    )?
+                    .with_project_identity(&config.resource_project_identity())
+                    .with_connection_scheme("redis");
+                    return Ok(Box::new(provider));
+                }
+                log::warn!("Legacy Redis configuration retains its shared allocation; use type: local with generic.image and generic.port_mapping for an explicit per-workspace container");
+            }
+            let provider = crate::services::shared::SharedRedisProvider::new_scoped(
                 &project_name,
+                &config.resource_project_identity(),
+                &named.name,
                 named.shared.as_ref(),
             )
             .context("Failed to create shared Redis provider")?;
@@ -269,8 +291,16 @@ pub async fn create_provider_from_named_config(
                     named.name
                 )
             })?;
-            let provider = PluginProvider::new(&named.name, plugin_config)
-                .context("Failed to create plugin provider")?;
+            let provider = PluginProvider::connect(
+                &named.name,
+                plugin_config,
+                config
+                    .project_root
+                    .as_deref()
+                    .context("plugin requires a project configuration root")?,
+            )
+            .await
+            .context("Failed to create plugin provider")?;
             Ok(Box::new(provider))
         }
 
@@ -290,6 +320,8 @@ async fn create_postgres_provider(
     named: &NamedServiceConfig,
 ) -> Result<Box<dyn ServiceProvider>> {
     let provider_type = ProviderType::from_str(&named.provider_type)?;
+    #[cfg(not(feature = "service-local"))]
+    let _ = config;
 
     match provider_type {
         #[cfg(feature = "service-local")]
@@ -303,8 +335,10 @@ async fn create_postgres_provider(
         }
         #[cfg(feature = "service-local")]
         ProviderType::Shared => {
-            let provider = crate::services::shared::SharedPostgresProvider::new(
+            let provider = crate::services::shared::SharedPostgresProvider::new_scoped(
                 &config.project_name(),
+                &config.resource_project_identity(),
+                &named.name,
                 named.shared.as_ref(),
             )
             .context("Failed to create shared postgres provider")?;
@@ -357,7 +391,8 @@ async fn create_postgres_provider(
 pub fn is_shared_service(named: &NamedServiceConfig) -> bool {
     let svc = named.service_type.to_lowercase();
     let provider = named.provider_type.to_lowercase();
-    matches!(svc.as_str(), "rustfs" | "s3" | "objectstorage" | "redis")
+    (matches!(svc.as_str(), "rustfs" | "s3" | "objectstorage")
+        || (svc == "redis" && named.generic.is_none()))
         || matches!(provider.as_str(), "shared" | "global")
 }
 
@@ -372,7 +407,7 @@ pub struct SharedEngineStatus {
 
 /// Ensure every configured **shared** global engine is running (the reconcile
 /// primitive a controller daemon would loop). Constructs each shared provider
-/// and calls `test_connection`, which starts the global container if needed.
+/// and calls `ensure_engine_ready`, which starts the global container if needed.
 /// Non-shared services (per-workspace CoW, cloud) are skipped.
 pub async fn reconcile_shared_engines(config: &Config) -> Result<Vec<SharedEngineStatus>> {
     config.validate_services()?;
@@ -382,7 +417,7 @@ pub async fn reconcile_shared_engines(config: &Config) -> Result<Vec<SharedEngin
             continue;
         }
         let (running, detail) = match create_provider_from_named_config(config, &named).await {
-            Ok(provider) => match provider.test_connection().await {
+            Ok(provider) => match provider.ensure_engine_ready().await {
                 Ok(()) => (true, "running".to_string()),
                 Err(e) => (false, format!("{e:#}")),
             },
@@ -545,7 +580,7 @@ pub async fn orchestrate_create(
             Err(e) => OrchestrationResult {
                 service_name: named.name.clone(),
                 success: false,
-                message: format!("Failed to create workspace on {}: {}", named.name, e),
+                message: format!("Failed to create workspace on {}: {:#}", named.name, e),
                 workspace_info: None,
             },
         };
@@ -635,6 +670,21 @@ pub async fn orchestrate_switch(
     workspace_name: &str,
     from_workspace: Option<&str>,
 ) -> Result<Vec<OrchestrationResult>> {
+    orchestrate_switch_with_origins(
+        config,
+        workspace_name,
+        from_workspace,
+        &std::collections::BTreeMap::new(),
+    )
+    .await
+}
+
+pub async fn orchestrate_switch_with_origins(
+    config: &Config,
+    workspace_name: &str,
+    from_workspace: Option<&str>,
+    origins: &std::collections::BTreeMap<String, crate::baseline::DataOrigin>,
+) -> Result<Vec<OrchestrationResult>> {
     let providers = create_auto_workspace_providers(config).await?;
 
     // Services are independent (separate containers, ports, state rows), so
@@ -642,6 +692,28 @@ pub async fn orchestrate_switch(
     // instead of the sum of all of them.
     let results = futures_util::future::join_all(providers.iter().map(|named| async move {
         let started = std::time::Instant::now();
+        let from_workspace = origins
+            .get(&named.name)
+            .map(|origin| origin.service_key())
+            .unwrap_or(from_workspace);
+        if let Some(crate::baseline::DataOrigin::Baseline {
+            service_key,
+            engine_fingerprint,
+            ..
+        }) = origins.get(&named.name)
+        {
+            match named.provider.baseline_fingerprint(service_key).await {
+                Ok(actual) if &actual == engine_fingerprint => {}
+                result => {
+                    return OrchestrationResult {
+                        service_name: named.name.clone(),
+                        success: false,
+                        message: format!("baseline generation verification failed: {result:?}"),
+                        workspace_info: None,
+                    }
+                }
+            }
+        }
 
         // Check if workspace already exists
         let exists = match named.provider.workspace_exists(workspace_name).await {
@@ -659,6 +731,28 @@ pub async fn orchestrate_switch(
             }
         };
 
+        if exists {
+            if let Some(crate::baseline::DataOrigin::Baseline {
+                service_key: baseline_key,
+                ..
+            }) = origins.get(&named.name)
+            {
+                let verified = named.provider.list_workspaces().await.map(|workspaces| {
+                    workspaces.iter().any(|w| {
+                        w.name == workspace_name
+                            && w.parent_workspace.as_deref() == Some(baseline_key)
+                    })
+                });
+                if !matches!(verified, Ok(true)) {
+                    return OrchestrationResult {
+                        service_name: named.name.clone(),
+                        success: false,
+                        message: "existing data does not belong to the recorded baseline".into(),
+                        workspace_info: None,
+                    };
+                }
+            }
+        }
         let result = if !exists {
             // Create the workspace first
             match named
@@ -678,7 +772,7 @@ pub async fn orchestrate_switch(
                 Err(e) => OrchestrationResult {
                     service_name: named.name.clone(),
                     success: false,
-                    message: format!("Failed to create workspace on {}: {}", named.name, e),
+                    message: format!("Failed to create workspace on {}: {:#}", named.name, e),
                     workspace_info: None,
                 },
             }
@@ -697,7 +791,7 @@ pub async fn orchestrate_switch(
                 Err(e) => OrchestrationResult {
                     service_name: named.name.clone(),
                     success: false,
-                    message: format!("Failed to switch workspace on {}: {}", named.name, e),
+                    message: format!("Failed to switch workspace on {}: {:#}", named.name, e),
                     workspace_info: None,
                 },
             }
@@ -746,6 +840,11 @@ pub async fn get_all_connection_info(
     Ok(results)
 }
 
+#[cfg(any(
+    feature = "service-neon",
+    feature = "service-xata",
+    feature = "service-dblab"
+))]
 fn resolve_env_var(value: &str) -> Result<String> {
     if value.starts_with("${") && value.ends_with('}') {
         let env_var = &value[2..value.len() - 1];
@@ -905,6 +1004,7 @@ mod tests {
         // a provider-side workspace shares the raw spelling.
         let mut state = crate::state::LocalStateManager::new().unwrap();
         let registered = crate::state::DevflowWorkspace {
+            data_parent: None,
             name: "feature/auth".to_string(),
             service_key: crate::config::workspace_service_key("feature/auth"),
             raw_identity_verified: true,

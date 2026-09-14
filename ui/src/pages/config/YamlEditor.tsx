@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { toast } from "../../utils/notify";
 import {
-  getConfigYaml,
+  getConfigDocument,
   saveConfigYaml,
   validateConfigYaml,
 } from "../../utils/invoke";
@@ -13,19 +13,23 @@ interface Props {
 }
 
 function YamlEditor({ projectPath, onSaved }: Props) {
+  const [format, setFormat] = useState("yaml");
+  const [documentPath, setDocumentPath] = useState("");
   const [content, setContent] = useState("");
   const [original, setOriginal] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
   const load = () => {
-    getConfigYaml(projectPath)
-      .then((yaml) => {
-        setContent(yaml);
-        setOriginal(yaml);
+    getConfigDocument(projectPath)
+      .then((document) => {
+        setFormat(document.format);
+        setDocumentPath(document.path);
+        setContent(document.content);
+        setOriginal(document.content);
         setValidationError(null);
       })
-      .catch(console.error);
+      .catch((error) => setValidationError(String(error)));
   };
 
   useEffect(() => {
@@ -35,7 +39,7 @@ function YamlEditor({ projectPath, onSaved }: Props) {
 
   const handleValidate = async () => {
     try {
-      const result = await validateConfigYaml(content);
+      const result = await validateConfigYaml(content, format);
       if (result.valid) {
         setValidationError(null);
         toast.success("Configuration is valid.");
@@ -49,13 +53,13 @@ function YamlEditor({ projectPath, onSaved }: Props) {
 
   const handleSave = async () => {
     try {
-      const result = await validateConfigYaml(content);
+      const result = await validateConfigYaml(content, format);
       if (!result.valid) {
         setValidationError(result.error || "Invalid configuration");
         return;
       }
       setValidationError(null);
-      await saveConfigYaml(projectPath, content);
+      await saveConfigYaml(projectPath, content, original);
       setOriginal(content);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -74,9 +78,9 @@ function YamlEditor({ projectPath, onSaved }: Props) {
 
   return (
     <div>
-      <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>YAML Editor</h2>
+      <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>{format.toUpperCase()} Editor</h2>
       <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12 }}>
-        Edit the raw .devflow.yml file directly. Changes made here will not preserve formatting from the GUI editor.
+        Edit {documentPath}. Comments and formatting are preserved when you save.
       </p>
 
       <textarea

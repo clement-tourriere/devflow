@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use devflow_core::config::{Config, EffectiveConfig};
+#[cfg(feature = "service-local")]
 use devflow_core::docker;
 use devflow_core::hooks::HookPhase;
 use devflow_core::services::{self};
@@ -119,7 +120,7 @@ fn validate_scaffoldable_service(service_type: &str, provider_type: &str) -> Res
     let supported = match provider_type.as_str() {
         "local" | "docker" => matches!(
             service_type.as_str(),
-            "postgres" | "clickhouse" | "mysql" | "mariadb"
+            "postgres" | "clickhouse" | "mysql" | "mariadb" | "redis"
         ),
         "shared" | "global" => matches!(
             service_type.as_str(),
@@ -136,7 +137,7 @@ fn validate_scaffoldable_service(service_type: &str, provider_type: &str) -> Res
 
     if !supported {
         anyhow::bail!(
-            "`service add` cannot fully configure service type '{}' with provider '{}'. Supported scaffolds: postgres (local/shared), clickhouse (local/shared), mysql (local), redis (shared), and rustfs (shared). Configure custom/plugin services explicitly in .devflow.yml.",
+            "`service add` cannot fully configure service type '{}' with provider '{}'. Supported scaffolds: postgres (local/shared), clickhouse (local/shared), mysql (local), redis (local/shared), and rustfs (shared). Configure custom/plugin services explicitly in .devflow.yml.",
             service_type,
             provider_type
         );
@@ -402,7 +403,10 @@ pub(crate) async fn run_add_service_wizard(
             ],
             "clickhouse" => vec!["local               — Docker container on this machine"],
             "mysql" => vec!["local               — Docker container on this machine"],
-            "redis" => vec!["shared              — One global container, DB index per workspace"],
+            "redis" => vec![
+                "local               — One isolated container per workspace",
+                "shared              — One global container, maximum 15 workspace DBs",
+            ],
             "rustfs" => vec!["shared              — One global container, bucket per workspace"],
             _ => vec!["local               — Docker container on this machine"],
         };
@@ -495,6 +499,7 @@ pub(crate) async fn run_add_service_wizard(
         default: false,
         local: if is_local {
             Some(devflow_core::config::LocalServiceConfig {
+                legacy_project_id: None,
                 image: discovered_image.clone(),
                 data_root: None,
                 storage: None,
@@ -542,7 +547,9 @@ pub(crate) async fn run_add_service_wizard(
         },
         mysql: if service_type == "mysql" {
             Some(devflow_core::config::MySQLConfig {
-                image: discovered_image.unwrap_or_else(|| "mysql:8".to_string()),
+                image: discovered_image
+                    .clone()
+                    .unwrap_or_else(|| "mysql:8".to_string()),
                 port_range_start: None,
                 data_root: None,
                 root_password: "dev".to_string(),
@@ -553,7 +560,20 @@ pub(crate) async fn run_add_service_wizard(
         } else {
             None
         },
-        generic: None,
+        generic: if service_type == "redis" && matches!(provider_type.as_str(), "local" | "docker")
+        {
+            Some(devflow_core::config::GenericDockerConfig {
+                image: discovered_image.clone().unwrap_or_else(|| "redis:7".into()),
+                port_mapping: Some("6379:6379".into()),
+                port_range_start: Some(56379),
+                environment: Default::default(),
+                volumes: Vec::new(),
+                command: None,
+                healthcheck: Some("redis-cli ping".into()),
+            })
+        } else {
+            None
+        },
         plugin: None,
         docker: discovered.as_ref().and_then(|d| d.docker_settings.clone()),
     };
@@ -651,6 +671,7 @@ pub(crate) async fn run_add_service_wizard(
     let effective_seed = from.map(|s| s.to_string()).or(discovered_seed);
 
     // Create the configured default workspace for local providers.
+    #[cfg(feature = "service-local")]
     let is_effective_local = services::factory::ProviderType::is_local(&named_cfg.provider_type);
     if provider_uses_local_runtime(&named_cfg.provider_type) {
         let mut config_with_service = config.clone();
@@ -682,7 +703,7 @@ pub(crate) async fn run_add_service_wizard(
                     effective_seed.as_deref(),
                     json_output,
                 )
-                .await;
+                .await?;
             } else {
                 super::init::init_local_service_main(
                     &config_with_service,
@@ -690,7 +711,7 @@ pub(crate) async fn run_add_service_wizard(
                     effective_seed.as_deref(),
                     json_output,
                 )
-                .await;
+                .await?;
             }
         } else {
             super::init::init_local_service_main(
@@ -699,7 +720,7 @@ pub(crate) async fn run_add_service_wizard(
                 effective_seed.as_deref(),
                 json_output,
             )
-            .await;
+            .await?;
         }
         #[cfg(not(feature = "service-local"))]
         {
@@ -709,7 +730,7 @@ pub(crate) async fn run_add_service_wizard(
                 effective_seed.as_deref(),
                 json_output,
             )
-            .await;
+            .await?;
         }
     }
 
@@ -789,6 +810,7 @@ pub(super) async fn handle_service_dispatch(
                     default: false,
                     local: if is_local {
                         Some(devflow_core::config::LocalServiceConfig {
+                            legacy_project_id: None,
                             image: None,
                             data_root: None,
                             storage: storage.clone(),
@@ -861,7 +883,7 @@ pub(super) async fn handle_service_dispatch(
                         from.as_deref(),
                         json_output,
                     )
-                    .await;
+                    .await?;
                 }
 
                 if json_output {
@@ -1020,7 +1042,7 @@ pub(super) async fn handle_service_dispatch(
                     stopped
                 );
                 if provider.supports_lifecycle() {
-                    println!("Lifecycle: supported (start/stop/reset)");
+                    println!("Lifecycle: supported (start/stop; inspect reset capability)");
                 }
             }
         }
@@ -1243,8 +1265,8 @@ pub(super) async fn handle_service_dispatch(
                         );
                         println!("  cleanup: {}", if caps.cleanup { "yes" } else { "no" });
                         println!(
-                            "  template_from_time: {}",
-                            if caps.template_from_time { "yes" } else { "no" }
+                            "  reset: {}",
+                            if caps.operations.reset { "yes" } else { "no" }
                         );
                         println!(
                             "  max_workspace_name_length: {}",
@@ -1331,6 +1353,24 @@ pub(super) async fn handle_service_provider_command(
         }
         return Ok(());
     }
+
+    let _policy_lease = match &cmd {
+        super::ServiceCommands::Create { .. } => Some(
+            devflow_core::workspace::operation::project_policy_lease(
+                &super::operation_project_dir(config_path),
+                false,
+            )
+            .await?,
+        ),
+        super::ServiceCommands::Delete { .. } | super::ServiceCommands::Destroy { .. } => Some(
+            devflow_core::workspace::operation::project_policy_lease(
+                &super::operation_project_dir(config_path),
+                true,
+            )
+            .await?,
+        ),
+        _ => None,
+    };
 
     // Orchestratable mutation commands: Create and Delete operate on all auto_workspace services
     let is_orchestratable_mutation = matches!(
@@ -1501,16 +1541,27 @@ pub(super) async fn handle_service_provider_command(
             }
 
             let max = max_count.unwrap_or(config.behavior.max_workspaces.unwrap_or(10));
-            let deleted = provider.cleanup_old_workspaces(max).await?;
+            let cleanup = devflow_core::application::cleanup_service(
+                config,
+                &super::operation_project_dir(config_path),
+                &resolved_name,
+                provider.as_ref(),
+                max,
+            )
+            .await?;
+            let deleted = &cleanup.deleted;
 
             if json_output {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
-                        "status": "ok",
+                        "status": if cleanup.failures.is_empty() { "ok" } else { "error" },
                         "service": resolved_name,
                         "max_count": max,
                         "deleted": deleted,
+                        "failures": cleanup.failures,
+                        "plan": cleanup.plan,
+                        "operation": cleanup.operation,
                     }))?
                 );
             } else if deleted.is_empty() {
@@ -1523,18 +1574,30 @@ pub(super) async fn handle_service_provider_command(
                     deleted.join(", ")
                 );
             }
+            if !cleanup.failures.is_empty() {
+                anyhow::bail!(
+                    "Cleanup failed for {} workspace(s): {:?}",
+                    cleanup.failures.len(),
+                    cleanup.failures
+                );
+            }
         }
         super::ServiceCommands::Start { workspace_name } => {
-            let service_key =
-                resolve_operation_service_key(config_path, &workspace_name, provider.as_ref())
-                    .await?;
-            if !provider.supports_lifecycle() {
+            if !provider.operations().start {
                 anyhow::bail!(
                     "Service '{}' does not support start/stop lifecycle",
                     provider.provider_name()
                 );
             }
-            provider.start_workspace(&service_key).await?;
+            devflow_core::application::service_operation(
+                config,
+                &super::operation_project_dir(config_path),
+                &resolved_name,
+                &workspace_name,
+                provider.as_ref(),
+                services::ServiceOperation::Start,
+            )
+            .await?;
 
             // Fire post-start hooks
             {
@@ -1571,16 +1634,21 @@ pub(super) async fn handle_service_provider_command(
             }
         }
         super::ServiceCommands::Stop { workspace_name } => {
-            let service_key =
-                resolve_operation_service_key(config_path, &workspace_name, provider.as_ref())
-                    .await?;
-            if !provider.supports_lifecycle() {
+            if !provider.operations().stop {
                 anyhow::bail!(
                     "Service '{}' does not support start/stop lifecycle",
                     provider.provider_name()
                 );
             }
-            provider.stop_workspace(&service_key).await?;
+            devflow_core::application::service_operation(
+                config,
+                &super::operation_project_dir(config_path),
+                &resolved_name,
+                &workspace_name,
+                provider.as_ref(),
+                services::ServiceOperation::Stop,
+            )
+            .await?;
             if json_output {
                 println!(
                     "{}",
@@ -1594,22 +1662,22 @@ pub(super) async fn handle_service_provider_command(
             }
         }
         super::ServiceCommands::Reset { workspace_name } => {
-            let service_key =
-                resolve_operation_service_key(config_path, &workspace_name, provider.as_ref())
-                    .await?;
-            if !provider.supports_lifecycle() {
-                anyhow::bail!(
-                    "Service '{}' does not support reset",
-                    provider.provider_name()
-                );
-            }
-            provider.reset_workspace(&service_key).await?;
+            let outcome = devflow_core::application::service_operation(
+                config,
+                &super::operation_project_dir(config_path),
+                &resolved_name,
+                &workspace_name,
+                provider.as_ref(),
+                services::ServiceOperation::Reset,
+            )
+            .await?;
             if json_output {
                 println!(
                     "{}",
                     serde_json::to_string(&serde_json::json!({
                         "status": "ok",
-                        "reset": workspace_name
+                        "reset": workspace_name,
+                        "operation": outcome.operation,
                     }))?
                 );
             } else {
@@ -1784,20 +1852,24 @@ pub(super) async fn handle_service_provider_command(
             workspace_name,
             from,
         } => {
-            let service_key =
-                resolve_operation_service_key(config_path, &workspace_name, provider.as_ref())
-                    .await?;
             if !json_output {
                 println!("Seeding workspace '{}' from '{}'...", workspace_name, from);
             }
-            provider.seed_from_source(&service_key, &from).await?;
+            let operation = devflow_core::application::seed_service(
+                config,
+                &super::operation_project_dir(config_path),
+                &resolved_name,
+                &workspace_name,
+                &from,
+            )
+            .await?;
             if json_output {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "status": "ok",
                         "seeded": workspace_name,
-                        "from": from,
+                        "operation": operation,
                     }))?
                 );
             } else {
@@ -2174,7 +2246,7 @@ pub(super) async fn handle_multi_service_aggregation(
                         stopped
                     );
                     if named.provider.supports_lifecycle() {
-                        println!("  Lifecycle: supported (start/stop/reset)");
+                        println!("  Lifecycle: supported (start/stop; inspect reset capability)");
                     }
                     println!();
                 }
@@ -2198,13 +2270,13 @@ pub(super) async fn handle_multi_service_aggregation(
                     let caps = named.provider.capabilities();
                     println!("[{}] ({})", named.name, named.provider.provider_name());
                     println!(
-                        "  lifecycle={} logs={} seed={} destroy={} cleanup={} template_from_time={} max_workspace_name_length={}",
+                        "  lifecycle={} logs={} seed={} destroy={} cleanup={} reset={} max_workspace_name_length={}",
                         if caps.lifecycle { "yes" } else { "no" },
                         if caps.logs { "yes" } else { "no" },
                         if caps.seed_from_source { "yes" } else { "no" },
                         if caps.destroy_project { "yes" } else { "no" },
                         if caps.cleanup { "yes" } else { "no" },
-                        if caps.template_from_time { "yes" } else { "no" },
+                        if caps.operations.reset { "yes" } else { "no" },
                         caps.max_workspace_name_length,
                     );
                     println!();
@@ -2442,6 +2514,7 @@ async fn handle_orchestrated_mutation(
 }
 
 /// Handle `devflow service discover` subcommand.
+#[cfg(feature = "service-local")]
 async fn handle_discover(
     service_type: Option<&str>,
     global: bool,
@@ -2501,6 +2574,7 @@ pub(super) struct DiscoveredServiceInfo {
 
 /// Offer discovered Docker containers to the user during `service add` interactive wizard.
 /// Returns `DiscoveredServiceInfo` if user picks a container, or `None` to skip.
+#[cfg(feature = "service-local")]
 pub(super) async fn offer_discovered_containers(
     service_type: &str,
     project_root: Option<&Path>,
@@ -2658,4 +2732,24 @@ mod tests {
             assert!(validate_scaffoldable_service(service_type, provider).is_err());
         }
     }
+}
+
+#[cfg(not(feature = "service-local"))]
+async fn handle_discover(
+    _service_type: Option<&str>,
+    _global: bool,
+    _project_root: Option<&Path>,
+    _json_output: bool,
+) -> Result<()> {
+    anyhow::bail!("Docker discovery requires the service-local build feature")
+}
+
+#[cfg(not(feature = "service-local"))]
+pub(super) async fn offer_discovered_containers(
+    _service_type: &str,
+    _project_root: Option<&Path>,
+    _non_interactive: bool,
+    _json_output: bool,
+) -> Option<DiscoveredServiceInfo> {
+    None
 }

@@ -28,7 +28,7 @@ devflow hook approvals list
 DEVFLOW_APPROVE_HOOKS=1 devflow --json --non-interactive switch -c agent/task-42
 ```
 
-Check the per-phase `hooks` summary in the JSON output: `skipped > 0` usually means an approval is missing.
+Check the per-phase `hook_results` summary in the JSON output: `skipped > 0` usually means an approval is missing.
 
 ## Bootstrap a Repository
 
@@ -152,7 +152,6 @@ devflow commit --ai
 #
 # Or via environment:
 # DEVFLOW_COMMIT_COMMAND="claude -p --model haiku"
-# DEVFLOW_LLM_API_KEY=sk-...  (OpenAI-compatible API fallback)
 ```
 
 ## Automation Contract
@@ -160,7 +159,7 @@ devflow commit --ai
 - Multi-provider `service create`, `service delete`, and `switch` return non-zero exit code when any provider fails.
 - JSON mode emits one document on stdout for supported machine-readable commands; `switch -x`/`--detach`/`--open` nests command or session details under `execution`. Output interfaces (`shell-init`, `completions`, `tui`) reject `--json`.
 - `destroy` and `remove` require `--force` in `--non-interactive` or `--json` mode.
-- Unapproved hooks are skipped with a warning in non-interactive mode (the command completes; the JSON `hooks` summary reports them as `skipped`). Set `DEVFLOW_APPROVE_HOOKS=1` to auto-approve.
+- Unapproved hooks are skipped with a warning in non-interactive mode (the command completes; the JSON `hook_results` summary reports them as `skipped`). Set `DEVFLOW_APPROVE_HOOKS=1` to auto-approve.
 - Git workspaces are always materialized as linked worktrees; the primary checkout is the default workspace. jj uses native workspaces.
 - `devflow --json list` always returns one versioned tree document, including `context_workspace`, `default_workspace`, `roots`, `workspaces`, `flat_order` (canonical depth-first display order), and `warnings`.
 - Treat `name` as the raw VCS identity. Use `service_key` (also exposed to hooks as `workspace_key` and the `workspace_sanitized` compatibility alias) for database, container, and path identifiers.
@@ -168,3 +167,33 @@ devflow commit --ai
 - A workspace's `parent` is immutable creation provenance. A missing/deleted parent remains visible in inventory rather than silently changing the child into a root.
 - Removal checks dirty/default/current workspaces before changing anything. `--force` explicitly accepts dirty-worktree or partial-cleanup risk.
 - Use `devflow --json capabilities` for a machine-readable summary of guarantees.
+
+## Readiness and recovery
+
+- Use `switch -c task --from code-parent --data-from data-parent` for separate code and data origins.
+- Inspect `operation.status`; `ready` means required setup completed, while `needs_attention` includes skipped hooks or failed prerequisites. Retry the same command to resume pending phases.
+- `post-create` stays pending after failure. `doctor` reports unfinished operations. JSON errors include operation details when available.
+- Read provider `data_strategy` capabilities; shared Redis, ClickHouse and RustFS children start empty.
+- Existing unowned resources require explicit adoption. See `docs-site/src/content/docs/guides/ownership-and-recovery.md` before migrating data.
+- Broad AI settings copying and implicit `mise trust` are disabled by default. Configure an approved hook when trust is required.
+
+
+## Reusable data and operation recovery
+
+```bash
+devflow baseline prepare clean --service db --from ./fixtures/base.sql
+devflow --json --non-interactive switch -c agent/task --from main --data-from baseline:clean@v1
+devflow exec --workspace agent/task -- pytest -k 'login or signup'
+devflow --json operation list
+devflow --json operation inspect OPERATION_ID
+devflow --json operation resume OPERATION_ID
+devflow --json retention plan --service db --max-count 10
+```
+
+Use exact baseline versions. Inventory exposes `workspaces[].control.data`, stable identities, pins, and desired state. Reset verifies the recorded baseline before restoring it. Baseline preparation/imports can have partial SQL effects; inspect failures and explicitly remove/reprepare unused failed versions.
+
+Required hooks finish before readiness, even with `background: true`. Set `required: false` for optional hooks; their errors and background completion receipts remain visible. Arbitrary shell hooks must tolerate retries.
+
+`exec -- PROGRAM ARGS` preserves literal arguments; use `exec --shell SCRIPT` explicitly for shell syntax. Cleanup protects configured defaults, materialized/locked worktrees, pins, active operations, and data dependencies. Preview with `retention plan`; `retention apply` returns individual failures.
+
+The native process runtime is the supported default. Proxy networking is an optional companion. AI permission merging and the built-in LLM API backend are retired; keep explicit guide generation, file-copy allowlists, and external commit commands.

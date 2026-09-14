@@ -1,6 +1,6 @@
 ---
 title: Adding devflow to an existing project
-description: Adopt devflow in an established repository — config, hooks, existing branches, Docker Compose migration, Pitchfork processes, and hybrid rollout patterns.
+description: Adopt devflow in an established repository — config, hooks, existing branches, Docker Compose migration, native processes, and hybrid rollout patterns.
 sidebar:
   order: 4
 ---
@@ -45,7 +45,7 @@ Most existing applications have three kinds of Compose services. Move them at di
 | --- | --- | --- |
 | PostgreSQL/MySQL/ClickHouse | `services:` with `type: shared` or `type: local` | Workspace-specific data and connection URLs. |
 | Redis/cache/object storage | `service_type: redis` or `service_type: rustfs` | One shared engine, per-workspace DB index/bucket. |
-| App server, frontend dev server, workers, schedulers | `processes.daemons` with `provider: native` or `pitchfork` | Runs in each worktree with service env injected. |
+| App server, frontend dev server, workers, schedulers | `processes.daemons` with `provider: native` | Runs in each worktree with service env injected. |
 | Search/mail/queue containers you still want as containers | `service_type: generic`, or keep them in Compose temporarily | Hybrid migration without a big-bang rewrite. |
 | `env_file` values that depend on ports/branches | `hooks.post-switch` `write-env` | Regenerated on every switch with the right workspace URLs. |
 
@@ -120,13 +120,13 @@ services:
       image: postgres:17
 ```
 
-## Add app processes with Pitchfork
+## Add app processes
 
 Once the app can run from the host (for example through `mise`, `uv`, `npm`, `bun`, `pdm`, or your language's task runner), move Compose app containers to devflow processes:
 
 ```yaml
 processes:
-  provider: pitchfork     # or omit for native
+  provider: native     # or omit for native
   auto_start: true
   auto_stop: true
   daemons:
@@ -152,7 +152,7 @@ processes:
         REDIS_URL: "{{ service['cache'].url }}"
 ```
 
-`$PORT` is set by devflow after port bumping, and `ready_port: 8000` follows the bumped port. Pitchfork is embedded through devflow (`processes.provider: pitchfork`); you do not need a separate `pitchfork` CLI process.
+`$PORT` is set by devflow after port bumping, and `ready_port: 8000` follows the bumped port. The native supervisor is included in devflow and records process state for the CLI and desktop.
 
 Useful commands:
 
@@ -164,7 +164,7 @@ devflow process stop --all
 devflow daemon start        # keep shared engines alive; reconcile watch/retry
 ```
 
-See [Project processes & Pitchfork](/devflow/guides/processes/) for readiness checks, watch/retry, logs, proxy URLs, and approval behavior.
+See [Project processes](/devflow/guides/processes/) for readiness checks, watch/retry, logs, proxy URLs, and approval behavior.
 
 ## Hybrid rollout patterns
 

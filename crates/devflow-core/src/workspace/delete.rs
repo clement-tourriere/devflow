@@ -10,11 +10,11 @@ use crate::services;
 use crate::state::LocalStateManager;
 use crate::vcs;
 
-use super::hooks::{run_lifecycle_hooks, run_lifecycle_hooks_best_effort};
+use super::hooks::{run_lifecycle_hooks_best_effort, run_lifecycle_hooks_with_result};
 use super::{DeleteWorkspaceResult, LifecycleOptions, ServiceResult};
 
 /// Options specific to workspace deletion.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DeleteOptions {
     /// Shared lifecycle options.
     pub lifecycle: LifecycleOptions,
@@ -94,6 +94,28 @@ fn preflight_delete_workspace_with_registered_path(
     let worktree_path = live_path.or(registered_path);
 
     let mut issues = Vec::new();
+    let control = LocalStateManager::new()?.control(project_dir);
+    if control
+        .workspaces
+        .get(workspace_name)
+        .is_some_and(|w| w.pinned)
+    {
+        issues.push(DeletePreflightIssue {
+            code: "pinned".into(),
+            message: "workspace is pinned; unpin it explicitly before removal".into(),
+            force_overridable: false,
+        });
+    }
+    if let (Some(repo), Some(path)) = (vcs_provider.as_ref(), worktree_path.as_ref()) {
+        if path.is_dir() && repo.worktree_is_locked(path)? {
+            issues.push(DeletePreflightIssue {
+                code: "worktree_locked".into(),
+                message: "Git worktree is locked; unlock it before removal".into(),
+                force_overridable: false,
+            });
+        }
+    }
+
     // Name validation guards creation and switching; it must not make an
     // already-materialized workspace (adopted branch, old registry entry)
     // permanently undeletable. Deletion of such a name needs explicit force.
@@ -274,6 +296,51 @@ pub async fn delete_workspace(
     workspace_name: &str,
     options: &DeleteOptions,
 ) -> Result<DeleteWorkspaceResult> {
+    let existing = LocalStateManager::new()?.get_workspace_by_dir(project_dir, workspace_name);
+    let parent = existing.as_ref().and_then(|w| w.parent.clone());
+    let data_parent = existing
+        .as_ref()
+        .and_then(|w| w.data_parent.clone().or(w.parent.clone()));
+    let mut journal = super::operation::OperationJournal::begin(
+        project_dir,
+        workspace_name,
+        "remove",
+        parent,
+        data_parent,
+        false,
+    )
+    .await?;
+    journal.set_request(
+        serde_json::json!({"workspace":workspace_name,"options":options}),
+        config,
+    )?;
+    journal.record.worktree_path = existing.and_then(|w| w.worktree_path);
+    match delete_workspace_inner(config, project_dir, workspace_name, options, &mut journal).await {
+        Ok(mut result) => {
+            journal.finish(
+                result.vcs_ref_deleted
+                    && result.services.iter().all(|r| r.success)
+                    && result.processes.iter().all(|r| r.success || !r.required)
+                    && result
+                        .hooks
+                        .iter()
+                        .all(|r| r.required_failed == 0 && r.required_skipped == 0),
+            )?;
+            result.operation = Some(journal.record.clone());
+            Ok(result)
+        }
+        Err(error) => Err(journal.fail(error)),
+    }
+}
+
+async fn delete_workspace_inner(
+    config: &Config,
+    project_dir: &Path,
+    workspace_name: &str,
+    options: &DeleteOptions,
+    journal: &mut super::operation::OperationJournal,
+) -> Result<DeleteWorkspaceResult> {
+    journal.phase("preflight")?;
     let opts = &options.lifecycle;
     let preflight = preflight_delete_workspace(config, project_dir, workspace_name)?;
     if !preflight.can_delete(options.force) {
@@ -296,7 +363,7 @@ pub async fn delete_workspace(
 
     // All lifecycle hooks execute while their worktree is still available.
     if !opts.skip_hooks {
-        run_lifecycle_hooks(
+        let summary = run_lifecycle_hooks_with_result(
             config,
             project_dir,
             workspace_name,
@@ -304,6 +371,10 @@ pub async fn delete_workspace(
             opts,
         )
         .await?;
+        hook_results.push(super::LifecycleHookResult::from_run_result(
+            &HookPhase::PreRemove,
+            summary,
+        ));
     }
 
     let deleting_services = !options.keep_services && !opts.skip_services;
@@ -442,6 +513,7 @@ pub async fn delete_workspace(
         }
     }
 
+    journal.phase("remove-worktree")?;
     let worktree_path = preflight.worktree_path.as_ref().map(PathBuf::from);
     let mut worktree_removed = false;
     if let Some(path) = worktree_path.as_ref() {
@@ -502,6 +574,7 @@ pub async fn delete_workspace(
     }
 
     Ok(DeleteWorkspaceResult {
+        operation: None,
         workspace: workspace_name.to_string(),
         service_key: preflight.service_key,
         worktree_removed,

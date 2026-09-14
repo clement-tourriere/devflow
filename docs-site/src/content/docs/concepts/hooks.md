@@ -30,7 +30,7 @@ hooks:
 | --- | --- |
 | **Simple** — `name: "command"` | one-line shell commands |
 | **Extended** — `command:` + options (`working_dir`, `condition`, `environment`, `background`, `continue_on_error`) | anything needing context or control |
-| **Action** — `action: {type: …}` | built-in, shell-free operations: `write-env`, `write-file`, `copy`, `replace`, `docker-exec`, `http`, `notify`, `sync-ai-configs`, `shell` |
+| **Action** — `action: {type: …}` | built-in, shell-free operations: `write-env`, `write-file`, `copy`, `replace`, `docker-exec`, `http`, `notify`, `shell` |
 
 The full schema, every template variable, filter, condition, and action is in the [hooks reference](/devflow/reference/hooks/).
 
@@ -78,4 +78,4 @@ Shell hooks from the (committed, hence attacker-writable) config require a one-t
 
 ## Recipes
 
-Intent-based hook generators: installing one probes the project (files present, tools actually installed), proposes parameter values, and writes plain editable hooks into `.devflow.yml`. Available: `env-file`, `patch-config`, `db-migrate`, `install-deps`, `workspace-setup`, `sync-ai-configs`, `multiplexer-session`. List them with `devflow hook recipes` (shows what detection found for your project) or run the `devflow hook setup` wizard. Details in the [hooks guide](/devflow/guides/hooks/#recipes).
+Intent-based hook generators: installing one probes the project (files present, tools actually installed), proposes parameter values, and writes plain editable hooks into `.devflow.yml`. Available: `env-file`, `patch-config`, `db-migrate`, `install-deps`, `workspace-setup`, `multiplexer-session`. List them with `devflow hook recipes` (shows what detection found for your project) or run the `devflow hook setup` wizard. Details in the [hooks guide](/devflow/guides/hooks/#recipes).

@@ -7,7 +7,7 @@ use crate::hooks::{self, HookEngine, HookPhase};
 use super::LifecycleOptions;
 
 /// How hook approval is handled for a lifecycle operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HookApprovalMode {
     /// CLI default: interactive prompts for approval.
     Interactive,
@@ -90,7 +90,9 @@ pub async fn run_lifecycle_hooks_with_result(
         }
     };
 
-    let engine = engine.with_quiet_output(!opts.verbose_hooks);
+    let engine = engine
+        .with_quiet_output(!opts.verbose_hooks)
+        .with_lifecycle_readiness();
 
     if opts.verbose_hooks {
         engine.run_phase_verbose(&phase, &context).await
@@ -115,10 +117,14 @@ pub async fn run_lifecycle_hooks_best_effort(
             let message = e.to_string();
             log::warn!("Hook phase {:?} failed: {}", phase, message);
             Some(super::LifecycleHookResult {
+                required_failed: 1,
+                required_skipped: 0,
+                background_records: Vec::new(),
                 phase: phase.to_string(),
                 succeeded: 0,
                 failed: 1,
                 skipped: 0,
+                skipped_reasons: Vec::new(),
                 background: 0,
                 errors: vec![message],
             })

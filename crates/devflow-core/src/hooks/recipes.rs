@@ -33,7 +33,6 @@ pub enum RecipeId {
     DbMigrate,
     InstallDeps,
     WorkspaceSetup,
-    SyncAiConfigs,
     MultiplexerSession,
 }
 
@@ -128,13 +127,12 @@ pub struct InstallRecipeResult {
 }
 
 impl RecipeId {
-    pub const ALL: [RecipeId; 7] = [
+    pub const ALL: [RecipeId; 6] = [
         RecipeId::EnvFile,
         RecipeId::PatchConfig,
         RecipeId::DbMigrate,
         RecipeId::InstallDeps,
         RecipeId::WorkspaceSetup,
-        RecipeId::SyncAiConfigs,
         RecipeId::MultiplexerSession,
     ];
 
@@ -181,13 +179,6 @@ impl RecipeId {
                 description: "Set up new worktrees: copy .env.example, trust mise, allow direnv",
                 category: "Setup",
                 phases: &["post-create"],
-                repeatable: false,
-            },
-            RecipeId::SyncAiConfigs => RecipeMeta {
-                name: "sync-ai-configs",
-                description: "Sync AI tool configs (.claude, .cursor, etc.) back to the main worktree before workspace removal",
-                category: "AI Tools",
-                phases: &["pre-remove"],
                 repeatable: false,
             },
             RecipeId::MultiplexerSession => RecipeMeta {
@@ -296,7 +287,7 @@ impl RecipeId {
                     required: false,
                 },
             ],
-            RecipeId::SyncAiConfigs | RecipeId::MultiplexerSession => vec![],
+            RecipeId::MultiplexerSession => vec![],
         }
     }
 
@@ -313,7 +304,6 @@ impl RecipeId {
                 ("post-create", "mise-trust"),
                 ("post-create", "direnv-allow"),
             ],
-            RecipeId::SyncAiConfigs => &[("pre-remove", "sync-ai-configs")],
             RecipeId::MultiplexerSession => &[("post-create", "open-session")],
         }
     }
@@ -326,7 +316,6 @@ impl RecipeId {
             RecipeId::DbMigrate => detect_db_migrate(ctx),
             RecipeId::InstallDeps => detect_install_deps(ctx),
             RecipeId::WorkspaceSetup => detect_workspace_setup(ctx),
-            RecipeId::SyncAiConfigs => detect_sync_ai_configs(ctx),
             RecipeId::MultiplexerSession => detect_multiplexer_session(ctx),
         }
     }
@@ -340,7 +329,6 @@ impl RecipeId {
             RecipeId::DbMigrate => build_command_recipe("db-migrate", params),
             RecipeId::InstallDeps => build_command_recipe("install-deps", params),
             RecipeId::WorkspaceSetup => build_workspace_setup(params),
-            RecipeId::SyncAiConfigs => Ok(build_sync_ai_configs()),
             RecipeId::MultiplexerSession => Ok(build_multiplexer_session()),
         }
     }
@@ -546,6 +534,7 @@ fn shell_hook(
     background: bool,
 ) -> HookEntry {
     HookEntry::Extended(ExtendedHookEntry {
+        required: true,
         command: command.into(),
         working_dir: None,
         continue_on_error: Some(true),
@@ -557,6 +546,7 @@ fn shell_hook(
 
 fn action_hook(action: HookAction, condition: Option<String>) -> HookEntry {
     HookEntry::Action(ActionHookEntry {
+        required: true,
         action,
         working_dir: None,
         continue_on_error: None,
@@ -1086,44 +1076,6 @@ fn build_workspace_setup(params: &RecipeParams) -> Result<HooksConfig> {
     Ok(hooks)
 }
 
-// ── sync-ai-configs ───────────────────────────────────────────────────
-
-fn detect_sync_ai_configs(ctx: &DetectContext) -> RecipeDetection {
-    let found: Vec<&str> = crate::config::AI_TOOL_DIRS
-        .iter()
-        .copied()
-        .filter(|dir| ctx.dir_exists(dir))
-        .collect();
-    let suggested = !found.is_empty();
-    let reasons = if suggested {
-        vec![format!("AI tool dirs found: {}", found.join(", "))]
-    } else {
-        vec!["no AI tool dirs found yet — still safe to install".to_string()]
-    };
-    RecipeDetection {
-        applicable: true,
-        suggested,
-        reasons,
-        suggested_params: RecipeParams::new(),
-        param_options: IndexMap::new(),
-    }
-}
-
-fn build_sync_ai_configs() -> HooksConfig {
-    let mut pre_remove = IndexMap::new();
-    // Built-in action (not a shell-out): runs natively in every frontend and
-    // needs no approval or devflow binary on PATH. continue_on_error matches
-    // the old shell recipe: a failed sync warns but never blocks removal.
-    let mut entry = action_hook(HookAction::SyncAiConfigs, None);
-    if let HookEntry::Action(ref mut action_entry) = entry {
-        action_entry.continue_on_error = Some(true);
-    }
-    pre_remove.insert("sync-ai-configs".to_string(), entry);
-    let mut hooks: HooksConfig = IndexMap::new();
-    hooks.insert(HookPhase::PreRemove, pre_remove);
-    hooks
-}
-
 // ── multiplexer-session ───────────────────────────────────────────────
 
 fn detect_multiplexer_session(ctx: &DetectContext) -> RecipeDetection {
@@ -1186,7 +1138,7 @@ mod tests {
 
     #[test]
     fn test_all_recipes_unique_and_resolvable() {
-        assert_eq!(RecipeId::ALL.len(), 7);
+        assert_eq!(RecipeId::ALL.len(), 6);
         let names: Vec<&str> = RecipeId::ALL.iter().map(|id| id.name()).collect();
         for expected in [
             "env-file",
@@ -1194,7 +1146,6 @@ mod tests {
             "db-migrate",
             "install-deps",
             "workspace-setup",
-            "sync-ai-configs",
             "multiplexer-session",
         ] {
             assert!(names.contains(&expected), "missing recipe {}", expected);
@@ -1216,16 +1167,18 @@ mod tests {
 
     #[test]
     fn test_merge_adds_and_skips() {
-        let generated = RecipeId::SyncAiConfigs.build(&RecipeParams::new()).unwrap();
+        let generated = RecipeId::EnvFile
+            .build(&params(&[("file", ".env"), ("vars", "A=1")]))
+            .unwrap();
         let mut existing: HooksConfig = IndexMap::new();
 
         let first = merge_hooks_into_config(&mut existing, &generated);
-        assert_eq!(first.hooks_added, 1);
+        assert_eq!(first.hooks_added, 2);
         assert_eq!(first.hooks_skipped, 0);
 
         let second = merge_hooks_into_config(&mut existing, &generated);
         assert_eq!(second.hooks_added, 0);
-        assert_eq!(second.hooks_skipped, 1);
+        assert_eq!(second.hooks_skipped, 2);
     }
 
     #[test]
@@ -1514,32 +1467,6 @@ services:
     }
 
     #[test]
-    fn test_sync_ai_configs_detection_and_build() {
-        let config = Config::default();
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(tmp.path().join(".claude")).unwrap();
-
-        let detection = RecipeId::SyncAiConfigs.detect(&no_binaries(&config, tmp.path()));
-        assert!(detection.applicable);
-        assert!(detection.suggested);
-
-        let built = RecipeId::SyncAiConfigs.build(&RecipeParams::new()).unwrap();
-        let entry = built
-            .get(&HookPhase::PreRemove)
-            .unwrap()
-            .get("sync-ai-configs")
-            .unwrap();
-        let HookEntry::Action(action_entry) = entry else {
-            panic!("expected built-in action hook");
-        };
-        assert!(matches!(action_entry.action, HookAction::SyncAiConfigs));
-        assert!(
-            !entry.requires_approval(),
-            "built-in action needs no approval"
-        );
-    }
-
-    #[test]
     fn test_multiplexer_session_detection_and_build() {
         let config = Config::default();
         let tmp = tempfile::tempdir().unwrap();
@@ -1594,8 +1521,6 @@ services:
         assert!(resolve_params(RecipeId::EnvFile, None, &RecipeParams::new()).is_err());
         // unknown key
         assert!(resolve_params(RecipeId::EnvFile, None, &params(&[("nope", "x")])).is_err());
-        // recipes without params reject any param
-        assert!(resolve_params(RecipeId::SyncAiConfigs, None, &params(&[("x", "y")])).is_err());
         // bool validation
         assert!(resolve_params(
             RecipeId::WorkspaceSetup,

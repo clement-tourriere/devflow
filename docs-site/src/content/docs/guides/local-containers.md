@@ -5,7 +5,7 @@ sidebar:
   order: 2
 ---
 
-`type: local` gives every workspace its own container with a Copy-on-Write clone of the parent's data. Strongest isolation, instant creation on APFS/ZFS/Btrfs/XFS.
+`type: local` gives every workspace its own container with a Copy-on-Write clone of the parent's data. Data paths are scoped by project and named service. Copy-on-write reduces copy cost where supported; creation also includes engine shutdown and readiness. Generic container providers expose their own data capabilities.
 
 ## PostgreSQL
 
@@ -75,7 +75,7 @@ services:
 ```
 
 :::tip
-For Redis, prefer `service_type: redis` (a [shared engine](/devflow/guides/shared-engines/#redis) with a DB index per workspace) over a generic container — unless you need full physical isolation.
+For Redis, use `service_type: redis` with `type: local` and a `generic` block for a separate container per workspace, or `type: shared` for a lower-overhead shared engine with up to 15 allocated DB indexes. `devflow service add` offers both choices.
 :::
 
 ## Day-to-day commands
@@ -108,3 +108,16 @@ Already running containers (started outside devflow) can be adopted: `devflow se
 ## Storage layout
 
 Data directories live under `data_root` (default `~/.local/share/devflow`), one per service per workspace, cloned from the parent on creation. `devflow doctor` shows the active CoW method; `devflow setup-zfs` provisions a file-backed ZFS pool on Linux when no CoW filesystem is available (see [Installation](/devflow/getting-started/installation/#copy-on-write-storage)).
+
+```yaml
+services:
+  - name: cache
+    type: local
+    service_type: redis
+    auto_workspace: true
+    generic:
+      image: redis:7
+      ports: ["6379:6379"]
+```
+
+Devflow allocates a separate host port for each container and reports it in connection output. Redis containers start empty; PostgreSQL baseline cloning is a separate data strategy.

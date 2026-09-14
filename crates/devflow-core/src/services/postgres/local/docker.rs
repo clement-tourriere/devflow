@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::{collections::HashSet, path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::Duration};
 
 use crate::config::DockerCustomSettings;
 
@@ -8,8 +8,7 @@ use bollard::models::{
     ContainerCreateBody, ContainerStateStatusEnum, HostConfig, PortBinding, PortMap,
 };
 use bollard::query_parameters::{
-    CreateContainerOptions, ListContainersOptions, LogsOptionsBuilder, RemoveContainerOptions,
-    StopContainerOptions,
+    CreateContainerOptions, LogsOptionsBuilder, RemoveContainerOptions, StopContainerOptions,
 };
 use bollard::Docker;
 use futures_util::TryStreamExt;
@@ -99,13 +98,14 @@ impl DockerRuntime {
         &self,
         spec: &ReserveWorkspaceSpec,
     ) -> anyhow::Result<ReservedWorkspaceRuntime> {
-        let raw = format!(
-            "devflow-{}-{}-{}",
-            sanitize(&spec.project_name),
-            sanitize(&spec.service_name),
-            sanitize(&spec.workspace_name)
+        let container_name = format!(
+            "devflow-pg-{}",
+            &crate::services::ownership::identity_digest(&[
+                &spec.project_name,
+                &spec.service_name,
+                &spec.workspace_name,
+            ])[..48]
         );
-        let container_name = crate::services::local_docker::bounded_container_name(&raw);
 
         Ok(ReservedWorkspaceRuntime { container_name })
     }
@@ -268,49 +268,7 @@ impl DockerRuntime {
     /// Uses a generous timeout so postgres can complete its shutdown
     /// checkpoint — a SIGKILL here would make the clone a crash-state copy,
     /// which is exactly what stopping (instead of pausing) is meant to avoid.
-    pub async fn stop_workspace_for_clone(&self, container_name: &str) -> anyhow::Result<()> {
-        match self.container_status(container_name).await? {
-            ContainerStatus::NotFound | ContainerStatus::Exited | ContainerStatus::Other(_) => {
-                return Ok(())
-            }
-            ContainerStatus::Paused => {
-                self.unpause_workspace(container_name).await?;
-            }
-            ContainerStatus::Running => {}
-        }
-
-        let options = StopContainerOptions {
-            t: Some(120),
-            ..Default::default()
-        };
-
-        self.client
-            .stop_container(container_name, Some(options))
-            .await
-            .with_context(|| format!("failed to stop container '{container_name}' before clone"))?;
-
-        Ok(())
-    }
-
     /// Start an existing (stopped or paused) container without re-creating it.
-    pub async fn start_existing(&self, container_name: &str) -> anyhow::Result<()> {
-        match self.container_status(container_name).await? {
-            ContainerStatus::Running => Ok(()),
-            ContainerStatus::Paused => self.unpause_workspace(container_name).await,
-            ContainerStatus::NotFound => {
-                anyhow::bail!("container '{container_name}' not found")
-            }
-            ContainerStatus::Exited | ContainerStatus::Other(_) => self
-                .client
-                .start_container(
-                    container_name,
-                    None::<bollard::query_parameters::StartContainerOptions>,
-                )
-                .await
-                .with_context(|| format!("failed to start container '{container_name}'")),
-        }
-    }
-
     pub async fn unpause_workspace(&self, container_name: &str) -> anyhow::Result<()> {
         match self.container_status(container_name).await? {
             ContainerStatus::Paused => {}
@@ -429,71 +387,6 @@ impl DockerRuntime {
     }
 }
 
-pub async fn pick_available_port(client: &Docker, start_port: u16) -> anyhow::Result<u16> {
-    let docker_ports = docker_published_ports(client).await;
-    let mut port = start_port;
-
-    for _ in 0..1000 {
-        if docker_ports.contains(&port) {
-            port = port.saturating_add(1);
-            if port == u16::MAX {
-                break;
-            }
-            continue;
-        }
-
-        // Claim the port process-wide: concurrent providers pick ports before
-        // their containers start, so a bind probe alone can hand the same
-        // port to two services.
-        if is_port_available(port).await && crate::services::local_docker::try_claim_ports(&[port])
-        {
-            return Ok(port);
-        }
-
-        port = port.saturating_add(1);
-        if port == u16::MAX {
-            break;
-        }
-    }
-
-    Err(anyhow!(
-        "failed to find available port starting from {start_port}"
-    ))
-}
-
-async fn is_port_available(port: u16) -> bool {
-    if let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
-        drop(listener);
-        return true;
-    }
-    false
-}
-
-async fn docker_published_ports(client: &Docker) -> HashSet<u16> {
-    let options = ListContainersOptions {
-        all: false,
-        ..Default::default()
-    };
-
-    let containers = match client.list_containers(Some(options)).await {
-        Ok(c) => c,
-        Err(_) => return HashSet::new(),
-    };
-
-    let mut ports = HashSet::new();
-    for container in containers {
-        if let Some(port_list) = container.ports {
-            for port in port_list {
-                if let Some(public_port) = port.public_port {
-                    ports.insert(public_port);
-                }
-            }
-        }
-    }
-
-    ports
-}
-
 /// Returns the current host user's UID:GID as a string (e.g. "1000:1000").
 /// This ensures files created inside the container are owned by the host user,
 /// allowing `cp` operations on the bind-mounted pgdata directory to succeed.
@@ -509,25 +402,4 @@ fn get_host_uid_gid() -> Option<String> {
 #[cfg(not(unix))]
 fn get_host_uid_gid() -> Option<String> {
     None
-}
-
-fn sanitize(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    for ch in input.chars() {
-        if ch.is_ascii_alphanumeric() {
-            output.push(ch.to_ascii_lowercase());
-        } else {
-            output.push('-');
-        }
-    }
-
-    while output.contains("--") {
-        output = output.replace("--", "-");
-    }
-
-    let trimmed = output.trim_matches('-').to_string();
-    if trimmed.is_empty() {
-        return "project".to_string();
-    }
-    trimmed
 }

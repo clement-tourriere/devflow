@@ -5,7 +5,7 @@ pub mod seed;
 pub mod state;
 pub mod storage;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -30,6 +30,8 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct LocalProvider {
     project_name: String,
+    owner_key: String,
+    legacy_project_id: Option<String>,
     service_name: String,
     image: String,
     port_range_start: u16,
@@ -47,6 +49,104 @@ pub struct LocalProvider {
 }
 
 impl LocalProvider {
+    fn seal_path(&self, workspace_id: &str) -> PathBuf {
+        self.data_root
+            .join("sealed")
+            .join(format!("{workspace_id}.image"))
+    }
+    fn sealed_image(&self, name: &str) -> Result<Option<String>> {
+        let Some(project) = self.store().project_for_owner(&self.owner_key)? else {
+            return Ok(None);
+        };
+        let Some(workspace) = self.store().get_workspace_by_name(&project.id, name)? else {
+            return Ok(None);
+        };
+        let path = self.seal_path(&workspace.id);
+        if path.exists() {
+            Ok(Some(std::fs::read_to_string(path)?))
+        } else {
+            Ok(None)
+        }
+    }
+    fn workspace_image(
+        &self,
+        project: &model::Project,
+        workspace: &model::Workspace,
+    ) -> Result<String> {
+        let workspaces = self.store().list_workspaces(&project.id)?;
+        let mut current = workspace;
+        for _ in 0..=workspaces.len() {
+            let seal = self.seal_path(&current.id);
+            if seal.exists() {
+                return Ok(std::fs::read_to_string(seal)?);
+            }
+            let Some(parent) = &current.parent_workspace_id else {
+                return Ok(project.image.clone());
+            };
+            current = workspaces
+                .iter()
+                .find(|w| &w.id == parent)
+                .context("workspace data parent is missing")?;
+        }
+        anyhow::bail!("cyclic workspace data ancestry")
+    }
+
+    fn ensure_unsealed(&self, name: &str) -> Result<()> {
+        anyhow::ensure!(
+            self.sealed_image(name)?.is_none(),
+            "'{name}' is a sealed baseline; create a child workspace to modify its data"
+        );
+        Ok(())
+    }
+    async fn delete_workspace_inner(&self, workspace_name: &str, allow_sealed: bool) -> Result<()> {
+        let project = self.ensure_project().await?;
+        let _lease = std::sync::Arc::new(
+            crate::services::ownership::OperationLease::acquire(
+                &self.operation_path(&project.id, workspace_name),
+            )
+            .await?,
+        );
+
+        let Some(workspace) = self
+            .store()
+            .get_workspace_by_name(&project.id, workspace_name)?
+        else {
+            // A retry after partial multi-provider cleanup must accept the
+            // resource already being removed from this exact owned project.
+            return Ok(());
+        };
+
+        if !allow_sealed {
+            self.ensure_unsealed(workspace_name)?;
+        }
+        anyhow::ensure!(
+            !self
+                .store()
+                .list_workspaces(&project.id)?
+                .iter()
+                .any(|w| w.parent_workspace_id.as_deref() == Some(&workspace.id)),
+            "workspace has dependent data generations"
+        );
+        // Remove container
+        self.runtime
+            .remove_branch(&workspace.container_name)
+            .await?;
+
+        // Delete storage data
+        self.storage
+            .delete_workspace_data(&project, &workspace)
+            .await?;
+
+        let seal = self.seal_path(&workspace.id);
+        if seal.exists() {
+            std::fs::remove_file(seal)?;
+        }
+        // Delete from state
+        self.store().delete_workspace(&workspace.id)?;
+
+        Ok(())
+    }
+
     pub async fn new(
         service_name: &str,
         config: &Config,
@@ -125,6 +225,11 @@ impl LocalProvider {
             });
 
         Ok(Self {
+            owner_key: crate::services::ownership::identity_digest(&[
+                &config.resource_project_identity(),
+                &service_name,
+            ]),
+            legacy_project_id: local_config.and_then(|c| c.legacy_project_id.clone()),
             project_name,
             service_name,
             image,
@@ -153,47 +258,61 @@ impl LocalProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    fn operation_path(&self, project_id: &str, workspace: &str) -> PathBuf {
+        self.data_root.join("operations").join(format!(
+            "{}.lock",
+            crate::services::ownership::identity_digest(&[project_id, workspace])
+        ))
+    }
+
     async fn ensure_project(&self) -> Result<model::Project> {
-        // Bind the lookup to a statement so the store() MutexGuard drops
-        // immediately. Keeping it in an `if let` scrutinee extends the guard
-        // over the whole block, and the second store() call below would then
-        // self-deadlock (std::sync::Mutex is not reentrant). That exact bug
-        // froze every provider operation in the GUI, whose cwd never matches
-        // the stored project_path.
-        let existing = self.store().get_project_by_name(&self.project_name)?;
+        let _lease = crate::services::ownership::OperationLease::acquire(
+            &self
+                .data_root
+                .join("operations")
+                .join(format!("project-{}.lock", self.owner_key)),
+        )
+        .await?;
+        let existing = self.store().project_for_owner(&self.owner_key)?;
         if let Some(mut project) = existing {
-            // Keep project_path in sync with where the project actually lives;
-            // a stale path (after `mv`/rename) would make orphan detection
-            // declare a live project orphaned and GC its data.
-            if let Some(ref path) = self.project_path {
-                if project.project_path.as_deref() != Some(path.as_str()) {
+            if let Some(path) = &self.project_path {
+                if project.project_path.as_ref() != Some(path) {
                     self.store().update_project_path(&project.id, path)?;
-                    log::debug!(
-                        "Updated project_path for project '{}': {}",
-                        self.project_name,
-                        path
-                    );
                     project.project_path = Some(path.clone());
                 }
             }
             return Ok(project);
         }
-
-        let project = create_project_record(
-            &self.store,
-            &self.storage,
-            self.storage_preference.as_deref(),
-            &self.project_name,
-            &self.image,
-            self.project_path.clone(),
-        )
-        .await?;
-
-        log::info!(
-            "Auto-created project '{}' with {} storage",
-            self.project_name,
-            project.storage_driver.as_str()
-        );
+        if let Some(id) = &self.legacy_project_id {
+            let project = self
+                .store()
+                .list_projects()?
+                .into_iter()
+                .find(|p| &p.id == id)
+                .context("configured legacy_project_id does not exist")?;
+            self.store().claim_project(&project.id, &self.owner_key)?;
+            return Ok(project);
+        }
+        if let Some(legacy) = self.store().get_project_by_name(&self.project_name)? {
+            anyhow::bail!("legacy local project '{}' (id {}) has no service ownership. Verify its data and configure local.legacy_project_id to adopt it; existing data was left untouched", self.project_name, legacy.id);
+        }
+        let storage_name = format!("{} [{}]", self.project_name, self.owner_key);
+        let existing = self.store().get_project_by_name(&storage_name)?;
+        let project = match existing {
+            Some(project) => project,
+            None => {
+                create_project_record(
+                    &self.store,
+                    &self.storage,
+                    self.storage_preference.as_deref(),
+                    &storage_name,
+                    &self.image,
+                    self.project_path.clone(),
+                )
+                .await?
+            }
+        };
+        self.store().claim_project(&project.id, &self.owner_key)?;
         Ok(project)
     }
 
@@ -259,22 +378,35 @@ impl ServiceProvider for LocalProvider {
         from_workspace: Option<&str>,
     ) -> Result<WorkspaceInfo> {
         let project = self.ensure_project().await?;
+        let _lease = std::sync::Arc::new(
+            crate::services::ownership::OperationLease::acquire(
+                &self.operation_path(&project.id, workspace_name),
+            )
+            .await?,
+        );
+        self.ensure_unsealed(workspace_name)?;
         self.reconcile_project(&project).await?;
 
-        // Check if workspace already exists
-        if let Some(existing) = self
+        let existing = self
             .store()
-            .get_workspace_by_name(&project.id, workspace_name)?
-        {
-            if existing.state == WorkspaceState::Running {
-                return Ok(WorkspaceInfo {
-                    name: existing.name,
-                    created_at: None,
-                    parent_workspace: None,
-                    database_name: self.pg_db.clone(),
-                    state: Some(existing.state.as_str().to_string()),
-                });
+            .get_workspace_by_name(&project.id, workspace_name)?;
+        if let Some(existing) = existing {
+            if matches!(
+                existing.state,
+                WorkspaceState::Running | WorkspaceState::Stopped
+            ) {
+                drop(_lease);
+                return self.switch_to_branch(workspace_name).await;
             }
+            anyhow::ensure!(existing.state != WorkspaceState::Failed,
+                "Workspace '{}' has a failed seed/setup; retry the seed or explicitly remove and recreate it", workspace_name);
+            // Provisioning intent is persisted before a clone. Its owned partial
+            // resources can be cleaned and retried after the clone lease ends.
+            self.runtime.remove_branch(&existing.container_name).await?;
+            self.storage
+                .delete_workspace_data(&project, &existing)
+                .await?;
+            self.store().delete_workspace(&existing.id)?;
         }
 
         let workspace_id = Uuid::new_v4().to_string();
@@ -290,114 +422,109 @@ impl ServiceProvider for LocalProvider {
         let reserved = self
             .runtime
             .reserve_workspace(&ReserveWorkspaceSpec {
-                project_name: self.project_name.clone(),
+                project_name: project.id.clone(),
                 service_name: self.service_name.clone(),
                 workspace_name: workspace_name.to_string(),
             })
             .await?;
 
         let start_port = self.store().next_port()?.max(self.port_range_start);
-        let port = docker::pick_available_port(self.runtime.client(), start_port).await?;
+        let _port_reservation =
+            crate::services::local_docker::pick_available_port(self.runtime.client(), start_port)
+                .await?;
+        let port = _port_reservation.port;
 
-        // Clone or create empty
-        let parent = if let Some(from_name) = from_workspace {
-            self.store().get_workspace_by_name(&project.id, from_name)?
-        } else {
-            // No explicit parent: clone from an existing workspace, preferring
-            // the most recent *stopped* one — its PGDATA is already quiesced,
-            // so we skip the stop/restart cycle a running parent requires
-            // (postgres shutdown checkpoint + restart, easily several seconds
-            // of both latency and parent downtime).
-            let workspaces = self.store().list_workspaces(&project.id)?;
-            workspaces
-                .iter()
-                .find(|b| b.state == WorkspaceState::Stopped)
-                .or_else(|| {
-                    workspaces
-                        .iter()
-                        .find(|b| b.state == WorkspaceState::Running)
-                })
-                .cloned()
-        };
-
-        let storage_metadata = if let Some(ref parent_workspace) = parent {
-            // Quiesce the source with a graceful STOP (shutdown checkpoint),
-            // not a pause: a paused postgres still has dirty buffers and
-            // unflushed WAL, and the per-file copy is not atomic — only a
-            // cleanly stopped server guarantees a consistent PGDATA.
-            let parent_running = self
-                .runtime
-                .container_status(&parent_workspace.container_name)
-                .await?
-                == docker::ContainerStatus::Running;
-
-            if parent_running {
-                let stop_started = std::time::Instant::now();
-                self.runtime
-                    .stop_workspace_for_clone(&parent_workspace.container_name)
-                    .await?;
-                log::debug!(
-                    "[{}] stopped parent '{}' for clone in {:.2?}",
-                    self.service_name,
-                    parent_workspace.name,
-                    stop_started.elapsed()
-                );
-            }
-
-            let clone_started = std::time::Instant::now();
-            let result = self
-                .storage
-                .clone_branch_from_parent(&project, parent_workspace, &workspace_id, &data_dir)
-                .await;
-            log::debug!(
-                "[{}] cloned data dir from parent '{}' ({} storage) in {:.2?}",
-                self.service_name,
-                parent_workspace.name,
-                project.storage_driver.as_str(),
-                clone_started.elapsed()
+        // No implicit "most recent" baseline: data origin must be deterministic.
+        let parent = from_workspace
+            .map(|name| {
+                self.store()
+                    .get_workspace_by_name(&project.id, name)
+                    .and_then(|parent| {
+                        parent.ok_or_else(|| anyhow::anyhow!("Data parent '{name}' does not exist"))
+                    })
+            })
+            .transpose()?;
+        if let Some(parent) = &parent {
+            anyhow::ensure!(
+                matches!(
+                    parent.state,
+                    WorkspaceState::Running | WorkspaceState::Stopped
+                ),
+                "Data parent is not ready"
             );
-
-            if parent_running {
-                // Restart even when the clone failed — never leave the
-                // parent down as a side effect.
-                if let Err(e) = self
-                    .runtime
-                    .start_existing(&parent_workspace.container_name)
-                    .await
-                {
-                    log::warn!(
-                        "Failed to restart parent container '{}' after clone: {}",
-                        parent_workspace.container_name,
-                        e
-                    );
-                }
-            }
-
-            result?
+            anyhow::ensure!(
+                Path::new(&parent.data_dir).is_dir(),
+                "Data parent directory is missing"
+            );
+        }
+        let workspace = self.store().create_workspace(NewWorkspace {
+            id: workspace_id.clone(),
+            project_id: project.id.clone(),
+            name: workspace_name.into(),
+            parent_workspace_id: parent.as_ref().map(|p| p.id.clone()),
+            state: WorkspaceState::Provisioning,
+            data_dir: data_dir.to_string_lossy().into(),
+            container_name: reserved.container_name.clone(),
+            port,
+            storage_metadata: None,
+        })?;
+        if let Some(parent) = &parent {
+            anyhow::ensure!(
+                parent.name != workspace_name,
+                "cannot clone a workspace onto itself"
+            );
+        }
+        let storage_metadata = if let Some(ref parent_workspace) = parent {
+            let storage = self.storage.clone();
+            let clone_project = project.clone();
+            let clone_parent = parent_workspace.clone();
+            let clone_id = workspace_id.clone();
+            let clone_dir = data_dir.clone();
+            let target_lease = _lease.clone();
+            crate::services::local_docker::quiesced_operation(
+                self.runtime.client().clone(),
+                parent_workspace.container_name.clone(),
+                self.operation_path(&project.id, &parent_workspace.name),
+                vec![
+                    "pg_isready".into(),
+                    "-h".into(),
+                    "127.0.0.1".into(),
+                    "-U".into(),
+                    self.pg_user.clone(),
+                    "-d".into(),
+                    self.pg_db.clone(),
+                ],
+                async move {
+                    let _target_lease = target_lease;
+                    storage
+                        .clone_branch_from_parent(
+                            &clone_project,
+                            &clone_parent,
+                            &clone_id,
+                            &clone_dir,
+                        )
+                        .await
+                },
+            )
+            .await?
         } else {
             self.storage
                 .create_empty_branch(&project, &workspace_id, &data_dir)
                 .await?
         };
 
-        // Persist to state
-        let workspace = self.store().create_workspace(NewWorkspace {
-            id: workspace_id,
-            project_id: project.id.clone(),
-            name: workspace_name.to_string(),
-            parent_workspace_id: parent.as_ref().map(|p| p.id.clone()),
-            state: WorkspaceState::Provisioning,
-            data_dir: data_dir.to_string_lossy().to_string(),
-            container_name: reserved.container_name.clone(),
-            port,
-            storage_metadata,
-        })?;
+        self.store()
+            .update_workspace_storage_metadata(&workspace.id, storage_metadata.as_deref())?;
 
         // Start container
         let start_started = std::time::Instant::now();
         self.runtime
             .start_workspace(&StartWorkspaceSpec {
-                image: project.image.clone(),
+                image: from_workspace
+                    .map(|p| self.sealed_image(p))
+                    .transpose()?
+                    .flatten()
+                    .unwrap_or_else(|| project.image.clone()),
                 container_name: reserved.container_name.clone(),
                 data_dir,
                 port,
@@ -441,31 +568,67 @@ impl ServiceProvider for LocalProvider {
     }
 
     async fn delete_workspace(&self, workspace_name: &str) -> Result<()> {
+        self.delete_workspace_inner(workspace_name, false).await
+    }
+    async fn delete_baseline(&self, workspace_name: &str) -> Result<()> {
+        self.delete_workspace_inner(workspace_name, true).await
+    }
+    async fn baseline_fingerprint(&self, workspace_name: &str) -> Result<String> {
+        self.sealed_image(workspace_name)?
+            .context("baseline is not sealed")
+    }
+    async fn seal_baseline(&self, workspace_name: &str) -> Result<String> {
         let project = self.ensure_project().await?;
-
+        let _lease = crate::services::ownership::OperationLease::acquire(
+            &self.operation_path(&project.id, workspace_name),
+        )
+        .await?;
+        if let Some(image) = self.sealed_image(workspace_name)? {
+            return Ok(image);
+        }
         let workspace = self
             .store()
             .get_workspace_by_name(&project.id, workspace_name)?
-            .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
-
-        // Remove container
+            .context("baseline workspace missing")?;
+        let (code, error) = seed::docker_exec(
+            self.runtime.client(),
+            &workspace.container_name,
+            &[
+                "psql",
+                "-U",
+                &self.pg_user,
+                "-d",
+                &self.pg_db,
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-c",
+                "SELECT 1",
+            ],
+        )
+        .await?;
+        anyhow::ensure!(code == 0, "baseline validation failed: {error}");
+        let inspect = self
+            .runtime
+            .client()
+            .inspect_container(&workspace.container_name, None)
+            .await?;
+        let image = inspect
+            .image
+            .context("baseline container lacks immutable image identity")?;
         self.runtime
-            .remove_branch(&workspace.container_name)
+            .stop_workspace(&workspace.container_name)
             .await?;
-
-        // Delete storage data
-        self.storage
-            .delete_workspace_data(&project, &workspace)
-            .await?;
-
-        // Delete from state
-        self.store().delete_workspace(&workspace.id)?;
-
-        Ok(())
+        self.store()
+            .update_workspace_state(&workspace.id, WorkspaceState::Stopped)?;
+        crate::services::ownership::atomic_write(&self.seal_path(&workspace.id), image.as_bytes())?;
+        Ok(image)
     }
 
     async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
-        let project = self.ensure_project().await?;
+        let project = self.store().project_for_owner(&self.owner_key)?;
+        let Some(project) = project else {
+            return Ok(Vec::new());
+        };
         self.reconcile_project(&project).await?;
 
         let workspaces = self.store().list_workspaces(&project.id)?;
@@ -493,7 +656,10 @@ impl ServiceProvider for LocalProvider {
     }
 
     async fn workspace_exists(&self, workspace_name: &str) -> Result<bool> {
-        let project = self.ensure_project().await?;
+        let project = self.store().project_for_owner(&self.owner_key)?;
+        let Some(project) = project else {
+            return Ok(false);
+        };
         Ok(self
             .store()
             .get_workspace_by_name(&project.id, workspace_name)?
@@ -502,6 +668,13 @@ impl ServiceProvider for LocalProvider {
 
     async fn switch_to_branch(&self, workspace_name: &str) -> Result<WorkspaceInfo> {
         let project = self.ensure_project().await?;
+        let _lease = std::sync::Arc::new(
+            crate::services::ownership::OperationLease::acquire(
+                &self.operation_path(&project.id, workspace_name),
+            )
+            .await?,
+        );
+        self.ensure_unsealed(workspace_name)?;
         self.reconcile_project(&project).await?;
 
         let workspace = self
@@ -509,11 +682,18 @@ impl ServiceProvider for LocalProvider {
             .get_workspace_by_name(&project.id, workspace_name)?
             .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
 
+        anyhow::ensure!(
+            matches!(
+                workspace.state,
+                WorkspaceState::Running | WorkspaceState::Stopped
+            ),
+            "workspace setup is incomplete or failed; retry setup before switching"
+        );
         // Start if stopped
         if workspace.state == WorkspaceState::Stopped {
             self.runtime
                 .start_workspace(&StartWorkspaceSpec {
-                    image: project.image.clone(),
+                    image: self.workspace_image(&project, &workspace)?,
                     container_name: workspace.container_name.clone(),
                     data_dir: PathBuf::from(&workspace.data_dir),
                     port: workspace.port,
@@ -549,7 +729,10 @@ impl ServiceProvider for LocalProvider {
     }
 
     async fn get_connection_info(&self, workspace_name: &str) -> Result<ConnectionInfo> {
-        let project = self.ensure_project().await?;
+        let project = self.store().project_for_owner(&self.owner_key)?;
+        let Some(project) = project else {
+            anyhow::bail!("service project has not been initialized");
+        };
 
         let workspace = self
             .store()
@@ -568,15 +751,30 @@ impl ServiceProvider for LocalProvider {
 
     async fn start_workspace(&self, workspace_name: &str) -> Result<()> {
         let project = self.ensure_project().await?;
+        let _lease = std::sync::Arc::new(
+            crate::services::ownership::OperationLease::acquire(
+                &self.operation_path(&project.id, workspace_name),
+            )
+            .await?,
+        );
+        self.ensure_unsealed(workspace_name)?;
 
         let workspace = self
             .store()
             .get_workspace_by_name(&project.id, workspace_name)?
             .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
 
+        anyhow::ensure!(
+            matches!(
+                workspace.state,
+                WorkspaceState::Running | WorkspaceState::Stopped
+            ),
+            "workspace setup is incomplete or failed; retry the failed operation first"
+        );
+
         self.runtime
             .start_workspace(&StartWorkspaceSpec {
-                image: project.image.clone(),
+                image: self.workspace_image(&project, &workspace)?,
                 container_name: workspace.container_name.clone(),
                 data_dir: PathBuf::from(&workspace.data_dir),
                 port: workspace.port,
@@ -606,6 +804,12 @@ impl ServiceProvider for LocalProvider {
 
     async fn stop_workspace(&self, workspace_name: &str) -> Result<()> {
         let project = self.ensure_project().await?;
+        let _lease = std::sync::Arc::new(
+            crate::services::ownership::OperationLease::acquire(
+                &self.operation_path(&project.id, workspace_name),
+            )
+            .await?,
+        );
 
         let workspace = self
             .store()
@@ -615,20 +819,45 @@ impl ServiceProvider for LocalProvider {
         self.runtime
             .stop_workspace(&workspace.container_name)
             .await?;
-        self.store()
-            .update_workspace_state(&workspace.id, WorkspaceState::Stopped)?;
+        if !matches!(
+            workspace.state,
+            WorkspaceState::Provisioning | WorkspaceState::Failed
+        ) {
+            self.store()
+                .update_workspace_state(&workspace.id, WorkspaceState::Stopped)?;
+        }
 
         Ok(())
     }
 
     async fn reset_workspace(&self, workspace_name: &str) -> Result<()> {
         let project = self.ensure_project().await?;
+        let _lease = std::sync::Arc::new(
+            crate::services::ownership::OperationLease::acquire(
+                &self.operation_path(&project.id, workspace_name),
+            )
+            .await?,
+        );
+        self.ensure_unsealed(workspace_name)?;
 
         let workspace = self
             .store()
             .get_workspace_by_name(&project.id, workspace_name)?
             .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
 
+        let parent_id = workspace
+            .parent_workspace_id
+            .as_ref()
+            .context("workspace has no data parent to reset from")?;
+        anyhow::ensure!(
+            self.store()
+                .list_workspaces(&project.id)?
+                .iter()
+                .any(|p| &p.id == parent_id
+                    && matches!(p.state, WorkspaceState::Running | WorkspaceState::Stopped)
+                    && Path::new(&p.data_dir).is_dir()),
+            "data parent is missing or not ready; reset was not started"
+        );
         let was_running = workspace.state == WorkspaceState::Running;
 
         // Stop container
@@ -645,39 +874,38 @@ impl ServiceProvider for LocalProvider {
                 .find(|b| &b.id == parent_id);
 
             if let Some(parent_workspace) = parent {
-                let parent_running = self
-                    .runtime
-                    .container_status(&parent_workspace.container_name)
-                    .await?
-                    == docker::ContainerStatus::Running;
-
-                if parent_running {
-                    self.runtime
-                        .stop_workspace_for_clone(&parent_workspace.container_name)
-                        .await?;
-                }
-
-                let data_dir = PathBuf::from(&workspace.data_dir);
-                let clone_result = self
-                    .storage
-                    .clone_branch_from_parent(&project, &parent_workspace, &workspace.id, &data_dir)
-                    .await;
-
-                if parent_running {
-                    if let Err(e) = self
-                        .runtime
-                        .start_existing(&parent_workspace.container_name)
-                        .await
-                    {
-                        log::warn!(
-                            "Failed to restart parent container '{}' after reset clone: {}",
-                            parent_workspace.container_name,
-                            e
-                        );
-                    }
-                }
-
-                let new_metadata = clone_result?;
+                let storage = self.storage.clone();
+                let clone_project = project.clone();
+                let clone_parent = parent_workspace.clone();
+                let clone_id = workspace.id.clone();
+                let clone_dir = PathBuf::from(&workspace.data_dir);
+                let target_lease = _lease.clone();
+                let new_metadata = crate::services::local_docker::quiesced_operation(
+                    self.runtime.client().clone(),
+                    parent_workspace.container_name.clone(),
+                    self.operation_path(&project.id, &parent_workspace.name),
+                    vec![
+                        "pg_isready".into(),
+                        "-h".into(),
+                        "127.0.0.1".into(),
+                        "-U".into(),
+                        self.pg_user.clone(),
+                        "-d".into(),
+                        self.pg_db.clone(),
+                    ],
+                    async move {
+                        let _target_lease = target_lease;
+                        storage
+                            .clone_branch_from_parent(
+                                &clone_project,
+                                &clone_parent,
+                                &clone_id,
+                                &clone_dir,
+                            )
+                            .await
+                    },
+                )
+                .await?;
 
                 if let Some(metadata) = &new_metadata {
                     self.store()
@@ -690,7 +918,7 @@ impl ServiceProvider for LocalProvider {
         if was_running {
             self.runtime
                 .start_workspace(&StartWorkspaceSpec {
-                    image: project.image.clone(),
+                    image: self.workspace_image(&project, &workspace)?,
                     container_name: workspace.container_name.clone(),
                     data_dir: PathBuf::from(&workspace.data_dir),
                     port: workspace.port,
@@ -722,8 +950,15 @@ impl ServiceProvider for LocalProvider {
         Ok(())
     }
 
-    fn supports_lifecycle(&self) -> bool {
-        true
+    fn operations(&self) -> crate::services::OperationCapabilities {
+        crate::services::OperationCapabilities {
+            start: true,
+            stop: true,
+            logs: true,
+            reset: true,
+            seed: true,
+            snapshot: true,
+        }
     }
 
     async fn test_connection(&self) -> Result<()> {
@@ -770,6 +1005,14 @@ impl ServiceProvider for LocalProvider {
             ),
         });
 
+        match storage::replacement_diagnostics(&self.data_root) {
+            Ok(recovery) => checks.extend(recovery),
+            Err(error) => checks.push(DoctorCheck {
+                name: "ZFS replacement recovery".into(),
+                available: false,
+                detail: format!("Cannot inspect replacement records: {error:#}"),
+            }),
+        }
         checks.push(data_root_doctor_check(&self.data_root));
         checks.push(port_range_doctor_check(self.port_range_start));
 
@@ -797,29 +1040,76 @@ impl ServiceProvider for LocalProvider {
 
     async fn seed_from_source(&self, workspace_name: &str, source: &str) -> Result<()> {
         let project = self.ensure_project().await?;
+        let _lease = std::sync::Arc::new(
+            crate::services::ownership::OperationLease::acquire(
+                &self.operation_path(&project.id, workspace_name),
+            )
+            .await?,
+        );
+        self.ensure_unsealed(workspace_name)?;
         let workspace = self
             .store()
             .get_workspace_by_name(&project.id, workspace_name)?
             .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
         let parsed = seed::parse_source(source)?;
-        seed::seed_branch(
-            self.runtime.client(),
-            &parsed,
-            &workspace.container_name,
-            &self.pg_user,
-            &self.pg_db,
-            &self.image,
-        )
-        .await
+        anyhow::ensure!(
+            workspace.state != WorkspaceState::Provisioning,
+            "workspace creation is incomplete; retry creation before seeding"
+        );
+        self.store()
+            .update_workspace_state(&workspace.id, WorkspaceState::Failed)?;
+        let result = async {
+            // Explicit seeding is also the repair path for a failed import.
+            // Keep the workspace failed until both startup and restore finish.
+            self.runtime
+                .start_workspace(&StartWorkspaceSpec {
+                    image: self.workspace_image(&project, &workspace)?,
+                    container_name: workspace.container_name.clone(),
+                    data_dir: PathBuf::from(&workspace.data_dir),
+                    port: workspace.port,
+                    pg_user: self.pg_user.clone(),
+                    pg_password: self.pg_password.clone(),
+                    pg_db: self.pg_db.clone(),
+                    project_name: self.project_name.clone(),
+                    service_name: self.service_name.clone(),
+                    workspace_name: workspace_name.to_string(),
+                    docker_settings: self.docker_settings.clone(),
+                })
+                .await?;
+            self.runtime
+                .wait_ready(
+                    &workspace.container_name,
+                    &self.pg_user,
+                    &self.pg_db,
+                    STARTUP_TIMEOUT,
+                )
+                .await?;
+            seed::seed_branch(
+                self.runtime.client(),
+                &parsed,
+                &workspace.container_name,
+                &self.pg_user,
+                &self.pg_db,
+                &project.image,
+            )
+            .await
+        }
+        .await;
+        self.store().update_workspace_state(
+            &workspace.id,
+            if result.is_ok() {
+                WorkspaceState::Running
+            } else {
+                WorkspaceState::Failed
+            },
+        )?;
+        result
     }
 
     fn project_info(&self) -> Option<ProjectInfo> {
-        let project = self
-            .store()
-            .get_project_by_name(&self.project_name)
-            .ok()??;
+        let project = self.store().project_for_owner(&self.owner_key).ok()??;
         Some(ProjectInfo {
-            name: project.name,
+            name: self.project_name.clone(),
             storage_driver: Some(project.storage_driver.as_str().to_string()),
             image: Some(project.image),
         })
@@ -829,14 +1119,19 @@ impl ServiceProvider for LocalProvider {
         "Local (Docker + CoW)"
     }
 
+    fn data_strategy(&self) -> &'static str {
+        "physical_copy"
+    }
+
     fn capabilities(&self) -> ServiceCapabilities {
         ServiceCapabilities {
+            data_strategy: self.data_strategy().into(),
             lifecycle: true,
             logs: true,
             destroy_project: true,
             cleanup: true,
             seed_from_source: true,
-            template_from_time: false,
+            operations: self.operations(),
             max_workspace_name_length: 255,
         }
     }
@@ -866,7 +1161,7 @@ impl ServiceProvider for LocalProvider {
     }
 
     async fn destroy_preview(&self) -> Result<Option<(String, Vec<String>)>> {
-        let project = match self.store().get_project_by_name(&self.project_name)? {
+        let project = match self.store().project_for_owner(&self.owner_key)? {
             Some(p) => p,
             None => return Ok(None),
         };
@@ -880,28 +1175,34 @@ impl ServiceProvider for LocalProvider {
     async fn destroy_project(&self) -> Result<Vec<String>> {
         let project = self
             .store()
-            .get_project_by_name(&self.project_name)?
+            .project_for_owner(&self.owner_key)?
             .ok_or_else(|| anyhow::anyhow!("Project '{}' not found", self.project_name))?;
 
         let workspaces = self.store().list_workspaces(&project.id)?;
         let workspace_names: Vec<String> = workspaces.iter().map(|b| b.name.clone()).collect();
 
-        // 1. Remove all Docker containers (best-effort)
-        for workspace in &workspaces {
-            if let Err(e) = self.runtime.remove_branch(&workspace.container_name).await {
-                log::warn!(
-                    "Failed to remove container '{}': {}",
-                    workspace.container_name,
-                    e
-                );
+        // Delete exact workspace resources and retain the small project ownership
+        // record. Never recursively remove a root that a concurrent create may use.
+        let mut remaining = workspaces;
+        while !remaining.is_empty() {
+            let parents = remaining
+                .iter()
+                .filter_map(|w| w.parent_workspace_id.as_deref())
+                .collect::<std::collections::HashSet<_>>();
+            let leaves = remaining
+                .iter()
+                .filter(|w| !parents.contains(w.id.as_str()))
+                .map(|w| w.name.clone())
+                .collect::<Vec<_>>();
+            anyhow::ensure!(
+                !leaves.is_empty(),
+                "cyclic data dependencies prevent project destruction"
+            );
+            for name in &leaves {
+                self.delete_workspace_inner(name, true).await?;
             }
+            remaining = self.store().list_workspaces(&project.id)?;
         }
-
-        // 2. Delete project-level storage data
-        self.storage.delete_project_data(&project).await?;
-
-        // 3. Delete project from SQLite (cascades to workspaces)
-        self.store().delete_project(&project.id)?;
 
         Ok(workspace_names)
     }
@@ -985,7 +1286,8 @@ mod regression_tests {
         .await
         .expect("ensure_project must not hang")
         .unwrap();
-        assert_eq!(project.name, "deadlock-regression");
+        assert!(project.name.starts_with("deadlock-regression ["));
+        let first_id = project.id.clone();
 
         // Second provider sees a different project root → hits the
         // project_path-mismatch branch that used to self-deadlock.
@@ -998,6 +1300,10 @@ mod regression_tests {
         .expect("ensure_project must not deadlock on project_path resync")
         .unwrap();
 
+        assert_ne!(
+            project.id, first_id,
+            "repositories sharing a display name must own separate data"
+        );
         let expected = root_b
             .path()
             .canonicalize()

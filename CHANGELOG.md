@@ -7,8 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- **Reusable data** — Versioned, sealed PostgreSQL baselines with recorded data origins, exact engine identities, and dependency-aware removal.
+- **Recovery and cleanup** — Stable resource identities, durable operation inspection/resume, project relocation, previewable retention, workspace pins/expiry, and bounded fingerprinted caches.
+- **Provider contracts** — Versioned capability descriptors and plugin negotiation, with generated desktop choices and provider documentation.
+
 ### Changed
 
+- **Workspace lifecycle** — CLI, TUI, and desktop share readiness and service operation policy; required background hooks finish before dependent commands, and optional hooks expose completion receipts.
+- **Local data safety** — Recoverable ZFS replacement, cancellation-safe database quiescence, and cross-process port reservations protect concurrent workspace creation and reset.
+- **Desktop and proxy** — Configuration uses a format-preserving raw editor; the optional proxy runs as a companion with one runtime owner.
+- **Automation** — Workspace execution preserves literal arguments, partial provider failures produce non-zero exits, and cleanup retains ownership state when retry is needed.
 - **Agent workflow** — `devflow agent skill` now generates harness-specific guide/rule files instead of installing embedded bundled skills; switch/context JSON expose `agent_workdir` for agent tool workdirs.
 - **Hooks** — Lifecycle hooks run synchronously by default unless `background: true`; non-blocking phases now describe failure policy rather than background execution.
 - **Local PostgreSQL storage** — `local.storage` / `--storage` support `auto`, `zfs`, `apfs_clone`, `reflink`, and `copy`, with clearer doctor diagnostics for configured preferences and a matching GUI Add Service selector.
@@ -21,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **Redundant integrations** — Removed embedded Pitchfork supervision, built-in LLM API commit generation, AI policy merging, inert configuration options, and duplicate desktop configuration forms. Migration warnings retain supported legacy state and resource ownership.
 - **Workspace sandbox** — Removed devflow's partial workspace sandbox implementation; use an agent harness, container, VM, or dedicated sandbox platform for hard isolation.
 
 ## v0.7.1 (2026-08-09)

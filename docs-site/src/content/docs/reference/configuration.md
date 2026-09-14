@@ -120,7 +120,7 @@ services:
 ```yaml
   - name: app-db
     type: shared
-    service_type: postgres             # postgres | clickhouse (redis/rustfs imply shared)
+    service_type: postgres             # postgres | clickhouse | redis | rustfs
     shared:
       image: postgres:17               # engine image
       port: 5432                       # fixed well-known port
@@ -129,7 +129,7 @@ services:
       password: rustfsadmin            # rustfs: secret key
 ```
 
-Redis is always shared (`service_type: redis`, default `redis:7`, port 6379, a DB index 0–15 per workspace). RustFS (`service_type: rustfs`, aliases `s3`/`objectstorage`) serves S3 on 9000 with a bucket per workspace.
+Redis supports separate workspace containers (`type: local` with a `generic` container configuration) or a shared engine (`type: shared`, up to 15 allocated workspace databases). Legacy local Redis configurations without a `generic` block retain shared allocation during migration. RustFS (`service_type: rustfs`, aliases `s3`/`objectstorage`) serves S3 on 9000 with a bucket per workspace.
 
 ## `processes`
 
@@ -137,18 +137,10 @@ Workspace-scoped project processes — app servers, frontend dev servers, backgr
 
 ```yaml
 processes:
-  provider: native       # native (default) or pitchfork (direct Rust supervisor embedding)
+  provider: native
+  start_policy: config   # or inherit_parent
   auto_start: true       # start after devflow switch aligns services and hooks
   auto_stop: true        # stop before devflow remove deletes the workspace
-  # Optional when provider: pitchfork
-  pitchfork:
-    config_policy: devflow-owned   # devflow-owned | import | mirror | merge
-    external_daemons: show         # hide | show | importable
-    web_ui:
-      enabled: false               # show/open loopback Pitchfork Web UI bridge actions
-      bind_address: 127.0.0.1
-      bind_port: 3120
-      edit_mode: warn              # readonly | warn | merge
   daemons:
     api:
       run: "npm run dev"
@@ -188,7 +180,7 @@ Daemon fields:
 | `watch` | glob patterns, relative to `dir`, that the controller daemon polls for restart-on-change |
 | `retry` | number of controller-daemon restart attempts after a crash |
 
-Manage them with `devflow process start|stop|restart|status|logs`. Auto-started process commands reuse hook approvals; pre-approve with `devflow hook approvals add "npm run dev"` for non-interactive automation, or set `DEVFLOW_APPROVE_HOOKS=1`. `provider: pitchfork` embeds Pitchfork's Rust supervisor/log APIs directly; devflow still owns desired state and proxy/GUI records. `processes.pitchfork.config_policy` records how devflow should reconcile `.devflow.yml` with Pitchfork-native config files: `devflow-owned` is the safe default and the active behavior for devflow-managed processes; `import`, `mirror`, and `merge` are explicit opt-in reconciliation modes for GUI workflows and never silently overwrite devflow templates. `devflow proxy` reads process state and exposes port-backed processes as `https://<process>.<workspace>.<project>.<suffix>` (default suffix `.local`). Run `devflow daemon start` to keep desired-state/watch/retry reconciliation active in the background. See [Project processes & Pitchfork](/devflow/guides/processes/) for migration examples, readiness checks, and operational commands.
+Manage them with `devflow process start|stop|restart|status|logs`. Auto-started process commands reuse hook approvals; pre-approve with `devflow hook approvals add "npm run dev"` for non-interactive automation, or set `DEVFLOW_APPROVE_HOOKS=1`. The native supervisor records desired state and runtime observations. `devflow proxy` reads process state and exposes port-backed processes as `https://<process>.<workspace>.<project>.<suffix>` (default suffix `.local`). Run `devflow daemon start` to keep desired-state/watch/retry reconciliation active in the background. See [Project processes](/devflow/guides/processes/) for migration examples, readiness checks, and operational commands.
 
 ### Cloud providers (experimental)
 
@@ -215,7 +207,7 @@ worktree:
   path_template: "../{repo}.{workspace}"  # {repo}, {workspace} (collision-safe key), {branch} legacy
   copy_files: [.env.local, .env]          # files/dirs reflink-copied from main
   copy_ignored: false                     # also copy gitignored entries (collapsed, parallel)
-  copy_ai_configs: true                   # copy .claude/, .cursor/, .opencode/, .agents/
+  copy_ai_configs: false                  # opt in to copying broad AI tool settings
   extra_ai_dirs: []                       # additional AI tool dirs
 ```
 
@@ -236,7 +228,7 @@ hooks:
       environment: { NODE_ENV: development }
     <hook-name>:            # action form
       action:
-        type: write-env     # write-env | write-file | copy | replace | docker-exec | http | notify | sync-ai-configs | shell
+        type: write-env     # write-env | write-file | copy | replace | docker-exec | http | notify | shell
         path: .env.local
         vars: { DATABASE_URL: "{{ service['app-db'].url }}" }
 ```
@@ -259,17 +251,11 @@ Used by `devflow switch -o/--open` and `-d/--detach`.
 commit:
   generation:
     command: "claude -p --model haiku"   # external CLI (preferred)
-    # api_url: "http://localhost:11434/v1"  # OpenAI-compatible fallback
-    # model: "llama3"
-    # api_key: ${DEVFLOW_LLM_API_KEY}
 ```
 
-## `agent`
+## Agent guides
 
-```yaml
-agent:
-  auto_context: true       # provide project context to agents on launch
-```
+Use `devflow agent context` and `devflow agent skill --target all`. The retired `agent.auto_context` setting is ignored with a migration warning.
 
 ## Value interpolation
 
@@ -283,3 +269,5 @@ neon:
 ## Workspace identity
 
 The raw VCS name is canonical for display, registry lookup, and VCS operations. Services and generated paths use a separate deterministic `service_key`: already-safe names are preserved, while names requiring normalization include a stable short hash. Consequently names such as `feature/auth`, `feature-auth`, and case variants remain distinct. Hook templates expose the key as `workspace_key`; `workspace_sanitized` is an alias.
+
+Use `project_id` for a stable data owner across repository moves. Shared legacy adoption uses `shared.legacy_resources`; local PostgreSQL adoption uses `local.legacy_project_id`. See [Data ownership and recovery](/devflow/guides/ownership-and-recovery/) before changing an existing installation.

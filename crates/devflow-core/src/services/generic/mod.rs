@@ -11,7 +11,7 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use bollard::models::{ContainerCreateBody, HostConfig, PortBinding, PortMap};
 use bollard::query_parameters::{
-    CreateContainerOptions, RemoveContainerOptions, StopContainerOptions,
+    CreateContainerOptions, ListContainersOptions, RemoveContainerOptions, StopContainerOptions,
 };
 use bollard::Docker;
 use chrono::Utc;
@@ -21,8 +21,7 @@ use crate::config::{DockerCustomSettings, GenericDockerConfig};
 use crate::services::{
     local_docker::{
         bounded_container_name, collect_container_logs, inspect_container_status,
-        list_managed_service_containers, pick_available_port, sanitize_name_component,
-        service_workspace_prefix, ContainerStatus,
+        pick_available_port, sanitize_name_component, ContainerStatus,
     },
     ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceCapabilities, ServiceProvider,
     WorkspaceInfo,
@@ -32,11 +31,13 @@ use crate::services::{
 pub struct GenericDockerProvider {
     /// Project name from config (e.g. "myapp").
     project_name: String,
+    project_identity: String,
     /// Logical service name from config (e.g. "cache", "search").
     service_name: String,
     /// Docker image to use.
     image: String,
     /// Static port mapping (e.g. "6379:6379"). Used when auto_workspace is false.
+    connection_scheme: Option<String>,
     port_mapping: Option<String>,
     /// Start of port range for workspace-specific instances.
     port_range_start: Option<u16>,
@@ -62,12 +63,14 @@ impl GenericDockerProvider {
         docker_settings: Option<&DockerCustomSettings>,
     ) -> anyhow::Result<Self> {
         let client =
-            Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon. Is Docker installed and running? Check with: docker info")?;
+            Docker::connect_with_defaults().context("Failed to connect to Docker daemon. Is Docker installed and running? Check with: docker info")?;
 
         Ok(Self {
             project_name: project_name.to_string(),
+            project_identity: project_name.to_string(),
             service_name: service_name.to_string(),
             image: config.image.clone(),
+            connection_scheme: None,
             port_mapping: config.port_mapping.clone(),
             port_range_start: config.port_range_start,
             environment: config.environment.clone(),
@@ -79,7 +82,28 @@ impl GenericDockerProvider {
         })
     }
 
+    pub fn with_connection_scheme(mut self, scheme: &str) -> Self {
+        self.connection_scheme = Some(scheme.into());
+        self
+    }
+
+    pub fn with_project_identity(mut self, identity: &str) -> Self {
+        self.project_identity = identity.to_string();
+        self
+    }
+
     fn container_name(&self, workspace_name: &str) -> String {
+        format!(
+            "devflow-generic-{}",
+            &crate::services::ownership::identity_digest(&[
+                &self.project_identity,
+                &self.service_name,
+                workspace_name,
+            ])[..48]
+        )
+    }
+
+    fn legacy_container_name(&self, workspace_name: &str) -> String {
         let raw = format!(
             "devflow-{}-{}-{}",
             sanitize_name_component(&self.project_name),
@@ -90,7 +114,20 @@ impl GenericDockerProvider {
     }
 
     async fn container_status(&self, container_name: &str) -> anyhow::Result<ContainerStatus> {
-        inspect_container_status(&self.client, container_name).await
+        let status = inspect_container_status(&self.client, container_name).await?;
+        if status != ContainerStatus::NotFound {
+            let info = self.client.inspect_container(container_name, None).await?;
+            let labels = info.config.and_then(|c| c.labels).unwrap_or_default();
+            anyhow::ensure!(
+                labels.get("devflow.project-id") == Some(&self.project_identity)
+                    && labels.get("devflow.service") == Some(&self.service_name)
+                    && labels
+                        .get("devflow.workspace")
+                        .is_some_and(|w| self.container_name(w) == container_name),
+                "container '{container_name}' has incompatible ownership"
+            );
+        }
+        Ok(status)
     }
 
     async fn ensure_image(&self) -> anyhow::Result<()> {
@@ -98,7 +135,9 @@ impl GenericDockerProvider {
     }
 
     /// Pick a port for a workspace. Uses port_range_start + offset based on existing containers.
-    async fn pick_port_for_workspace(&self) -> anyhow::Result<u16> {
+    async fn pick_port_for_workspace(
+        &self,
+    ) -> anyhow::Result<crate::services::local_docker::PortReservation> {
         let start = self.port_range_start.unwrap_or(56000);
         pick_available_port(&self.client, start).await
     }
@@ -178,6 +217,10 @@ impl GenericDockerProvider {
         let mut labels = HashMap::new();
         labels.insert("devflow.managed".to_string(), "true".to_string());
         labels.insert("devflow.project".to_string(), self.project_name.clone());
+        labels.insert(
+            "devflow.project-id".to_string(),
+            self.project_identity.clone(),
+        );
         labels.insert("devflow.service".to_string(), self.service_name.clone());
         labels.insert("devflow.service-type".to_string(), "generic".to_string());
         labels.insert("devflow.workspace".to_string(), workspace_name.to_string());
@@ -286,14 +329,39 @@ impl GenericDockerProvider {
 
     /// List all devflow-managed containers for this service.
     async fn list_managed_containers(&self) -> anyhow::Result<Vec<(String, String, bool)>> {
-        let prefix = service_workspace_prefix(&self.project_name, &self.service_name);
-        list_managed_service_containers(
-            &self.client,
-            &self.project_name,
-            &self.service_name,
-            &prefix,
-        )
-        .await
+        let containers = self
+            .client
+            .list_containers(Some(ListContainersOptions {
+                all: true,
+                ..Default::default()
+            }))
+            .await?;
+        let mut owned = Vec::new();
+        for container in containers {
+            let labels = container.labels.unwrap_or_default();
+            if labels.get("devflow.project-id") != Some(&self.project_identity)
+                || labels.get("devflow.service") != Some(&self.service_name)
+                || labels.get("devflow.managed").map(String::as_str) != Some("true")
+            {
+                continue;
+            }
+            let Some(workspace) = labels.get("devflow.workspace") else {
+                continue;
+            };
+            let name = self.container_name(workspace);
+            if !container
+                .names
+                .unwrap_or_default()
+                .iter()
+                .any(|n| n.trim_start_matches('/') == name)
+            {
+                continue;
+            }
+            let running =
+                container.state == Some(bollard::models::ContainerSummaryStateEnum::RUNNING);
+            owned.push((workspace.clone(), name, running));
+        }
+        Ok(owned)
     }
 }
 
@@ -315,37 +383,17 @@ impl ServiceProvider for GenericDockerProvider {
 
         // Check if already exists
         match self.container_status(&container_name).await? {
-            ContainerStatus::Running => {
-                return Ok(WorkspaceInfo {
-                    name: workspace_name.to_string(),
-                    created_at: Some(Utc::now()),
-                    parent_workspace: from_workspace.map(|s| s.to_string()),
-                    database_name: container_name,
-                    state: Some("running".to_string()),
-                });
-            }
-            ContainerStatus::Exited | ContainerStatus::Paused => {
-                // Restart it
-                self.client
-                    .start_container(
-                        &container_name,
-                        None::<bollard::query_parameters::StartContainerOptions>,
-                    )
-                    .await
-                    .with_context(|| format!("failed to start container '{container_name}'"))?;
-
-                return Ok(WorkspaceInfo {
-                    name: workspace_name.to_string(),
-                    created_at: Some(Utc::now()),
-                    parent_workspace: from_workspace.map(|s| s.to_string()),
-                    database_name: container_name,
-                    state: Some("running".to_string()),
-                });
-            }
-            ContainerStatus::NotFound | ContainerStatus::Other(_) => {}
+            ContainerStatus::NotFound => {}
+            _ => return self.switch_to_branch(workspace_name).await,
         }
 
-        let port = self.pick_port_for_workspace().await?;
+        let legacy = self.legacy_container_name(workspace_name);
+        anyhow::ensure!(
+            inspect_container_status(&self.client, &legacy).await? == ContainerStatus::NotFound,
+            "legacy container '{legacy}' has no proven project ownership; verify and migrate its data before creating a replacement"
+        );
+        let _port_reservation = self.pick_port_for_workspace().await?;
+        let port = _port_reservation.port;
         self.create_and_start_container(&container_name, port, workspace_name)
             .await?;
         self.wait_healthy(&container_name, Duration::from_secs(60))
@@ -354,7 +402,7 @@ impl ServiceProvider for GenericDockerProvider {
         Ok(WorkspaceInfo {
             name: workspace_name.to_string(),
             created_at: Some(Utc::now()),
-            parent_workspace: from_workspace.map(|s| s.to_string()),
+            parent_workspace: None,
             database_name: container_name,
             state: Some("running".to_string()),
         })
@@ -407,29 +455,7 @@ impl ServiceProvider for GenericDockerProvider {
 
     async fn switch_to_branch(&self, workspace_name: &str) -> anyhow::Result<WorkspaceInfo> {
         let container_name = self.container_name(workspace_name);
-
-        match self.container_status(&container_name).await? {
-            ContainerStatus::Running => {}
-            ContainerStatus::Exited | ContainerStatus::Paused | ContainerStatus::Other(_) => {
-                self.client
-                    .start_container(
-                        &container_name,
-                        None::<bollard::query_parameters::StartContainerOptions>,
-                    )
-                    .await
-                    .with_context(|| format!("failed to start container '{container_name}'"))?;
-
-                self.wait_healthy(&container_name, Duration::from_secs(60))
-                    .await?;
-            }
-            ContainerStatus::NotFound => {
-                return Err(anyhow!(
-                    "no container found for workspace '{}' on service '{}'",
-                    workspace_name,
-                    self.service_name
-                ));
-            }
-        }
+        self.start_workspace(workspace_name).await?;
 
         Ok(WorkspaceInfo {
             name: workspace_name.to_string(),
@@ -450,24 +476,37 @@ impl ServiceProvider for GenericDockerProvider {
             database: self.service_name.clone(),
             user: String::new(),
             password: None,
-            connection_string: None,
+            connection_string: self
+                .connection_scheme
+                .as_ref()
+                .map(|scheme| format!("{scheme}://127.0.0.1:{port}/0")),
         })
     }
 
-    fn supports_lifecycle(&self) -> bool {
-        true
+    fn operations(&self) -> crate::services::OperationCapabilities {
+        crate::services::OperationCapabilities {
+            start: true,
+            stop: true,
+            logs: true,
+            reset: false,
+            seed: false,
+            snapshot: false,
+        }
     }
 
     async fn start_workspace(&self, workspace_name: &str) -> anyhow::Result<()> {
         let container_name = self.container_name(workspace_name);
 
         match self.container_status(&container_name).await? {
-            ContainerStatus::Running => Ok(()),
-            ContainerStatus::NotFound => Err(anyhow!(
-                "no container for workspace '{}' on service '{}'",
-                workspace_name,
-                self.service_name
-            )),
+            ContainerStatus::Running => {}
+            ContainerStatus::Paused => self.client.unpause_container(&container_name).await?,
+            ContainerStatus::NotFound => {
+                return Err(anyhow!(
+                    "no container for workspace '{}' on service '{}'",
+                    workspace_name,
+                    self.service_name
+                ))
+            }
             _ => {
                 self.client
                     .start_container(
@@ -476,10 +515,10 @@ impl ServiceProvider for GenericDockerProvider {
                     )
                     .await
                     .with_context(|| format!("failed to start container '{container_name}'"))?;
-                self.wait_healthy(&container_name, Duration::from_secs(60))
-                    .await
             }
         }
+        self.wait_healthy(&container_name, Duration::from_secs(60))
+            .await
     }
 
     async fn stop_workspace(&self, workspace_name: &str) -> anyhow::Result<()> {
@@ -607,12 +646,13 @@ impl ServiceProvider for GenericDockerProvider {
 
     fn capabilities(&self) -> ServiceCapabilities {
         ServiceCapabilities {
+            data_strategy: self.data_strategy().into(),
             lifecycle: true,
             logs: true,
             destroy_project: true,
             cleanup: true,
             seed_from_source: false,
-            template_from_time: false,
+            operations: self.operations(),
             max_workspace_name_length: 255,
         }
     }

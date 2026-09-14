@@ -80,6 +80,7 @@ pub async fn get_connection_info(
 
 #[derive(Serialize)]
 pub struct CreateWorkspaceResult {
+    pub operation: Option<workspace::operation::OperationRecord>,
     pub workspace: String,
     pub service_key: String,
     pub parent: Option<String>,
@@ -92,16 +93,21 @@ pub struct CreateWorkspaceResult {
 
 #[derive(Serialize)]
 pub struct HookRunResultDto {
+    pub required_failed: usize,
+    pub required_skipped: usize,
+    pub background_records: Vec<String>,
     pub phase: String,
     pub succeeded: usize,
     pub failed: usize,
     pub skipped: usize,
     pub background: usize,
     pub errors: Vec<String>,
+    pub skipped_reasons: Vec<String>,
 }
 
 #[derive(Serialize)]
 pub struct SwitchWorkspaceResult {
+    pub operation: Option<workspace::operation::OperationRecord>,
     pub workspace: String,
     pub service_key: String,
     pub parent: Option<String>,
@@ -114,6 +120,7 @@ pub struct SwitchWorkspaceResult {
 
 #[derive(Serialize)]
 pub struct DeleteWorkspaceResult {
+    pub operation: Option<workspace::operation::OperationRecord>,
     pub workspace: String,
     pub service_key: String,
     pub worktree_removed: bool,
@@ -131,6 +138,7 @@ pub async fn create_workspace(
     project_path: String,
     workspace_name: String,
     from_workspace: Option<String>,
+    data_from_workspace: Option<String>,
     copy_files: Option<Vec<String>>,
     copy_ignored: Option<bool>,
 ) -> Result<CreateWorkspaceResult, String> {
@@ -138,6 +146,7 @@ pub async fn create_workspace(
     let cfg = crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
 
     let options = workspace::create::CreateOptions {
+        data_from_workspace,
         lifecycle: gui_lifecycle_options(),
         from_workspace,
         copy_files,
@@ -160,6 +169,7 @@ pub async fn create_workspace(
     .map_err(crate::commands::format_error)?;
 
     let response = CreateWorkspaceResult {
+        operation: result.operation.clone(),
         workspace: result.workspace.clone(),
         service_key: result.service_key.clone(),
         parent: result.parent.clone(),
@@ -187,7 +197,11 @@ pub async fn create_workspace(
                 failed: r.failed,
                 skipped: r.skipped,
                 background: r.background,
+                required_failed: r.required_failed,
+                required_skipped: r.required_skipped,
+                background_records: r.background_records,
                 errors: r.errors,
+                skipped_reasons: r.skipped_reasons,
             })
             .collect(),
     };
@@ -206,6 +220,7 @@ pub async fn switch_workspace(
     let cfg = crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
 
     let options = workspace::switch::SwitchOptions {
+        data_from_workspace: None,
         lifecycle: gui_lifecycle_options(),
         create_if_missing: false,
         from_workspace: None,
@@ -222,6 +237,7 @@ pub async fn switch_workspace(
     .map_err(crate::commands::format_error)?;
 
     let response = SwitchWorkspaceResult {
+        operation: result.operation.clone(),
         workspace: result.workspace.clone(),
         service_key: result.service_key.clone(),
         parent: result.parent.clone(),
@@ -249,7 +265,11 @@ pub async fn switch_workspace(
                 failed: r.failed,
                 skipped: r.skipped,
                 background: r.background,
+                required_failed: r.required_failed,
+                required_skipped: r.required_skipped,
+                background_records: r.background_records,
                 errors: r.errors,
+                skipped_reasons: r.skipped_reasons,
             })
             .collect(),
     };
@@ -307,6 +327,7 @@ pub async fn delete_workspace(
     .map_err(crate::commands::format_error)?;
 
     let response = DeleteWorkspaceResult {
+        operation: result.operation.clone(),
         workspace: result.workspace.clone(),
         service_key: result.service_key.clone(),
         worktree_removed: result.worktree_removed,
@@ -331,7 +352,11 @@ pub async fn delete_workspace(
                 failed: r.failed,
                 skipped: r.skipped,
                 background: r.background,
+                required_failed: r.required_failed,
+                required_skipped: r.required_skipped,
+                background_records: r.background_records,
                 errors: r.errors,
+                skipped_reasons: r.skipped_reasons,
             })
             .collect(),
     };

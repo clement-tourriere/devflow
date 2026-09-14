@@ -1,15 +1,15 @@
-import { useEffect } from "react";
+import { useEffect, lazy, Suspense } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import Layout from "./components/Layout";
-import Home from "./pages/Home";
-import ProjectList from "./pages/projects/ProjectList";
-import ProjectDetail from "./pages/projects/ProjectDetail";
-import ProjectSetup from "./pages/projects/ProjectSetup";
-import ProxyDashboard from "./pages/proxy/ProxyDashboard";
-import HookManager from "./pages/hooks/HookManager";
-import ConfigEditor from "./pages/config/ConfigEditor";
-import DoctorPage from "./pages/doctor/DoctorPage";
-import Settings from "./pages/settings/Settings";
+const Home = lazy(() => import("./pages/Home"));
+const ProjectList = lazy(() => import("./pages/projects/ProjectList"));
+const ProjectDetail = lazy(() => import("./pages/projects/ProjectDetail"));
+const ProjectSetup = lazy(() => import("./pages/projects/ProjectSetup"));
+const ProxyDashboard = lazy(() => import("./pages/proxy/ProxyDashboard"));
+const HookManager = lazy(() => import("./pages/hooks/HookManager"));
+const ConfigEditor = lazy(() => import("./pages/config/ConfigEditor"));
+const DoctorPage = lazy(() => import("./pages/doctor/DoctorPage"));
+const Settings = lazy(() => import("./pages/settings/Settings"));
 
 const TEXT_INPUT_TYPES = new Set([
   "",
@@ -91,6 +91,7 @@ function App() {
   }, []);
 
   return (
+    <Suspense fallback={<p role="status">Loading…</p>}>
     <Routes>
       <Route path="/" element={<Layout />}>
         <Route index element={<Home />} />
@@ -108,6 +109,7 @@ function App() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
+    </Suspense>
   );
 }
 

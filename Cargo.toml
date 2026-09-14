@@ -23,19 +23,26 @@ repository = "https://github.com/clement-tourriere/devflow"
 name = "devflow"
 path = "src/main.rs"
 
+[[bin]]
+name = "devflow-proxy"
+path = "src/proxy_main.rs"
+required-features = ["proxy"]
+test = false
+bench = false
+
 [features]
-default = ["service-local", "service-neon", "service-dblab", "service-xata", "llm", "tui"]
+default = ["service-local", "tui"]
+proxy = ["dep:devflow-proxy"]
 tui = ["dep:ratatui", "dep:crossterm", "devflow-core/service-local"]
 service-local = ["devflow-core/service-local"]
 service-neon = ["devflow-core/service-neon"]
 service-dblab = ["devflow-core/service-dblab"]
 service-xata = ["devflow-core/service-xata"]
-llm = ["devflow-core/llm"]
 
 [dependencies]
 # Core library
-devflow-core = { path = "crates/devflow-core" }
-devflow-proxy = { path = "crates/devflow-proxy" }
+devflow-core = { path = "crates/devflow-core", default-features = false }
+devflow-proxy = { path = "crates/devflow-proxy", optional = true }
 
 # CLI and argument parsing
 clap = { version = "4.5", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
@@ -47,7 +54,7 @@ serde_yaml_ng = { version = "0.10", default-features = false }
 serde_json = "1.0"
 
 # Async runtime
-tokio = { version = "1.46", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "macros", "process", "fs"] }
+tokio = { version = "1.46", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "macros", "process", "fs", "signal"] }
 
 # Error handling
 anyhow = "1.0"
@@ -58,11 +65,8 @@ anyhow = "1.0"
 regex = "1.12"
 
 # Logging
-log = { version = "0.4", default-features = false, features = ["release_max_level_off"] }
+log = { version = "0.4", default-features = false }
 env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
-
-# Tool detection on PATH
-which = "8.0.0"
 
 # Terminal UI for interactive selection
 inquire = { version = "0.9", default-features = false, features = ["crossterm"] }

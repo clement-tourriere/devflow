@@ -109,7 +109,7 @@ function ProxyDashboard() {
             Proxy
           </h1>
           <div className="page-header-sub">
-            Auto-discovered containers served over HTTPS via *.localhost
+            Workspace URLs for processes and containers
           </div>
         </div>
         <div className="page-header-actions">
@@ -120,13 +120,19 @@ function ProxyDashboard() {
           <button
             className={`btn ${status?.running ? "btn-danger" : "btn-primary"}`}
             onClick={handleToggleProxy}
-            disabled={loading}
+            disabled={loading || status?.available === false}
           >
             {loading ? "…" : status?.running ? "Stop proxy" : "Start proxy"}
           </button>
         </div>
       </div>
 
+      {status?.available === false && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          Install the optional proxy companion to manage workspace URLs. {" "}
+          <a href="https://clement-tourriere.github.io/devflow/guides/proxy/#optional-desktop-companion" target="_blank" rel="noreferrer">Installation instructions</a>
+        </div>
+      )}
       <div className="grid grid-2">
         <div className="card">
           <div className="card-title">Status</div>

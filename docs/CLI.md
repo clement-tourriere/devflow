@@ -330,7 +330,7 @@ Print logs captured from stdout/stderr. Use `--follow`/`-f` to stream appended o
 
 Set `required: false` on optional processes so readiness failures are reported but do not fail `switch`/`process start`.
 
-When `processes.auto_start: true`, `devflow switch` starts configured processes after services and hooks are aligned. Auto-started shell commands use the same approval store as hooks: unapproved commands are skipped in `--json`/`--non-interactive` mode unless pre-approved with `devflow hook approvals add "npm run dev"` or `DEVFLOW_APPROVE_HOOKS=1`. Use `processes.provider: pitchfork` to embed Pitchfork's Rust supervisor directly without shelling out to the `pitchfork` CLI. Running processes with resolved ports are exposed by `devflow proxy` as `https://<process>.<workspace>.<project>.<suffix>` (default suffix: `.local`). Run `devflow daemon start` to keep desired-state, `watch` restart-on-change, and `retry` reconciliation active in the background. See `docs-site/src/content/docs/guides/processes.md` and `examples/migrate-existing-app.devflow.yml` for migration examples.
+When `processes.auto_start: true`, `devflow switch` starts configured processes after services and hooks are aligned. Auto-started shell commands use the same approval store as hooks: unapproved commands are skipped in `--json`/`--non-interactive` mode unless pre-approved with `devflow hook approvals add "npm run dev"` or `DEVFLOW_APPROVE_HOOKS=1`. The native supervisor owns process startup, logs, readiness and shutdown. Running processes with resolved ports are exposed by `devflow proxy` as `https://<process>.<workspace>.<project>.<suffix>` (default suffix: `.local`). Run `devflow daemon start` to keep desired-state, `watch` restart-on-change, and `retry` reconciliation active in the background. See `docs-site/src/content/docs/guides/processes.md` and `examples/migrate-existing-app.devflow.yml` for migration examples.
 
 ## Controller Daemon
 
@@ -445,7 +445,6 @@ Current built-in action types include:
 - `docker-exec`
 - `http`
 - `notify`
-- `sync-ai-configs`
 
 ### `devflow hook recipes`
 
@@ -459,7 +458,7 @@ devflow --json hook recipes
 ```
 
 Available: `env-file`, `patch-config`, `db-migrate`, `install-deps`,
-`workspace-setup`, `sync-ai-configs`, `multiplexer-session`.
+`workspace-setup`, `multiplexer-session`.
 
 ### `devflow hook install <recipe>`
 
@@ -527,12 +526,10 @@ devflow --json agent skill --target claude
 devflow agent docs                    # Generate a root AGENTS.md
 ```
 
-### `devflow sync-ai-configs`
 
 Sync AI tool configuration directories from the current worktree back to the main worktree.
 
 ```bash
-devflow sync-ai-configs
 ```
 
 For `.claude/settings.local.json`, permission arrays are unioned and deduplicated. For other AI config directories, copying is additive only.
@@ -716,9 +713,6 @@ The current tabs are:
 | `DEVFLOW_CURRENT_BRANCH_DISABLED=true` | Disable devflow for the current workspace only |
 | `DEVFLOW_CONTEXT_BRANCH=...` | Override context workspace for parent resolution |
 | `DEVFLOW_ZFS_DATASET=...` | Force a specific ZFS dataset |
-| `DEVFLOW_LLM_API_KEY=...` | API key for AI commit messages |
-| `DEVFLOW_LLM_API_URL=...` | OpenAI-compatible LLM endpoint |
-| `DEVFLOW_LLM_MODEL=...` | LLM model name |
 | `DEVFLOW_COMMIT_COMMAND=...` | External CLI used for commit generation |
 | `DEVFLOW_APPROVE_HOOKS=1` | Auto-approve config-file hooks (CI/agent runs) |
 | `DEVFLOW_BACKGROUND_HOOK_TIMEOUT=30` | Seconds to await background hooks before CLI exit |
@@ -734,3 +728,42 @@ Override the context workspace used as the default parent for workspace creation
 ```bash
 DEVFLOW_CONTEXT_BRANCH=release_1_0 devflow switch -c hotfix/patch
 ```
+
+## Data origins and recovery
+
+`switch -c task --from main --data-from baseline` chooses code and data sources independently. Data provenance is immutable. Switch and remove JSON results include an `operation` record; errors emit one JSON document as well. Check `operation.status == "ready"` before starting dependent work. `needs_attention` includes skipped hooks and incomplete dependencies; retry the original command after fixing them. JSON-mode `switch -x` reports execution as skipped while setup is incomplete. `doctor` lists unfinished operations.
+
+The native supervisor and local services ship in default CLI builds. Proxy and cloud adapters are optional build features. External commit generator commands remain available in minimal builds. See [Data ownership and recovery](../docs-site/src/content/docs/guides/ownership-and-recovery.md) for migration details.
+
+## Baselines, execution and recovery
+
+```sh
+devflow baseline prepare clean --service db --from fixtures/base.sql --validate fixtures/check.sql
+devflow --json baseline list
+devflow baseline inspect baseline:clean@v1
+devflow switch -c agent/task --from main --data-from baseline:clean@v1
+devflow exec --workspace agent/task -- pytest -k 'login or signup'
+devflow exec --workspace agent/task --shell 'npm test && npm run build'
+devflow operation list --history
+devflow operation inspect OPERATION_ID
+devflow --json --non-interactive operation resume OPERATION_ID
+devflow baseline remove baseline:clean@v1
+```
+
+Program arguments after `--` remain literal arguments. Shell syntax requires `--shell`; `switch -x 'command with spaces'` keeps its legacy shell spelling when no trailing argument vector is supplied. Required setup must finish before execution. Optional hook failures produce warnings; `required: false` background hooks record completion separately.
+
+Operations persist stable project identity, saved intent, attempts, steps, per-service checkpoints and bounded history. Resume supports workspace switch/removal and service start/stop/reset/cleanup. Failed seed and baseline preparation require inspection and an explicit retry or replacement; arbitrary SQL and shell hooks may have partial effects.
+
+## Retention and project identity
+
+```sh
+devflow --json retention plan --service db --max-count 10
+devflow retention pin agent/long-task
+devflow retention expire agent/short-task 2026-12-01T00:00:00Z
+devflow --json retention apply --service db --max-count 10
+devflow retention unpin agent/long-task
+devflow project list
+devflow project relocate /old/repository /new/repository
+```
+
+Relocation updates registered paths while preserving project/workspace/service IDs, resource namespaces and operation history. It does not move files or repair Git's linked-worktree metadata; perform the repository move and any required `git worktree repair` first.

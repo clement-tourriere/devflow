@@ -6,7 +6,7 @@
 #   ./scripts/generate-llms-txt.sh           # Generate both files
 #   ./scripts/generate-llms-txt.sh --check   # Verify files are up to date (for CI)
 #
-# Requires: a built devflow binary (cargo build) or the ability to run cargo.
+# Reads source files; no compiled binary is needed.
 #
 set -euo pipefail
 
@@ -20,47 +20,13 @@ if [[ "${1:-}" == "--check" ]]; then
   CHECK_MODE=true
 fi
 
-# ---------------------------------------------------------------------------
-# Find the devflow binary — prefer release, then debug, then build it.
-# ---------------------------------------------------------------------------
-find_devflow_bin() {
-  if [[ -x "$ROOT_DIR/target/release/devflow" ]]; then
-    echo "$ROOT_DIR/target/release/devflow"
-  elif [[ -x "$ROOT_DIR/target/debug/devflow" ]]; then
-    echo "$ROOT_DIR/target/debug/devflow"
-  else
-    echo "::info:: No devflow binary found, building..." >&2
-    # --locked: in CI this step runs BEFORE the job's `cargo … --locked`
-    # gates; an unlocked build here would silently rewrite a stale
-    # Cargo.lock and defeat them. Keep stderr visible for the same reason.
-    cargo build --locked --manifest-path "$ROOT_DIR/Cargo.toml" --quiet
-    echo "$ROOT_DIR/target/debug/devflow"
-  fi
-}
-
-DEVFLOW_BIN="$(find_devflow_bin)"
-
-# ---------------------------------------------------------------------------
-# Extract CLI help for all commands
-# ---------------------------------------------------------------------------
-get_help() {
-  # Run in a temp dir so devflow doesn't try to load .devflow.yml
-  local tmpdir
-  tmpdir="$(mktemp -d)"
-  (cd "$tmpdir" && "$DEVFLOW_BIN" "$@" 2>/dev/null) || true
-  rm -rf "$tmpdir"
-}
-
-get_main_help() {
-  get_help --help
-}
-
 # Extract version from Cargo.toml
 VERSION=$(grep '^version' "$ROOT_DIR/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
 # Extract hook phases from source
 extract_hook_phases() {
-  grep -oP '(?<=HookPhase::)\w+' "$ROOT_DIR/crates/devflow-core/src/hooks/mod.rs" \
+  grep -oE 'HookPhase::[[:alnum:]_]+' "$ROOT_DIR/crates/devflow-core/src/hooks/mod.rs" \
+    | sed 's/HookPhase:://' \
     | grep -v Custom \
     | sort -u \
     | while read -r variant; do
@@ -71,7 +37,7 @@ extract_hook_phases() {
 
 # Extract environment variables from CLAUDE.md / README.md
 extract_env_vars() {
-  grep -oP 'DEVFLOW_\w+' "$ROOT_DIR/README.md" | sort -u
+  grep -oE 'DEVFLOW_[[:alnum:]_]+' "$ROOT_DIR/README.md" | sort -u
 }
 
 # ---------------------------------------------------------------------------
@@ -85,8 +51,8 @@ generate_llms_txt() {
 
 devflow gives each Git workspace its own isolated development environment. Running
 `devflow switch -c feature-auth` creates (or switches to) a dedicated worktree and
-service instances that belong to that workspace. Data is cloned using Copy-on-Write
-for near-instant, space-efficient workspace creation.
+service instances that belong to that workspace. Select code and data origins
+independently; local providers use Copy-on-Write where the filesystem supports it.
 
 ## Automation defaults
 
@@ -98,6 +64,12 @@ for near-instant, space-efficient workspace creation.
 - Note: `--no-verify` skips ALL hooks entirely — only use when hooks are genuinely unwanted.
 - Git uses linked worktrees for every additional workspace; jj uses native workspaces.
 - Consume raw `name`, reported `service_key`, and `worktree_path` from `devflow --json list`; never reconstruct legacy keys.
+- Use `switch -c task --from main --data-from baseline:clean@v1` to choose independent code and data origins.
+- Use `baseline prepare NAME --service SERVICE --from FILE` to seal reusable local PostgreSQL data.
+- Use `exec --workspace TASK -- PROGRAM ARGS` for literal arguments; use `--shell` for shell syntax.
+- Inspect saved operations with `operation list --history` and `operation inspect ID`; resume supported operations with `operation resume ID`.
+- Check `operation.status` before starting dependent work: `ready` confirms setup; `needs_attention` requires inspecting skipped or failed phases.
+- Retry incomplete setup with the same command. `doctor` reports pending operations; failed seeds require a successful seed retry.
 - Run `remove` from a different workspace; current/default workspaces remain protected even with `--force`.
 
 ## Docs
@@ -108,6 +80,10 @@ HEADER
   cat <<'LINKS'
 - [README.md](README.md): Product overview, quickstart, configuration reference, CLI reference, and install guide.
 - [AGENTS.md](AGENTS.md): Agent-first onboarding, bootstrap flow, suggested agent loop, and automation contract.
+- [Data baselines](docs-site/src/content/docs/guides/baselines.md): Prepare sealed PostgreSQL generations and reset children to a recorded version.
+- [Retention and caches](docs-site/src/content/docs/guides/retention-and-caches.md): Pins, expiry, cleanup plans and fingerprinted artifact reuse.
+- [Provider catalog](docs-site/src/content/docs/reference/provider-catalog.md): Generated operation capabilities and required configuration.
+- [Ownership and recovery](docs-site/src/content/docs/guides/ownership-and-recovery.md): Independent code/data origins, resource migration, readiness, and recovery.
 - [CLAUDE.md](CLAUDE.md): Project structure, config schema, development commands, and AI agent context.
 - [CHANGELOG.md](CHANGELOG.md): Version history and release notes.
 - [Documentation site](https://clement-tourriere.github.io/devflow/): Full documentation site (Astro Starlight; source in docs-site/).
@@ -184,6 +160,11 @@ Seven service types: postgres, clickhouse, mysql, redis, rustfs/S3, generic
 - Run \`remove\` from a different workspace; default and current workspaces remain protected even with \`--force\`.
 - \`devflow --json capabilities\` returns a machine-readable contract summary.
 - \`devflow --json doctor --strict\` is the health gate; inspect \`summary\` and \`next_steps\` for remediation.
+- \`switch --from\` selects code; \`--data-from\` selects the reusable data parent. Both origins persist across retries.
+- Check \`operation.status\` for \`ready\` before dependent work. Skipped required hooks leave \`needs_attention\`; the materialized worktree is still returned.
+- Resources belong to an exact project/service/workspace identity. Legacy resources require explicit adoption; preserve ownership state with data.
+- SQL seeding is transactional and streamed. Failed imports stay failed until a successful seed retry; stop/start does not clear the failure.
+- Local services and native processes are the defaults. Cloud adapters and the proxy companion are optional build features.
 
 ## Minimal agent loop
 
@@ -224,7 +205,7 @@ INTRO
 |---|---|
 | `devflow list` | List all workspaces with service + worktree status |
 | `devflow link <workspace>` | Link an existing VCS workspace into devflow |
-| `devflow switch [<workspace>] [-c] [--base <b>] [-x <cmd>] [--no-services] [--no-verify] [--template] [--dry-run]` | Switch to a workspace (interactive picker if no arg) |
+| `devflow switch [<workspace>] [-c] [--from <code>] [--data-from <baseline>] [-x <cmd>] [--no-services] [--no-verify] [--template] [--dry-run]` | Switch to a workspace (interactive picker if no arg) |
 | `devflow remove <workspace> [--force] [--keep-services]` | Remove workspace + worktree + all service workspaces |
 | `devflow cleanup [--max-count N]` | Remove old workspaces, keep most recent N |
 
@@ -421,15 +402,9 @@ hooks:
   pre-commit:
     test: "npm test"
 
-agent:
-  auto_context: true                  # Provide context to agents on launch
-
 commit:
   generation:
     command: "claude -p --model haiku" # External CLI for commit messages (preferred)
-    # api_url: "http://localhost:11434/v1"   # OpenAI-compatible API (fallback)
-    # model: "llama3"
-    # api_key: "..."
 ```
 
 ### Configuration hierarchy (highest to lowest precedence)
@@ -449,9 +424,6 @@ commit:
 | `DEVFLOW_DISABLED_BRANCHES=main,release/*` | Disable for specific workspaces |
 | `DEVFLOW_CURRENT_BRANCH_DISABLED=true` | Disable for current workspace only |
 | `DEVFLOW_ZFS_DATASET=...` | Force a specific ZFS dataset |
-| `DEVFLOW_LLM_API_KEY=...` | API key for AI commit messages |
-| `DEVFLOW_LLM_API_URL=...` | LLM endpoint URL (OpenAI-compatible) |
-| `DEVFLOW_LLM_MODEL=...` | LLM model name |
 | `DEVFLOW_COMMIT_COMMAND=...` | External CLI for commit messages (e.g., "claude -p") |
 
 SECTION
@@ -561,7 +533,7 @@ crates/devflow-core/    Core library (no CLI/TTY dependencies)
     state/local_state.rs  User-level state (SQLite)
     docker/             Docker discovery + compose parsing + settings
     workspace/          Lifecycle orchestration (create, switch, delete, worktree, hooks)
-    llm.rs              LLM integration for AI commit messages (CLI-first + API fallback)
+    commit.rs           External-command commit message generation
 
 crates/devflow-proxy/   Auto-HTTPS reverse proxy (hyper/rustls/bollard, mDNS)
 crates/devflow-terminal/ PTY manager for the Tauri GUI
@@ -583,21 +555,21 @@ SECTION
 # ---------------------------------------------------------------------------
 if $CHECK_MODE; then
   # Generate to temp files and diff
-  TMPDIR="$(mktemp -d)"
-  trap 'rm -rf "$TMPDIR"' EXIT
+  LLMS_CHECK_DIR="$(mktemp -d)"
+  trap 'rm -rf "$LLMS_CHECK_DIR"' EXIT
 
-  generate_llms_txt > "$TMPDIR/llms.txt"
-  generate_llms_full_txt > "$TMPDIR/llms-full.txt"
+  generate_llms_txt > "$LLMS_CHECK_DIR/llms.txt"
+  generate_llms_full_txt > "$LLMS_CHECK_DIR/llms-full.txt"
 
   EXIT_CODE=0
-  if ! diff -q "$LLMS_TXT" "$TMPDIR/llms.txt" >/dev/null 2>&1; then
+  if ! diff -q "$LLMS_TXT" "$LLMS_CHECK_DIR/llms.txt" >/dev/null 2>&1; then
     echo "ERROR: llms.txt is out of date. Run: mise run generate-llms" >&2
-    diff -u "$LLMS_TXT" "$TMPDIR/llms.txt" >&2 || true
+    diff -u "$LLMS_TXT" "$LLMS_CHECK_DIR/llms.txt" >&2 || true
     EXIT_CODE=1
   fi
-  if ! diff -q "$LLMS_FULL_TXT" "$TMPDIR/llms-full.txt" >/dev/null 2>&1; then
+  if ! diff -q "$LLMS_FULL_TXT" "$LLMS_CHECK_DIR/llms-full.txt" >/dev/null 2>&1; then
     echo "ERROR: llms-full.txt is out of date. Run: mise run generate-llms" >&2
-    diff -u "$LLMS_FULL_TXT" "$TMPDIR/llms-full.txt" >&2 || true
+    diff -u "$LLMS_FULL_TXT" "$LLMS_CHECK_DIR/llms-full.txt" >&2 || true
     EXIT_CODE=1
   fi
   if [ $EXIT_CODE -eq 0 ]; then

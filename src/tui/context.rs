@@ -41,17 +41,22 @@ fn summarize_workspace_switch(
             .filter(|r| !r.success && r.required)
             .map(|r| format!("process '{}': {}", r.process, r.message)),
     );
-    failures.extend(hooks.iter().filter(|hook| hook.failed > 0).map(|hook| {
-        let details = if hook.errors.is_empty() {
-            String::new()
-        } else {
-            format!(": {}", hook.errors.join("; "))
-        };
-        format!(
-            "hook phase '{}': {} failed{}",
-            hook.phase, hook.failed, details
-        )
-    }));
+    failures.extend(
+        hooks
+            .iter()
+            .filter(|hook| hook.required_failed > 0)
+            .map(|hook| {
+                let details = if hook.errors.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", hook.errors.join("; "))
+                };
+                format!(
+                    "hook phase '{}': {} failed{}",
+                    hook.phase, hook.failed, details
+                )
+            }),
+    );
     if !failures.is_empty() {
         anyhow::bail!(
             "{} '{}' completed with failures: {}",
@@ -69,7 +74,7 @@ fn summarize_workspace_switch(
     warnings.extend(
         hooks
             .iter()
-            .filter(|hook| hook.skipped > 0)
+            .filter(|hook| hook.required_skipped > 0)
             .map(|hook| format!("hook phase '{}': {} skipped", hook.phase, hook.skipped)),
     );
     if warnings.is_empty() {
@@ -415,13 +420,14 @@ impl DevflowContext {
         project_dir: &std::path::Path,
     ) -> Result<String> {
         let options = devflow_core::workspace::switch::SwitchOptions {
+            data_from_workspace: None,
             lifecycle: devflow_core::workspace::LifecycleOptions::default(),
             create_if_missing: false,
             from_workspace: None,
             copy_files: None,
             copy_ignored: None,
         };
-        let result = devflow_core::workspace::switch::switch_workspace(
+        let result = devflow_core::application::switch_workspace(
             config,
             project_dir,
             workspace_name,
@@ -445,6 +451,7 @@ impl DevflowContext {
         project_dir: &std::path::Path,
     ) -> Result<String> {
         let options = devflow_core::workspace::create::CreateOptions {
+            data_from_workspace: None,
             lifecycle: devflow_core::workspace::LifecycleOptions::default(),
             from_workspace: from.map(ToString::to_string),
             copy_files: None,
@@ -504,13 +511,15 @@ impl DevflowContext {
         project_dir: &std::path::Path,
     ) -> Result<String> {
         let named = factory::resolve_provider(config, Some(service_name)).await?;
-        let service_key = factory::resolve_service_operation_key(
+        devflow_core::application::service_operation(
+            config,
             project_dir,
+            service_name,
             workspace_name,
             named.provider.as_ref(),
+            devflow_core::services::ServiceOperation::Start,
         )
         .await?;
-        named.provider.start_workspace(&service_key).await?;
         Ok(format!(
             "Started {} on workspace '{}'",
             service_name, workspace_name
@@ -525,13 +534,15 @@ impl DevflowContext {
         project_dir: &std::path::Path,
     ) -> Result<String> {
         let named = factory::resolve_provider(config, Some(service_name)).await?;
-        let service_key = factory::resolve_service_operation_key(
+        devflow_core::application::service_operation(
+            config,
             project_dir,
+            service_name,
             workspace_name,
             named.provider.as_ref(),
+            devflow_core::services::ServiceOperation::Stop,
         )
         .await?;
-        named.provider.stop_workspace(&service_key).await?;
         Ok(format!(
             "Stopped {} on workspace '{}'",
             service_name, workspace_name
@@ -546,13 +557,15 @@ impl DevflowContext {
         project_dir: &std::path::Path,
     ) -> Result<String> {
         let named = factory::resolve_provider(config, Some(service_name)).await?;
-        let service_key = factory::resolve_service_operation_key(
+        devflow_core::application::service_operation(
+            config,
             project_dir,
+            service_name,
             workspace_name,
             named.provider.as_ref(),
+            devflow_core::services::ServiceOperation::Reset,
         )
         .await?;
-        named.provider.reset_workspace(&service_key).await?;
         Ok(format!(
             "Reset {} on workspace '{}'",
             service_name, workspace_name
@@ -614,6 +627,7 @@ impl DevflowContext {
     }
 
     /// Start the proxy in daemon mode.
+    #[cfg(feature = "proxy")]
     pub async fn start_proxy_bg() -> Result<String> {
         // Honor globally configured ports (the suffix and mDNS use the
         // spawned CLI's own defaults, which read the same global config).
@@ -644,11 +658,22 @@ impl DevflowContext {
     }
 
     /// Stop the proxy daemon.
+    #[cfg(feature = "proxy")]
     pub async fn stop_proxy_bg() -> Result<String> {
         match devflow_core::detach::stop(&devflow_proxy::ca::default_pid_path())? {
             Some(pid) => Ok(format!("Proxy stopped (pid: {})", pid)),
             None => anyhow::bail!("Proxy is not running (no PID file)"),
         }
+    }
+
+    #[cfg(not(feature = "proxy"))]
+    pub async fn start_proxy_bg() -> Result<String> {
+        anyhow::bail!("Proxy support is not compiled in; rebuild with --features proxy")
+    }
+
+    #[cfg(not(feature = "proxy"))]
+    pub async fn stop_proxy_bg() -> Result<String> {
+        anyhow::bail!("Proxy support is not compiled in; rebuild with --features proxy")
     }
 }
 
@@ -668,6 +693,10 @@ mod tests {
     #[test]
     fn hook_failures_are_not_reported_as_tui_success() {
         let hooks = vec![devflow_core::workspace::LifecycleHookResult {
+            required_failed: 1,
+            required_skipped: 0,
+            background_records: Vec::new(),
+            skipped_reasons: Vec::new(),
             phase: "post-create".to_string(),
             succeeded: 0,
             failed: 1,

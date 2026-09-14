@@ -5,8 +5,9 @@ use bollard::query_parameters::{
     CreateContainerOptions, UploadToContainerOptions, WaitContainerOptions,
 };
 use bollard::Docker;
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use std::path::PathBuf;
+use tokio::io::AsyncReadExt;
 
 #[derive(Debug)]
 pub enum SeedSource {
@@ -63,27 +64,22 @@ pub async fn seed_branch(
 fn is_plain_sql(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
-        .map(|ext| ext == "sql")
+        .map(|ext| ext.eq_ignore_ascii_case("sql"))
         .unwrap_or(false)
 }
 
-/// Create a tar archive in memory containing a single file.
-fn create_tar_with_file(filename: &str, data: &[u8]) -> Result<Vec<u8>> {
-    let mut builder = tar::Builder::new(Vec::new());
-    let mut header = tar::Header::new_gnu();
-    header.set_size(data.len() as u64);
-    header.set_mode(0o644);
-    header.set_cksum();
-    builder.append_data(&mut header, filename, data)?;
-    builder
-        .into_inner()
-        .context("failed to finalize tar archive")
-}
-
 /// Execute a command inside a container. Returns (exit_code, stderr_text).
-async fn docker_exec(docker: &Docker, container_name: &str, cmd: &[&str]) -> Result<(i64, String)> {
+pub(super) async fn docker_exec(
+    docker: &Docker,
+    container_name: &str,
+    cmd: &[&str],
+) -> Result<(i64, String)> {
     let config = ExecConfig {
         cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
+        // Docker extracts uploaded archives as root. Keep dumps private (0600)
+        // and run the import client as their owner, even when the database
+        // container itself uses an unprivileged UID. `-U` selects the DB role.
+        user: Some("0".to_string()),
         attach_stdout: Some(true),
         attach_stderr: Some(true),
         ..Default::default()
@@ -105,7 +101,8 @@ async fn docker_exec(docker: &Docker, container_name: &str, cmd: &[&str]) -> Res
         bollard::exec::StartExecResults::Attached { mut output, .. } => {
             while let Some(msg) = output.try_next().await? {
                 if let bollard::container::LogOutput::StdErr { message } = msg {
-                    stderr_buf.extend_from_slice(&message);
+                    let remaining = (64 * 1024_usize).saturating_sub(stderr_buf.len());
+                    stderr_buf.extend_from_slice(&message[..message.len().min(remaining)]);
                 }
             }
         }
@@ -119,30 +116,47 @@ async fn docker_exec(docker: &Docker, container_name: &str, cmd: &[&str]) -> Res
     Ok((exit_code, stderr))
 }
 
-/// Upload a file into a container at the given path using the Docker API.
+/// Stream a tar header, the file, and padding; memory use stays bounded.
 async fn upload_file_to_container(
     docker: &Docker,
     container_name: &str,
-    container_dir: &str,
     filename: &str,
-    data: &[u8],
+    path: &std::path::Path,
 ) -> Result<()> {
-    let tar_bytes = create_tar_with_file(filename, data)?;
-
-    let options = UploadToContainerOptions {
-        path: container_dir.to_string(),
-        ..Default::default()
-    };
-
+    let file = tokio::fs::File::open(path).await?;
+    let len = file.metadata().await?.len();
+    anyhow::ensure!(len > 0, "seed file is empty");
+    let mut header = tar::Header::new_gnu();
+    header.set_path(filename)?;
+    header.set_size(len);
+    header.set_mode(0o600);
+    header.set_cksum();
+    let header = bytes::Bytes::copy_from_slice(header.as_bytes());
+    let contents = futures_util::stream::try_unfold(file, |mut file| async move {
+        let mut buf = vec![0; 64 * 1024];
+        let len = file.read(&mut buf).await?;
+        buf.truncate(len);
+        Ok::<_, std::io::Error>(if len == 0 {
+            None
+        } else {
+            Some((bytes::Bytes::from(buf), file))
+        })
+    });
+    let padding = bytes::Bytes::from(vec![0; ((512 - len % 512) % 512 + 1024) as usize]);
+    let stream = futures_util::stream::once(async { Ok::<_, std::io::Error>(header) })
+        .chain(contents)
+        .chain(futures_util::stream::once(async { Ok(padding) }));
     docker
         .upload_to_container(
             container_name,
-            Some(options),
-            bollard::body_full(bytes::Bytes::from(tar_bytes)),
+            Some(UploadToContainerOptions {
+                path: "/tmp".into(),
+                ..Default::default()
+            }),
+            bollard::body_try_stream(stream),
         )
         .await
-        .with_context(|| format!("failed to upload file to container '{container_name}'"))?;
-
+        .context("failed to stream seed into container")?;
     Ok(())
 }
 
@@ -165,7 +179,7 @@ async fn seed_from_postgres(
     }
 
     let dump_url_str = dump_url.to_string();
-    let dump_path = "/tmp/devflow_dump.Fc";
+    let dump_path = format!("/tmp/devflow-dump-{}.Fc", uuid::Uuid::new_v4());
 
     // Create an ephemeral container to run pg_dump, writing to a file
     let dump_container_name = format!("devflow-dump-{}", uuid::Uuid::new_v4());
@@ -195,54 +209,70 @@ async fn seed_from_postgres(
         .await
         .context("Failed to create pg_dump container")?;
 
-    docker
-        .start_container(
-            &dump_container_name,
-            None::<bollard::query_parameters::StartContainerOptions>,
-        )
-        .await
-        .context("Failed to start pg_dump container")?;
-
-    // Wait for the container to finish
-    let wait_options = WaitContainerOptions {
-        condition: "not-running".to_string(),
-    };
-
-    let wait_results: Vec<_> = docker
-        .wait_container(&dump_container_name, Some(wait_options))
-        .try_collect()
-        .await
-        .context("Failed to wait for pg_dump container")?;
-
-    let exit_code = wait_results.first().map(|r| r.status_code).unwrap_or(-1);
-    if exit_code != 0 {
-        // Clean up container before failing
-        let _ = docker
-            .remove_container(
+    let result = async {
+        docker
+            .start_container(
                 &dump_container_name,
-                Some(bollard::query_parameters::RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
+                None::<bollard::query_parameters::StartContainerOptions>,
+            )
+            .await?;
+        let results: Vec<_> = docker
+            .wait_container(
+                &dump_container_name,
+                Some(WaitContainerOptions {
+                    condition: "not-running".into(),
                 }),
             )
-            .await;
-        anyhow::bail!("pg_dump failed with exit code: {}", exit_code);
+            .try_collect()
+            .await
+            .context("pg_dump did not complete successfully")?;
+        let code = results.first().map(|r| r.status_code).unwrap_or(-1);
+        anyhow::ensure!(code == 0, "pg_dump failed (exit {code})");
+        // Docker already supplies a tar stream: relay it without downloading or
+        // extracting the complete dump into memory.
+        let stream = docker
+            .download_from_container(
+                &dump_container_name,
+                Some(bollard::query_parameters::DownloadFromContainerOptions {
+                    path: dump_path.clone(),
+                }),
+            )
+            .map_err(std::io::Error::other);
+        docker
+            .upload_to_container(
+                container_name,
+                Some(UploadToContainerOptions {
+                    path: "/tmp".into(),
+                    ..Default::default()
+                }),
+                bollard::body_try_stream(stream),
+            )
+            .await?;
+        let (code, stderr) = docker_exec(
+            docker,
+            container_name,
+            &[
+                "pg_restore",
+                "-U",
+                pg_user,
+                "-d",
+                pg_db,
+                "--no-owner",
+                "--single-transaction",
+                &dump_path,
+            ],
+        )
+        .await?;
+        anyhow::ensure!(
+            code == 0,
+            "pg_restore failed (exit {code}): {}",
+            stderr.trim()
+        );
+        Ok(())
     }
-
-    // Download the dump file from the ephemeral container
-    let download_options = bollard::query_parameters::DownloadFromContainerOptions {
-        path: dump_path.to_string(),
-    };
-
-    let chunks: Vec<bytes::Bytes> = docker
-        .download_from_container(&dump_container_name, Some(download_options))
-        .try_collect()
-        .await
-        .context("Failed to download dump from container")?;
-    let tar_bytes: Vec<u8> = chunks.into_iter().flat_map(|b| b.to_vec()).collect();
-
-    // Clean up the ephemeral container
-    let _ = docker
+    .await;
+    let _ = docker_exec(docker, container_name, &["rm", "-f", &dump_path]).await;
+    let cleanup = docker
         .remove_container(
             &dump_container_name,
             Some(bollard::query_parameters::RemoveContainerOptions {
@@ -251,62 +281,10 @@ async fn seed_from_postgres(
             }),
         )
         .await;
-
-    // Extract the dump file from the tar archive
-    let mut archive = tar::Archive::new(tar_bytes.as_slice());
-    let mut dump_data = Vec::new();
-    if let Some(entry) = archive
-        .entries()
-        .context("Failed to read tar archive")?
-        .next()
-    {
-        let mut entry = entry?;
-        std::io::Read::read_to_end(&mut entry, &mut dump_data)?;
+    if let Err(error) = cleanup {
+        log::warn!("failed to clean up seed container '{dump_container_name}': {error}");
     }
-
-    if dump_data.is_empty() {
-        anyhow::bail!("pg_dump produced empty output");
-    }
-
-    // Upload the dump file to the target container
-    upload_file_to_container(
-        docker,
-        container_name,
-        "/tmp",
-        "devflow_seed_dump",
-        &dump_data,
-    )
-    .await?;
-
-    // Restore using pg_restore
-    let restore_path = "/tmp/devflow_seed_dump";
-    let (exit_code, stderr) = docker_exec(
-        docker,
-        container_name,
-        &[
-            "pg_restore",
-            "-U",
-            pg_user,
-            "-d",
-            pg_db,
-            "--no-owner",
-            restore_path,
-        ],
-    )
-    .await
-    .context("Failed to run pg_restore")?;
-
-    // Clean up temp file
-    let _ = docker_exec(docker, container_name, &["rm", "-f", restore_path]).await;
-
-    if exit_code != 0 {
-        if stderr.contains("FATAL") || stderr.contains("could not connect") {
-            anyhow::bail!("pg_restore failed: {}", stderr.trim());
-        }
-        log::warn!("pg_restore exited with warnings: {}", stderr.trim());
-    }
-
-    Ok(())
+    result
 }
 
 async fn seed_from_file(
@@ -329,57 +307,60 @@ async fn seed_from_file(
         );
     }
 
-    let container_path = "/tmp/devflow_seed_dump";
-
-    // Read the file and upload it to the container via bollard
-    let file_data = tokio::fs::read(&abs_path)
-        .await
-        .with_context(|| format!("Failed to read seed file: {}", abs_path.display()))?;
-
-    upload_file_to_container(
-        docker,
-        container_name,
-        "/tmp",
-        "devflow_seed_dump",
-        &file_data,
-    )
-    .await?;
+    let filename = format!("devflow-seed-{}", uuid::Uuid::new_v4());
+    let container_path = format!("/tmp/{filename}");
+    upload_file_to_container(docker, container_name, &filename, &abs_path).await?;
 
     // Restore
-    let (exit_code, stderr) = if is_plain_sql(&abs_path) {
-        docker_exec(
-            docker,
-            container_name,
-            &["psql", "-U", pg_user, "-d", pg_db, "-f", container_path],
-        )
-        .await
-        .context("Failed to run psql")?
-    } else {
-        docker_exec(
-            docker,
-            container_name,
-            &[
-                "pg_restore",
-                "-U",
-                pg_user,
-                "-d",
-                pg_db,
-                "--no-owner",
-                container_path,
-            ],
-        )
-        .await
-        .context("Failed to run pg_restore")?
-    };
+    let restore = async {
+        if is_plain_sql(&abs_path) {
+            docker_exec(
+                docker,
+                container_name,
+                &[
+                    "psql",
+                    "-X",
+                    "-v",
+                    "ON_ERROR_STOP=1",
+                    "--single-transaction",
+                    "-U",
+                    pg_user,
+                    "-d",
+                    pg_db,
+                    "-f",
+                    &container_path,
+                ],
+            )
+            .await
+            .context("Failed to run psql")
+        } else {
+            docker_exec(
+                docker,
+                container_name,
+                &[
+                    "pg_restore",
+                    "-U",
+                    pg_user,
+                    "-d",
+                    pg_db,
+                    "--no-owner",
+                    "--single-transaction",
+                    &container_path,
+                ],
+            )
+            .await
+            .context("Failed to run pg_restore")
+        }
+    }
+    .await;
 
     // Clean up temp file in container
-    let _ = docker_exec(docker, container_name, &["rm", "-f", container_path]).await;
+    let _ = docker_exec(docker, container_name, &["rm", "-f", &container_path]).await;
+
+    let (exit_code, stderr) = restore?;
 
     if exit_code != 0 {
-        if stderr.contains("FATAL") || stderr.contains("could not connect") {
-            anyhow::bail!("Restore failed: {}", stderr.trim());
-        }
-        log::warn!("Restore exited with warnings: {}", stderr.trim());
+        anyhow::bail!("Restore failed (exit {}): {}", exit_code, stderr.trim());
     }
 
     Ok(())
@@ -410,22 +391,22 @@ async fn seed_from_s3(
     let temp_dir = tempfile::tempdir().context("Failed to create temp directory")?;
 
     // Derive filename from key
-    let filename = key.rsplit('/').next().unwrap_or("dump");
+    let filename = if key.to_ascii_lowercase().ends_with(".sql") {
+        "seed.sql"
+    } else {
+        "seed.dump"
+    };
     let temp_path = temp_dir.path().join(filename);
 
     log::info!("Downloading s3://{}/{}", bucket, key);
-    let response = s3_bucket
-        .get_object(key)
+    let mut file = tokio::fs::File::create(&temp_path).await?;
+    let status = s3_bucket
+        .get_object_to_writer(key, &mut file)
         .await
-        .with_context(|| format!("Failed to download from S3: s3://{}/{}", bucket, key))?;
-
-    if response.status_code() != 200 {
-        anyhow::bail!("S3 download failed with status {}", response.status_code());
-    }
-
-    tokio::fs::write(&temp_path, response.bytes())
-        .await
-        .context("Failed to write S3 object to temp file")?;
+        .context("failed to stream seed from S3")?;
+    anyhow::ensure!(status == 200, "S3 download failed with status {status}");
+    file.sync_all().await?;
+    drop(file);
 
     // Delegate to file-based seeding
     seed_from_file(docker, &temp_path, container_name, pg_user, pg_db).await

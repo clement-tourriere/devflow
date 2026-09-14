@@ -7,22 +7,21 @@ authors = ["Clément Tourrière <clement.tourriere@gmail.com>"]
 license = "MIT"
 
 [features]
-default = ["service-local", "service-neon", "service-dblab", "service-xata", "llm"]
+default = ["service-local"]
 service-local = ["dep:bollard", "dep:rusqlite", "dep:rust-s3", "dep:tar", "dep:bytes", "dep:tempfile", "dep:url"]
-service-neon = []
+service-neon = ["dep:percent-encoding"]
 service-dblab = []
 service-xata = []
-llm = []
 
 [dependencies]
 # Serialization
 serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
 serde_yaml_ng = { version = "0.10", default-features = false }
 serde_json = "1.0"
-toml = { version = "0.8", default-features = false, features = ["parse"] }
+toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
 
 # Async runtime
-tokio = { version = "1.46", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "macros", "process", "fs"] }
+tokio = { version = "1.46", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "macros", "process", "fs", "io-util"] }
 
 # Error handling
 anyhow = "1.0"
@@ -43,9 +42,10 @@ minijinja = { version = "2", default-features = false, features = ["builtins", "
 
 # File system
 dirs = { version = "6.0", default-features = false }
+cap-std = "4.0.3"
 
 # Logging
-log = { version = "0.4", default-features = false, features = ["release_max_level_off"] }
+log = { version = "0.4", default-features = false }
 
 # Date/time handling
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
@@ -63,6 +63,7 @@ sha2 = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 
 # URL parsing
+percent-encoding = { version = "2.3", optional = true }
 url = { version = "2.5", optional = true }
 
 # S3 support for data seeding
@@ -87,8 +88,6 @@ inquire = { version = "0.9", default-features = false, features = ["crossterm"] 
 # Ordered maps for deterministic hook execution
 indexmap = { version = "2", default-features = false, features = ["serde"] }
 
-# Direct Rust embedding of Pitchfork's supervisor/log APIs for process runtime
-pitchfork-cli = { version = "=2.14.0", default-features = false }
 
 # Cross-platform Copy-on-Write file copies (APFS clonefile, ioctl FICLONE, ReFS)
 reflink-copy = "0.1"
@@ -105,3 +104,6 @@ nix = { version = "0.31", default-features = false, features = ["signal", "proce
 # rust-s3's lib target is named `s3`, which cargo-machete cannot map back.
 [package.metadata.cargo-machete]
 ignored = ["rust-s3"]
+
+[dev-dependencies]
+tempfile = "3.27"

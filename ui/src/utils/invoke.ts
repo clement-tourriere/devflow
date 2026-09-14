@@ -35,7 +35,6 @@ import type {
   DeleteWorkspacePreflight,
   ProcessStatus,
   ProcessOperationResponse,
-  PitchforkBridgeInfo,
 } from "../types";
 
 // Projects
@@ -100,8 +99,6 @@ export const pruneWorktrees = (projectPath: string) =>
   invoke<PruneResult>("prune_worktrees", { projectPath });
 
 // Processes
-export const getPitchforkBridgeInfo = (projectPath: string) =>
-  invoke<PitchforkBridgeInfo>("get_pitchfork_bridge_info", { projectPath });
 export const listProcesses = (projectPath: string, workspaceName?: string) =>
   invoke<ProcessStatus[]>("list_processes", { projectPath, workspaceName });
 export const startProcesses = (
@@ -311,16 +308,19 @@ export const getConfigJson = (projectPath: string) =>
   });
 export const saveConfigJson = (
   projectPath: string,
-  config: import("../types/config").DevflowConfig
-) => invoke<void>("save_config_json", { projectPath, config });
+  config: import("../types/config").DevflowConfig,
+  original?: import("../types/config").DevflowConfig
+) => invoke<void>("save_config_json", { projectPath, config, original });
+export const getConfigDocument = (projectPath: string) =>
+  invoke<{path: string; format: string; content: string; config: import("../types/config").DevflowConfig}>("get_config_document", {projectPath});
 export const getConfigYaml = (projectPath: string) =>
   invoke<string>("get_config_yaml", { projectPath });
-export const saveConfigYaml = (projectPath: string, content: string) =>
-  invoke<void>("save_config_yaml", { projectPath, content });
-export const validateConfigYaml = (content: string) =>
+export const saveConfigYaml = (projectPath: string, content: string, original?: string) =>
+  invoke<void>("save_config_yaml", { projectPath, content, original });
+export const validateConfigYaml = (content: string, format = "yaml") =>
   invoke<{ valid: boolean; error?: string; services?: number; hooks?: number }>(
     "validate_config_yaml",
-    { content }
+    { content, format }
   );
 
 // Destroy
@@ -360,3 +360,5 @@ export const resizeTerminal = (
 ) => invoke<void>("resize_terminal", { sessionId, rows, cols });
 export const closeTerminal = (sessionId: string) =>
   invoke<void>("close_terminal", { sessionId });
+
+export const providerDescriptors = () => invoke<import("../types").ProviderDescriptor[]>("provider_descriptors");

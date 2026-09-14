@@ -306,6 +306,10 @@ impl ServiceProvider for DBLabProvider {
         })
     }
 
+    fn data_strategy(&self) -> &'static str {
+        "remote_clone"
+    }
+
     fn provider_name(&self) -> &'static str {
         "Database Lab Engine"
     }

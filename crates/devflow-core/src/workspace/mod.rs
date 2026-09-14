@@ -4,6 +4,7 @@ pub mod hooks;
 pub mod invariant;
 pub mod inventory;
 pub mod link;
+pub mod operation;
 pub mod switch;
 pub mod worktree;
 
@@ -51,7 +52,7 @@ pub fn validate_workspace_name(name: &str) -> Result<(), String> {
 }
 
 /// Result of a worktree setup operation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct WorktreeSetupResult {
     /// Resolved absolute path to the worktree.
     pub path: PathBuf,
@@ -80,24 +81,36 @@ impl From<OrchestrationResult> for ServiceResult {
 /// Summary of a lifecycle hook phase execution.
 #[derive(Debug, Clone, Serialize)]
 pub struct LifecycleHookResult {
+    pub required_failed: usize,
+    pub required_skipped: usize,
+    pub background_records: Vec<String>,
     pub phase: String,
     pub succeeded: usize,
     pub failed: usize,
     pub skipped: usize,
+    pub skipped_reasons: Vec<String>,
     pub background: usize,
     pub errors: Vec<String>,
 }
 
 impl LifecycleHookResult {
+    pub fn ready(&self) -> bool {
+        self.required_failed == 0 && self.required_skipped == 0
+    }
+
     pub fn from_run_result(
         phase: &HookPhase,
         result: crate::hooks::executor::HookRunResult,
     ) -> Self {
         Self {
+            required_failed: result.required_failed,
+            required_skipped: result.required_skipped,
+            background_records: result.background_records,
             phase: phase.to_string(),
             succeeded: result.succeeded,
             failed: result.failed,
             skipped: result.skipped,
+            skipped_reasons: result.skipped_reasons,
             background: result.background,
             errors: result.errors,
         }
@@ -105,8 +118,9 @@ impl LifecycleHookResult {
 }
 
 /// Result of `create_workspace()`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CreateWorkspaceResult {
+    pub operation: Option<operation::OperationRecord>,
     /// Exact VCS branch/bookmark name.
     pub workspace: String,
     /// Collision-resistant service/filesystem identity.
@@ -126,8 +140,9 @@ pub struct CreateWorkspaceResult {
 }
 
 /// Result of `switch_workspace()`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SwitchWorkspaceResult {
+    pub operation: Option<operation::OperationRecord>,
     /// Exact VCS branch/bookmark name.
     pub workspace: String,
     /// Collision-resistant service/filesystem identity.
@@ -147,8 +162,9 @@ pub struct SwitchWorkspaceResult {
 }
 
 /// Result of `delete_workspace()`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DeleteWorkspaceResult {
+    pub operation: Option<operation::OperationRecord>,
     /// Raw VCS workspace that was deleted.
     pub workspace: String,
     /// Collision-resistant service/filesystem identity.
@@ -168,7 +184,7 @@ pub struct DeleteWorkspaceResult {
 }
 
 /// Options shared across lifecycle operations.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LifecycleOptions {
     /// Skip hook execution entirely.
     pub skip_hooks: bool,
@@ -198,6 +214,22 @@ impl Default for LifecycleOptions {
             trigger_source: None,
             vcs_event: None,
         }
+    }
+}
+
+impl SwitchWorkspaceResult {
+    pub fn failed(&self) -> bool {
+        self.services.iter().any(|r| !r.success)
+            || self.processes.iter().any(|r| !r.success && r.required)
+            || self.hooks.iter().any(|r| r.required_failed > 0)
+    }
+
+    pub fn ready(&self) -> bool {
+        !self.failed()
+            && self
+                .operation
+                .as_ref()
+                .is_some_and(|op| op.status == "ready")
     }
 }
 

@@ -604,30 +604,14 @@ fn test_invalid_workspace_filter_regex_fails_closed() {
 }
 
 #[test]
-fn test_worktree_respect_gitignore_defaults_true() {
-    let yaml = r#"
-worktree:
-  copy_files: [".env"]
-"#;
-    let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
-    assert!(config.worktree.respect_gitignore);
-}
-
-#[test]
-fn test_worktree_respect_gitignore_explicit_false() {
-    let yaml = r#"
-worktree:
-  respect_gitignore: false
-"#;
-    let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse config");
-    assert!(!config.worktree.respect_gitignore);
-}
-
-#[test]
-fn test_worktree_recommended_default_includes_respect_gitignore() {
-    let wt = WorktreeConfig::recommended_default();
-    assert!(wt.respect_gitignore);
-    assert!(!wt.copy_ignored);
+fn retired_configuration_is_not_written_back() {
+    let config: Config = serde_yaml_ng::from_str("agent:\n  auto_context: true\nworktree:\n  respect_gitignore: false\n  copy_ignored: true\ncommit:\n  generation:\n    command: my-generator\n    api_key: old-secret\n").unwrap();
+    let output = serde_yaml_ng::to_string(&config).unwrap();
+    assert!(!output.contains("auto_context"));
+    assert!(!output.contains("respect_gitignore"));
+    assert!(!output.contains("old-secret"));
+    assert!(output.contains("copy_ignored: true"));
+    assert!(output.contains("my-generator"));
 }
 
 #[test]
@@ -678,32 +662,16 @@ worktree:
 }
 
 #[test]
-fn test_sync_ai_configs_action_round_trips_through_yaml() {
-    // The only unit variant in the internally-tagged HookAction enum, and it
-    // is written by three independent producers (GUI modal, `devflow hook
-    // install sync-ai-configs`, hand-written config) — pin the wire form.
-    let yaml = r#"
-hooks:
-  pre-remove:
-    sync-ai-configs:
-      action:
-        type: sync-ai-configs
-"#;
-    let config: Config = serde_yaml_ng::from_str(yaml).expect("action should parse");
-    let hooks = config.hooks.expect("hooks section");
-    let entry = hooks
-        .get(&crate::hooks::HookPhase::PreRemove)
-        .and_then(|phase| phase.get("sync-ai-configs"))
-        .expect("hook entry");
-    let crate::hooks::HookEntry::Action(action_entry) = entry else {
-        panic!("expected action entry");
-    };
-    assert!(matches!(
-        action_entry.action,
-        crate::hooks::HookAction::SyncAiConfigs
-    ));
-
-    // And the serialized form round-trips back to the same tag.
-    let serialized = serde_yaml_ng::to_string(&action_entry.action).unwrap();
-    assert!(serialized.contains("type: sync-ai-configs"), "{serialized}");
+fn retired_policy_merging_hook_is_removed_during_configuration_migration() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join(".devflow.yml");
+    std::fs::write(&path, "hooks:\n  pre-remove:\n    old-merge:\n      action:\n        type: sync-ai-configs\n    keep:\n      command: echo cleanup\n").unwrap();
+    let config = Config::from_file(&path).unwrap();
+    let hooks = config.hooks.unwrap();
+    let phase = &hooks[&crate::hooks::HookPhase::PreRemove];
+    assert!(!phase.contains_key("old-merge"));
+    assert!(phase.contains_key("keep"));
+    assert!(!serde_yaml_ng::to_string(&hooks)
+        .unwrap()
+        .contains("sync-ai-configs"));
 }

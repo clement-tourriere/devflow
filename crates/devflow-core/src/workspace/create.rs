@@ -11,6 +11,7 @@ pub struct CreateOptions {
     pub lifecycle: LifecycleOptions,
     /// Parent workspace to branch from (like `--from`).
     pub from_workspace: Option<String>,
+    pub data_from_workspace: Option<String>,
     /// Override the config `worktree.copy_files` for this creation.
     pub copy_files: Option<Vec<String>>,
     /// Override the config `worktree.copy_ignored` for this creation.
@@ -37,6 +38,7 @@ pub async fn create_workspace(
             lifecycle: options.lifecycle.clone(),
             create_if_missing: true,
             from_workspace: options.from_workspace.clone(),
+            data_from_workspace: options.data_from_workspace.clone(),
             copy_files: options.copy_files.clone(),
             copy_ignored: options.copy_ignored,
         },
@@ -44,6 +46,7 @@ pub async fn create_workspace(
     .await?;
 
     Ok(CreateWorkspaceResult {
+        operation: result.operation,
         workspace: result.workspace,
         service_key: result.service_key,
         parent: result.parent,

@@ -1,7 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
 
-use super::{confine_path, ActionResult};
+use super::ActionResult;
+use crate::files::{WorkspaceFiles, WritePolicy};
 use crate::hooks::template::TemplateEngine;
 use crate::hooks::{HookContext, WriteMode};
 
@@ -17,37 +18,17 @@ pub fn execute(
     let file_path = template_engine.render(path_template, context)?;
     let content = template_engine.render(content_template, context)?;
 
-    let path = confine_path(working_dir, &file_path)?;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-    }
-
-    match mode {
-        WriteMode::Overwrite => {
-            std::fs::write(&path, &content)
-                .with_context(|| format!("Failed to write file: {}", path.display()))?;
-        }
-        WriteMode::Append => {
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .with_context(|| format!("Failed to open file for append: {}", path.display()))?;
-            file.write_all(content.as_bytes())
-                .with_context(|| format!("Failed to append to file: {}", path.display()))?;
-        }
-        WriteMode::CreateOnly => {
-            if path.exists() {
-                return Ok(ActionResult {
-                    summary: format!("write-file: {} (skipped, already exists)", file_path),
-                });
-            }
-            std::fs::write(&path, &content)
-                .with_context(|| format!("Failed to write file: {}", path.display()))?;
-        }
+    let policy = match mode {
+        WriteMode::Overwrite => WritePolicy::Replace,
+        WriteMode::Append => WritePolicy::Append,
+        WriteMode::CreateOnly => WritePolicy::CreateOnly,
+    };
+    let changed =
+        WorkspaceFiles::open(working_dir)?.write(&file_path, content.as_bytes(), policy)?;
+    if !changed {
+        return Ok(ActionResult {
+            summary: format!("write-file: {} (skipped, already exists)", file_path),
+        });
     }
 
     Ok(ActionResult {

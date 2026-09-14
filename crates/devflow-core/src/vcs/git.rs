@@ -456,6 +456,14 @@ impl VcsProvider for GitRepository {
     }
 
     fn create_worktree(&self, workspace: &str, path: &Path) -> Result<WorktreeCreateResult> {
+        let parent = path.parent().context("worktree path has no parent")?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create worktree parent '{}'", parent.display()))?;
+        anyhow::ensure!(
+            !path.exists(),
+            "worktree destination '{}' already exists; inspect it before retrying",
+            path.display()
+        );
         // Old releases used a lossy worktree metadata name. Prune all stale
         // entries before selecting the collision-resistant name below.
         let _ = <Self as VcsProvider>::prune_worktrees(self);
@@ -503,15 +511,24 @@ impl VcsProvider for GitRepository {
         let mut opts = WorktreeAddOptions::new();
         opts.reference(Some(&reference));
 
-        self.repo
-            .worktree(&wt_name, path, Some(&opts))
-            .with_context(|| {
+        let metadata = self.repo.commondir().join("worktrees").join(&wt_name);
+        let metadata_existed = metadata.exists();
+        if let Err(error) = self.repo.worktree(&wt_name, path, Some(&opts)) {
+            // libgit2 can leave an incomplete metadata directory. Remove only
+            // metadata created by this attempt; retain checkout files for inspection.
+            if !metadata_existed && metadata.exists() {
+                std::fs::remove_dir_all(&metadata).with_context(|| {
+                    format!("failed to clean incomplete metadata {}", metadata.display())
+                })?;
+            }
+            return Err(error).with_context(|| {
                 format!(
                     "Failed to create worktree '{}' at '{}'",
                     wt_name,
                     path.display()
                 )
-            })?;
+            });
+        }
 
         Ok(WorktreeCreateResult::new())
     }

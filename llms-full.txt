@@ -38,6 +38,11 @@ Seven service types: postgres, clickhouse, mysql, redis, rustfs/S3, generic
 - Run `remove` from a different workspace; default and current workspaces remain protected even with `--force`.
 - `devflow --json capabilities` returns a machine-readable contract summary.
 - `devflow --json doctor --strict` is the health gate; inspect `summary` and `next_steps` for remediation.
+- `switch --from` selects code; `--data-from` selects the reusable data parent. Both origins persist across retries.
+- Check `operation.status` for `ready` before dependent work. Skipped required hooks leave `needs_attention`; the materialized worktree is still returned.
+- Resources belong to an exact project/service/workspace identity. Legacy resources require explicit adoption; preserve ownership state with data.
+- SQL seeding is transactional and streamed. Failed imports stay failed until a successful seed retry; stop/start does not clear the failure.
+- Local services and native processes are the defaults. Cloud adapters and the proxy companion are optional build features.
 
 ## Minimal agent loop
 
@@ -74,7 +79,7 @@ PROJECT_ROOT=$(devflow --json list | jq -r '.project.root')
 |---|---|
 | `devflow list` | List all workspaces with service + worktree status |
 | `devflow link <workspace>` | Link an existing VCS workspace into devflow |
-| `devflow switch [<workspace>] [-c] [--base <b>] [-x <cmd>] [--no-services] [--no-verify] [--template] [--dry-run]` | Switch to a workspace (interactive picker if no arg) |
+| `devflow switch [<workspace>] [-c] [--from <code>] [--data-from <baseline>] [-x <cmd>] [--no-services] [--no-verify] [--template] [--dry-run]` | Switch to a workspace (interactive picker if no arg) |
 | `devflow remove <workspace> [--force] [--keep-services]` | Remove workspace + worktree + all service workspaces |
 | `devflow cleanup [--max-count N]` | Remove old workspaces, keep most recent N |
 
@@ -267,15 +272,9 @@ hooks:
   pre-commit:
     test: "npm test"
 
-agent:
-  auto_context: true                  # Provide context to agents on launch
-
 commit:
   generation:
     command: "claude -p --model haiku" # External CLI for commit messages (preferred)
-    # api_url: "http://localhost:11434/v1"   # OpenAI-compatible API (fallback)
-    # model: "llama3"
-    # api_key: "..."
 ```
 
 ### Configuration hierarchy (highest to lowest precedence)
@@ -295,9 +294,6 @@ commit:
 | `DEVFLOW_DISABLED_BRANCHES=main,release/*` | Disable for specific workspaces |
 | `DEVFLOW_CURRENT_BRANCH_DISABLED=true` | Disable for current workspace only |
 | `DEVFLOW_ZFS_DATASET=...` | Force a specific ZFS dataset |
-| `DEVFLOW_LLM_API_KEY=...` | API key for AI commit messages |
-| `DEVFLOW_LLM_API_URL=...` | LLM endpoint URL (OpenAI-compatible) |
-| `DEVFLOW_LLM_MODEL=...` | LLM model name |
 | `DEVFLOW_COMMIT_COMMAND=...` | External CLI for commit messages (e.g., "claude -p") |
 
 ## Hook lifecycle phases
@@ -399,7 +395,7 @@ crates/devflow-core/    Core library (no CLI/TTY dependencies)
     state/local_state.rs  User-level state (SQLite)
     docker/             Docker discovery + compose parsing + settings
     workspace/          Lifecycle orchestration (create, switch, delete, worktree, hooks)
-    llm.rs              LLM integration for AI commit messages (CLI-first + API fallback)
+    commit.rs           External-command commit message generation
 
 crates/devflow-proxy/   Auto-HTTPS reverse proxy (hyper/rustls/bollard, mDNS)
 crates/devflow-terminal/ PTY manager for the Tauri GUI

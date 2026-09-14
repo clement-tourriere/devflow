@@ -1,8 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use indexmap::IndexMap;
 use std::path::Path;
 
-use super::{confine_path, ActionResult};
+use super::ActionResult;
+use crate::files::{WorkspaceFiles, WritePolicy};
 use crate::hooks::template::TemplateEngine;
 use crate::hooks::{EnvWriteMode, HookContext};
 
@@ -16,7 +17,7 @@ pub fn execute(
     working_dir: &Path,
 ) -> Result<ActionResult> {
     let file_path = template_engine.render(path_template, context)?;
-    let path = confine_path(working_dir, &file_path)?;
+    let files = WorkspaceFiles::open(working_dir)?;
 
     // Render all variable values through the template engine
     let mut rendered_vars = IndexMap::new();
@@ -26,26 +27,13 @@ pub fn execute(
         rendered_vars.insert(rendered_key, rendered_value);
     }
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-    }
-
     match mode {
         EnvWriteMode::Overwrite => {
             let content = format_env_file(&rendered_vars);
-            std::fs::write(&path, content)
-                .with_context(|| format!("Failed to write env file: {}", path.display()))?;
+            files.write(&file_path, content.as_bytes(), WritePolicy::Replace)?;
         }
         EnvWriteMode::Merge => {
-            let mut existing = if path.exists() {
-                parse_env_file(
-                    &std::fs::read_to_string(&path)
-                        .with_context(|| format!("Failed to read env file: {}", path.display()))?,
-                )
-            } else {
-                IndexMap::new()
-            };
+            let mut existing = parse_env_file(&files.read(&file_path)?.unwrap_or_default());
 
             // Merge: new vars overwrite existing ones, keep others
             for (key, value) in &rendered_vars {
@@ -53,8 +41,7 @@ pub fn execute(
             }
 
             let content = format_env_file(&existing);
-            std::fs::write(&path, content)
-                .with_context(|| format!("Failed to write env file: {}", path.display()))?;
+            files.write(&file_path, content.as_bytes(), WritePolicy::Replace)?;
         }
     }
 

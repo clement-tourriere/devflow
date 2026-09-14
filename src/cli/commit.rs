@@ -81,55 +81,18 @@ pub(super) async fn handle_commit_command(
     Ok(())
 }
 
-/// Generate a commit message using the configured LLM.
-///
-/// Prefers external CLI command (e.g., `claude -p`, `llm`, `aichat`) if configured,
-/// falling back to the OpenAI-compatible API.
-#[cfg(feature = "llm")]
+/// Generate a commit message using the configured external command.
 async fn generate_ai_commit_message(
     vcs: &dyn vcs::VcsProvider,
     config: &Config,
     _json_output: bool,
 ) -> Result<String> {
-    use devflow_core::llm;
-
-    let commit_gen_config = config.commit.as_ref().and_then(|c| c.generation.as_ref());
-    let llm_config = llm::LlmConfig::from_config_and_env(commit_gen_config);
-
-    // Prefer external CLI command
-    if let Some(ref cmd) = llm_config.cli_command {
-        let diff = vcs.staged_diff()?;
-        let summary = vcs.staged_summary()?;
-        eprintln!("Generating commit message via: {}...", cmd);
-        return llm::generate_commit_message_via_cli(cmd, &diff, &summary).await;
-    }
-
-    // Fallback to API
-    if !llm_config.is_configured() {
-        anyhow::bail!(
-            "LLM not configured. Either:\n\
-             1. Set 'commit.generation.command' in .devflow.yml (e.g., \"claude -p --model=haiku\")\n\
-             2. Set DEVFLOW_COMMIT_COMMAND env var\n\
-             3. Set DEVFLOW_LLM_API_KEY for OpenAI-compatible API"
-        );
-    }
-
+    let command = std::env::var("DEVFLOW_COMMIT_COMMAND").ok().filter(|s| !s.trim().is_empty())
+        .or_else(|| config.commit.as_ref().and_then(|c| c.generation.as_ref()).and_then(|g| g.command.clone()))
+        .context("API commit generation was retired; configure commit.generation.command or DEVFLOW_COMMIT_COMMAND")?;
     let diff = vcs.staged_diff()?;
     let summary = vcs.staged_summary()?;
-    eprintln!(
-        "Generating commit message with {} ({})...",
-        llm_config.model, llm_config.api_url
-    );
-    llm::generate_commit_message(&diff, &summary).await
-}
-
-#[cfg(not(feature = "llm"))]
-async fn generate_ai_commit_message(
-    _vcs: &dyn vcs::VcsProvider,
-    _config: &Config,
-    _json_output: bool,
-) -> Result<String> {
-    anyhow::bail!("LLM support not compiled in. Rebuild with the `llm` feature enabled.");
+    devflow_core::commit::generate_commit_message_via_cli(&command, &diff, &summary).await
 }
 
 /// Open the user's editor to compose or edit a commit message.

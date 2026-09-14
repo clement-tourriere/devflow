@@ -23,7 +23,7 @@ services:
       template_branching: true    # CREATE DATABASE … TEMPLATE parent (default true)
 ```
 
-Creating workspace `feature_x` from `main` runs `CREATE DATABASE feature_x TEMPLATE main` — schema *and data* are copied engine-side. With `template_branching: false`, new workspaces get empty databases.
+Creating workspace `feature_x` from `main` runs `CREATE DATABASE child_resource TEMPLATE parent_resource` using the recorded resource identifiers — schema *and data* are copied engine-side. With `template_branching: false`, new workspaces get empty databases.
 
 ## ClickHouse — `type: shared`
 
@@ -40,7 +40,7 @@ services:
 
 ## Redis
 
-Always shared/global. Each workspace gets a numbered DB index (0–15), allocated atomically and tracked inside Redis itself:
+With `type: shared`, each workspace gets a numbered DB index (1–15; index 0 stores allocations), allocated atomically and tracked inside Redis itself:
 
 ```yaml
 services:
@@ -51,12 +51,12 @@ services:
 ```
 
 :::caution
-Redis has only 16 databases **globally** — at most 15 workspace allocations across *all* projects sharing this Redis. Fine for a developer machine; not for big fleets.
+This shared allocator supports at most 15 workspace allocations across all projects using the engine; index 0 stores allocation metadata. That is a devflow allocation policy, not a universal Redis limit. Choose a separate local container for each workspace when you need more concurrent allocations or stronger isolation.
 :::
 
 ## RustFS object storage (S3-compatible)
 
-One global RustFS container, one bucket per workspace named `{project}-{workspace}`:
+One global RustFS container, one bucket per project/service/workspace identity:
 
 ```yaml
 services:
@@ -97,3 +97,5 @@ The daemon covers **every registered project's** shared engines (`type: shared`,
 | Reset/seed granularity | per container | per database/bucket |
 
 Mixing is normal: CoW Postgres for the data you branch, shared Redis/RustFS for caches and blobs. For a step-by-step Docker Compose migration, see [Adding devflow to an existing project](/devflow/getting-started/existing-project/#migration-map-from-docker-compose).
+
+Resource ownership is recorded explicitly. Existing unowned resources require deliberate adoption; inventory does not start engines. See [Data ownership and recovery](/devflow/guides/ownership-and-recovery/).

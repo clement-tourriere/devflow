@@ -45,6 +45,11 @@ use crate::services::{
 pub struct PluginProvider {
     /// Logical service name from the config (e.g. "my-redis").
     service_name: String,
+    project_root: PathBuf,
+    project_id: crate::state::ProjectId,
+    operations: super::OperationCapabilities,
+    supports_destroy: bool,
+    invocation_group: String,
     /// Resolved path to the plugin executable.
     executable: PathBuf,
     /// Per-invocation timeout.
@@ -58,30 +63,63 @@ impl PluginProvider {
     ///
     /// Resolves the executable path from either `path` (direct) or `name`
     /// (looked up as `devflow-plugin-{name}` on `$PATH`).
-    pub fn new(service_name: &str, config: &PluginConfig) -> Result<Self> {
-        let executable = Self::resolve_executable(config)?;
+    pub async fn connect(
+        service_name: &str,
+        config: &PluginConfig,
+        root: &std::path::Path,
+    ) -> Result<Self> {
+        let executable = Self::resolve_executable(config, root)?;
         let timeout = Duration::from_secs(config.timeout);
 
-        Ok(Self {
+        let mut provider = Self {
             service_name: service_name.to_string(),
+            project_root: root.to_path_buf(),
+            project_id: crate::state::LocalStateManager::new()?.control(root).id,
+            operations: Default::default(),
+            supports_destroy: false,
+            invocation_group: uuid::Uuid::new_v4().to_string(),
             executable,
             timeout,
             plugin_config: config.config.clone(),
-        })
+        };
+        let negotiated = provider
+            .invoke("negotiate", json!({"supported_versions":[1]}))
+            .await
+            .context(
+                "plugin must implement protocol v1 negotiation; regenerate or update its adapter",
+            )?;
+        anyhow::ensure!(
+            negotiated.get("protocol_version").and_then(|v| v.as_u64()) == Some(1),
+            "plugin protocol version is unsupported"
+        );
+        provider.operations = serde_json::from_value(
+            negotiated
+                .get("operations")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+        )?;
+        // Baseline sealing is currently a local PostgreSQL contract.
+        provider.operations.snapshot = false;
+        provider.supports_destroy = negotiated
+            .get("destroy")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        Ok(provider)
+    }
+
+    fn require(&self, operation: super::ServiceOperation) -> Result<()> {
+        if !self.operations.supports(operation) {
+            return Err(super::UnsupportedOperation::new("plugin", operation).into());
+        }
+        Ok(())
     }
 
     /// Resolve the plugin executable from config.
-    fn resolve_executable(config: &PluginConfig) -> Result<PathBuf> {
+    fn resolve_executable(config: &PluginConfig, root: &std::path::Path) -> Result<PathBuf> {
         if let Some(ref path) = config.path {
             let p = PathBuf::from(path);
-            // If relative, resolve against cwd
-            let resolved = if p.is_absolute() {
-                p
-            } else {
-                std::env::current_dir()
-                    .context("Failed to get current directory")?
-                    .join(p)
-            };
+            // Relative paths belong to the project, independent of the frontend cwd.
+            let resolved = if p.is_absolute() { p } else { root.join(p) };
             anyhow::ensure!(
                 resolved.exists(),
                 "Plugin executable not found at: {}",
@@ -106,7 +144,40 @@ impl PluginProvider {
     /// Invoke the plugin with the given method and params, returning the parsed
     /// JSON result value.
     async fn invoke(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        let workspace = params.get("workspace_name").and_then(|v| v.as_str());
+        let state = crate::state::LocalStateManager::new()?;
+        let registered = state.get_workspaces_by_dir(&self.project_root);
+        let raw = workspace
+            .and_then(|key| {
+                registered
+                    .iter()
+                    .find(|w| w.service_key == key || w.name == key)
+            })
+            .map(|w| w.name.as_str())
+            .or(workspace);
+        let operation = crate::workspace::operation::OperationJournal::pending(&self.project_root)?
+            .into_iter()
+            .find(|op| {
+                op.status == "running"
+                    && (Some(op.workspace.as_str()) == raw
+                        || (raw.is_none() && op.kind.ends_with(&format!(":{}", self.service_name))))
+            });
+        let operation_id = operation
+            .as_ref()
+            .map(|op| op.id.as_str())
+            .unwrap_or(&self.invocation_group);
+        let resource_id = crate::services::ownership::identity_digest(&[
+            &self.project_id.0,
+            &self.service_name,
+            workspace.unwrap_or("engine"),
+        ]);
         let request = json!({
+            "protocol_version": 1,
+            "project_id": self.project_id,
+            "resource_id": resource_id,
+            "operation_id": operation_id,
+            "idempotency_key": crate::services::ownership::identity_digest(&[operation_id,method,&resource_id]),
+            "deadline": chrono::Utc::now() + chrono::Duration::seconds(self.timeout.as_secs() as i64),
             "method": method,
             "params": params,
             "config": self.plugin_config,
@@ -116,7 +187,9 @@ impl PluginProvider {
         let request_bytes =
             serde_json::to_vec(&request).context("Failed to serialize plugin request")?;
 
+        let deadline = tokio::time::Instant::now() + self.timeout;
         let mut child = Command::new(&self.executable)
+            .current_dir(&self.project_root)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -131,23 +204,23 @@ impl PluginProvider {
 
         // Write request to stdin
         if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(&request_bytes)
+            tokio::time::timeout_at(deadline, stdin.write_all(&request_bytes))
                 .await
+                .context("plugin did not read its request before the deadline")?
                 .context("Failed to write to plugin stdin")?;
             // Drop stdin to signal EOF
         }
 
         // Wait for the process with a timeout
-        let output = tokio::time::timeout(self.timeout, child.wait_with_output())
+        let output = tokio::time::timeout_at(deadline, child.wait_with_output())
             .await
             .map_err(|_| {
-                anyhow::anyhow!(
-                    "Plugin '{}' timed out after {}s on method '{}'",
-                    self.service_name,
-                    self.timeout.as_secs(),
-                    method
-                )
+                PluginError {
+                    code: "timeout_unknown_completion".into(),
+                    message: format!("Plugin '{}' timed out after {}s on '{}'; inspect backend state before retrying", self.service_name, self.timeout.as_secs(), method),
+                    retryable: false,
+                    operation_id: operation_id.into(),
+                }
             })?
             .with_context(|| {
                 format!(
@@ -202,6 +275,26 @@ impl PluginProvider {
                 .cloned()
                 .unwrap_or(serde_json::Value::Null))
         } else {
+            if let Some(error) = response.get("error").filter(|e| e.is_object()) {
+                return Err(PluginError {
+                    code: error
+                        .get("code")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("plugin_error")
+                        .into(),
+                    message: error
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("plugin operation failed")
+                        .into(),
+                    retryable: error
+                        .get("retryable")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    operation_id: operation_id.into(),
+                }
+                .into());
+            }
             let error_msg = response
                 .get("error")
                 .and_then(|v| v.as_str())
@@ -284,6 +377,7 @@ impl ServiceProvider for PluginProvider {
     }
 
     async fn start_workspace(&self, workspace_name: &str) -> Result<()> {
+        self.require(super::ServiceOperation::Start)?;
         self.invoke(
             "start_workspace",
             json!({ "workspace_name": workspace_name }),
@@ -293,6 +387,7 @@ impl ServiceProvider for PluginProvider {
     }
 
     async fn stop_workspace(&self, workspace_name: &str) -> Result<()> {
+        self.require(super::ServiceOperation::Stop)?;
         self.invoke(
             "stop_workspace",
             json!({ "workspace_name": workspace_name }),
@@ -302,6 +397,7 @@ impl ServiceProvider for PluginProvider {
     }
 
     async fn reset_workspace(&self, workspace_name: &str) -> Result<()> {
+        self.require(super::ServiceOperation::Reset)?;
         self.invoke(
             "reset_workspace",
             json!({ "workspace_name": workspace_name }),
@@ -310,24 +406,40 @@ impl ServiceProvider for PluginProvider {
         Ok(())
     }
 
-    fn supports_lifecycle(&self) -> bool {
-        // We can't call an async method from a sync fn, so we default to true
-        // and let the plugin return errors for unsupported operations.
-        true
+    async fn seed_from_source(&self, workspace_name: &str, source: &str) -> Result<()> {
+        self.require(super::ServiceOperation::Seed)?;
+        self.invoke(
+            "seed_from_source",
+            json!({"workspace_name": workspace_name, "source": source}),
+        )
+        .await?;
+        Ok(())
     }
 
-    async fn cleanup_old_workspaces(&self, max_count: usize) -> Result<Vec<String>> {
-        let result = self
-            .invoke("cleanup_old_workspaces", json!({ "max_count": max_count }))
-            .await?;
-        serde_json::from_value(result).context("Failed to parse Vec<String> from plugin response")
+    async fn logs(&self, workspace_name: &str, tail: Option<usize>) -> Result<String> {
+        self.require(super::ServiceOperation::Logs)?;
+        serde_json::from_value(
+            self.invoke(
+                "logs",
+                json!({"workspace_name": workspace_name, "tail": tail}),
+            )
+            .await?,
+        )
+        .context("plugin logs result must be a string")
     }
 
+    fn operations(&self) -> super::OperationCapabilities {
+        self.operations
+    }
     fn supports_destroy(&self) -> bool {
-        true
+        self.supports_destroy
     }
 
     async fn destroy_project(&self) -> Result<Vec<String>> {
+        anyhow::ensure!(
+            self.supports_destroy,
+            "plugin does not support project destruction"
+        );
         let result = self.invoke("destroy_project", json!({})).await?;
         serde_json::from_value(result).context("Failed to parse Vec<String> from plugin response")
     }
@@ -368,3 +480,21 @@ impl ServiceProvider for PluginProvider {
         "plugin"
     }
 }
+
+#[derive(Debug, serde::Serialize)]
+pub struct PluginError {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+    pub operation_id: String,
+}
+impl std::fmt::Display for PluginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: {} (operation {}, retryable: {})",
+            self.code, self.message, self.operation_id, self.retryable
+        )
+    }
+}
+impl std::error::Error for PluginError {}

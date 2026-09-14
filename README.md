@@ -27,6 +27,10 @@ devflow switch -c feature/auth
 
 Work on multiple features, reviews, migrations, or AI-agent tasks in parallel — without sharing a database or stashing state. Drive it from the CLI, a terminal dashboard (`devflow tui`), or a desktop GUI.
 
+Default CLI builds include local services, the native process supervisor, and the TUI. Optional build features are `proxy`, `service-neon`, `service-xata`, and `service-dblab`; use `cargo build --all-features` for all integrations. Commit generation uses an external command.
+
+For separate code/data origins, explicit adoption of existing resources, and interrupted-operation recovery, see [Data ownership and recovery](docs-site/src/content/docs/guides/ownership-and-recovery.md).
+
 ## How it works
 
 1. `devflow switch -c feature-x` creates a Git worktree or jj workspace from the selected parent. `devflow switch feature-x` reuses one that already exists.
@@ -41,7 +45,7 @@ Every workspace's app is reachable at a predictable HTTPS URL, every workspace's
 - **Git and jj workspaces** — Git uses linked worktrees, Jujutsu uses native workspaces, and manually created worktrees can be adopted without an in-place checkout mode
 - **Two isolation models, chosen per service** — physical (a Copy-on-Write Docker container per workspace) or logical (one shared global engine with a database, bucket, or DB index per workspace)
 - **Multi-service** — PostgreSQL, ClickHouse, MySQL, Redis, RustFS object storage, any Docker image, or custom plugin providers; cloud branching via Neon/DBLab/Xata (experimental)
-- **Project processes** — workspace-scoped web servers, workers, and schedulers with native or direct Pitchfork start/stop/status/logs, ready checks, dependency ordering, port bumping, and service env interpolation
+- **Project processes** — workspace-scoped web servers, workers, and schedulers with native start/stop/status/logs, ready checks, dependency ordering, port bumping, and service env interpolation
 - **Managed worktrees** — per-workspace directories from a path template, with env files, gitignored caches, and AI tool configs (`.claude/`, `.cursor/`, …) copied in automatically
 - **Lifecycle hooks** — MiniJinja-templated commands and built-in actions at every phase, with conditions, an approval system, and recipes that detect your project's stack
 - **Auto-HTTPS proxy** — every Docker container and port-backed devflow process gets a trusted `https://name.local` URL that resolves the same from the host and from inside containers; no `/etc/hosts` edits, no certificate warnings
@@ -160,7 +164,7 @@ devflow process logs api --tail 100 --follow
 devflow process stop --all
 ```
 
-When `processes.auto_start: true`, `devflow switch` starts configured processes after services and hooks are aligned. Auto-started commands use the same approval store as hooks, so agents can pre-approve with `devflow hook approvals add "npm run dev"` or set `DEVFLOW_APPROVE_HOOKS=1`. Set `processes.provider: pitchfork` to embed Pitchfork's Rust supervisor directly (no `pitchfork` CLI subprocess) for start/stop/log handling while devflow keeps desired state, proxy records, and GUI status. Running processes with ports are also exposed through the devflow proxy as `https://<process>.<workspace>.<project>.<suffix>` (default suffix: `.local`). `devflow remove` preflights the worktree, runs removal hooks while the directory still exists, stops processes, deletes services, and only then removes the worktree and VCS ref. Run `devflow daemon start` to keep desired-state, `watch` restart-on-change, and `retry` reconciliation active in the background. See [Project processes & Pitchfork](https://clement-tourriere.github.io/devflow/guides/processes/) and [Adding devflow to an existing project](https://clement-tourriere.github.io/devflow/getting-started/existing-project/) for Compose-to-devflow migration examples.
+When `processes.auto_start: true`, `devflow switch` starts configured processes after services and hooks are aligned. Auto-started commands use the same approval store as hooks, so agents can pre-approve with `devflow hook approvals add "npm run dev"` or set `DEVFLOW_APPROVE_HOOKS=1`. The desktop and CLI share native runtime records. Running processes with ports are also exposed through the devflow proxy as `https://<process>.<workspace>.<project>.<suffix>` (default suffix: `.local`). `devflow remove` preflights the worktree, runs removal hooks while the directory still exists, stops processes, deletes services, and only then removes the worktree and VCS ref. Run `devflow daemon start` to keep desired-state, `watch` restart-on-change, and `retry` reconciliation active in the background. See [Project processes](https://clement-tourriere.github.io/devflow/guides/processes/) and [Adding devflow to an existing project](https://clement-tourriere.github.io/devflow/getting-started/existing-project/) for Compose-to-devflow migration examples.
 
 ## Hooks and automation
 
@@ -182,7 +186,6 @@ devflow --json --non-interactive switch -c agent/task-42   # isolated env for th
 devflow agent context --format json                        # project + connection context for the agent
 devflow switch -c agent/fix-login -x claude -- 'Fix the login timeout bug'
 devflow commit --ai                                        # LLM-generated commit message
-devflow sync-ai-configs                                    # sync .claude/.cursor settings back to main
 ```
 
 AI tool configs (`.claude/`, `.cursor/`, `.opencode/`, `.agents/`) are copied into new worktrees automatically. In `--non-interactive` mode, unapproved hooks are skipped with a warning (set `DEVFLOW_APPROVE_HOOKS=1` to auto-approve in CI/agent runs). See `AGENTS.md` for the recommended coding-agent workflow.
@@ -275,3 +278,19 @@ Run `devflow --json doctor --strict` for a health check that exits non-zero when
 ## License
 
 MIT
+
+## Repeatable data and recovery
+
+```sh
+devflow baseline prepare clean --service db --from ./fixtures/base.sql
+devflow --json --non-interactive switch -c agent/task --from main --data-from baseline:clean@v1
+devflow exec --workspace agent/task -- pytest -k 'login or signup'
+devflow service reset agent/task --service db
+devflow operation inspect OPERATION_ID
+devflow operation resume OPERATION_ID
+devflow --json retention plan --service db --max-count 10
+```
+
+Baselines are immutable local PostgreSQL generations. Workspace inventory exposes exact per-service origins, readiness, identities, and retention state. See [architecture and migrations](docs/architecture.md), [baselines](docs-site/src/content/docs/guides/baselines.md), and [retention and caches](docs-site/src/content/docs/guides/retention-and-caches.md).
+
+The desktop uses the optional proxy companion. Install it independently with `cargo install --path . --no-default-features --features proxy --bin devflow-proxy`. Workspace and database commands work without it.

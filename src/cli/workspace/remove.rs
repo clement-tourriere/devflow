@@ -22,10 +22,10 @@ pub(super) async fn handle_remove_command(
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
-                        "status": "error",
-                        "workspace": workspace_name,
-                        "error": "Use --force to confirm removal in non-interactive or JSON output mode",
-                    }))?
+                            "status": "error",
+                    "workspace": workspace_name,
+                            "error": "Use --force to confirm removal in non-interactive or JSON output mode",
+                        }))?
                 );
             }
             anyhow::bail!("Use --force to confirm removal in non-interactive or JSON output mode");
@@ -88,10 +88,10 @@ pub(super) async fn handle_remove_command(
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
-                        "status": "error",
-                        "workspace": workspace_name,
-                        "error": error.to_string(),
-                    }))?
+                            "status": "error",
+                    "workspace": workspace_name,
+                            "error": error.to_string(),
+                        }))?
                 );
             }
             return Err(error);
@@ -136,6 +136,8 @@ pub(super) async fn handle_remove_command(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "status": if service_failures == 0 && process_failures == 0 && result.vcs_ref_deleted { "ok" } else { "error" },
+                "operation": result.operation,
+                "hook_results": result.hooks.iter().map(|r| serde_json::json!({"phase":r.phase,"succeeded":r.succeeded,"failed":r.failed,"skipped":r.skipped,"background":r.background,"errors":r.errors,"skipped_reasons":r.skipped_reasons})).collect::<Vec<_>>(),
                 "workspace": workspace_name,
                 "service_key": result.service_key,
                 "vcs_ref_deleted": result.vcs_ref_deleted,

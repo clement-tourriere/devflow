@@ -673,6 +673,7 @@ impl App {
                             default: false,
                             local: if is_local {
                                 Some(devflow_core::config::LocalServiceConfig {
+                legacy_project_id: None,
                                     image: None,
                                     data_root: None,
                                     storage: None,

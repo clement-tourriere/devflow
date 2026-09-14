@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod approval;
+mod background;
 pub mod detect;
 pub mod executor;
 pub mod recipes;
@@ -136,6 +137,14 @@ pub enum HookEntry {
 }
 
 impl HookEntry {
+    pub fn required(&self) -> bool {
+        match self {
+            Self::Simple(_) => true,
+            Self::Extended(e) => e.required,
+            Self::Action(a) => a.required,
+        }
+    }
+
     /// Whether this hook entry requires user approval before execution.
     /// Only shell commands and docker-exec need approval; built-in file/network actions do not.
     pub fn requires_approval(&self) -> bool {
@@ -148,6 +157,9 @@ impl HookEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtendedHookEntry {
+    /// Whether failure or missing approval blocks workspace readiness.
+    #[serde(default = "required_by_default")]
+    pub required: bool,
     /// The command to execute (MiniJinja template)
     pub command: String,
     /// Working directory (relative to project root)
@@ -170,6 +182,8 @@ pub struct ExtendedHookEntry {
 /// A hook entry that uses a built-in action instead of a shell command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionHookEntry {
+    #[serde(default = "required_by_default")]
+    pub required: bool,
     /// The built-in action to execute
     pub action: HookAction,
     /// Working directory (relative to project root)
@@ -250,8 +264,7 @@ pub enum HookAction {
         #[serde(default)]
         level: NotifyLevel,
     },
-    /// Merge AI tool configs (`.claude/`, `.cursor/`, …) from the current
-    /// worktree back into the main worktree (see `crate::ai_configs`).
+    /// Retired action, accepted only to migrate old hook configurations.
     SyncAiConfigs,
 }
 
@@ -536,6 +549,10 @@ async fn build_hook_context_impl(
     })
 }
 
+fn required_by_default() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,6 +821,7 @@ post-switch:
         assert!(simple.requires_approval());
 
         let extended = HookEntry::Extended(ExtendedHookEntry {
+            required: true,
             command: "npm test".to_string(),
             working_dir: None,
             continue_on_error: None,
@@ -814,6 +832,7 @@ post-switch:
         assert!(extended.requires_approval());
 
         let action_shell = HookEntry::Action(ActionHookEntry {
+            required: true,
             action: HookAction::Shell {
                 command: "echo hi".to_string(),
             },
@@ -826,6 +845,7 @@ post-switch:
         assert!(action_shell.requires_approval());
 
         let action_write_env = HookEntry::Action(ActionHookEntry {
+            required: true,
             action: HookAction::WriteEnv {
                 path: ".env".to_string(),
                 vars: IndexMap::new(),
@@ -840,6 +860,7 @@ post-switch:
         assert!(!action_write_env.requires_approval());
 
         let action_docker = HookEntry::Action(ActionHookEntry {
+            required: true,
             action: HookAction::DockerExec {
                 container: "test".to_string(),
                 command: "echo".to_string(),

@@ -17,9 +17,7 @@ use bollard::Docker;
 use super::container::{self, GlobalContainerSpec};
 use super::naming;
 use crate::config::SharedServiceConfig;
-use crate::services::{
-    ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceProvider, WorkspaceInfo,
-};
+use crate::services::{ConnectionInfo, DoctorReport, ProjectInfo, ServiceProvider, WorkspaceInfo};
 
 const DEFAULT_IMAGE: &str = "redis:7";
 const DEFAULT_PORT: u16 = 6379;
@@ -54,6 +52,7 @@ return -1
 /// its own numbered database.
 pub struct SharedRedisProvider {
     project_name: String,
+    resources: crate::services::ownership::ResourceRegistry,
     image: String,
     container_name: String,
     port: u16,
@@ -62,9 +61,24 @@ pub struct SharedRedisProvider {
 
 impl SharedRedisProvider {
     pub fn new(project_name: &str, config: Option<&SharedServiceConfig>) -> Result<Self> {
+        Self::new_scoped(project_name, project_name, "db", config)
+    }
+
+    pub fn new_scoped(
+        project_name: &str,
+        project_identity: &str,
+        service_name: &str,
+        config: Option<&SharedServiceConfig>,
+    ) -> Result<Self> {
         let c = config.cloned().unwrap_or_default();
         Ok(Self {
             project_name: project_name.to_string(),
+            resources: crate::services::ownership::ResourceRegistry::new(
+                project_identity,
+                service_name,
+                c.container_name.as_deref().unwrap_or(DEFAULT_CONTAINER),
+                c.legacy_resources.clone(),
+            )?,
             image: c.image.unwrap_or_else(|| DEFAULT_IMAGE.to_string()),
             container_name: c
                 .container_name
@@ -75,7 +89,7 @@ impl SharedRedisProvider {
     }
 
     fn alloc_field(&self, workspace: &str) -> String {
-        naming::redis_alloc_field(&self.project_name, workspace)
+        self.resources.resource_name(workspace)
     }
 
     fn container_spec(&self) -> GlobalContainerSpec {
@@ -203,67 +217,92 @@ impl ServiceProvider for SharedRedisProvider {
         workspace_name: &str,
         _from_workspace: Option<&str>,
     ) -> Result<WorkspaceInfo> {
+        let _lease = self.resources.lease(workspace_name).await?;
         let docker = container::connect()?;
         self.ensure_ready(&docker).await?;
+        self.resources.check_existing(
+            workspace_name,
+            self.lookup_index(&docker, workspace_name).await?.is_some(),
+        )?;
+        let legacy = naming::redis_alloc_field(&self.project_name, workspace_name);
+        let legacy_exists = !self
+            .run(&docker, 0, &["HGET", ALLOC_HASH, &legacy])
+            .await?
+            .is_empty();
+        self.resources
+            .check_legacy(workspace_name, &legacy, legacy_exists)?;
+        self.resources.claim(workspace_name, None)?;
         let index = self.allocate_index(&docker, workspace_name).await?;
-        Ok(WorkspaceInfo {
-            name: workspace_name.to_string(),
-            created_at: None,
-            parent_workspace: None,
-            database_name: index.to_string(),
-            state: Some("running".to_string()),
-        })
+        self.resources.complete(workspace_name)?;
+        let mut info = self
+            .resources
+            .record(workspace_name)?
+            .context("missing resource ownership")?
+            .into_workspace_info("running");
+        info.database_name = index.to_string();
+        Ok(info)
     }
 
     async fn delete_workspace(&self, workspace_name: &str) -> Result<()> {
-        let docker = container::connect()?;
-        if container::ensure_running_container(&docker, &self.container_spec())
-            .await
-            .is_err()
-        {
+        let _lease = self.resources.lease(workspace_name).await?;
+        if self.resources.was_deleted(workspace_name)? {
             return Ok(());
         }
+        let record = self
+            .resources
+            .record(workspace_name)?
+            .context("no ownership record; adopt legacy resources explicitly before deletion")?;
+        let docker = container::connect()?;
+        self.ensure_ready(&docker).await?;
         if let Some(index) = self.lookup_index(&docker, workspace_name).await? {
-            // Clear the workspace's database, then release the allocation.
-            let _ = self.run(&docker, index, &["FLUSHDB"]).await;
-            let field = self.alloc_field(workspace_name);
-            self.run(&docker, 0, &["HDEL", ALLOC_HASH, &field])
-                .await
-                .with_context(|| format!("failed to release Redis index for '{workspace_name}'"))?;
+            self.run(&docker, index, &["FLUSHDB"]).await?;
+            self.run(&docker, 0, &["HDEL", ALLOC_HASH, &record.resource])
+                .await?;
         }
-        Ok(())
+        self.resources.release(workspace_name)
     }
 
     async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
         let docker = container::connect()?;
-        self.ensure_ready(&docker).await?;
-        let prefix = naming::redis_project_prefix(&self.project_name);
-        // HGETALL returns field/value lines alternating.
-        let out = self.run(&docker, 0, &["HGETALL", ALLOC_HASH]).await?;
-        let tokens: Vec<&str> = out.lines().map(str::trim).collect();
-        let mut workspaces = Vec::new();
-        let mut i = 0;
-        while i + 1 < tokens.len() {
-            let field = tokens[i];
-            let index = tokens[i + 1];
-            i += 2;
-            if let Some(ws) = field.strip_prefix(&prefix) {
-                workspaces.push(WorkspaceInfo {
-                    name: ws.to_string(),
-                    created_at: None,
-                    parent_workspace: None,
-                    database_name: index.to_string(),
-                    state: Some("running".to_string()),
-                });
-            }
+        let status = container::observe_container(&docker, &self.container_spec()).await?;
+        let mut result = Vec::new();
+        for record in self.resources.list()? {
+            let index = if status == crate::services::local_docker::ContainerStatus::Running {
+                self.lookup_index(&docker, &record.workspace).await?
+            } else {
+                None
+            };
+            let state = match status {
+                crate::services::local_docker::ContainerStatus::NotFound => "missing",
+                crate::services::local_docker::ContainerStatus::Running => {
+                    if index.is_some() {
+                        "running"
+                    } else {
+                        "missing"
+                    }
+                }
+                _ => "stopped",
+            };
+            let mut info = record.into_workspace_info(state);
+            info.database_name = index.map(|i| i.to_string()).unwrap_or_default();
+            result.push(info);
         }
-        Ok(workspaces)
+        Ok(result)
     }
 
     async fn workspace_exists(&self, workspace_name: &str) -> Result<bool> {
         let docker = container::connect()?;
-        self.ensure_ready(&docker).await?;
-        Ok(self.lookup_index(&docker, workspace_name).await?.is_some())
+        let status = container::observe_container(&docker, &self.container_spec()).await?;
+        let Some(record) = self.resources.record(workspace_name)? else {
+            return Ok(false);
+        };
+        match status {
+            crate::services::local_docker::ContainerStatus::NotFound => Ok(false),
+            crate::services::local_docker::ContainerStatus::Running => {
+                Ok(self.lookup_index(&docker, workspace_name).await?.is_some())
+            }
+            _ => Ok(record.ready),
+        }
     }
 
     async fn switch_to_branch(&self, workspace_name: &str) -> Result<WorkspaceInfo> {
@@ -272,8 +311,18 @@ impl ServiceProvider for SharedRedisProvider {
 
     async fn get_connection_info(&self, workspace_name: &str) -> Result<ConnectionInfo> {
         let docker = container::connect()?;
-        self.ensure_ready(&docker).await?;
-        let index = self.allocate_index(&docker, workspace_name).await?;
+        let status = container::observe_container(&docker, &self.container_spec()).await?;
+        anyhow::ensure!(
+            status == crate::services::local_docker::ContainerStatus::Running,
+            "shared Redis is not running; start the workspace first"
+        );
+        self.resources
+            .record(workspace_name)?
+            .context("Redis workspace is not provisioned")?;
+        let index = self
+            .lookup_index(&docker, workspace_name)
+            .await?
+            .context("Redis workspace has no allocated slot")?;
         Ok(self.connection_info_for(index))
     }
 
@@ -282,7 +331,7 @@ impl ServiceProvider for SharedRedisProvider {
     }
 
     async fn destroy_preview(&self) -> Result<Option<(String, Vec<String>)>> {
-        let workspaces = self.list_workspaces().await.unwrap_or_default();
+        let workspaces = self.list_workspaces().await?;
         Ok(Some((
             self.container_name.clone(),
             workspaces
@@ -293,60 +342,31 @@ impl ServiceProvider for SharedRedisProvider {
     }
 
     async fn destroy_project(&self) -> Result<Vec<String>> {
-        let docker = container::connect()?;
-        self.ensure_ready(&docker).await?;
         let mut removed = Vec::new();
-        for w in self.list_workspaces().await? {
-            if let Ok(index) = w.database_name.parse::<u32>() {
-                let _ = self.run(&docker, index, &["FLUSHDB"]).await;
-                let field = self.alloc_field(&w.name);
-                let _ = self.run(&docker, 0, &["HDEL", ALLOC_HASH, &field]).await;
-                removed.push(format!("db {index}"));
-            }
+        for record in self.resources.list()? {
+            self.delete_workspace(&record.workspace).await?;
+            removed.push(record.resource);
         }
         Ok(removed)
     }
 
     async fn doctor(&self) -> Result<DoctorReport> {
-        let mut checks = Vec::new();
-        match container::connect() {
-            Ok(docker) => {
-                checks.push(DoctorCheck {
-                    name: "docker".to_string(),
-                    available: true,
-                    detail: "Connected to Docker daemon".to_string(),
-                });
-                let running = matches!(
-                    crate::services::local_docker::inspect_container_status(
-                        &docker,
-                        &self.container_name
-                    )
-                    .await,
-                    Ok(crate::services::local_docker::ContainerStatus::Running)
-                );
-                checks.push(DoctorCheck {
-                    name: "redis-container".to_string(),
-                    available: running,
-                    detail: if running {
-                        format!("'{}' running on port {}", self.container_name, self.port)
-                    } else {
-                        format!(
-                            "'{}' not running (started on first use)",
-                            self.container_name
-                        )
-                    },
-                });
-            }
-            Err(e) => checks.push(DoctorCheck {
-                name: "docker".to_string(),
-                available: false,
-                detail: format!("Docker unavailable: {e}"),
-            }),
-        }
-        Ok(DoctorReport { checks })
+        Ok(container::doctor(&self.container_spec()).await)
     }
 
     async fn test_connection(&self) -> Result<()> {
+        let docker = container::connect()?;
+        let status = container::observe_container(&docker, &self.container_spec()).await?;
+        anyhow::ensure!(
+            matches!(
+                status,
+                crate::services::local_docker::ContainerStatus::Running
+            ),
+            "shared engine is stopped or missing; run devflow service up"
+        );
+        Ok(())
+    }
+    async fn ensure_engine_ready(&self) -> Result<()> {
         let docker = container::connect()?;
         self.ensure_ready(&docker).await
     }

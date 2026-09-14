@@ -14,7 +14,13 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
-type BoxBody = http_body_util::Full<Bytes>;
+type BoxBody = http_body_util::combinators::UnsyncBoxBody<Bytes, hyper::Error>;
+
+fn full(bytes: Bytes) -> BoxBody {
+    Full::new(bytes)
+        .map_err(|never| match never {})
+        .boxed_unsync()
+}
 
 /// Run the HTTPS reverse proxy server on an already-bound listener.
 pub async fn run_https_server(
@@ -159,7 +165,7 @@ pub async fn run_http_server(
                                         Response::builder()
                                             .status(StatusCode::MOVED_PERMANENTLY)
                                             .header(hyper::header::LOCATION, location)
-                                            .body(Full::new(Bytes::new()))
+                                            .body(full(Bytes::new()))
                                             .unwrap(),
                                     );
                                 }
@@ -251,7 +257,7 @@ async fn handle_request(
         None => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Full::new(Bytes::from("Missing Host header")))
+                .body(full(Bytes::from("Missing Host header")))
                 .unwrap());
         }
     };
@@ -261,7 +267,7 @@ async fn handle_request(
         None => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
-                .body(Full::new(Bytes::from(format!(
+                .body(full(Bytes::from(format!(
                     "No upstream found for {}",
                     hostname
                 ))))
@@ -288,7 +294,7 @@ async fn handle_request(
             log::warn!("Failed to connect to upstream {}: {}", upstream_addr, e);
             return Ok(Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
-                .body(Full::new(Bytes::from(format!(
+                .body(full(Bytes::from(format!(
                     "Failed to connect to upstream: {}",
                     e
                 ))))
@@ -304,7 +310,7 @@ async fn handle_request(
             log::warn!("Upstream handshake failed for {}: {}", upstream_addr, e);
             return Ok(Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
-                .body(Full::new(Bytes::from(format!(
+                .body(full(Bytes::from(format!(
                     "Upstream handshake failed: {}",
                     e
                 ))))
@@ -318,19 +324,12 @@ async fn handle_request(
         }
     });
 
-    // Build the upstream request. Upgrade requests switch protocols after the
-    // response headers, so there is no HTTP body to buffer.
+    // Forward Incoming directly: the upstream pulls frames with backpressure.
     let (parts, body) = req.into_parts();
-    let body_bytes = if is_upgrade {
-        Bytes::new()
-    } else {
-        body.collect().await?.to_bytes()
-    };
-
     let mut upstream_req = Request::builder()
         .method(parts.method)
         .uri(&upstream_path)
-        .body(Full::new(body_bytes))
+        .body(body)
         .unwrap();
 
     // Copy headers
@@ -378,21 +377,17 @@ async fn handle_request(
                     ));
                 }
 
-                return Ok(Response::from_parts(parts, Full::new(Bytes::new())));
+                return Ok(Response::from_parts(parts, full(Bytes::new())));
             }
 
             let (parts, body) = resp.into_parts();
-            let body_bytes = body.collect().await?.to_bytes();
-            Ok(Response::from_parts(parts, Full::new(body_bytes)))
+            Ok(Response::from_parts(parts, body.boxed_unsync()))
         }
         Err(e) => {
             log::warn!("Upstream request failed: {}", e);
             Ok(Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
-                .body(Full::new(Bytes::from(format!(
-                    "Upstream request failed: {}",
-                    e
-                ))))
+                .body(full(Bytes::from(format!("Upstream request failed: {}", e))))
                 .unwrap())
         }
     }
@@ -402,8 +397,80 @@ async fn handle_request(
 mod tests {
     use super::*;
 
-    fn request_with_headers(headers: &[(&'static str, &'static str)]) -> Request<Full<Bytes>> {
-        let mut req = Request::builder().body(Full::new(Bytes::new())).unwrap();
+    #[tokio::test]
+    async fn forwards_stream_frames_before_request_or_response_finishes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = upstream.local_addr().unwrap().port();
+        let (seen, received) = tokio::sync::oneshot::channel();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let mut data = Vec::new();
+            loop {
+                let mut buf = [0; 1024];
+                let count = stream.read(&mut buf).await.unwrap();
+                assert!(count > 0);
+                data.extend_from_slice(&buf[..count]);
+                if data.windows(5).any(|w| w == b"hello") {
+                    break;
+                }
+            }
+            seen.send(()).unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\nb\r\ndata: one\n\n\r\n").await.unwrap();
+            // An SSE response remains open. The test must receive its first event.
+            std::future::pending::<()>().await;
+        });
+        let router = crate::router::Router::new();
+        router
+            .upsert(crate::discovery::ProxyTarget {
+                domain: "stream.local".into(),
+                container_ip: "127.0.0.1".into(),
+                port,
+                container_id: "test".into(),
+                container_name: "test".into(),
+                project: None,
+                service: None,
+                workspace: None,
+            })
+            .await;
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = proxy.local_addr().unwrap();
+        let proxy_task = tokio::spawn(async move {
+            let (stream, peer) = proxy.accept().await.unwrap();
+            let service = service_fn(move |req| {
+                let router = router.clone();
+                async move { handle_request(req, &router, None, peer).await }
+            });
+            let _ = http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        });
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        client.write_all(b"POST / HTTP/1.1\r\nHost: stream.local\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n").await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), received)
+            .await
+            .expect("request chunk was buffered until EOF")
+            .unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut received = Vec::new();
+            loop {
+                let mut buf = [0; 1024];
+                let count = client.read(&mut buf).await.unwrap();
+                assert!(count > 0);
+                received.extend_from_slice(&buf[..count]);
+                if received.windows(9).any(|w| w == b"data: one") {
+                    break;
+                }
+            }
+        })
+        .await;
+        upstream_task.abort();
+        proxy_task.abort();
+        assert!(event.is_ok(), "SSE event was buffered until EOF");
+    }
+
+    fn request_with_headers(headers: &[(&'static str, &'static str)]) -> Request<BoxBody> {
+        let mut req = Request::builder().body(full(Bytes::new())).unwrap();
         for (name, value) in headers {
             req.headers_mut().append(*name, value.parse().unwrap());
         }

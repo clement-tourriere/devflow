@@ -69,6 +69,7 @@ jobs:
         run: |
           bun install --frozen-lockfile
           bun run build
+          bun test tests
 
       - name: Build documentation
         working-directory: docs-site
@@ -119,7 +120,45 @@ jobs:
         run: cargo build --locked -p devflow-core
 
       - name: Run shared-provider integration tests (requires Docker)
-        run: cargo test --locked -p devflow-core --test shared_integration -- --ignored --test-threads=1
+        run: cargo test --locked -p devflow-core --test shared_integration --test review_regressions -- --ignored --test-threads=1
+
+  zfs-integration-tests:
+    name: ZFS replacement failure recovery
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ZFS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zfsutils-linux
+          sudo modprobe zfs
+      - name: Exercise a disposable pool
+        run: |
+          cargo test --locked -p devflow-core --lib --no-run --message-format=json > /tmp/devflow-zfs-build.jsonl
+          test_bin=$(python3 -c 'import json; print(next(x["executable"] for l in open("/tmp/devflow-zfs-build.jsonl") if (x := json.loads(l)).get("executable") and x.get("profile", {}).get("test")))')
+          pool="devflow_ci_${GITHUB_RUN_ID}"
+          disk=$(mktemp /tmp/devflow-zfs.XXXXXX)
+          truncate -s 2G "$disk"
+          trap 'sudo zpool destroy "$pool"; rm -f "$disk"' EXIT
+          sudo zpool create -o cachefile=none -O mountpoint=none "$pool" "$disk"
+          sudo env DEVFLOW_TEST_ZFS_POOL="$pool" "$test_bin" linux_zfs_failures_preserve_mounted_data --ignored --nocapture
+
+  feature-builds:
+    name: CLI feature builds
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features: ["--no-default-features", "", "--all-features"]
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked -p devflow -p devflow-core ${{ matrix.features }}
+      - name: Check generated provider catalog
+        if: matrix.features == '--all-features'
+        run: python3 scripts/generate-provider-manifest.py --check
 
   coverage:
     name: Coverage
@@ -140,7 +179,7 @@ jobs:
         run: cargo install cargo-llvm-cov --locked
 
       - name: Generate coverage report
-        run: cargo llvm-cov --locked --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov --locked -p devflow -p devflow-core -p devflow-proxy --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -384,6 +423,8 @@ jobs:
     permissions:
       contents: write
     needs:
+      - docker-integration-tests
+      - feature-builds
       - integration-linux-zfs
       - integration-linux-xfs
       - integration-linux-btrfs

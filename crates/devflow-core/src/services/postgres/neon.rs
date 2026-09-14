@@ -43,32 +43,33 @@ struct NeonBranch {
 
 #[derive(Debug, Deserialize)]
 struct ListBranchesResponse {
-    workspaces: Vec<NeonBranch>,
+    branches: Vec<NeonBranch>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CreateBranchResponse {
-    workspace: NeonBranch,
+    branch: NeonBranch,
 }
 
 #[derive(Debug, Deserialize)]
-struct NeonEndpoint {
-    id: String,
-    database_host: String,
-    database_name: String,
-    database_user: String,
-    #[serde(default)]
-    database_password: Option<String>,
+struct NeonDatabase {
+    name: String,
+    owner_name: String,
 }
-
 #[derive(Debug, Deserialize)]
-struct ListEndpointsResponse {
-    endpoints: Vec<NeonEndpoint>,
+struct DatabasesResponse {
+    databases: Vec<NeonDatabase>,
+}
+#[derive(Debug, Deserialize)]
+struct ConnectionUriResponse {
+    uri: String,
 }
 
 impl NeonProvider {
     pub fn new(api_key: String, project_id: String, base_url: Option<String>) -> Result<Self> {
-        let client = Client::new();
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()?;
         let base_url = base_url.unwrap_or_else(|| "https://console.neon.tech/api/v2".to_string());
 
         Ok(Self {
@@ -120,19 +121,12 @@ impl NeonProvider {
             .with_context(|| "Failed to parse JSON response from Neon API")
     }
 
-    async fn get_workspace_endpoint(&self, workspace_name: &str) -> Result<NeonEndpoint> {
-        let path = format!("projects/{}/endpoints", self.project_id);
-        let response: ListEndpointsResponse = self
-            .make_request(reqwest::Method::GET, &path, None::<&()>)
-            .await?;
-
-        for endpoint in response.endpoints {
-            if endpoint.database_name == workspace_name || endpoint.id.contains(workspace_name) {
-                return Ok(endpoint);
-            }
-        }
-
-        anyhow::bail!("No endpoint found for workspace: {}", workspace_name);
+    async fn find_branch(&self, name: &str) -> Result<WorkspaceInfo> {
+        self.list_workspaces()
+            .await?
+            .into_iter()
+            .find(|b| b.name == name)
+            .with_context(|| format!("Neon branch '{name}' does not exist"))
     }
 }
 
@@ -143,21 +137,26 @@ impl ServiceProvider for NeonProvider {
         workspace_name: &str,
         from_workspace: Option<&str>,
     ) -> Result<WorkspaceInfo> {
-        let request = CreateBranchRequest {
-            name: workspace_name.to_string(),
-            parent_id: from_workspace.map(|s| s.to_string()),
+        let parent_id = if let Some(parent) = from_workspace {
+            Some(self.find_branch(parent).await?.database_name)
+        } else {
+            None
         };
+        let request = serde_json::json!({
+            "branch": CreateBranchRequest { name: workspace_name.into(), parent_id },
+            "endpoints": [{"type": "read_write"}]
+        });
 
-        let path = format!("projects/{}/workspaces", self.project_id);
+        let path = format!("projects/{}/branches", self.project_id);
         let response: CreateBranchResponse = self
             .make_request(reqwest::Method::POST, &path, Some(&request))
             .await?;
 
         Ok(WorkspaceInfo {
-            name: response.workspace.name,
-            created_at: Some(response.workspace.created_at),
-            parent_workspace: response.workspace.parent_id,
-            database_name: response.workspace.id,
+            name: response.branch.name,
+            created_at: Some(response.branch.created_at),
+            parent_workspace: from_workspace.map(String::from),
+            database_name: response.branch.id,
             state: Some("running".to_string()),
         })
     }
@@ -170,7 +169,7 @@ impl ServiceProvider for NeonProvider {
             .ok_or_else(|| anyhow::anyhow!("Workspace '{}' not found", workspace_name))?;
 
         let path = format!(
-            "projects/{}/workspaces/{}",
+            "projects/{}/branches/{}",
             self.project_id, workspace.database_name
         );
         let _: serde_json::Value = self
@@ -181,18 +180,25 @@ impl ServiceProvider for NeonProvider {
     }
 
     async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
-        let path = format!("projects/{}/workspaces", self.project_id);
+        let path = format!("projects/{}/branches", self.project_id);
         let response: ListBranchesResponse = self
             .make_request(reqwest::Method::GET, &path, None::<&()>)
             .await?;
 
+        let names: std::collections::HashMap<_, _> = response
+            .branches
+            .iter()
+            .map(|b| (b.id.clone(), b.name.clone()))
+            .collect();
         let workspaces = response
-            .workspaces
+            .branches
             .into_iter()
             .map(|workspace| WorkspaceInfo {
                 name: workspace.name,
                 created_at: Some(workspace.created_at),
-                parent_workspace: workspace.parent_id,
+                parent_workspace: workspace
+                    .parent_id
+                    .map(|id| names.get(&id).cloned().unwrap_or(id)),
                 database_name: workspace.id,
                 state: Some("running".to_string()),
             })
@@ -215,27 +221,50 @@ impl ServiceProvider for NeonProvider {
     }
 
     async fn get_connection_info(&self, workspace_name: &str) -> Result<ConnectionInfo> {
-        let endpoint = self.get_workspace_endpoint(workspace_name).await?;
-
-        let connection_string = if let Some(ref password) = endpoint.database_password {
-            format!(
-                "postgresql://{}:{}@{}/{}",
-                endpoint.database_user, password, endpoint.database_host, endpoint.database_name
-            )
-        } else {
-            format!(
-                "postgresql://{}@{}/{}",
-                endpoint.database_user, endpoint.database_host, endpoint.database_name
-            )
-        };
-
+        let branch = self.find_branch(workspace_name).await?;
+        let path = format!(
+            "projects/{}/branches/{}/databases",
+            self.project_id, branch.database_name
+        );
+        let response: DatabasesResponse = self
+            .make_request(reqwest::Method::GET, &path, None::<&()>)
+            .await?;
+        let database = if response.databases.len() == 1 { response.databases.into_iter().next() }
+            else { response.databases.into_iter().find(|db| db.name == "neondb") }
+            .context("Neon branch has no unambiguous default database (expected a single database or neondb)")?;
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/projects/{}/connection_uri",
+            self.base_url, self.project_id
+        ))?;
+        url.query_pairs_mut()
+            .append_pair("branch_id", &branch.database_name)
+            .append_pair("database_name", &database.name)
+            .append_pair("role_name", &database.owner_name);
+        let response: ConnectionUriResponse = self
+            .client
+            .get(url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let uri = reqwest::Url::parse(&response.uri)
+            .context("Neon returned an invalid connection URI")?;
         Ok(ConnectionInfo {
-            host: endpoint.database_host,
-            port: 5432,
-            database: endpoint.database_name,
-            user: endpoint.database_user,
-            password: endpoint.database_password,
-            connection_string: Some(connection_string),
+            host: uri
+                .host_str()
+                .context("Neon connection URI has no host")?
+                .into(),
+            port: uri.port().unwrap_or(5432),
+            database: database.name,
+            user: database.owner_name,
+            password: uri.password().map(|p| {
+                percent_encoding::percent_decode_str(p)
+                    .decode_utf8_lossy()
+                    .into_owned()
+            }),
+            connection_string: Some(response.uri),
         })
     }
 
@@ -262,11 +291,11 @@ impl ServiceProvider for NeonProvider {
         })
     }
 
-    fn provider_name(&self) -> &'static str {
-        "Neon"
+    fn data_strategy(&self) -> &'static str {
+        "remote_clone"
     }
 
-    fn supports_template_from_time(&self) -> bool {
-        true
+    fn provider_name(&self) -> &'static str {
+        "Neon"
     }
 }

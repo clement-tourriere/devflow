@@ -12,9 +12,7 @@ use s3::{Bucket, BucketConfiguration, Region};
 use super::container::{self, GlobalContainerSpec};
 use super::naming;
 use crate::config::SharedServiceConfig;
-use crate::services::{
-    ConnectionInfo, DoctorCheck, DoctorReport, ProjectInfo, ServiceProvider, WorkspaceInfo,
-};
+use crate::services::{ConnectionInfo, DoctorReport, ProjectInfo, ServiceProvider, WorkspaceInfo};
 
 const DEFAULT_IMAGE: &str = "rustfs/rustfs:latest";
 const DEFAULT_S3_PORT: u16 = 9000;
@@ -28,6 +26,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(60);
 /// workspace).
 pub struct RustFsProvider {
     project_name: String,
+    resources: crate::services::ownership::ResourceRegistry,
     image: String,
     container_name: String,
     s3_port: u16,
@@ -38,9 +37,24 @@ pub struct RustFsProvider {
 
 impl RustFsProvider {
     pub fn new(project_name: &str, config: Option<&SharedServiceConfig>) -> Result<Self> {
+        Self::new_scoped(project_name, project_name, "db", config)
+    }
+
+    pub fn new_scoped(
+        project_name: &str,
+        project_identity: &str,
+        service_name: &str,
+        config: Option<&SharedServiceConfig>,
+    ) -> Result<Self> {
         let c = config.cloned().unwrap_or_default();
         Ok(Self {
             project_name: project_name.to_string(),
+            resources: crate::services::ownership::ResourceRegistry::new(
+                project_identity,
+                service_name,
+                c.container_name.as_deref().unwrap_or(DEFAULT_CONTAINER),
+                c.legacy_resources.clone(),
+            )?,
             image: c.image.unwrap_or_else(|| DEFAULT_IMAGE.to_string()),
             container_name: c
                 .container_name
@@ -53,7 +67,7 @@ impl RustFsProvider {
     }
 
     fn bucket_name(&self, workspace: &str) -> String {
-        naming::logical_bucket_name(&self.project_name, workspace)
+        self.resources.resource_name(workspace)
     }
 
     fn endpoint(&self) -> String {
@@ -127,24 +141,17 @@ impl RustFsProvider {
         }
     }
 
-    async fn list_project_buckets(&self) -> Result<Vec<String>> {
-        let prefix = naming::project_bucket_prefix(&self.project_name);
-        let resp = Bucket::list_buckets(self.region(), self.credentials()?)
-            .await
-            .context("failed to list RustFS buckets")?;
-        Ok(resp
-            .bucket_names()
-            .filter(|n| n.starts_with(&prefix))
-            .collect())
-    }
-
     /// Empty a bucket (delete all objects) so it can be removed.
     async fn empty_bucket(&self, name: &str) -> Result<()> {
         let bucket = self.bucket_handle(name)?;
-        let pages = bucket.list(String::new(), None).await.unwrap_or_default();
+        let pages = bucket.list(String::new(), None).await?;
         for page in pages {
             for obj in page.contents {
-                let _ = bucket.delete_object(&obj.key).await;
+                let response = bucket.delete_object(&obj.key).await?;
+                anyhow::ensure!(
+                    response.status_code() < 300,
+                    "failed to delete object from owned bucket"
+                );
             }
         }
         Ok(())
@@ -158,77 +165,88 @@ impl ServiceProvider for RustFsProvider {
         workspace_name: &str,
         _from_workspace: Option<&str>,
     ) -> Result<WorkspaceInfo> {
+        let _lease = self.resources.lease(workspace_name).await?;
         self.ensure_ready().await?;
         let name = self.bucket_name(workspace_name);
-
-        // Tell rust-s3 to skip the LocationConstraint body, which RustFS/MinIO
-        // don't require (and reject for non-AWS regions).
-        std::env::set_var("RUST_S3_SKIP_LOCATION_CONSTRAINT", "true");
-
-        let handle = self.bucket_handle(&name)?;
-        let already = handle.exists().await.unwrap_or(false);
-        if !already {
+        let exists = self.bucket_handle(&name)?.exists().await?;
+        self.resources.check_existing(workspace_name, exists)?;
+        let legacy = naming::logical_bucket_name(&self.project_name, workspace_name);
+        self.resources.check_legacy(
+            workspace_name,
+            &legacy,
+            self.bucket_handle(&legacy)?.exists().await?,
+        )?;
+        self.resources.claim(workspace_name, None)?;
+        if !exists {
+            std::env::set_var("RUST_S3_SKIP_LOCATION_CONSTRAINT", "true");
             Bucket::create_with_path_style(
                 &name,
                 self.region(),
                 self.credentials()?,
                 BucketConfiguration::default(),
             )
-            .await
-            .with_context(|| format!("failed to create bucket '{name}'"))?;
+            .await?;
         }
-
-        Ok(WorkspaceInfo {
-            name: workspace_name.to_string(),
-            created_at: None,
-            parent_workspace: None,
-            database_name: name,
-            state: Some("running".to_string()),
-        })
+        self.resources.complete(workspace_name)?;
+        Ok(self
+            .resources
+            .record(workspace_name)?
+            .context("missing resource ownership")?
+            .into_workspace_info("running"))
     }
 
     async fn delete_workspace(&self, workspace_name: &str) -> Result<()> {
-        // If the engine isn't reachable there's nothing to remove.
-        if self.ensure_ready().await.is_err() {
+        let _lease = self.resources.lease(workspace_name).await?;
+        if self.resources.was_deleted(workspace_name)? {
             return Ok(());
         }
-        let name = self.bucket_name(workspace_name);
-        let handle = self.bucket_handle(&name)?;
-        if !handle.exists().await.unwrap_or(false) {
-            return Ok(());
+        let record = self
+            .resources
+            .record(workspace_name)?
+            .context("no ownership record; adopt legacy resources explicitly before deletion")?;
+        self.ensure_ready().await?;
+        let handle = self.bucket_handle(&record.resource)?;
+        if handle.exists().await? {
+            self.empty_bucket(&record.resource).await?;
+            handle.delete().await?;
         }
-        // A bucket must be empty before it can be deleted.
-        self.empty_bucket(&name).await?;
-        handle
-            .delete()
-            .await
-            .with_context(|| format!("failed to delete bucket '{name}'"))?;
-        Ok(())
+        self.resources.release(workspace_name)
     }
 
     async fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
-        self.ensure_ready().await?;
-        let prefix = naming::project_bucket_prefix(&self.project_name);
-        let buckets = self.list_project_buckets().await?;
-        Ok(buckets
-            .into_iter()
-            .map(|bucket| {
-                let ws = bucket.strip_prefix(&prefix).unwrap_or(&bucket).to_string();
-                WorkspaceInfo {
-                    name: ws,
-                    created_at: None,
-                    parent_workspace: None,
-                    database_name: bucket,
-                    state: Some("running".to_string()),
+        let docker = container::connect()?;
+        let status = container::observe_container(&docker, &self.container_spec()).await?;
+        let mut result = Vec::new();
+        for record in self.resources.list()? {
+            let state = match status {
+                crate::services::local_docker::ContainerStatus::NotFound => "missing",
+                crate::services::local_docker::ContainerStatus::Running => {
+                    if self.bucket_handle(&record.resource)?.exists().await? {
+                        "running"
+                    } else {
+                        "missing"
+                    }
                 }
-            })
-            .collect())
+                _ => "stopped",
+            };
+            result.push(record.into_workspace_info(state));
+        }
+        Ok(result)
     }
 
     async fn workspace_exists(&self, workspace_name: &str) -> Result<bool> {
-        self.ensure_ready().await?;
-        let handle = self.bucket_handle(&self.bucket_name(workspace_name))?;
-        Ok(handle.exists().await.unwrap_or(false))
+        let docker = container::connect()?;
+        let status = container::observe_container(&docker, &self.container_spec()).await?;
+        let Some(record) = self.resources.record(workspace_name)? else {
+            return Ok(false);
+        };
+        match status {
+            crate::services::local_docker::ContainerStatus::NotFound => Ok(false),
+            crate::services::local_docker::ContainerStatus::Running => {
+                Ok(self.bucket_handle(&record.resource)?.exists().await?)
+            }
+            _ => Ok(record.ready),
+        }
     }
 
     async fn switch_to_branch(&self, workspace_name: &str) -> Result<WorkspaceInfo> {
@@ -236,6 +254,8 @@ impl ServiceProvider for RustFsProvider {
     }
 
     async fn get_connection_info(&self, workspace_name: &str) -> Result<ConnectionInfo> {
+        let docker = container::connect()?;
+        container::observe_container(&docker, &self.container_spec()).await?;
         let bucket = self.bucket_name(workspace_name);
         Ok(ConnectionInfo {
             host: "127.0.0.1".to_string(),
@@ -252,69 +272,42 @@ impl ServiceProvider for RustFsProvider {
     }
 
     async fn destroy_preview(&self) -> Result<Option<(String, Vec<String>)>> {
-        let buckets = self.list_project_buckets().await.unwrap_or_default();
-        Ok(Some((self.container_name.clone(), buckets)))
+        Ok(Some((
+            self.container_name.clone(),
+            self.resources
+                .list()?
+                .into_iter()
+                .map(|r| r.resource)
+                .collect(),
+        )))
     }
 
     async fn destroy_project(&self) -> Result<Vec<String>> {
-        self.ensure_ready().await?;
         let mut removed = Vec::new();
-        for bucket in self.list_project_buckets().await? {
-            let _ = self.empty_bucket(&bucket).await;
-            match self.bucket_handle(&bucket) {
-                Ok(h) => match h.delete().await {
-                    Ok(_) => removed.push(bucket),
-                    Err(e) => log::warn!("Failed to delete bucket '{}': {}", bucket, e),
-                },
-                Err(e) => log::warn!("Failed to handle bucket '{}': {}", bucket, e),
-            }
+        for record in self.resources.list()? {
+            self.delete_workspace(&record.workspace).await?;
+            removed.push(record.resource);
         }
         Ok(removed)
     }
 
     async fn doctor(&self) -> Result<DoctorReport> {
-        let mut checks = Vec::new();
-        match container::connect() {
-            Ok(docker) => {
-                checks.push(DoctorCheck {
-                    name: "docker".to_string(),
-                    available: true,
-                    detail: "Connected to Docker daemon".to_string(),
-                });
-                let running = matches!(
-                    crate::services::local_docker::inspect_container_status(
-                        &docker,
-                        &self.container_name
-                    )
-                    .await,
-                    Ok(crate::services::local_docker::ContainerStatus::Running)
-                );
-                checks.push(DoctorCheck {
-                    name: "rustfs-container".to_string(),
-                    available: running,
-                    detail: if running {
-                        format!(
-                            "'{}' running (S3 {}, console {})",
-                            self.container_name, self.s3_port, self.console_port
-                        )
-                    } else {
-                        format!(
-                            "'{}' not running (started on first use)",
-                            self.container_name
-                        )
-                    },
-                });
-            }
-            Err(e) => checks.push(DoctorCheck {
-                name: "docker".to_string(),
-                available: false,
-                detail: format!("Docker unavailable: {e}"),
-            }),
-        }
-        Ok(DoctorReport { checks })
+        Ok(container::doctor(&self.container_spec()).await)
     }
 
     async fn test_connection(&self) -> Result<()> {
+        let docker = container::connect()?;
+        let status = container::observe_container(&docker, &self.container_spec()).await?;
+        anyhow::ensure!(
+            matches!(
+                status,
+                crate::services::local_docker::ContainerStatus::Running
+            ),
+            "shared engine is stopped or missing; run devflow service up"
+        );
+        Ok(())
+    }
+    async fn ensure_engine_ready(&self) -> Result<()> {
         self.ensure_ready().await
     }
 

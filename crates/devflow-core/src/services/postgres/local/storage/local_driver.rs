@@ -124,6 +124,18 @@ impl LocalDriver {
         target: &Path,
         mode: LocalMode,
     ) -> anyhow::Result<()> {
+        crate::services::copy::replace_directory(target, |staged| async move {
+            self.clone_dir_raw(source, &staged, mode).await
+        })
+        .await
+    }
+
+    async fn clone_dir_raw(
+        &self,
+        source: &Path,
+        target: &Path,
+        mode: LocalMode,
+    ) -> anyhow::Result<()> {
         tokio::fs::metadata(source)
             .await
             .with_context(|| format!("source directory '{}' not found", source.display()))?;

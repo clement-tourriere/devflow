@@ -37,7 +37,7 @@ serde_json = "1.0"
 anyhow = "1.0"
 
 # Logging
-log = { version = "0.4", features = ["release_max_level_off"] }
+log = "0.4"
 
 # File system paths
 dirs = "6.0"

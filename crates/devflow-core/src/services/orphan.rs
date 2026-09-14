@@ -5,10 +5,16 @@
 //! containers).  Provides cleanup routines that remove all associated resources
 //! without requiring the original `.devflow.yml` config file.
 
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+#[cfg(feature = "service-local")]
+use std::collections::HashSet;
+use std::path::Path;
+#[cfg(feature = "service-local")]
+use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+#[cfg(feature = "service-local")]
+use anyhow::Context;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::state::LocalStateManager;

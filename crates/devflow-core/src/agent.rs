@@ -121,6 +121,11 @@ pub fn generate_agent_guide(
     }
     out.push_str("```\n\n");
     out.push_str("Important: a child process cannot `cd` the already-running agent or parent shell. Treat `agent_workdir` from JSON output as the authoritative directory and set the harness/tool workdir explicitly.\n\n");
+    out.push_str("## Data and recovery\n\n");
+    out.push_str("- Select code with `--from` and reusable data with `--data-from`; data defaults to the code parent. Origins persist across retries.\n");
+    out.push_str("- Check `operation.status` before dependent work. `ready` confirms setup; `needs_attention` requires inspecting failed or skipped phases, even if the command returned a worktree.\n");
+    out.push_str("- Retry incomplete setup with the same command. Use `devflow --json doctor --strict` to find pending operations.\n");
+    out.push_str("- Failed seeds remain failed until a successful seed retry. Preserve ownership state with service data; never infer ownership from a name prefix.\n\n");
 
     out.push_str("## Hooks\n\n");
     out.push_str("- Hooks run by default during `devflow switch`; do **not** pass `--no-verify` unless the user explicitly wants to skip setup/migration hooks.\n");
@@ -231,7 +236,7 @@ pub fn uninstall_agent_skills(project_dir: &Path) -> Result<()> {
 }
 
 /// Check whether generated agent guides are installed and current.
-pub fn check_agent_skills_installed(project_dir: &Path) -> SkillInstallStatus {
+pub fn check_agent_guides(project_dir: &Path) -> SkillInstallStatus {
     let config = Config::load_effective_for_dir(project_dir).unwrap_or_default();
     let mut installed_skills = Vec::new();
     let mut missing_skills = Vec::new();
@@ -342,4 +347,9 @@ fn remove_file_or_dir(path: &Path) -> Result<()> {
         std::fs::remove_dir_all(path)?;
     }
     Ok(())
+}
+
+/// Compatibility alias; new callers use check_agent_guides.
+pub fn check_agent_skills_installed(project_dir: &Path) -> SkillInstallStatus {
+    check_agent_guides(project_dir)
 }

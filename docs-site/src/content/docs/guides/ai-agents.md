@@ -89,7 +89,6 @@ The bundled workspace helpers teach agents to list/switch/create workspaces with
 | `CLAUDE.md` | Claude Code project context |
 | `llms.txt` / `llms-full.txt` | machine-readable index / full flat context dump |
 
-Agent-modified configs in worktrees flow back with `devflow sync-ai-configs` (union-merges `.claude/settings.local.json` permissions; additive copies elsewhere) — or automatically via the `sync-ai-configs` recipe.
 
 ## AI commit messages
 
@@ -99,17 +98,14 @@ devflow commit --ai --edit      # review in $EDITOR first
 devflow commit --ai --dry-run   # print only
 ```
 
-Generation prefers an external CLI, falling back to any OpenAI-compatible API:
+Generation runs the configured external command:
 
 ```yaml
 commit:
   generation:
     command: "claude -p --model haiku"     # preferred
-    # api_url: "http://localhost:11434/v1" # fallback (Ollama: no key needed for localhost)
-    # model: "llama3.1"
 ```
 
-Environment equivalents: `DEVFLOW_COMMIT_COMMAND`, `DEVFLOW_LLM_API_URL`, `DEVFLOW_LLM_MODEL`, `DEVFLOW_LLM_API_KEY`. Diffs over 32 KB are truncated with a notice to the model.
 
 ## CI example (GitHub Actions)
 

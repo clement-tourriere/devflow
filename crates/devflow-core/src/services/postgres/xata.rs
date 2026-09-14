@@ -35,28 +35,32 @@ struct XataBranch {
     name: String,
     #[serde(rename = "createdAt")]
     created_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ListBranchesResponse {
-    workspaces: Vec<XataBranch>,
-}
-
-#[derive(Debug, Serialize)]
-struct CreateBranchRequest {
-    name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "parentID")]
     parent_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+struct ListBranchesResponse {
+    branches: Vec<XataBranch>,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateBranchRequest {
+    mode: &'static str,
+    name: String,
+    #[serde(rename = "parentID")]
+    parent_id: String,
+}
+
+#[derive(Deserialize)]
 struct BranchCredentials {
     username: String,
     password: String,
-    host: Option<String>,
-    port: Option<u16>,
-    database: Option<String>,
+    hostname: String,
+    port: u16,
+    dbname: String,
+    #[serde(rename = "connectionString")]
+    connection_string: String,
 }
 
 impl XataProvider {
@@ -66,7 +70,9 @@ impl XataProvider {
         project_id: String,
         base_url: Option<String>,
     ) -> Result<Self> {
-        let client = Client::new();
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()?;
 
         Ok(Self {
             client,
@@ -79,7 +85,7 @@ impl XataProvider {
 
     fn branches_url(&self) -> String {
         format!(
-            "{}/organizations/{}/projects/{}/workspaces",
+            "{}/organizations/{}/projects/{}/branches",
             self.base_url, self.organization_id, self.project_id
         )
     }
@@ -159,7 +165,7 @@ impl XataProvider {
         let response: ListBranchesResponse = self
             .api_request(reqwest::Method::GET, &self.branches_url(), None::<&()>)
             .await?;
-        Ok(response.workspaces)
+        Ok(response.branches)
     }
 
     async fn find_branch_by_name(&self, workspace_name: &str) -> Result<Option<XataBranch>> {
@@ -169,18 +175,7 @@ impl XataProvider {
     }
 
     fn normalize_workspace_name(workspace_name: &str) -> String {
-        workspace_name
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .collect::<String>()
-            .trim_matches('-')
-            .to_string()
+        workspace_name.to_owned()
     }
 }
 
@@ -206,7 +201,8 @@ impl ServiceProvider for XataProvider {
 
         let request = CreateBranchRequest {
             name: normalized_name.clone(),
-            parent_id,
+            mode: "inherit",
+            parent_id: parent_id.context("Xata creation requires a data parent; use --from or --data-from to select an existing branch")?,
         };
 
         let workspace: XataBranch = self
@@ -217,7 +213,7 @@ impl ServiceProvider for XataProvider {
             name: workspace.name,
             created_at: workspace.created_at,
             parent_workspace: from_workspace.map(|s| s.to_string()),
-            database_name: self.project_id.clone(),
+            database_name: workspace.id,
             state: Some("running".to_string()),
         })
     }
@@ -240,8 +236,8 @@ impl ServiceProvider for XataProvider {
             .map(|workspace| WorkspaceInfo {
                 name: workspace.name,
                 created_at: workspace.created_at,
-                parent_workspace: None,
-                database_name: self.project_id.clone(),
+                parent_workspace: workspace.parent_id,
+                database_name: workspace.id,
                 state: Some("running".to_string()),
             })
             .collect())
@@ -271,22 +267,19 @@ impl ServiceProvider for XataProvider {
             .api_request(reqwest::Method::GET, &creds_url, None::<&()>)
             .await?;
 
-        let host = creds.host.unwrap_or_else(|| "localhost".to_string());
-        let port = creds.port.unwrap_or(5432);
-        let database = creds.database.unwrap_or_else(|| workspace.name.clone());
-
-        let connection_string = format!(
-            "postgresql://{}:{}@{}:{}/{}",
-            creds.username, creds.password, host, port, database
+        anyhow::ensure!(
+            !creds.hostname.is_empty()
+                && !creds.dbname.is_empty()
+                && !creds.connection_string.is_empty(),
+            "Xata returned incomplete credentials"
         );
-
         Ok(ConnectionInfo {
-            host,
-            port,
-            database,
+            host: creds.hostname,
+            port: creds.port,
+            database: creds.dbname,
             user: creds.username,
             password: Some(creds.password),
-            connection_string: Some(connection_string),
+            connection_string: Some(creds.connection_string),
         })
     }
 
@@ -311,6 +304,10 @@ impl ServiceProvider for XataProvider {
         Ok(DoctorReport {
             checks: vec![check],
         })
+    }
+
+    fn data_strategy(&self) -> &'static str {
+        "remote_clone"
     }
 
     fn provider_name(&self) -> &'static str {

@@ -23,7 +23,7 @@ worktree:
     - .env.local
     - .env
   copy_ignored: false                     # also copy gitignored entries (node_modules, …)
-  copy_ai_configs: true                   # copy .claude/, .cursor/, .opencode/, .agents/
+  copy_ai_configs: false                   # copy .claude/, .cursor/, .opencode/, .agents/
   extra_ai_dirs: []                       # additional AI tool dirs to copy
 ```
 
@@ -84,15 +84,9 @@ The hook-driven setup path currently copies `copy_files` and gitignored entries 
 
 After preflight, devflow runs removal hooks while the directory still exists, stops processes, and deletes service instances. Only after those steps succeed does it remove the worktree, delete its VCS ref, and unregister state. A service deletion failure therefore leaves the code and worktree available for retry. GUI force deletion is a separate second confirmation.
 
-## Syncing AI configs back
+## Agent configuration
 
-Changes agents make to `.claude/settings.local.json` (approved permissions, etc.) in a worktree can be synced back to the main checkout:
-
-```bash
-devflow sync-ai-configs
-```
-
-Permission arrays are unioned and deduplicated; other AI config files are copied only if missing in main. The `sync-ai-configs` [hook recipe](/devflow/reference/hooks/#recipes) automates this before workspace removal.
+Agent policy merging is retired. Generate project guides with `devflow agent skill --target all`, and use explicit `worktree.copy_files` entries for project files that each workspace needs.
 
 ## Related
 

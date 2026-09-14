@@ -81,7 +81,7 @@ pub async fn ensure_image(docker: &Docker, image: &str) -> Result<()> {
 /// Ensure the global container exists and is running. Idempotent and tolerant
 /// of races between concurrent devflow processes (Docker 409 = already exists).
 pub async fn ensure_running_container(docker: &Docker, spec: &GlobalContainerSpec) -> Result<()> {
-    match inspect_container_status(docker, &spec.container_name).await? {
+    match observe_container(docker, spec).await? {
         ContainerStatus::Running => return Ok(()),
         ContainerStatus::Paused => {
             docker
@@ -179,7 +179,92 @@ pub async fn ensure_running_container(docker: &Docker, spec: &GlobalContainerSpe
         }
     }
 
+    // A competing creator may have used the same name with different settings.
+    observe_container(docker, spec).await?;
+
     start_existing(docker, &spec.container_name).await
+}
+
+/// Inspect and validate without pulling, creating, starting, or unpausing.
+pub async fn observe_container(
+    docker: &Docker,
+    spec: &GlobalContainerSpec,
+) -> Result<ContainerStatus> {
+    let status = inspect_container_status(docker, &spec.container_name).await?;
+    if status != ContainerStatus::NotFound {
+        let actual = docker.inspect_container(&spec.container_name, None).await?;
+        validate_spec(&actual, spec)?;
+    }
+    Ok(status)
+}
+
+fn validate_spec(
+    actual: &bollard::models::ContainerInspectResponse,
+    spec: &GlobalContainerSpec,
+) -> Result<()> {
+    let config = actual
+        .config
+        .as_ref()
+        .context("shared container has no configuration")?;
+    let mismatch = |field: &str| {
+        anyhow!(
+        "shared container '{}' has incompatible {field}; use matching shared settings or a different container_name",
+        spec.container_name
+    )
+    };
+    let labels = config
+        .labels
+        .as_ref()
+        .context("shared container has no ownership labels")?;
+    if labels.get("devflow.managed").map(String::as_str) != Some("true")
+        || labels.get("devflow.scope").map(String::as_str) != Some("global")
+    {
+        return Err(mismatch("ownership labels"));
+    }
+    if config.image.as_deref() != Some(spec.image.as_str()) {
+        return Err(mismatch("image"));
+    }
+    let env = config.env.as_deref().unwrap_or_default();
+    for expected in &spec.env {
+        if !env.contains(expected) {
+            // Never print secret values from environment or Redis command arguments.
+            return Err(mismatch("environment/credentials"));
+        }
+    }
+    if !spec.cmd.is_empty() && config.cmd.as_deref() != Some(spec.cmd.as_slice()) {
+        return Err(mismatch("command/credentials"));
+    }
+    let host = actual
+        .host_config
+        .as_ref()
+        .context("shared container has no host configuration")?;
+    for expected in &spec.binds {
+        if !host.binds.as_deref().unwrap_or_default().contains(expected) {
+            return Err(mismatch("data mounts"));
+        }
+    }
+    let ports = host
+        .port_bindings
+        .as_ref()
+        .context("shared container has no published ports")?;
+    let mut expected_ports = vec![(spec.host_port, spec.container_port)];
+    expected_ports.extend(spec.extra_port);
+    for (host_port, container_port) in expected_ports {
+        let key = format!("{container_port}/tcp");
+        let expected = host_port.to_string();
+        let valid = ports
+            .get(&key)
+            .and_then(Option::as_ref)
+            .is_some_and(|bindings| {
+                bindings.len() == 1
+                    && bindings[0].host_port.as_deref() == Some(expected.as_str())
+                    && bindings[0].host_ip.as_deref() == Some("127.0.0.1")
+            });
+        if !valid {
+            return Err(mismatch("published ports"));
+        }
+    }
+    Ok(())
 }
 
 async fn start_existing(docker: &Docker, container_name: &str) -> Result<()> {
@@ -289,5 +374,38 @@ pub async fn wait_ready_pg(
             }
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+}
+
+/// One observational diagnostic used consistently by all shared providers.
+pub async fn doctor(spec: &GlobalContainerSpec) -> crate::services::DoctorReport {
+    let result = async {
+        let docker = connect()?;
+        observe_container(&docker, spec).await
+    }
+    .await;
+    let (available, detail) = match result {
+        Ok(ContainerStatus::Running) => (
+            true,
+            format!(
+                "{} running on port {}; settings match",
+                spec.container_name, spec.host_port
+            ),
+        ),
+        Ok(status) => (
+            false,
+            format!(
+                "{}: {:?}; use service up to start it",
+                spec.container_name, status
+            ),
+        ),
+        Err(error) => (false, format!("{error:#}")),
+    };
+    crate::services::DoctorReport {
+        checks: vec![crate::services::DoctorCheck {
+            name: "shared-container".into(),
+            available,
+            detail,
+        }],
     }
 }

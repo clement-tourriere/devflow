@@ -3,7 +3,6 @@ import { toast } from "../../utils/notify";
 import { reportWorkspaceResult } from "../../utils/results";
 import { useParams, Link, useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
-import { open as openExternal } from "@tauri-apps/plugin-shell";
 import {
   getProjectDetail,
   listWorkspaces,
@@ -33,7 +32,6 @@ import {
   listContainers,
   getProxyStatus,
   runDoctor,
-  getPitchforkBridgeInfo,
 } from "../../utils/invoke";
 import type {
   ProjectDetail as ProjectDetailType,
@@ -47,7 +45,6 @@ import type {
   ProxyStatus,
   ProcessStatus,
   ProcessResult,
-  PitchforkBridgeInfo,
 } from "../../types";
 import Modal from "../../components/Modal";
 import ConfirmDialog from "../../components/ConfirmDialog";
@@ -165,7 +162,6 @@ function ProjectDetail() {
   const [processStatuses, setProcessStatuses] = useState<ProcessStatus[]>([]);
   const [processWorkspace, setProcessWorkspace] = useState<string>("");
   const [selectedProcesses, setSelectedProcesses] = useState<Set<string>>(new Set());
-  const [pitchforkBridge, setPitchforkBridge] = useState<PitchforkBridgeInfo | null>(null);
   const [currentWorkspace, setCurrentWorkspace] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [setupIssueCount, setSetupIssueCount] = useState(0);
@@ -318,9 +314,6 @@ function ProjectDetail() {
       getProxyStatus()
         .then(setProxyStatus)
         .catch(() => setProxyStatus(null)),
-      getPitchforkBridgeInfo(projectPath)
-        .then(setPitchforkBridge)
-        .catch(() => setPitchforkBridge(null)),
       listContainers()
         .then(setContainers)
         .catch(() => setContainers([])),
@@ -691,27 +684,6 @@ function ProjectDetail() {
     }
   };
 
-  const handleOpenPitchforkWebUi = async () => {
-    const url = pitchforkBridge?.web_ui_url || "http://127.0.0.1:3120";
-    try {
-      await openExternal(url);
-      if (!pitchforkBridge?.web_ui_reachable) {
-        toast.warning("Opened the configured Pitchfork Web UI URL, but it does not appear reachable yet.", {
-          title: "Pitchfork Web UI",
-        });
-      }
-    } catch (e) {
-      toast.error(`${e}`, { title: "Failed to open Pitchfork Web UI" });
-    }
-  };
-
-  const handleLaunchPitchforkTui = () => {
-    if (!pitchforkBridge?.cli_available) {
-      toast.warning("Install the external pitchfork CLI to launch its TUI.", { title: "Pitchfork TUI" });
-      return;
-    }
-    openTerminal({ projectPath, workspaceName: processWorkspace || undefined, initialCommand: "pitchfork tui" });
-  };
 
   const handleViewProcessLogs = async (name: string, workspaceName: string) => {
     const target: LogTarget = { kind: "process", name, workspace: workspaceName };
@@ -968,8 +940,7 @@ function ProjectDetail() {
   const allProcessesSelected =
     allProcessNamesForWorkspace.length > 0 &&
     allProcessNamesForWorkspace.every((name) => selectedProcesses.has(name));
-  const hasPitchforkProcesses =
-    pitchforkBridge?.enabled || processStatuses.some((p) => p.runtime === "pitchfork");
+
 
   return (
     <div>
@@ -1213,9 +1184,10 @@ function ProjectDetail() {
                         <span style={{ width: 18, color: "var(--text-muted)" }}>└</span>
                       )}
                       <span style={{ fontWeight: b.is_default ? 600 : 400 }}>
-                        {b.name}
+                        {b.name}{b.control?.pinned && " · pinned"}
                       </span>
                     </div>
+                    {b.control && Object.entries(b.control.data).map(([service, origin]) => <div key={service} style={{ fontSize: 11, color: "var(--text-muted)" }}>{service}: {origin.kind === "baseline" ? origin.reference : origin.kind === "workspace" ? `from ${origin.workspace}` : "starts empty"}</div>)}
                     {b.service_key !== b.name && (
                       <span
                         className="mono"
@@ -1534,32 +1506,7 @@ function ProjectDetail() {
                 </button>
               </>
             )}
-            {hasPitchforkProcesses && (
-              <>
-                <button
-                  className="btn"
-                  onClick={handleOpenPitchforkWebUi}
-                  disabled={!pitchforkBridge?.web_ui_enabled}
-                  title={
-                    pitchforkBridge?.web_ui_enabled
-                      ? `${pitchforkBridge.web_ui_reachable ? "Open" : "Open configured URL (not reachable yet)"}: ${pitchforkBridge.web_ui_url}`
-                      : "Enable processes.pitchfork.web_ui in the config editor first"
-                  }
-                  style={{ padding: "4px 10px", fontSize: 13 }}
-                >
-                  Pitchfork Web UI
-                </button>
-                <button
-                  className="btn"
-                  onClick={handleLaunchPitchforkTui}
-                  disabled={!pitchforkBridge?.cli_available}
-                  title={pitchforkBridge?.cli_available ? "Open pitchfork tui in devflow's terminal" : "External pitchfork CLI not found on PATH"}
-                  style={{ padding: "4px 10px", fontSize: 13 }}
-                >
-                  Pitchfork TUI
-                </button>
-              </>
-            )}
+
           </div>
         </div>
         {!processWorkspace ? (
@@ -1737,17 +1684,7 @@ function ProjectDetail() {
                             </svg>
                           </button>
                         )}
-                        {p.configured && p.runtime === "pitchfork" && (
-                          <button
-                            className="btn"
-                            style={{ width: 28, height: 24, padding: 0, justifyContent: "center", fontSize: 10 }}
-                            onClick={() => handleStartProcess(p.process, true)}
-                            disabled={actionLoading === `process-start:${p.process}`}
-                            title="Force restart through Pitchfork"
-                          >
-                            !
-                          </button>
-                        )}
+
                         <button
                           className="btn"
                           style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
@@ -1922,7 +1859,7 @@ function ProjectDetail() {
                           {runningCount} running
                         </span>
                       )}
-                      {s.provider_type === "local" && (
+                      {(s.operations?.start || s.operations?.stop || s.operations?.logs) && (
                         <button
                           className="btn btn-danger"
                           style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
@@ -2033,10 +1970,10 @@ function ProjectDetail() {
                                           <circle cx="11.5" cy="4.5" r="2" />
                                         </svg>
                                       </button>
-                                      {s.provider_type === "local" && (
+                                      {(s.operations?.start || s.operations?.stop || s.operations?.logs) && (
                                         <>
                                           {/* Start */}
-                                          {isStopped && (
+                                          {isStopped && s.operations?.start && (
                                             <button
                                               className="btn"
                                               style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
@@ -2053,7 +1990,7 @@ function ProjectDetail() {
                                             </button>
                                           )}
                                           {/* Stop */}
-                                          {isRunning && (
+                                          {isRunning && s.operations?.stop && (
                                             <button
                                               className="btn"
                                               style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
@@ -2070,7 +2007,7 @@ function ProjectDetail() {
                                             </button>
                                           )}
                                           {/* Reset */}
-                                          <button
+                                          {s.operations?.reset && <button
                                             className="btn"
                                             style={{ width: 28, height: 24, padding: 0, justifyContent: "center" }}
                                             onClick={(e) => {
@@ -2085,7 +2022,7 @@ function ProjectDetail() {
                                               <path d="M10 2l2.2 1.8L14 2" />
                                               <path d="M6 14l-2.2-1.8L2 14" />
                                             </svg>
-                                          </button>
+                                          </button>}
                                           {/* Logs */}
                                           <button
                                             className="btn"

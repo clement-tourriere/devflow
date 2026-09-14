@@ -1,3 +1,4 @@
+pub mod document;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -18,6 +19,10 @@ pub struct Config {
     /// Project name (derived from `devflow init <name>` or the directory name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Stable resource identity. Set this when a project must retain its
+    /// resources across moves; otherwise the canonical primary checkout is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     /// Preferred VCS for this project ("git" or "jj").
     /// Overrides the global `default_vcs` when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -40,7 +45,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub processes: Option<crate::processes::ProcessesConfig>,
     /// AI agent integration configuration.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub agent: Option<AgentConfig>,
     /// Commit message generation configuration (LLM).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -103,7 +108,8 @@ pub struct NamedServiceConfig {
 }
 
 /// Where a resolved service definition came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ServiceSource {
     /// Committed project config (`.devflow.yml` / `devflow.toml`).
     Config,
@@ -121,7 +127,7 @@ impl ServiceSource {
 }
 
 /// A service definition tagged with its origin.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ServiceWithSource {
     pub service: NamedServiceConfig,
     pub source: ServiceSource,
@@ -149,6 +155,9 @@ fn default_provider_type() -> String {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LocalServiceConfig {
+    /// Explicitly adopt a legacy local PostgreSQL project UUID after verifying its data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_project_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -172,6 +181,10 @@ pub struct LocalServiceConfig {
 /// a DB index for redis) provisioned on the fly.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SharedServiceConfig {
+    /// Explicit adoption of pre-ownership resources, keyed by service_key.
+    /// A resource already claimed by another owner cannot be adopted.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub legacy_resources: HashMap<String, String>,
     /// Container image. Defaults per engine (e.g. `postgres:17`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
@@ -352,11 +365,7 @@ pub struct GenericDockerConfig {
 
 /// Configuration for AI agent integration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct AgentConfig {
-    /// Automatically provide project context to the agent on launch.
-    #[serde(default = "default_true")]
-    pub auto_context: bool,
-}
+pub struct AgentConfig {}
 
 /// Configuration for command execution in workspaces.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -381,24 +390,18 @@ pub struct CommitConfig {
 /// LLM configuration for generating commit messages.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CommitGenerationConfig {
-    /// External CLI command to pipe prompts to (e.g., "claude -p --model=haiku").
-    /// Takes precedence over the built-in API approach.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
-    /// OpenAI-compatible API key (fallback when no command is set).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-    /// OpenAI-compatible API URL (fallback when no command is set).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_url: Option<String>,
-    /// Model name (fallback when no command is set).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    /// Retired API settings are accepted only for migration diagnostics.
+    #[serde(default, flatten, skip_serializing)]
+    pub legacy: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorktreeConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caches: Vec<crate::cache::CacheSpec>,
     /// Removed setting: worktrees are always enabled now. Accepted (and
     /// ignored) so configs written by older releases keep parsing; a
     /// deprecation warning is logged in `Config::from_file`.
@@ -420,13 +423,12 @@ pub struct WorktreeConfig {
     /// explicitly in `copy_files` instead, so the recommended default is false.
     #[serde(default)]
     pub copy_ignored: bool,
-    /// Exclude gitignored files from worktrees (both CoW and non-CoW paths).
-    /// Default: `true` — saves disk space by removing dirs like `node_modules/`, `target/`.
-    #[serde(default = "default_respect_gitignore")]
-    pub respect_gitignore: bool,
+    /// Legacy input only. Use copy_ignored; this field is never written.
+    #[serde(default, skip_serializing)]
+    pub respect_gitignore: Option<bool>,
     /// Whether to copy AI tool config directories (`.claude`, `.cursor`, etc.)
-    /// into new worktrees. Default: `true`.
-    #[serde(default = "default_true")]
+    /// into new worktrees. Default: `false`; explicitly opt in to broad tool settings copying.
+    #[serde(default)]
     pub copy_ai_configs: bool,
     /// Additional AI tool directories to copy (beyond the built-in list).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -445,11 +447,12 @@ impl Default for WorktreeConfig {
     fn default() -> Self {
         Self {
             enabled: None,
+            caches: Vec::new(),
             path_template: default_worktree_path_template(),
             copy_files: default_copy_files(),
             copy_ignored: false,
-            respect_gitignore: true,
-            copy_ai_configs: true,
+            respect_gitignore: None,
+            copy_ai_configs: false,
             extra_ai_dirs: Vec::new(),
         }
     }
@@ -506,10 +509,6 @@ fn default_worktree_path_template() -> String {
 
 fn default_copy_files() -> Vec<String> {
     vec![".env".to_string(), ".env.local".to_string()]
-}
-
-fn default_respect_gitignore() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -666,6 +665,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             name: None,
+            project_id: None,
             default_vcs: None,
             git: GitConfig::default(),
             behavior: BehaviorConfig {

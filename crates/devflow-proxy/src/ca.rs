@@ -7,31 +7,25 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use time::{Duration, OffsetDateTime};
 
-/// Default CA certificate path: ~/.devflow/proxy/ca.crt
+/// Runtime files remain at the legacy location unless explicitly isolated.
+fn runtime_dir() -> PathBuf {
+    std::env::var_os("DEVFLOW_PROXY_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".devflow/proxy")
+        })
+}
+
 pub fn default_ca_cert_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".devflow")
-        .join("proxy")
-        .join("ca.crt")
+    runtime_dir().join("ca.crt")
 }
-
-/// Default proxy pidfile path: ~/.devflow/proxy/proxy.pid
 pub fn default_pid_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".devflow")
-        .join("proxy")
-        .join("proxy.pid")
+    runtime_dir().join("proxy.pid")
 }
-
-/// Default CA key path: ~/.devflow/proxy/ca.key
 pub fn default_ca_key_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".devflow")
-        .join("proxy")
-        .join("ca.key")
+    runtime_dir().join("ca.key")
 }
 
 /// Certificate Authority for signing server certificates.

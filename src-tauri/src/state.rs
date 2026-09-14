@@ -11,11 +11,13 @@ pub struct ProjectEntry {
 /// Application settings.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AppSettings {
+    #[serde(default, skip_serializing)]
     pub projects: Vec<ProjectEntry>,
     #[serde(default)]
     pub proxy_auto_start: bool,
     #[serde(default)]
-    pub proxy_config: Option<devflow_proxy::ProxyConfig>,
+    #[serde(skip_serializing)]
+    pub proxy_config: Option<serde_json::Value>,
     #[serde(default = "default_terminal_renderer")]
     pub terminal_renderer: String,
     #[serde(default = "default_terminal_font_size")]
@@ -75,22 +77,51 @@ fn settings_path() -> std::path::PathBuf {
 /// Application state managed by Tauri.
 pub struct AppState {
     pub settings: Arc<RwLock<AppSettings>>,
-    pub proxy: RwLock<Option<Arc<devflow_proxy::ProxyHandle>>>,
-    pub proxy_config: Arc<RwLock<devflow_proxy::ProxyConfig>>,
     pub tray: std::sync::Mutex<Option<tauri::tray::TrayIcon>>,
     pub terminals: devflow_terminal::TerminalManager,
 }
 
 impl AppState {
     pub fn new() -> Self {
-        let settings = AppSettings::load();
-        let proxy_config = settings.proxy_config.clone().unwrap_or_default();
+        let mut settings = AppSettings::load();
+        if let Ok(mut registry) = devflow_core::state::LocalStateManager::new() {
+            let migrated = settings.projects.iter().all(|p| {
+                registry
+                    .register_project(std::path::Path::new(&p.path), Some(&p.name))
+                    .is_ok()
+            });
+            if migrated && !settings.projects.is_empty() {
+                settings.projects.clear();
+                let _ = settings.save();
+            }
+        }
+        if settings.proxy_config.is_some() {
+            log::warn!("Proxy configuration now comes from the global devflow config; the desktop no longer owns a separate runtime");
+        }
         Self {
             settings: Arc::new(RwLock::new(settings)),
-            proxy: RwLock::new(None),
-            proxy_config: Arc::new(RwLock::new(proxy_config)),
             tray: std::sync::Mutex::new(None),
             terminals: devflow_terminal::TerminalManager::new(),
         }
     }
+}
+
+pub fn registered_projects() -> anyhow::Result<Vec<ProjectEntry>> {
+    let mut projects = devflow_core::state::LocalStateManager::new()?
+        .list_all_projects()
+        .into_iter()
+        .filter(|(_, p)| p.control.visible)
+        .map(|(path, p)| ProjectEntry {
+            name: p.control.name.unwrap_or_else(|| {
+                std::path::Path::new(&path)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            }),
+            path,
+        })
+        .collect::<Vec<_>>();
+    projects.sort_by(|a, b| a.name.cmp(&b.name).then(a.path.cmp(&b.path)));
+    Ok(projects)
 }

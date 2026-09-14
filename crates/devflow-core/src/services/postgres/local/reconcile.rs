@@ -20,30 +20,21 @@ pub async fn compute_state_changes(
             doctor.detail
         );
 
-        return workspaces
-            .into_iter()
-            .filter(|b| b.state == WorkspaceState::Provisioning)
-            .map(|b| (b.id, WorkspaceState::Stopped))
-            .collect();
+        return Vec::new();
     }
 
     let mut changes = vec![];
     for workspace in workspaces {
+        // Running Docker does not prove a seed or clone completed.
+        if matches!(
+            workspace.state,
+            WorkspaceState::Provisioning | WorkspaceState::Failed
+        ) {
+            continue;
+        }
         let next_state = match runtime.container_status(&workspace.container_name).await {
             Ok(ContainerStatus::Running) => WorkspaceState::Running,
-            Ok(ContainerStatus::Paused) => {
-                match runtime.unpause_workspace(&workspace.container_name).await {
-                    Ok(()) => WorkspaceState::Running,
-                    Err(err) => {
-                        log::warn!(
-                            "Failed to unpause container '{}' during reconciliation: {}",
-                            workspace.container_name,
-                            err
-                        );
-                        WorkspaceState::Failed
-                    }
-                }
-            }
+            Ok(ContainerStatus::Paused) => WorkspaceState::Stopped,
             Ok(ContainerStatus::Exited)
             | Ok(ContainerStatus::NotFound)
             | Ok(ContainerStatus::Other(_)) => {

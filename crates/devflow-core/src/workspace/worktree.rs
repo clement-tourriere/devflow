@@ -93,6 +93,12 @@ pub fn create_worktree_with_files(
     // Check for existing worktree first
     if let Some(existing_path) = vcs.worktree_path(workspace_name)? {
         let resolved = std::fs::canonicalize(&existing_path).unwrap_or(existing_path);
+        crate::cache::materialize(
+            config,
+            &vcs.main_worktree_dir()
+                .unwrap_or_else(|| project_dir.to_path_buf()),
+            &resolved,
+        )?;
         return Ok(WorktreeSetupResult {
             path: resolved,
             created: false,
@@ -131,8 +137,7 @@ pub fn create_worktree_with_files(
         copy_ignored_override,
     );
 
-    trust_mise_configs(&wt_path);
-
+    crate::cache::materialize(config, &main_dir, &wt_path)?;
     let resolved = std::fs::canonicalize(&wt_path).unwrap_or(wt_path);
     Ok(WorktreeSetupResult {
         path: resolved,
@@ -353,35 +358,6 @@ pub fn reflink_copy_dir(src: &Path, dst: &Path) {
             dst.display(),
             e
         );
-    }
-}
-
-fn trust_mise_configs(worktree_path: &Path) {
-    for file_name in ["mise.toml", ".mise.toml"] {
-        let path = worktree_path.join(file_name);
-        if !path.is_file() {
-            continue;
-        }
-        let output = std::process::Command::new("mise")
-            .args(["trust", "-y"])
-            .arg(&path)
-            .output();
-        match output {
-            Ok(output) if output.status.success() => {}
-            Ok(output) => {
-                log::warn!(
-                    "Failed to trust mise config '{}': {}",
-                    path.display(),
-                    String::from_utf8_lossy(&output.stderr).trim()
-                );
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                log::debug!("mise not found; skipping trust for '{}'", path.display());
-            }
-            Err(e) => {
-                log::warn!("Failed to run mise trust for '{}': {}", path.display(), e);
-            }
-        }
     }
 }
 

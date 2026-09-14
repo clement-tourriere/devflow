@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
 import Modal from "./Modal";
-import { discoverDockerContainers } from "../utils/invoke";
-import type { DiscoveredContainer, AddServiceRequest } from "../types";
+import { providerDescriptors, discoverDockerContainers } from "../utils/invoke";
+import type { DiscoveredContainer, AddServiceRequest, ProviderDescriptor } from "../types";
 
 interface AddServiceModalProps {
   open: boolean;
@@ -51,6 +51,8 @@ function AddServiceModal({
   submitLabel = "Add Service",
   submittingLabel = "Adding...",
 }: AddServiceModalProps) {
+  const [descriptors, setDescriptors] = useState<ProviderDescriptor[]>([]);
+  useEffect(() => { providerDescriptors().then(setDescriptors).catch(e => setError(String(e))); }, []);
   const [svcType, setSvcType] = useState("postgres");
   const [provider, setProvider] = useState("local");
   const [name, setName] = useState("app-db");
@@ -333,8 +335,8 @@ function AddServiceModal({
         </div>
       )}
 
-      {/* Provider (only for postgres) */}
-      {svcType === "postgres" && (
+      {/* Provider and isolation policy */}
+      {(svcType === "postgres" || svcType === "redis") && (
         <div style={{ marginBottom: 16 }}>
           <label style={{ display: "block", marginBottom: 4, fontSize: 13, color: "var(--text-secondary)", fontWeight: 500 }}>
             Provider
@@ -344,11 +346,7 @@ function AddServiceModal({
             onChange={(e) => setProvider(e.target.value)}
             style={{ width: "100%" }}
           >
-            <option value="local">Local Docker</option>
-            <option value="shared">Shared Docker</option>
-            <option value="neon">Neon</option>
-            <option value="dblab">DBLab</option>
-            <option value="xata">Xata</option>
+            {descriptors.filter(d => d.available && d.service_types.includes(svcType) && d.required_configuration.length === 0).map(d => <option key={d.provider} value={d.provider}>{d.provider === "shared" ? `Shared engine${d.allocation_limit ? ` (${d.allocation_limit} workspaces maximum)` : ""}` : d.provider === "local" ? "Container per workspace" : d.provider}</option>)}
           </select>
         </div>
       )}

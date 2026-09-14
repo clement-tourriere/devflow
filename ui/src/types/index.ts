@@ -1,3 +1,4 @@
+import type { ProviderDescriptor } from "./providers.generated";
 export type { DevflowConfig } from "./config";
 
 export interface ProjectEntry {
@@ -32,9 +33,12 @@ export interface WorkspaceServiceStatus {
   parent_workspace: string | null;
   provisioned: boolean;
   supports_lifecycle: boolean;
+  operations: ProviderDescriptor["operations"];
 }
 
+export type DataOrigin = { kind: "empty" } | { kind: "workspace"; workspace: string; service_key: string } | { kind: "baseline"; reference: string; service_key: string; generation: string; engine_fingerprint: string };
 export interface WorkspaceEntry {
+  control?: { id: string; desired: string; pinned: boolean; expires_at: string | null; data: Record<string, DataOrigin> };
   name: string;
   service_key: string;
   canonical_service_key: string;
@@ -74,6 +78,7 @@ export interface WorkspacesResponse {
 }
 
 export interface ServiceEntry {
+  operations: ProviderDescriptor["operations"];
   name: string;
   service_type: string;
   provider_type: string;
@@ -178,19 +183,9 @@ export interface ProcessOperationResponse {
   results: ProcessResult[];
 }
 
-export interface PitchforkBridgeInfo {
-  provider: string;
-  enabled: boolean;
-  web_ui_enabled: boolean;
-  web_ui_url: string;
-  web_ui_reachable: boolean;
-  cli_available: boolean;
-  config_policy: string;
-  external_daemons: string;
-  edit_mode: string;
-}
 
 export interface CreateWorkspaceResult {
+  operation?: WorkspaceOperation;
   workspace: string;
   service_key: string;
   parent: string | null;
@@ -202,6 +197,7 @@ export interface CreateWorkspaceResult {
 }
 
 export interface SwitchWorkspaceResult {
+  operation?: WorkspaceOperation;
   workspace: string;
   service_key: string;
   parent: string | null;
@@ -213,6 +209,7 @@ export interface SwitchWorkspaceResult {
 }
 
 export interface DeleteWorkspaceResult {
+  operation?: WorkspaceOperation;
   workspace: string;
   service_key: string;
   worktree_removed: boolean;
@@ -276,6 +273,7 @@ export interface ActionFieldInfo {
 }
 
 export interface HookRunResult {
+  skipped_reasons?: string[];
   // Present on lifecycle results (HookRunResultDto); absent on `run_hook`'s
   // hand-built payload, which reuses this shape without a phase.
   phase?: string;
@@ -284,6 +282,8 @@ export interface HookRunResult {
   skipped: number;
   background: number;
   errors: string[];
+  required_failed?: number;
+  required_skipped?: number;
 }
 
 export interface TriggerMapping {
@@ -332,6 +332,7 @@ export interface InstallRecipeResult {
 }
 
 export interface ProxyStatus {
+  available: boolean;
   running: boolean;
   https_port: number;
   http_port: number;
@@ -480,3 +481,13 @@ export interface TerminalOutputEvent {
 export interface TerminalExitEvent {
   session_id: string;
 }
+
+export interface WorkspaceOperation {
+  id: string;
+  status: string;
+  phase: string;
+  code_parent: string | null;
+  data_parent: string | null;
+}
+
+export type { ProviderDescriptor } from "./providers.generated";

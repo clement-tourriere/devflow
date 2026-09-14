@@ -1,8 +1,7 @@
 use anyhow::Result;
 use devflow_core::config::Config;
 use devflow_core::processes::{
-    PitchforkProcessConfig, ProcessDaemonConfig, ProcessPortBump, ProcessPortConfig,
-    ProcessesConfig,
+    ProcessDaemonConfig, ProcessPortBump, ProcessPortConfig, ProcessesConfig,
 };
 use devflow_core::services::{self};
 use indexmap::IndexMap;
@@ -201,81 +200,23 @@ pub(super) async fn init_local_service_main(
     named_cfg: &devflow_core::config::NamedServiceConfig,
     from: Option<&str>,
     quiet_output: bool,
-) {
-    match services::factory::create_provider_from_named_config(config, named_cfg).await {
-        Ok(be) => {
-            let default_workspace = config.git.main_workspace.as_str();
-            let fallback_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
-            let project_dir = config.project_root.as_deref().unwrap_or(&fallback_dir);
-            let service_key =
-                match devflow_core::state::LocalStateManager::new().and_then(|state| {
-                    state.resolve_workspace_service_key_by_dir(project_dir, default_workspace)
-                }) {
-                    Ok(service_key) => service_key,
-                    Err(error) => {
-                        eprintln!(
-                            "Warning: refusing to initialize service workspace '{}': {}",
-                            default_workspace, error
-                        );
-                        return;
-                    }
-                };
-            match be.create_workspace(&service_key, None).await {
-                Ok(info) => {
-                    if !quiet_output {
-                        println!("Created '{}' workspace", default_workspace);
-                    }
-                    if let Ok(conn) = be.get_connection_info(&service_key).await {
-                        if let Some(ref uri) = conn.connection_string {
-                            if !quiet_output {
-                                println!("  Connection: {}", uri);
-                            }
-                        }
-                    }
-                    if let Some(state) = &info.state {
-                        if !quiet_output {
-                            println!("  State: {}", state);
-                        }
-                    }
-
-                    // Seed if --from specified
-                    if let Some(source) = from {
-                        if !quiet_output {
-                            println!("Seeding '{}' workspace from: {}", default_workspace, source);
-                        }
-                        match be.seed_from_source(&service_key, source).await {
-                            Ok(_) => {
-                                if !quiet_output {
-                                    println!("Seeding completed successfully");
-                                }
-                            }
-                            Err(e) => eprintln!("Warning: seeding failed: {}", e),
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!(
-                        "Warning: could not create default workspace '{}' for '{}': {}",
-                        default_workspace, named_cfg.name, e
-                    );
-                    eprintln!(
-                        "  You can create it later with: devflow service create {}",
-                        default_workspace
-                    );
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!(
-                "Warning: could not initialize service '{}': {}",
-                named_cfg.name, e
-            );
-            eprintln!(
-                "  You can create the default workspace later with: devflow service create {}",
-                config.git.main_workspace
-            );
-        }
+) -> Result<()> {
+    let provider = services::factory::create_provider_from_named_config(config, named_cfg).await?;
+    let fallback_dir = std::env::current_dir()?;
+    let project_dir = config.project_root.as_deref().unwrap_or(&fallback_dir);
+    let workspace = &config.git.main_workspace;
+    let key = devflow_core::state::LocalStateManager::new()?
+        .resolve_workspace_service_key_by_dir(project_dir, workspace)?;
+    if !provider.workspace_exists(&key).await? {
+        provider.create_workspace(&key, None).await?;
     }
+    if let Some(source) = from {
+        provider.seed_from_source(&key, source).await?;
+    }
+    if !quiet_output {
+        println!("Initialized '{}' service workspace", workspace);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -376,15 +317,13 @@ pub(super) fn install_compose_processes(
     }
 
     let processes = config.processes.get_or_insert_with(|| ProcessesConfig {
-        provider: "pitchfork".to_string(),
+        start_policy: Default::default(),
+        provider: "native".to_string(),
         auto_start: true,
         auto_stop: true,
-        pitchfork: Some(PitchforkProcessConfig::default()),
+        pitchfork: None,
         daemons: IndexMap::new(),
     });
-    if processes.provider == "native" {
-        processes.provider = "pitchfork".to_string();
-    }
 
     let mut added = 0usize;
     for suggestion in suggestions {
@@ -678,11 +617,12 @@ pub(super) async fn handle_destroy_project(
         if json_output { None } else { Some(&print_line) };
     let outcome = devflow_core::project::destroy(&project_dir, options, progress).await?;
 
+    let succeeded = outcome.succeeded();
     if json_output {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "status": "ok",
+                "status": if succeeded { "ok" } else { "partial" },
                 "project": outcome.project_name,
                 "processes_stopped": outcome.processes_stopped,
                 "services": outcome.services_destroyed,
@@ -695,8 +635,16 @@ pub(super) async fn handle_destroy_project(
         );
     } else {
         println!();
-        println!("Project '{}' destroyed.", outcome.project_name);
+        if succeeded {
+            println!("Project '{}' destroyed.", outcome.project_name);
+        } else {
+            eprintln!("Project cleanup is incomplete; configuration and ownership state were retained for retry.");
+        }
     }
 
+    anyhow::ensure!(
+        succeeded,
+        "project cleanup failed; inspect the service results and retry destroy"
+    );
     Ok(())
 }

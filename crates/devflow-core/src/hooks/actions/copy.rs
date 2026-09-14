@@ -1,7 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
 
-use super::{confine_path, ActionResult};
+use super::ActionResult;
+use crate::files::WorkspaceFiles;
 use crate::hooks::template::TemplateEngine;
 use crate::hooks::HookContext;
 
@@ -17,26 +18,12 @@ pub fn execute(
     let from = template_engine.render(from_template, context)?;
     let to = template_engine.render(to_template, context)?;
 
-    let src = confine_path(working_dir, &from)?;
-    let dst = confine_path(working_dir, &to)?;
-
-    if !src.exists() {
-        anyhow::bail!("Source file not found: {}", src.display());
-    }
-
-    if dst.exists() && !overwrite {
+    let changed = WorkspaceFiles::open(working_dir)?.copy(&from, &to, overwrite)?;
+    if !changed {
         return Ok(ActionResult {
             summary: format!("copy: {} -> {} (skipped, destination exists)", from, to),
         });
     }
-
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-    }
-
-    std::fs::copy(&src, &dst)
-        .with_context(|| format!("Failed to copy {} -> {}", src.display(), dst.display()))?;
 
     Ok(ActionResult {
         summary: format!("copy: {} -> {}", from, to),

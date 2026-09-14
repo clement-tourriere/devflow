@@ -70,6 +70,20 @@ pub struct DestroyOutcome {
     pub local_config_deleted: bool,
 }
 
+impl DestroyOutcome {
+    pub fn succeeded(&self) -> bool {
+        self.state_cleared
+            && self
+                .services_destroyed
+                .iter()
+                .all(|service| service.success)
+            && self
+                .process_results
+                .iter()
+                .all(|process| process.success || !process.required)
+    }
+}
+
 /// Describe what [`destroy`] would tear down for the project at `project_dir`.
 pub fn destroy_plan(project_dir: &Path) -> Result<DestroyPlan> {
     let config = Config::load_effective_for_dir(project_dir)?;
@@ -116,6 +130,8 @@ pub async fn destroy(
     options: DestroyOptions,
     progress: DestroyProgress<'_>,
 ) -> Result<DestroyOutcome> {
+    let _policy_lease =
+        crate::workspace::operation::project_policy_lease(project_dir, true).await?;
     let config = Config::load_effective_for_dir(project_dir)?;
     let project_name = config.project_name();
     let vcs_repo = vcs::detect_vcs_provider(project_dir).ok();
@@ -169,6 +185,25 @@ pub async fn destroy(
             ),
         }
         services_destroyed.push(outcome);
+    }
+
+    if services_destroyed.iter().any(|service| !service.success)
+        || process_results
+            .iter()
+            .any(|process| !process.success && process.required)
+    {
+        // Keep configuration and ownership references so failed deletions can be retried.
+        return Ok(DestroyOutcome {
+            project_name,
+            processes_stopped,
+            process_results,
+            services_destroyed,
+            worktrees_removed: 0,
+            hooks_uninstalled: false,
+            state_cleared: false,
+            config_deleted: false,
+            local_config_deleted: false,
+        });
     }
 
     // 3. Remove worktrees — never silently rm-rf one the VCS refuses to drop
@@ -326,22 +361,30 @@ async fn destroy_one_service(
         match provider.list_workspaces().await {
             Ok(workspaces) => {
                 let mut deleted = Vec::new();
-                for workspace in &workspaces {
+                let mut failures = Vec::new();
+                let mut pending = workspaces;
+                while !pending.is_empty() {
+                    let Some(index) = pending.iter().position(|w| {
+                        !pending
+                            .iter()
+                            .any(|child| child.parent_workspace.as_deref() == Some(w.name.as_str()))
+                    }) else {
+                        failures.push(
+                            "cyclic provider data dependencies prevent ordered cleanup".into(),
+                        );
+                        break;
+                    };
+                    let workspace = pending.remove(index);
                     match provider.delete_workspace(&workspace.name).await {
                         Ok(_) => deleted.push(workspace.name.clone()),
-                        Err(e) => log::warn!(
-                            "Failed to delete workspace '{}' on '{}': {}",
-                            workspace.name,
-                            svc_config.name,
-                            e
-                        ),
+                        Err(error) => failures.push(format!("{}: {error:#}", workspace.name)),
                     }
                 }
                 ServiceDestroyOutcome {
                     name: svc_config.name.clone(),
-                    success: true,
+                    success: failures.is_empty(),
                     workspaces_destroyed: deleted,
-                    error: None,
+                    error: (!failures.is_empty()).then(|| failures.join("; ")),
                 }
             }
             Err(e) => ServiceDestroyOutcome {

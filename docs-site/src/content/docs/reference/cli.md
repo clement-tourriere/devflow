@@ -78,7 +78,7 @@ Alias for `service cleanup` (`--max-count <n>`).
 ## Services
 
 `service add` scaffolds complete local/shared definitions: PostgreSQL and
-ClickHouse (local/shared), MySQL (local), Redis and RustFS (shared). Define
+ClickHouse and Redis (local/shared), MySQL (local), and RustFS (shared). Define
 credentialed cloud, generic, or plugin providers explicitly under `services:`
 in `.devflow.yml` so their required fields are present.
 
@@ -108,7 +108,7 @@ devflow process list|status [--workspace <ws>]
 devflow process logs <name> [--workspace <ws>] [--tail N] [--follow]
 ```
 
-Processes are workspace-scoped app commands configured under `processes.daemons` (web servers, workers, schedulers). They run in the worktree, capture stdout/stderr to devflow logs, support dependency ordering, port bumping, and readiness checks, and can interpolate service URLs via MiniJinja (`{{ service['app-db'].url }}`). `processes.auto_start: true` makes `devflow switch` start them after services and hooks; auto-started shell commands use the same approval store as hooks (`devflow hook approvals add "npm run dev"` or `DEVFLOW_APPROVE_HOOKS=1` for automation). `processes.provider: pitchfork` embeds Pitchfork's Rust supervisor/log APIs directly. Running processes with ports are exposed by `devflow proxy` as `https://<process>.<workspace>.<project>.<suffix>` (default `.local`). `devflow remove` stops them before cleanup. Run `devflow daemon start` to keep desired-state, `watch` restart-on-change, and `retry` reconciliation active in the background. See [Project processes & Pitchfork](/devflow/guides/processes/) for Compose migration patterns and provider details.
+Processes are workspace-scoped app commands configured under `processes.daemons` (web servers, workers, schedulers). They run in the worktree, capture stdout/stderr to devflow logs, support dependency ordering, port bumping, and readiness checks, and can interpolate service URLs via MiniJinja (`{{ service['app-db'].url }}`). `processes.auto_start: true` makes `devflow switch` start them after services and hooks; auto-started shell commands use the same approval store as hooks (`devflow hook approvals add "npm run dev"` or `DEVFLOW_APPROVE_HOOKS=1` for automation). `processes.provider: native` selects the built-in supervisor. Running processes with ports are exposed by `devflow proxy` as `https://<process>.<workspace>.<project>.<suffix>` (default `.local`). `devflow remove` stops them before cleanup. Run `devflow daemon start` to keep desired-state, `watch` restart-on-change, and `retry` reconciliation active in the background. See [Project processes](/devflow/guides/processes/) for Compose migration patterns and provider details.
 
 ## Controller daemon
 
@@ -142,7 +142,6 @@ devflow hook install <recipe> [--param KEY=VALUE]... [--yes]
 devflow commit [--ai] [--edit] [--dry-run] [-m <msg>]
 devflow agent status | context [--format json] [--workspace <ws>]
 devflow agent skill                    # install bundled workspace helper skills
-devflow sync-ai-configs                # sync AI tool configs from worktree back to main
 devflow capabilities                   # machine-readable automation contract
 ```
 
@@ -176,3 +175,36 @@ devflow plugin list | check <name> | init <name> --lang bash|python
 ## Environment overrides
 
 `DEVFLOW_CONTEXT_BRANCH=<ws>` overrides the context workspace used as default parent — useful in CI. The full table is in [Environment variables](/devflow/reference/environment/).
+
+## Baselines, execution and recovery
+
+```sh
+devflow baseline prepare clean --service db --from fixtures/base.sql --validate fixtures/check.sql
+devflow --json baseline list
+devflow baseline inspect baseline:clean@v1
+devflow switch -c agent/task --from main --data-from baseline:clean@v1
+devflow exec --workspace agent/task -- pytest -k 'login or signup'
+devflow exec --workspace agent/task --shell 'npm test && npm run build'
+devflow operation list --history
+devflow operation inspect OPERATION_ID
+devflow --json --non-interactive operation resume OPERATION_ID
+devflow baseline remove baseline:clean@v1
+```
+
+Program arguments after `--` remain literal arguments. Shell syntax requires `--shell`; `switch -x 'command with spaces'` keeps its legacy shell spelling when no trailing argument vector is supplied. Required setup must finish before execution. Optional hook failures produce warnings; `required: false` background hooks record completion separately.
+
+Operations persist stable project identity, saved intent, attempts, steps, per-service checkpoints and bounded history. Resume supports workspace switch/removal and service start/stop/reset/cleanup. Failed seed and baseline preparation require inspection and an explicit retry or replacement; arbitrary SQL and shell hooks may have partial effects.
+
+## Retention and project identity
+
+```sh
+devflow --json retention plan --service db --max-count 10
+devflow retention pin agent/long-task
+devflow retention expire agent/short-task 2026-12-01T00:00:00Z
+devflow --json retention apply --service db --max-count 10
+devflow retention unpin agent/long-task
+devflow project list
+devflow project relocate /old/repository /new/repository
+```
+
+Relocation updates registered paths while preserving project/workspace/service IDs, resource namespaces and operation history. It does not move files or repair Git's linked-worktree metadata; perform the repository move and any required `git worktree repair` first.

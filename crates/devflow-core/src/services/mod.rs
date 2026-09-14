@@ -1,5 +1,8 @@
+#[cfg(any(feature = "service-local", test))]
+pub(crate) mod copy;
 pub mod factory;
 pub mod orphan;
+pub mod ownership;
 pub mod plugin;
 pub mod postgres;
 
@@ -55,12 +58,15 @@ pub struct ProjectInfo {
 /// which operations to offer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceCapabilities {
+    /// Data behavior when creating a child: empty, physical_copy, template_copy, remote_clone.
+    #[serde(default)]
+    pub data_strategy: String,
     pub lifecycle: bool,
     pub logs: bool,
     pub destroy_project: bool,
     pub cleanup: bool,
     pub seed_from_source: bool,
-    pub template_from_time: bool,
+    pub operations: OperationCapabilities,
     pub max_workspace_name_length: usize,
 }
 
@@ -100,52 +106,26 @@ pub trait ServiceProvider: Send + Sync {
     fn supports_cleanup(&self) -> bool {
         true
     }
-    fn supports_template_from_time(&self) -> bool {
-        false
-    }
     fn max_workspace_name_length(&self) -> usize {
         63
     }
 
-    // Lifecycle management (for local provider with Docker containers)
+    fn operations(&self) -> OperationCapabilities {
+        OperationCapabilities::default()
+    }
+
     async fn start_workspace(&self, _workspace_name: &str) -> Result<()> {
-        Ok(())
+        Err(UnsupportedOperation::new(self.provider_name(), ServiceOperation::Start).into())
     }
     async fn stop_workspace(&self, _workspace_name: &str) -> Result<()> {
-        Ok(())
+        Err(UnsupportedOperation::new(self.provider_name(), ServiceOperation::Stop).into())
     }
     async fn reset_workspace(&self, _workspace_name: &str) -> Result<()> {
-        Ok(())
+        Err(UnsupportedOperation::new(self.provider_name(), ServiceOperation::Reset).into())
     }
+    /// Compatibility summary; callers must use the capability for each action.
     fn supports_lifecycle(&self) -> bool {
-        false
-    }
-
-    // Cleanup
-    async fn cleanup_old_workspaces(&self, max_count: usize) -> Result<Vec<String>> {
-        if !self.supports_cleanup() {
-            return Ok(vec![]);
-        }
-
-        let workspaces = self.list_workspaces().await?;
-        let mut sorted_branches: Vec<_> = workspaces
-            .into_iter()
-            .filter(|b| b.name != "main" && b.name != "master")
-            .collect();
-
-        sorted_branches.sort_by_key(|b| std::cmp::Reverse(b.created_at));
-
-        let mut deleted = Vec::new();
-        if sorted_branches.len() > max_count {
-            for workspace in sorted_branches.into_iter().skip(max_count) {
-                match self.delete_workspace(&workspace.name).await {
-                    Ok(_) => deleted.push(workspace.name),
-                    Err(e) => log::warn!("Failed to delete workspace {}: {}", workspace.name, e),
-                }
-            }
-        }
-
-        Ok(deleted)
+        self.operations().start && self.operations().stop
     }
 
     // Project destruction (local provider)
@@ -164,11 +144,27 @@ pub trait ServiceProvider: Send + Sync {
         anyhow::bail!("This provider does not support seeding from external sources")
     }
 
+    /// Seal a dedicated data generation and return its immutable engine identity.
+    async fn seal_baseline(&self, _workspace: &str) -> Result<String> {
+        Err(UnsupportedOperation::new(self.provider_name(), ServiceOperation::Snapshot).into())
+    }
+    async fn baseline_fingerprint(&self, _workspace: &str) -> Result<String> {
+        Err(UnsupportedOperation::new(self.provider_name(), ServiceOperation::Snapshot).into())
+    }
+    async fn delete_baseline(&self, _workspace: &str) -> Result<()> {
+        Err(UnsupportedOperation::new(self.provider_name(), ServiceOperation::Snapshot).into())
+    }
+
     // Diagnostics
     async fn doctor(&self) -> Result<DoctorReport>;
 
     // Test connection
+    /// Observe connectivity without creating or starting an engine.
     async fn test_connection(&self) -> Result<()>;
+    /// Explicit engine reconciliation for controllers and `service up`.
+    async fn ensure_engine_ready(&self) -> Result<()> {
+        self.test_connection().await
+    }
 
     // Project metadata (optional, implemented by local provider)
     fn project_info(&self) -> Option<ProjectInfo> {
@@ -183,15 +179,20 @@ pub trait ServiceProvider: Send + Sync {
     // Get provider display name
     fn provider_name(&self) -> &'static str;
 
+    fn data_strategy(&self) -> &'static str {
+        "empty"
+    }
+
     // Machine-readable capability summary for UI/automation.
     fn capabilities(&self) -> ServiceCapabilities {
         ServiceCapabilities {
+            data_strategy: self.data_strategy().into(),
             lifecycle: self.supports_lifecycle(),
-            logs: false,
+            logs: self.operations().logs,
             destroy_project: self.supports_destroy(),
             cleanup: self.supports_cleanup(),
-            seed_from_source: false,
-            template_from_time: self.supports_template_from_time(),
+            seed_from_source: self.operations().seed,
+            operations: self.operations(),
             max_workspace_name_length: self.max_workspace_name_length(),
         }
     }
@@ -203,6 +204,14 @@ pub trait ServiceProvider: Send + Sync {
 /// On Linux, attempts reflink (`cp -a --reflink=auto`), falling back to regular copy.
 #[cfg(feature = "service-local")]
 pub async fn clone_data_dir(source: &std::path::Path, target: &std::path::Path) -> Result<()> {
+    copy::replace_directory(target, |staged| async move {
+        clone_data_dir_raw(source, &staged).await
+    })
+    .await
+}
+
+#[cfg(feature = "service-local")]
+async fn clone_data_dir_raw(source: &std::path::Path, target: &std::path::Path) -> Result<()> {
     use anyhow::Context;
 
     if !source.exists() {
@@ -275,3 +284,76 @@ pub async fn clone_data_dir(source: &std::path::Path, target: &std::path::Path) 
 
     Ok(())
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceOperation {
+    Start,
+    Stop,
+    Reset,
+    Seed,
+    Logs,
+    Snapshot,
+}
+
+impl std::fmt::Display for ServiceOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Start => "start",
+                Self::Stop => "stop",
+                Self::Reset => "reset",
+                Self::Seed => "seed",
+                Self::Logs => "logs",
+                Self::Snapshot => "snapshot",
+            }
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct OperationCapabilities {
+    pub start: bool,
+    pub stop: bool,
+    pub reset: bool,
+    pub seed: bool,
+    pub logs: bool,
+    pub snapshot: bool,
+}
+impl OperationCapabilities {
+    pub fn supports(&self, op: ServiceOperation) -> bool {
+        match op {
+            ServiceOperation::Start => self.start,
+            ServiceOperation::Stop => self.stop,
+            ServiceOperation::Reset => self.reset,
+            ServiceOperation::Seed => self.seed,
+            ServiceOperation::Logs => self.logs,
+            ServiceOperation::Snapshot => self.snapshot,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct UnsupportedOperation {
+    pub provider: String,
+    pub operation: ServiceOperation,
+}
+impl UnsupportedOperation {
+    pub fn new(provider: &str, operation: ServiceOperation) -> Self {
+        Self {
+            provider: provider.into(),
+            operation,
+        }
+    }
+}
+impl std::fmt::Display for UnsupportedOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} does not support {}", self.provider, self.operation)
+    }
+}
+impl std::error::Error for UnsupportedOperation {}
+
+pub mod descriptor;

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::Context;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use super::model::{now_epoch_millis, Project, StorageDriver, Workspace, WorkspaceState};
 
@@ -77,6 +77,10 @@ impl Store {
               FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
               FOREIGN KEY(parent_workspace_id) REFERENCES workspaces(id) ON DELETE SET NULL
             );
+            CREATE TABLE IF NOT EXISTS project_owners (
+              project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+              owner_key TEXT NOT NULL UNIQUE
+            );
             "#,
             )
             .context("failed to apply SQLite schema")?;
@@ -116,6 +120,38 @@ impl Store {
 
         rows.collect::<Result<Vec<_>, _>>()
             .context("failed to list projects")
+    }
+
+    pub fn claim_project(&self, project_id: &str, owner_key: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO project_owners(project_id, owner_key) VALUES (?1, ?2) ON CONFLICT(project_id) DO NOTHING",
+            rusqlite::params![project_id, owner_key],
+        )?;
+        let owner: String = self.conn.query_row(
+            "SELECT owner_key FROM project_owners WHERE project_id = ?1",
+            [project_id],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(
+            owner == owner_key,
+            "legacy local project is already owned by another project or service"
+        );
+        Ok(())
+    }
+
+    pub fn project_for_owner(&self, owner_key: &str) -> anyhow::Result<Option<Project>> {
+        let id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT project_id FROM project_owners WHERE owner_key = ?1",
+                [owner_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(match id {
+            Some(id) => self.list_projects()?.into_iter().find(|p| p.id == id),
+            None => None,
+        })
     }
 
     pub fn get_project_by_name(&self, name: &str) -> anyhow::Result<Option<Project>> {

@@ -1,4 +1,5 @@
 pub mod local_driver;
+mod replacement;
 pub mod zfs_driver;
 pub mod zfs_setup;
 
@@ -444,6 +445,12 @@ fn parse_zfs_config(project: &Project) -> anyhow::Result<ZfsProjectConfig> {
             project.id
         )
     })
+}
+
+pub(super) fn replacement_diagnostics(
+    data_root: &Path,
+) -> anyhow::Result<Vec<crate::services::DoctorCheck>> {
+    replacement::diagnostics(data_root)
 }
 
 #[cfg(test)]

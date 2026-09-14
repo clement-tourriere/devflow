@@ -63,14 +63,14 @@ One global container per engine; each workspace gets a logical boundary provisio
 | Engine | Per-workspace unit | Branching semantics |
 | --- | --- | --- |
 | PostgreSQL | database | `CREATE DATABASE … TEMPLATE parent` (branch-from-parent) |
-| Redis | numbered DB index (0–15) | none — empty DB per workspace |
+| Redis (shared) | numbered DB index (1–15; 0 tracks allocations) | none — empty DB per workspace |
 | RustFS (S3) | bucket (`{project}-{workspace}`) | none — empty bucket |
 | ClickHouse | database | none — empty database |
 
 ```yaml
 services:
   - name: cache
-    service_type: redis      # always shared/global
+    service_type: redis      # shared DB allocation (or use local with a generic container config)
   - name: app-db
     type: shared
     service_type: postgres
