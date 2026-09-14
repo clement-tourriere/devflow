@@ -460,6 +460,9 @@ SECTION
   cat <<'SECTION'
 ## Hook lifecycle phases
 
+Hooks run synchronously unless an entry sets `background: true`. The blocking
+flag controls the default failure policy, not whether the hook is awaited.
+
 | Phase | When it fires | Blocking? |
 |---|---|---|
 | `pre-switch` | Before switching to a workspace | Yes |

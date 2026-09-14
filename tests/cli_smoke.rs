@@ -20,7 +20,10 @@ fn devflow_bin() -> PathBuf {
 }
 
 fn run(args: &[&str]) -> std::process::Output {
+    let tmp = tempfile::tempdir().unwrap();
     Command::new(devflow_bin())
+        .current_dir(tmp.path())
+        .env("DEVFLOW_CONFIG_DIR", tmp.path().join("devflow-config"))
         .args(args)
         .output()
         .unwrap_or_else(|e| panic!("Failed to execute devflow {:?}: {}", args, e))
@@ -52,6 +55,7 @@ fn run_in_repo(args: &[&str]) -> std::process::Output {
         .expect("git commit");
 
     Command::new(devflow_bin())
+        .env("DEVFLOW_CONFIG_DIR", tmp.path().join("devflow-config"))
         .args(args)
         .current_dir(tmp.path())
         .output()
@@ -341,6 +345,7 @@ fn init_creates_config() {
         .ok();
 
     let out = Command::new(devflow_bin())
+        .env("DEVFLOW_CONFIG_DIR", tmp.path().join("devflow-config"))
         .args(["--non-interactive", "init"])
         .current_dir(tmp.path())
         .output()
@@ -364,6 +369,7 @@ fn json_init_reports_onboarding_next_steps() {
         .expect("git init");
 
     let out = Command::new(devflow_bin())
+        .env("DEVFLOW_CONFIG_DIR", tmp.path().join("devflow-config"))
         .args([
             "--json",
             "--non-interactive",
@@ -441,6 +447,7 @@ worktree:
 
     let xdg = tmp.path().join("xdg");
     let link = Command::new(devflow_bin())
+        .env("DEVFLOW_CONFIG_DIR", tmp.path().join("devflow-config"))
         .args(["link", "main"])
         .env("XDG_DATA_HOME", &xdg)
         .current_dir(&repo)
@@ -449,6 +456,7 @@ worktree:
     assert!(link.status.success(), "link failed: {:?}", link);
 
     let out = Command::new(devflow_bin())
+        .env("DEVFLOW_CONFIG_DIR", tmp.path().join("devflow-config"))
         .args([
             "--json",
             "--non-interactive",
@@ -473,6 +481,7 @@ worktree:
     assert!(std::path::Path::new(worktree_path).is_dir());
 
     let context = Command::new(devflow_bin())
+        .env("DEVFLOW_CONFIG_DIR", tmp.path().join("devflow-config"))
         .args(["--json", "agent", "context", "--workspace", "agent/smoke"])
         .env("XDG_DATA_HOME", &xdg)
         .current_dir(&repo)
@@ -485,6 +494,7 @@ worktree:
     assert_eq!(context_json["cd_hint"].as_str(), Some(cd_hint.as_str()));
 
     let status = Command::new(devflow_bin())
+        .env("DEVFLOW_CONFIG_DIR", tmp.path().join("devflow-config"))
         .args(["--json", "agent", "status"])
         .env("XDG_DATA_HOME", &xdg)
         .current_dir(&repo)

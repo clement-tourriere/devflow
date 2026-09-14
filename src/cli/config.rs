@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use devflow_core::config::{Config, EffectiveConfig};
+use devflow_core::state::LocalStateManager;
 use devflow_core::vcs;
 use std::path::PathBuf;
 

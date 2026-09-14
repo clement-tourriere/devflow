@@ -77,12 +77,11 @@ A `switch -c` (create + switch) executes this sequence:
 1. Pre-switch hooks
 2. VCS branch creation
 3. Linked worktree setup + file copying
-4. Pre-service-create hooks
-5. Service orchestration (create instances for each configured service)
-6. Post-service-create hooks
-7. State registration (SQLite)
-8. Post-create hooks
-9. Post-switch hooks
+4. Register the workspace and its immutable parent in local state
+5. Service orchestration and service lifecycle hooks
+6. Post-create hooks
+7. Post-switch hooks
+8. Process orchestration (after generated environment files exist)
 ```
 
 `workspace/create.rs` delegates to the shared lifecycle in `workspace/switch.rs`, which also registers workspace state.
@@ -91,27 +90,30 @@ A `switch -c` (create + switch) executes this sequence:
 
 The hook engine (`hooks/`) is MiniJinja-based:
 
-- **Phases**: 18 built-in lifecycle phases + custom phases
+- **Phases**: 12 built-in lifecycle phases + custom phases
 - **Entry types**: Simple (shell command string) or Action (structured: `write-env`, `copy`, `docker-exec`, `http`, `notify`, etc.)
-- **Approval**: Shell commands from project config require approval in `--non-interactive` mode
-- **Execution**: Blocking phases wait for completion; non-blocking phases run in background
+- **Approval**: Shell commands from project config require approval; non-interactive runs skip unapproved hooks and report them
+- **Execution**: Hooks run synchronously unless `background: true`; the phase determines the default failure policy
 - **Templates**: Full MiniJinja with custom filters (`sanitize`, `sanitize_db`, `hash_port`)
 
 ### Configuration
 
-Three-tier precedence (highest to lowest):
+Configuration precedence (highest to lowest):
 1. Environment variables (`DEVFLOW_*`)
 2. `.devflow.local.yml` (gitignored, per-developer)
-3. `.devflow.yml` (committed, team-shared)
+3. `.devflow.yml` or `devflow.toml` (committed, team-shared)
+4. Global devflow configuration
+
+CLI-managed service definitions in local state are overlaid on the effective configuration.
 
 Configuration types and merging live in `config/mod.rs`; loading and validation live in `config/loading.rs`.
 
 ### State Management
 
-Local state is stored in SQLite at `~/.local/share/devflow/state.db`:
-- Project registry (path → project metadata)
-- Workspace registry (project + workspace → parent, worktree path, timestamps)
-- Hook approval store
+The platform devflow configuration directory contains `local_state.yml` for
+project/workspace metadata and `hook_approvals.yml` for hook approvals. Set
+`DEVFLOW_CONFIG_DIR` to override that directory. Local PostgreSQL providers keep
+their service state separately in `state.db` under the configured data root.
 
 ## Proxy Architecture (`devflow-proxy`)
 
@@ -127,7 +129,8 @@ Monitor → Discovery → Router → Server
                          └─ JSON API (/api/status, /api/targets)
 ```
 
-The proxy watches Docker events, discovers containers, and dynamically routes `*.localhost` HTTPS requests to the correct container IP:port.
+The proxy watches Docker events and routes service and process HTTPS requests
+using the configured domain suffix (`.local` by default).
 
 ## GUI Architecture (`src-tauri/` + `ui/`)
 
@@ -156,5 +159,4 @@ All optional backends and UI components are feature-gated:
 | `service-dblab` | DBLab provider | `reqwest` |
 | `service-xata` | Xata provider | `reqwest` |
 | `llm` | AI commit messages | `reqwest` |
-| `skills` | External skill management and generated agent guides (no bundled skills) | `reqwest`, `sha2` |
 | `tui` | Terminal UI | `ratatui`, `crossterm` |

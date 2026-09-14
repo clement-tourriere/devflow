@@ -62,6 +62,7 @@ OUTPUT=$(devflow --json --non-interactive switch -c "$WORKSPACE")
 # Use the materialized workspace path for subsequent agent tool calls
 AGENT_WORKDIR=$(echo "$OUTPUT" | jq -r '.agent_workdir // .worktree_path // empty')
 test -d "$AGENT_WORKDIR"
+CONNECTION=$(devflow --json service connection "$WORKSPACE")
 
 jq -n --arg workspace "$WORKSPACE" --arg agent_workdir "$AGENT_WORKDIR" \
   --argjson switch "$OUTPUT" --argjson connection "$CONNECTION" \
@@ -88,8 +89,8 @@ devflow agent context
 devflow agent context --format json
 devflow agent context --workspace feature/auth
 
-# Install the bundled workspace helper skills (.claude/skills/)
-devflow agent skill
+# Generate project-specific guide files for coding agents
+devflow agent skill --target all
 ```
 
 ## Hook Inspection

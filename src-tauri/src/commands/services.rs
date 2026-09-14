@@ -393,11 +393,14 @@ pub async fn stop_service(
 
 #[tauri::command]
 pub async fn run_doctor(project_path: String) -> Result<serde_json::Value, String> {
-    let config_path = std::path::Path::new(&project_path).join(".devflow.yml");
     let project_dir = std::path::Path::new(&project_path);
+    let config_path = devflow_core::config::Config::find_config_file_in(project_dir)
+        .unwrap_or_else(|| project_dir.join(".devflow.yml"));
 
     let config = devflow_core::config::Config::from_file(&config_path).ok();
-    let config_for_checks = config.clone().unwrap_or_default();
+    let service_config =
+        crate::commands::project_config::load_project_config_with_local_state(project_dir).ok();
+    let config_for_checks = service_config.clone().unwrap_or_default();
     let mut general_checks = devflow_core::doctor::project_doctor_checks(
         &config_for_checks,
         config_path.exists().then_some(config_path.as_path()),
@@ -422,8 +425,25 @@ pub async fn run_doctor(project_path: String) -> Result<serde_json::Value, Strin
         },
     );
 
-    let service_config =
-        crate::commands::project_config::load_project_config_with_local_state(project_dir).ok();
+    general_checks.push(
+        match crate::commands::project_config::service_source_counts(project_dir) {
+            Ok((committed, local, names)) => services::DoctorCheck {
+                name: "Service config sources".to_string(),
+                available: true,
+                detail: format!(
+                    "{} service(s) from config, {} from local state ({})",
+                    committed,
+                    local,
+                    names.join(", ")
+                ),
+            },
+            Err(error) => services::DoctorCheck {
+                name: "Service config sources".to_string(),
+                available: false,
+                detail: error,
+            },
+        },
+    );
     let named_services = service_config
         .as_ref()
         .map(|c| c.resolve_services())

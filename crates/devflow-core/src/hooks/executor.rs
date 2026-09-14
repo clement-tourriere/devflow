@@ -1085,9 +1085,16 @@ mod tests {
         let mut phase_hooks = IndexMap::new();
         phase_hooks.insert(
             "bg-marker".to_string(),
-            HookEntry::Simple("sleep 0.2 && touch bg-done.txt".to_string()),
+            HookEntry::Extended(super::super::ExtendedHookEntry {
+                command: "sleep 0.2 && touch bg-done.txt".to_string(),
+                background: true,
+                continue_on_error: Some(false),
+                condition: None,
+                working_dir: None,
+                environment: None,
+            }),
         );
-        // post-switch is a non-blocking phase → hook runs in the background
+        // Explicit background hooks must finish when the CLI drains them.
         hooks.insert(HookPhase::PostSwitch, phase_hooks);
 
         let engine = HookEngine::new_no_approval(hooks, tmp.path().to_path_buf());

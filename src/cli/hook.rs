@@ -170,9 +170,8 @@ fn handle_hook_show(config: &Config, phase_filter: Option<&str>, json_output: bo
 
         shown = true;
         println!(
-            "{} ({}; {}):",
+            "{} (runs synchronously by default; {}):",
             phase,
-            "runs synchronously by default",
             if phase.is_blocking() {
                 "failures fail the operation by default"
             } else {

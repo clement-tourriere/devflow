@@ -519,11 +519,12 @@ devflow agent context --workspace feature/auth
 
 ### `devflow agent skill`
 
-Install devflow workspace helper skills into `.claude/skills/`.
+Generate project-specific guides for generic agents, Claude, Cursor, and OpenCode.
 
 ```bash
-devflow agent skill
-devflow --json agent skill
+devflow agent skill --target all
+devflow --json agent skill --target claude
+devflow agent docs                    # Generate a root AGENTS.md
 ```
 
 ### `devflow sync-ai-configs`

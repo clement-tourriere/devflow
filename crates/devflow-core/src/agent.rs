@@ -232,7 +232,7 @@ pub fn uninstall_agent_skills(project_dir: &Path) -> Result<()> {
 
 /// Check whether generated agent guides are installed and current.
 pub fn check_agent_skills_installed(project_dir: &Path) -> SkillInstallStatus {
-    let config = Config::from_file(&project_dir.join(".devflow.yml")).unwrap_or_default();
+    let config = Config::load_effective_for_dir(project_dir).unwrap_or_default();
     let mut installed_skills = Vec::new();
     let mut missing_skills = Vec::new();
     let mut stale_skills = Vec::new();
