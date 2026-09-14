@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Upgrade `h2` to 0.4.16 and `rustls` to 0.23.45 to address RUSTSEC-2026-0258 and RUSTSEC-2026-0285 found by release CI.
 - Preserve exact baseline generations and engine images through recreation, nested descendants and reset; reject incompatible existing containers.
 - Preserve Git staging/merge state during jj inspection and recover stale jj workspaces without losing local edits.
 - Keep failed removal and project destruction recoverable, confine payload writes, and validate destination cache inputs before reuse.
