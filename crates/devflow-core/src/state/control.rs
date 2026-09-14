@@ -22,6 +22,8 @@ identity!(ResourceId);
 #[serde(default)]
 pub struct WorkspaceControl {
     pub id: WorkspaceId,
+    /// Resource lifetime, separate from the stable logical workspace identity.
+    pub generation: ResourceId,
     pub desired: DesiredState,
     pub operation_id: Option<String>,
     pub pinned: bool,
@@ -62,12 +64,17 @@ impl ProjectControl {
     }
     pub fn workspace(&mut self, name: &str) -> &mut WorkspaceControl {
         let id = WorkspaceId(identity_digest(&[&self.id.0, "workspace", name]));
-        self.workspaces
+        let workspace = self
+            .workspaces
             .entry(name.into())
             .or_insert_with(|| WorkspaceControl {
                 id,
                 ..Default::default()
-            })
+            });
+        if workspace.generation.0.is_empty() {
+            workspace.generation = ResourceId(uuid::Uuid::new_v4().to_string());
+        }
+        workspace
     }
     pub fn service(&mut self, name: &str) -> ServiceId {
         self.services

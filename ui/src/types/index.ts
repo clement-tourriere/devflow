@@ -1,5 +1,4 @@
 import type { ProviderDescriptor } from "./providers.generated";
-export type { DevflowConfig } from "./config";
 
 export interface ProjectEntry {
   path: string;
@@ -38,7 +37,7 @@ export interface WorkspaceServiceStatus {
 
 export type DataOrigin = { kind: "empty" } | { kind: "workspace"; workspace: string; service_key: string } | { kind: "baseline"; reference: string; service_key: string; generation: string; engine_fingerprint: string };
 export interface WorkspaceEntry {
-  control?: { id: string; desired: string; pinned: boolean; expires_at: string | null; data: Record<string, DataOrigin> };
+  control?: { id: string; generation: string; desired: string; pinned: boolean; expires_at: string | null; data: Record<string, DataOrigin> };
   name: string;
   service_key: string;
   canonical_service_key: string;
@@ -411,6 +410,7 @@ export interface AppSettings {
 export type TerminalRenderer = "auto" | "webgpu" | "webgl2";
 
 export interface DestroyResult {
+  resources: Array<{kind: string; resource: string; success: boolean; error: string | null}>;
   project_name: string;
   processes_stopped: number;
   process_results: ProcessResult[];
@@ -483,6 +483,10 @@ export interface TerminalExitEvent {
 }
 
 export interface WorkspaceOperation {
+  workspace: string;
+  kind: string;
+  mutation_started?: boolean;
+  plan?: unknown;
   id: string;
   status: string;
   phase: string;

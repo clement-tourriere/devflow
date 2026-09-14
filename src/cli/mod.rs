@@ -49,6 +49,16 @@ pub(crate) fn operation_project_dir(config_path: &Option<PathBuf>) -> PathBuf {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Resolve code, data, hooks and artifact inputs without changing resources.
+    Plan {
+        workspace: String,
+        #[arg(long = "from")]
+        from: Option<String>,
+        #[arg(long = "data-from")]
+        data_from: Option<String>,
+    },
+    #[command(hide = true)]
+    ExecutionRun { record: PathBuf },
     /// Run a program in a ready workspace, preserving its argument vector.
     Exec {
         #[arg(long)]
@@ -804,47 +814,9 @@ pub enum AgentCommands {
     },
 }
 
-/// Subcommands for `devflow proxy`.
-#[derive(Subcommand)]
-pub enum ProxyCommands {
-    #[command(about = "Start the reverse proxy")]
-    Start {
-        #[arg(long, help = "Run as a background daemon")]
-        daemon: bool,
-        #[arg(long, help = "HTTPS listen port [default: 443]")]
-        https_port: Option<u16>,
-        #[arg(long, help = "HTTP listen port [default: 80]")]
-        http_port: Option<u16>,
-        #[arg(long, help = "API listen port [default: 2019]")]
-        api_port: Option<u16>,
-        #[arg(
-            long,
-            help = "Domain suffix for auto-discovered containers [default: local — same name resolves inside and outside containers]"
-        )]
-        domain_suffix: Option<String>,
-        #[arg(
-            long,
-            help = "Disable auto-connecting containers to shared devflow network"
-        )]
-        no_auto_network: bool,
-        #[arg(
-            long,
-            help = "Disable mDNS advertising of friendly .local names (macOS)"
-        )]
-        no_mdns: bool,
-    },
-    #[command(about = "Stop the reverse proxy")]
-    Stop,
-    #[command(about = "Show proxy status")]
-    Status,
-    #[command(about = "List proxied containers and devflow processes")]
-    List,
-    #[command(about = "Manage CA certificate trust")]
-    Trust {
-        #[command(subcommand)]
-        action: TrustCommands,
-    },
-}
+pub use crate::proxy_commands::ProxyCommands;
+#[cfg(feature = "proxy")]
+pub use crate::proxy_commands::TrustCommands;
 
 /// Subcommands for `devflow daemon`.
 #[derive(Subcommand)]
@@ -862,19 +834,6 @@ pub enum DaemonCommands {
     Stop,
     #[command(about = "Show controller daemon status")]
     Status,
-}
-
-/// Subcommands for `devflow proxy trust`.
-#[derive(Subcommand)]
-pub enum TrustCommands {
-    #[command(about = "Install CA certificate to system trust store")]
-    Install,
-    #[command(about = "Verify CA certificate is trusted")]
-    Verify,
-    #[command(about = "Remove CA certificate from system trust store")]
-    Remove,
-    #[command(about = "Show trust installation instructions")]
-    Info,
 }
 
 pub async fn handle_command(
@@ -907,9 +866,21 @@ pub async fn handle_command(
         return proxy::handle_proxy_command(action, json_output).await;
         #[cfg(not(feature = "proxy"))]
         {
-            let _ = action;
-            anyhow::bail!("Proxy support is not compiled in; rebuild with --features proxy");
+            let args = action.companion_args();
+            let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+            if let Some(value) = devflow_core::companion::forward(&args, json_output).await? {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            }
+            return Ok(());
         }
+    }
+
+    if let Commands::ExecutionRun { record } = cmd {
+        let code = devflow_core::execution::run_saved(&record).await?;
+        if code != 0 {
+            std::process::exit(code.max(1));
+        }
+        return Ok(());
     }
 
     // Daemon commands — operate on global state, no project config needed
@@ -986,6 +957,7 @@ pub async fn handle_command(
         cmd,
         Commands::Exec { .. }
             | Commands::Baseline { .. }
+            | Commands::Plan { .. }
             | Commands::Operation { .. }
             | Commands::Retention { .. }
             | Commands::Project { .. }
@@ -1682,7 +1654,7 @@ pub async fn handle_command(
                 "json_mode": {
                     "stdout_single_json_document": true,
                     "diagnostics_on_stderr": true,
-                    "unsupported_commands": ["shell-init", "completions", "tui"],
+                    "unsupported_commands": ["shell-init", "completions", "tui", "proxy start without --daemon"],
                 },
                 "non_interactive": {
                     "prompts_disabled": true,
@@ -1694,6 +1666,10 @@ pub async fn handle_command(
                     "model": "materialized_only",
                     "independent_data_parent": true,
                     "operation_journal": true,
+                    "resolved_plan_command": "plan",
+                    "resource_generations": true,
+                    "cancel_no_effect_operations": true,
+                    "native_jj_stale_recovery": true,
                     "ready_field": "operation.status",
                     "git": "linked_worktree",
                     "jj": "native_workspace",
@@ -1701,6 +1677,8 @@ pub async fn handle_command(
                     "backend_identity_field": "service_key",
                     "inventory_schema_version": devflow_core::workspace::inventory::INVENTORY_SCHEMA_VERSION,
                 },
+                "execution": { "per_execution_records": true, "verified_runner_identity": true, "detached_handoff": true },
+                "controller": { "exclusive_owner": true, "verified_process_identity": true },
                 "orchestration": {
                     "partial_failure_exit_code": "non-zero",
                     "partial_failure_reported_in_json": true,

@@ -22,8 +22,8 @@ worktree:
   copy_files:                             # files/dirs copied from the main worktree
     - .env.local
     - .env
-  copy_ignored: false                     # also copy gitignored entries (node_modules, …)
-  copy_ai_configs: false                   # copy .claude/, .cursor/, .opencode/, .agents/
+  copy_ignored: false                     # deprecated broad copy; prefer caches
+  copy_ai_configs: false                   # deprecated broad copy; prefer explicit files
   extra_ai_dirs: []                       # additional AI tool dirs to copy
 ```
 
@@ -31,8 +31,8 @@ worktree:
 | --- | --- | --- |
 | `path_template` | `../{repo}.{workspace}` | Placeholders: `{repo}` (config `name:` or project directory name), `{workspace}` (collision-safe service key), `{branch}` (legacy alias for `{workspace}`). Relative to the project root. |
 | `copy_files` | `[.env, .env.local]` | Files **or directories** copied from the main worktree into each new one when present. Reflink/CoW copy when the filesystem supports it. |
-| `copy_ignored` | `false` | Copies gitignored entries too — as collapsed top-level entries (`node_modules` as one unit, not file-by-file), in parallel. Great for warm caches; costs disk on non-CoW filesystems. |
-| `copy_ai_configs` | `true` | Copies AI tool config dirs (`.claude`, `.cursor`, `.opencode`, `.agents`) so agents and editors keep their settings in every worktree. |
+| `copy_ignored` | `false` | Deprecated broad copying of ignored entries. Use fingerprinted caches for reusable artifacts. |
+| `copy_ai_configs` | `false` | Deprecated broad copying of AI tool settings. Use explicit `copy_files` entries or tracked project guides. |
 | `extra_ai_dirs` | `[]` | Additional directories to treat like AI config dirs. |
 
 ### Path normalization
@@ -54,8 +54,8 @@ The exact suffix is implementation-defined; consume `worktree_path` from command
 
 1. Reuses the existing worktree if one is already checked out for that branch.
 2. Creates the VCS ref if needed (from `--from <parent>` or your current context).
-3. Creates the worktree via libgit2 — tracked files only, instant. Stale worktree metadata for the same name is pruned automatically when its directory no longer exists.
-4. Copies `copy_files`, then AI config dirs, then (if `copy_ignored`) gitignored entries — all with parallel reflink copies (APFS clones / Btrfs-XFS reflinks; full copy elsewhere).
+3. Creates the worktree via libgit2 — tracked files only. Stale worktree metadata for the same name is pruned automatically when its directory no longer exists.
+4. Copies configured payloads through confined directory handles, preserving symlink entries without following destination links. Failed copies block readiness and are retried. Matching artifact caches are materialized separately.
 5. Registers the raw name, collision-safe service key, immutable creation parent, and worktree path in local state.
 6. Creates/switches service workspaces and runs hooks **inside the new worktree** — `post-create` hooks like `npm ci` or write-env target the right directory.
 7. Emits `DEVFLOW_CD=<path>` so the [shell wrapper](/devflow/getting-started/shell-integration/) moves you there.
@@ -74,9 +74,7 @@ The exact suffix is implementation-defined; consume `worktree_path` from command
 devflow worktree-setup
 ```
 
-:::caution
-The hook-driven setup path currently copies `copy_files` and gitignored entries but **not** AI config dirs — run `devflow switch <workspace>` once (or copy `.claude/` manually) if your agents need their configs in a hand-made worktree.
-:::
+
 
 ## Safety on removal
 

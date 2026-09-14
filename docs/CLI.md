@@ -330,7 +330,7 @@ Print logs captured from stdout/stderr. Use `--follow`/`-f` to stream appended o
 
 Set `required: false` on optional processes so readiness failures are reported but do not fail `switch`/`process start`.
 
-When `processes.auto_start: true`, `devflow switch` starts configured processes after services and hooks are aligned. Auto-started shell commands use the same approval store as hooks: unapproved commands are skipped in `--json`/`--non-interactive` mode unless pre-approved with `devflow hook approvals add "npm run dev"` or `DEVFLOW_APPROVE_HOOKS=1`. The native supervisor owns process startup, logs, readiness and shutdown. Running processes with resolved ports are exposed by `devflow proxy` as `https://<process>.<workspace>.<project>.<suffix>` (default suffix: `.local`). Run `devflow daemon start` to keep desired-state, `watch` restart-on-change, and `retry` reconciliation active in the background. See `docs-site/src/content/docs/guides/processes.md` and `examples/migrate-existing-app.devflow.yml` for migration examples.
+When `processes.auto_start: true`, `devflow switch` starts configured processes after services and hooks are aligned. Auto-started shell commands use the same approval store as hooks: unapproved commands are skipped in `--json`/`--non-interactive` mode unless pre-approved with `devflow hook approvals add "npm run dev"` or `DEVFLOW_APPROVE_HOOKS=1`. The native supervisor owns process startup, logs, readiness and shutdown. Running processes with resolved ports are exposed by `devflow proxy` as `https://<process>.<workspace>.<project>.<suffix>` (default suffix: `.localhost`). Run `devflow daemon start` to keep desired-state, `watch` restart-on-change, and `retry` reconciliation active in the background. See `docs-site/src/content/docs/guides/processes.md` and `examples/migrate-existing-app.devflow.yml` for migration examples.
 
 ## Controller Daemon
 
@@ -528,7 +528,7 @@ For `.claude/settings.local.json`, permission arrays are unioned and deduplicate
 
 ### `devflow proxy start`
 
-Start the native HTTP(S) reverse proxy and friendly-name discovery. Discovered containers get `*.local` names (the default suffix on all platforms) advertised over mDNS so the **same name resolves from the host and from inside containers**: on the host via Bonjour (macOS) or Avahi (Linux — needs avahi-daemon + avahi-utils), and inside containers via Docker DNS aliases. Web names resolve to the proxy (HTTPS with the trusted CA); database names resolve directly to the container IP for native access at the standard port (needs routable container IPs: OrbStack/Colima/Linux). Devflow-managed host processes with resolved ports are also routed to `127.0.0.1` as `https://<process>.<workspace>.<project>.<suffix>`. `--domain-suffix localhost` opts into loopback-only names, but beware: many runtimes hard-resolve `*.localhost` to loopback inside containers (RFC 6761), so those names don't work container-to-container.
+Start the optional native HTTP(S) reverse proxy. The default `.localhost` suffix resolves to loopback on the host without a DNS helper. Use `--domain-suffix local` for mDNS discovery where supported. Container-to-container connections use Docker DNS names or direct service endpoints; `.localhost` resolves inside each container. Install the companion with `DEVFLOW_INSTALL_PROXY=1` or build `devflow-proxy` with the `proxy` feature.
 
 ```bash
 devflow proxy start
@@ -746,3 +746,11 @@ devflow project relocate /old/repository /new/repository
 ```
 
 Relocation updates registered paths while preserving project/workspace/service IDs, resource namespaces and operation history. It does not move files or repair Git's linked-worktree metadata; perform the repository move and any required `git worktree repair` first.
+
+## Plan and recover workspace operations
+
+`devflow --json plan agent/task --from main --data-from baseline:clean@2` previews the code revision, exact data origins, worktree path, payloads, cache inputs, hooks and protections without materializing resources. A dirty jj source reports `snapshot_required: true`; its snapshot is taken by the explicit switch.
+
+Use `operation list`, `operation inspect ID` and `operation resume ID` to inspect and resume incomplete setup. `operation cancel ID` only accepts operations proven to have made no resource changes. Policy-rejected removals become terminal cancellations automatically. Full workspace deletion starts a fresh resource generation on recreation; `--keep-services` retains and protects the previous data binding.
+
+Each `exec` result includes an `execution_id`. Foreground and detached runs keep separate completion/ownership records, and failed launchers never count as active sessions. Custom `execute.detach_command` templates must include `{cmd}` so devflow's runner can report completion. Controller foreground, detached and one-shot starts share one exclusive owner lease.

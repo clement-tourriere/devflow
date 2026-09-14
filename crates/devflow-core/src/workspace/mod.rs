@@ -5,6 +5,7 @@ pub mod invariant;
 pub mod inventory;
 pub mod link;
 pub mod operation;
+pub mod plan;
 pub mod switch;
 pub mod worktree;
 

@@ -1,3 +1,4 @@
+use devflow_core::application::service_resources::{self, Request as ResourceRequest};
 use devflow_core::config::{
     ClickHouseConfig, DockerCustomSettings, GenericDockerConfig, LocalServiceConfig, MySQLConfig,
     NamedServiceConfig, SharedServiceConfig,
@@ -115,10 +116,16 @@ pub async fn add_service(
             .await
             .map_err(crate::commands::format_error)?
         {
-            provider
-                .create_workspace(&key, None)
-                .await
-                .map_err(crate::commands::format_error)?;
+            service_resources::mutate(
+                &config,
+                project_dir,
+                &named.name,
+                &config.git.main_workspace,
+                provider.as_ref(),
+                &ResourceRequest::Create { parent: None },
+            )
+            .await
+            .map_err(crate::commands::format_error)?;
         }
         if let Some(seed) = request.seed_from.as_deref().filter(|s| !s.is_empty()) {
             provider
@@ -627,9 +634,6 @@ pub async fn delete_service_workspace(
     workspace_name: String,
 ) -> Result<(), String> {
     let project_dir = std::path::Path::new(&project_path);
-    let _policy_lease = devflow_core::workspace::operation::project_policy_lease(project_dir, true)
-        .await
-        .map_err(crate::commands::format_error)?;
     let config =
         crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
 
@@ -643,12 +647,17 @@ pub async fn delete_service_workspace(
         .await
         .map_err(crate::commands::format_error)?;
 
-    let service_key =
-        resolve_operation_service_key(project_dir, &workspace_name, provider.as_ref()).await?;
-    provider
-        .delete_workspace(&service_key)
-        .await
-        .map_err(crate::commands::format_error)
+    service_resources::mutate(
+        &config,
+        project_dir,
+        &service_name,
+        &workspace_name,
+        provider.as_ref(),
+        &ResourceRequest::Delete,
+    )
+    .await
+    .map(|_| ())
+    .map_err(crate::commands::format_error)
 }
 
 #[derive(Serialize)]
@@ -663,9 +672,6 @@ pub async fn destroy_service(
     service_name: String,
 ) -> Result<DestroyServiceResult, String> {
     let project_dir = std::path::Path::new(&project_path);
-    let _policy_lease = devflow_core::workspace::operation::project_policy_lease(project_dir, true)
-        .await
-        .map_err(crate::commands::format_error)?;
     let config_path = crate::commands::project_config::config_path(project_dir);
     let config =
         crate::commands::project_config::load_project_config_with_local_state(project_dir)?;
@@ -688,10 +694,17 @@ pub async fn destroy_service(
         ));
     }
 
-    let destroyed_workspaces = provider
-        .destroy_project()
-        .await
-        .map_err(crate::commands::format_error)?;
+    let destroyed_workspaces = service_resources::mutate(
+        &config,
+        project_dir,
+        &service_name,
+        "(service)",
+        provider.as_ref(),
+        &ResourceRequest::Destroy,
+    )
+    .await
+    .map_err(crate::commands::format_error)?
+    .destroyed;
 
     // Remove from local state (CLI/GUI-managed services) and committed config
     // (if this service came from `.devflow.yml`).

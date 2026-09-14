@@ -180,7 +180,7 @@ Daemon fields:
 | `watch` | glob patterns, relative to `dir`, that the controller daemon polls for restart-on-change |
 | `retry` | number of controller-daemon restart attempts after a crash |
 
-Manage them with `devflow process start|stop|restart|status|logs`. Auto-started process commands reuse hook approvals; pre-approve with `devflow hook approvals add "npm run dev"` for non-interactive automation, or set `DEVFLOW_APPROVE_HOOKS=1`. The native supervisor records desired state and runtime observations. `devflow proxy` reads process state and exposes port-backed processes as `https://<process>.<workspace>.<project>.<suffix>` (default suffix `.local`). Run `devflow daemon start` to keep desired-state/watch/retry reconciliation active in the background. See [Project processes](/devflow/guides/processes/) for migration examples, readiness checks, and operational commands.
+Manage them with `devflow process start|stop|restart|status|logs`. Auto-started process commands reuse hook approvals; pre-approve with `devflow hook approvals add "npm run dev"` for non-interactive automation, or set `DEVFLOW_APPROVE_HOOKS=1`. The native supervisor records desired state and runtime observations. `devflow proxy` reads process state and exposes port-backed processes as `https://<process>.<workspace>.<project>.<suffix>` (default suffix `.localhost`). Run `devflow daemon start` to keep desired-state/watch/retry reconciliation active in the background. See [Project processes](/devflow/guides/processes/) for migration examples, readiness checks, and operational commands.
 
 ### Cloud providers (experimental)
 
@@ -206,8 +206,8 @@ Manage them with `devflow process start|stop|restart|status|logs`. Auto-started 
 worktree:
   path_template: "../{repo}.{workspace}"  # {repo}, {workspace} (collision-safe key), {branch} legacy
   copy_files: [.env.local, .env]          # files/dirs reflink-copied from main
-  copy_ignored: false                     # also copy gitignored entries (collapsed, parallel)
-  copy_ai_configs: false                  # opt in to copying broad AI tool settings
+  copy_ignored: false                     # deprecated; use fingerprinted caches
+  copy_ai_configs: false                  # deprecated; use explicit copy_files
   extra_ai_dirs: []                       # additional AI tool dirs
 ```
 

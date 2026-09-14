@@ -8,8 +8,9 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use jj_lib::{
+    backend::CommitId,
     commit::Commit,
     config::{ConfigLayer, ConfigResolutionContext, ConfigSource, StackedConfig},
     default_backend_factories::{default_backend_factories, default_working_copy_factories},
@@ -18,6 +19,7 @@ use jj_lib::{
     gitignore::GitIgnoreFile,
     lock::FileLock,
     matchers::NothingMatcher,
+    object_id::ObjectId,
     op_store::RefTarget,
     ref_name::{RefName, WorkspaceName},
     repo::{ReadonlyRepo, Repo},
@@ -215,8 +217,35 @@ pub(super) struct State {
     _git_lock: FileLock,
 }
 
+#[derive(Debug)]
+struct StaleWorkingCopy;
+impl std::fmt::Display for StaleWorkingCopy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Jujutsu working copy requires native recovery")
+    }
+}
+impl std::error::Error for StaleWorkingCopy {}
+
+struct SnapshotConfig {
+    ignores: Arc<GitIgnoreFile>,
+    matcher: Box<dyn jj_lib::matchers::Matcher>,
+    limit: u64,
+}
+impl SnapshotConfig {
+    fn options(&self) -> SnapshotOptions<'_> {
+        SnapshotOptions {
+            base_ignores: self.ignores.clone(),
+            progress: None,
+            start_tracking_matcher: self.matcher.as_ref(),
+            force_tracking_matcher: &NothingMatcher,
+            max_new_file_size: self.limit,
+        }
+    }
+}
+
 impl State {
-    pub async fn load(root: &Path) -> Result<Self> {
+    /// Open the recorded repository view without snapshotting or changing Git.
+    pub async fn inspect(root: &Path) -> Result<Self> {
         let initial = settings(root, None)?;
         let workspace = Workspace::load(
             &initial,
@@ -234,14 +263,26 @@ impl State {
         )?;
         let lock = FileLock::lock(workspace.repo_path().join("git_import_export.lock"))?;
         let repo = workspace.repo_loader().load_at_head().await?;
-        let mut state = Self {
+        Ok(Self {
             workspace,
             repo,
             untracked: false,
             _git_lock: lock,
-        };
+        })
+    }
+
+    /// Prepare for an explicit mutation, preserving local working-copy edits.
+    pub async fn load(root: &Path) -> Result<Self> {
+        let mut state = Self::inspect(root).await?;
+        if state.colocated() {
+            anyhow::ensure!(git2::Repository::open(root)?.state() == git2::RepositoryState::Clean,
+                "Finish or abort the active Git operation before changing this colocated jj workspace");
+        }
         state.import_git_head().await?;
-        state.snapshot().await?;
+        match state.snapshot().await {
+            Err(error) if error.is::<StaleWorkingCopy>() => state.recover_stale().await?,
+            result => result?,
+        }
         state.import_git_refs().await?;
         Ok(state)
     }
@@ -303,13 +344,25 @@ impl State {
                 .get_wc_commit_id(self.workspace.workspace_name())
                 .context("Current jj workspace is missing")?;
             let commit = tx.repo().store().get_commit_async(id).await?;
-            git::reset_head(
-                tx.repo_mut(),
-                self.workspace.workspace_name(),
-                self.workspace.workspace_root(),
-                &commit,
-            )
-            .await?;
+            let old = self.working_commit().await?;
+            if old.parent_ids() != commit.parent_ids() {
+                self.require_git_checkout_safe()?;
+                git::reset_head(
+                    tx.repo_mut(),
+                    self.workspace.workspace_name(),
+                    self.workspace.workspace_root(),
+                    &commit,
+                )
+                .await?;
+            } else if old.tree().tree_ids_and_labels() != commit.tree().tree_ids_and_labels() {
+                git::update_intent_to_add(
+                    self.repo.as_ref(),
+                    self.workspace.workspace_root(),
+                    &old.tree(),
+                    &commit.tree(),
+                )
+                .await?;
+            }
             let stats = git::export_refs(tx.repo_mut())?;
             for failure in stats.failed_bookmarks {
                 log::warn!("Could not export jj bookmark to Git: {failure:?}");
@@ -415,11 +468,7 @@ impl State {
         )?)
     }
 
-    async fn snapshot(&mut self) -> Result<()> {
-        let mut commit = self.working_commit().await?;
-        let settings = self.workspace.settings().clone();
-        let root = self.workspace.workspace_root().to_path_buf();
-        let colocated = self.colocated();
+    fn snapshot_config(&self) -> Result<SnapshotConfig> {
         let ignores = self.base_ignores()?;
         let HumanByteSize(limit) = self
             .workspace
@@ -450,13 +499,159 @@ impl State {
         };
         let matcher =
             fileset::parse(&mut FilesetDiagnostics::new(), &auto_track, &context)?.to_matcher();
-        let options = SnapshotOptions {
-            base_ignores: ignores,
-            progress: None,
-            start_tracking_matcher: matcher.as_ref(),
-            force_tracking_matcher: &NothingMatcher,
-            max_new_file_size: if limit == 0 { u64::MAX } else { limit },
-        };
+        Ok(SnapshotConfig {
+            ignores,
+            matcher,
+            limit: if limit == 0 { u64::MAX } else { limit },
+        })
+    }
+
+    pub async fn is_dirty(&mut self) -> Result<bool> {
+        let commit = self.working_commit().await?;
+        let config = self.snapshot_config()?;
+        let mut locked = self.workspace.start_working_copy_mutation().await?;
+        let (tree, stats) = locked.locked_wc().snapshot(&config.options()).await?;
+        // Dropping the lock leaves working-copy metadata and Git state unchanged.
+        Ok(!stats.untracked_paths.is_empty()
+            || tree.tree_ids_and_labels()
+                != commit
+                    .parent_tree(self.repo.as_ref())
+                    .await?
+                    .tree_ids_and_labels())
+    }
+
+    fn require_git_checkout_safe(&self) -> Result<()> {
+        if self.colocated() {
+            let repo = git2::Repository::open(self.workspace.workspace_root())?;
+            anyhow::ensure!(repo.state() == git2::RepositoryState::Clean, "Finish or abort the active Git operation before updating this colocated working copy");
+            let parent = repo.head().ok().and_then(|head| head.peel_to_tree().ok());
+            let mut index = repo.index()?;
+            index.read(true)?;
+            anyhow::ensure!(repo.diff_tree_to_index(parent.as_ref(), Some(&index), None)?.deltas().len() == 0, "Git has staged changes; preserve or commit them before updating this colocated working copy");
+        }
+        Ok(())
+    }
+
+    async fn recover_stale(&mut self) -> Result<()> {
+        self.require_git_checkout_safe()?;
+        let target = self.working_commit().await?;
+        let old_op = self.workspace.working_copy().operation_id().clone();
+        match self.workspace.repo_loader().load_operation(&old_op).await {
+            Ok(op) => {
+                // Snapshot against the actual old checkout, then let jj merge
+                // concurrent operation heads and rebase those saved edits.
+                self.repo = self.workspace.repo_loader().load_at(&op).await?;
+                let base = self.working_commit().await?;
+                self.snapshot().await?;
+                let saved = self.working_commit().await?;
+                let loader = self.workspace.repo_loader();
+                let op = jj_lib::op_heads_store::resolve_op_heads(
+                    loader.op_heads_store().as_ref(),
+                    loader.op_store(),
+                    async |heads| -> Result<_, jj_lib::repo::RepoLoaderError> {
+                        let (merged, _) = loader
+                            .merge_operations(
+                                heads,
+                                Some(self.workspace.workspace_name()),
+                                Some("devflow: reconcile workspace edits"),
+                                [],
+                            )
+                            .await?;
+                        Ok(merged.operation().clone())
+                    },
+                )
+                .await?;
+                self.repo = loader.load_at(&op).await?;
+                // Operation merging retains both revisions, but may select
+                // the already-rebased WC and leave the saved edit divergent.
+                // Apply the actual checkout delta explicitly to the target;
+                // jj represents overlapping edits as native tree conflicts.
+                let tree = jj_lib::merged_tree::MergedTree::merge(
+                    jj_lib::merge::Merge::from_removes_adds(
+                        [(base.tree(), "previous checkout".into())],
+                        [
+                            (target.tree(), "updated workspace".into()),
+                            (saved.tree(), "local working-copy edits".into()),
+                        ],
+                    ),
+                )
+                .await?;
+                let mut desired = target;
+                if tree.tree_ids_and_labels() != desired.tree().tree_ids_and_labels()
+                    || self.working_commit().await?.id() != desired.id()
+                {
+                    let mut tx = self.repo.start_transaction();
+                    let recovered =
+                        if tree.tree_ids_and_labels() != desired.tree().tree_ids_and_labels() {
+                            tx.repo_mut()
+                                .rewrite_commit(&desired)
+                                .set_tree(tree)
+                                .write()
+                                .await?
+                        } else {
+                            desired.clone()
+                        };
+                    tx.repo_mut().set_wc_commit(
+                        self.workspace.workspace_name().to_owned(),
+                        recovered.id().clone(),
+                    )?;
+                    tx.repo_mut().rebase_descendants().await?;
+                    self.repo = tx
+                        .commit("devflow: preserve stale working-copy edits")
+                        .await?;
+                    desired = recovered;
+                }
+                if self.colocated() {
+                    let mut tx = self.repo.start_transaction();
+                    git::reset_head(
+                        tx.repo_mut(),
+                        self.workspace.workspace_name(),
+                        self.workspace.workspace_root(),
+                        &desired,
+                    )
+                    .await?;
+                    if tx.repo().has_changes() {
+                        self.repo = tx.commit("devflow: recover Git HEAD").await?;
+                    }
+                }
+                let mut locked = self.workspace.start_working_copy_mutation().await?;
+                anyhow::ensure!(
+                    locked.locked_wc().old_tree().tree_ids_and_labels()
+                        == saved.tree().tree_ids_and_labels(),
+                    "Concurrent jj working-copy update; retry native recovery"
+                );
+                locked.locked_wc().check_out(&desired).await?;
+                locked.finish(self.repo.op_id().clone()).await?;
+            }
+            Err(jj_lib::op_store::OpStoreError::ObjectNotFound { .. }) => {
+                let name = self.workspace.workspace_name().to_owned();
+                let mut locked = self.workspace.start_working_copy_mutation().await?;
+                let (repo, commit) = jj_lib::working_copy::create_and_check_out_recovery_commit(
+                    locked.locked_wc(),
+                    &self.repo,
+                    name,
+                    "Recovered by devflow: previous working-copy operation was unavailable",
+                )
+                .await?;
+                locked.finish(repo.op_id().clone()).await?;
+                self.repo = repo;
+                log::warn!(
+                    "Preserved jj working copy in recovery commit {}",
+                    commit.id().hex()
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
+        self.snapshot().await
+    }
+
+    async fn snapshot(&mut self) -> Result<()> {
+        let mut commit = self.working_commit().await?;
+        let settings = self.workspace.settings().clone();
+        let root = self.workspace.workspace_root().to_path_buf();
+        let colocated = self.colocated();
+        let config = self.snapshot_config()?;
+        let options = config.options();
         let name = self.workspace.workspace_name().to_owned();
         let mut locked = self.workspace.start_working_copy_mutation().await?;
         match WorkingCopyFreshness::check_stale(locked.locked_wc(), &commit, &self.repo).await? {
@@ -470,9 +665,7 @@ impl State {
                     .context("Jujutsu workspace was forgotten")?;
                 commit = self.repo.store().get_commit_async(id).await?;
             }
-            _ => bail!(
-                "Jujutsu working copy is stale; run 'jj workspace update-stale' before retrying"
-            ),
+            _ => return Err(StaleWorkingCopy.into()),
         }
         let (tree, stats) = locked.locked_wc().snapshot(&options).await?;
         self.untracked = !stats.untracked_paths.is_empty();
@@ -483,7 +676,8 @@ impl State {
             let mut tx = self.repo.start_transaction();
             tx.set_is_snapshot(true);
             tx.set_workspace_name(&name);
-            let new = if immutable(&self.repo, &settings, &root, &name, &commit)? {
+            let is_immutable = immutable(&self.repo, &settings, &root, &name, &commit)?;
+            let new = if is_immutable {
                 tx.repo_mut()
                     .new_commit(vec![commit.id().clone()], tree)
                     .write()
@@ -499,7 +693,26 @@ impl State {
                 .set_wc_commit(name.clone(), new.id().clone())?;
             tx.repo_mut().rebase_descendants().await?;
             if colocated {
-                git::reset_head(tx.repo_mut(), &name, &root, &new).await?;
+                if is_immutable {
+                    // Moving to a new checkout requires a deliberate Git reset.
+                    // Refuse while Git owns staged/merge state.
+                    let git_repo = git2::Repository::open(&root)?;
+                    anyhow::ensure!(
+                        git_repo.state() == git2::RepositoryState::Clean,
+                        "Finish the active Git operation before changing immutable jj history"
+                    );
+                    let parent = git_repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+                    anyhow::ensure!(git_repo.diff_tree_to_index(parent.as_ref(), None, None)?.deltas().len() == 0, "Git has staged changes; preserve them before changing immutable jj history");
+                    git::reset_head(tx.repo_mut(), &name, &root, &new).await?;
+                } else {
+                    git::update_intent_to_add(
+                        self.repo.as_ref(),
+                        &root,
+                        &commit.tree(),
+                        &new.tree(),
+                    )
+                    .await?;
+                }
                 git::export_refs(tx.repo_mut())?;
             }
             self.repo = tx.commit("devflow: snapshot working copy").await?;
@@ -508,11 +721,38 @@ impl State {
         Ok(())
     }
 
+    pub async fn verify_removal_generation(
+        &self,
+        name: &str,
+        saved: &str,
+        path: &Path,
+    ) -> Result<()> {
+        if let Some(id) = self.repo.view().get_wc_commit_id(WorkspaceName::new(name)) {
+            let current = self.repo.store().get_commit_async(id).await?;
+            let saved = CommitId::try_from_hex(saved).context("Invalid saved jj cleanup commit")?;
+            let saved = self.repo.store().get_commit_async(&saved).await?;
+            anyhow::ensure!(
+                current.change_id() == saved.change_id(),
+                "jj workspace registration belongs to another generation; cleanup receipt retained"
+            );
+            anyhow::ensure!(
+                self.entries()?
+                    .iter()
+                    .any(|entry| entry.internal_name == name
+                        && super::paths_equal(&entry.path, path)),
+                "jj workspace registration moved to another path; cleanup receipt retained"
+            );
+        }
+        Ok(())
+    }
+
     pub async fn forget(&mut self, name: &str) -> Result<()> {
         let name = WorkspaceName::new(name);
-        let mut tx = self.repo.start_transaction();
-        tx.repo_mut().remove_workspace(name).await?;
-        self.finish(tx, "devflow: forget workspace").await?;
+        if self.repo.view().get_wc_commit_id(name).is_some() {
+            let mut tx = self.repo.start_transaction();
+            tx.repo_mut().remove_workspace(name).await?;
+            self.finish(tx, "devflow: forget workspace").await?;
+        }
         SimpleWorkspaceStore::load(self.workspace.repo_path())?.forget(&[name])?;
         Ok(())
     }

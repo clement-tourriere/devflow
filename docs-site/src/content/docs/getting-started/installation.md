@@ -22,11 +22,14 @@ The script downloads the latest [GitHub release](https://github.com/clement-tour
 
 Supported platforms: Linux (x86_64, arm64) and macOS (Apple Silicon). On anything else, [install from source](#install-from-source).
 
+**v0.8.0 validation:** macOS core workflows and local Docker fixtures were tested. Linux real-project use, including ZFS/XFS/Btrfs storage, is **untested**; automated Linux CI checks run separately. Live Neon, DBLab and Xata accounts are **untested**, and those providers remain experimental. Interactive desktop sessions are also **untested**; desktop compilation and frontend checks passed.
+
 Environment variables to customize the install:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `DEVFLOW_INSTALL_DIR` | `~/.local/bin` | Where the binary is installed |
+| `DEVFLOW_INSTALL_PROXY` | `0` | Set to `1` to install the optional `devflow-proxy` companion too |
 | `DEVFLOW_VERSION` | `latest` | Pin a specific release tag (e.g. `v0.5.0`) |
 
 ## Install from source
@@ -36,6 +39,8 @@ git clone https://github.com/clement-tourriere/devflow.git
 cd devflow
 cargo install --path .
 ```
+
+Install the optional companion from source with `cargo install --path . --no-default-features --features proxy --bin devflow-proxy`.
 
 ## Updating
 

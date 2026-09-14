@@ -64,12 +64,14 @@ export const createWorkspace = (
   workspaceName: string,
   fromWorkspace?: string,
   copyFiles?: string[],
-  copyIgnored?: boolean
+  copyIgnored?: boolean,
+  dataFromWorkspace?: string
 ) =>
   invoke<CreateWorkspaceResult>("create_workspace", {
     projectPath,
     workspaceName,
     fromWorkspace,
+    dataFromWorkspace,
     copyFiles,
     copyIgnored,
   });
@@ -217,7 +219,6 @@ export const discoverDockerContainers = (
   });
 export const generateAgentGuides = (projectPath: string) =>
   invoke<string[]>("generate_agent_guides", { projectPath });
-export const installAgentSkills = generateAgentGuides;
 
 // Hooks
 export const listHooks = (projectPath: string) =>
@@ -249,19 +250,8 @@ export const getCertificateStatus = () =>
   invoke<CertificateStatus>("get_certificate_status");
 
 // Config
-export const getConfigJson = (projectPath: string) =>
-  invoke<import("../types/config").DevflowConfig>("get_config_json", {
-    projectPath,
-  });
-export const saveConfigJson = (
-  projectPath: string,
-  config: import("../types/config").DevflowConfig,
-  original?: import("../types/config").DevflowConfig
-) => invoke<void>("save_config_json", { projectPath, config, original });
 export const getConfigDocument = (projectPath: string) =>
-  invoke<{path: string; format: string; content: string; config: import("../types/config").DevflowConfig}>("get_config_document", {projectPath});
-export const getConfigYaml = (projectPath: string) =>
-  invoke<string>("get_config_yaml", { projectPath });
+  invoke<{path: string; format: string; content: string}>("get_config_document", {projectPath});
 export const saveConfigYaml = (projectPath: string, content: string, original?: string) =>
   invoke<void>("save_config_yaml", { projectPath, content, original });
 export const validateConfigYaml = (content: string, format = "yaml") =>
@@ -309,3 +299,8 @@ export const closeTerminal = (sessionId: string) =>
   invoke<void>("close_terminal", { sessionId });
 
 export const providerDescriptors = () => invoke<import("../types").ProviderDescriptor[]>("provider_descriptors");
+
+export const listBaselines = (projectPath: string) => invoke<Array<{reference: string; service: string; status: string; engine_fingerprint: string | null}>>("list_baselines", {projectPath});
+export const listOperations = (projectPath: string) => invoke<import("../types").WorkspaceOperation[]>("list_operations", {projectPath});
+export const resumeOperation = (projectPath: string, id: string) => invoke<Record<string, unknown>>("resume_operation", {projectPath, id});
+export const cancelOperation = (projectPath: string, id: string) => invoke<import("../types").WorkspaceOperation>("cancel_operation", {projectPath, id});

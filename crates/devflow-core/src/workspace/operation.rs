@@ -10,9 +10,17 @@ pub struct OperationRecord {
     #[serde(default)]
     pub project_id: crate::state::ProjectId,
     #[serde(default)]
+    pub generation: crate::state::ResourceId,
+    #[serde(default)]
+    pub previous_desired: crate::state::control::DesiredState,
+    #[serde(default = "legacy_mutation_started")]
+    pub mutation_started: bool,
+    #[serde(default)]
     pub attempt: u32,
     #[serde(default)]
     pub request: serde_json::Value,
+    #[serde(default)]
+    pub plan: serde_json::Value,
     #[serde(default)]
     pub config_fingerprint: Option<String>,
     #[serde(default)]
@@ -31,6 +39,22 @@ pub struct OperationRecord {
     pub post_create_pending: bool,
     pub completed_phases: Vec<String>,
     pub error: Option<String>,
+}
+fn legacy_mutation_started() -> bool {
+    true
+}
+impl OperationRecord {
+    fn can_cancel_without_effects(&self) -> bool {
+        !self.mutation_started
+            || (self.schema_version < 3
+                && self.kind == "remove"
+                && self.phase == "preflight"
+                && self.status == "failed"
+                && self.steps.iter().all(|s| s.name == "preflight")
+                && self.error.as_ref().is_some_and(|error| {
+                    error.starts_with("Refusing to delete workspace '") && error.contains("':\n")
+                }))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +95,13 @@ pub struct OperationError {
 }
 impl std::fmt::Display for OperationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.operation.status == "cancelled" {
+            return write!(
+                f,
+                "{} (operation {} cancelled before resource changes)",
+                self.message, self.operation.id
+            );
+        }
         write!(
             f,
             "{} (operation {}, phase {}; retry the same command to resume)",
@@ -121,7 +152,11 @@ impl OperationJournal {
         // concurrent creation of dependencies while applying a deletion plan.
         let project_lease = project_policy_lease(
             Path::new(&project),
-            kind.starts_with("cleanup:") || kind == "baseline-remove" || kind == "remove",
+            kind.starts_with("cleanup:")
+                || kind.starts_with("service-resource-delete:")
+                || kind.starts_with("service-resource-destroy:")
+                || kind == "baseline-remove"
+                || kind == "remove",
         )
         .await?;
         let lease = OperationLease::acquire(&root.join(format!("{key}.lock"))).await?;
@@ -140,7 +175,7 @@ impl OperationJournal {
         if !path.exists() && legacy_path.exists() {
             std::fs::rename(legacy_path, &path)?;
         }
-        let previous: Option<OperationRecord> = if path.exists() {
+        let mut previous: Option<OperationRecord> = if path.exists() {
             Some(
                 serde_json::from_slice(&std::fs::read(&path)?)
                     .context("invalid operation journal; refusing to discard recovery intent")?,
@@ -148,6 +183,19 @@ impl OperationJournal {
         } else {
             None
         };
+        let (generation, previous_desired) = state.update_control(Path::new(&project), |c| {
+            let w = c.workspace(workspace);
+            Ok((w.generation.clone(), w.desired.clone()))
+        })?;
+        if previous
+            .as_ref()
+            .is_some_and(|r| !r.generation.0.is_empty() && r.generation != generation)
+        {
+            let mut retired = previous.take().unwrap();
+            retired.status = "cancelled".into();
+            retired.error = Some("workspace resource generation was removed".into());
+            Self::archive(&retired, &project_id)?;
+        }
         if let Some(previous) = previous
             .as_ref()
             .filter(|r| matches!(r.status.as_str(), "ready" | "cancelled"))
@@ -158,7 +206,7 @@ impl OperationJournal {
             previous.filter(|r| !matches!(r.status.as_str(), "ready" | "cancelled"))
         {
             anyhow::ensure!(
-                (previous.schema_version == 1 || previous.schema_version == 2)
+                (1..=3).contains(&previous.schema_version)
                     && (previous.project == project || previous.project_id == project_id)
                     && previous.workspace == workspace
                     && previous.kind == kind,
@@ -169,8 +217,12 @@ impl OperationJournal {
             OperationRecord {
                 schema_version: 2,
                 project_id: project_id.clone(),
+                generation: generation.clone(),
+                previous_desired,
+                mutation_started: false,
                 attempt: 0,
                 request: serde_json::Value::Null,
+                plan: serde_json::Value::Null,
                 config_fingerprint: None,
                 steps: Vec::new(),
                 updated_at: chrono::Utc::now(),
@@ -190,16 +242,15 @@ impl OperationJournal {
         };
         record.project_id = project_id;
         record.project = project.clone();
-        record.schema_version = 2;
+        record.schema_version = 3;
+        record.generation = generation;
         record.attempt += 1;
         state.update_control(Path::new(&project), |control| {
             let workspace = control.workspace(workspace);
             workspace.operation_id = Some(record.id.clone());
-            workspace.desired = if kind == "remove" {
-                crate::state::control::DesiredState::Absent
-            } else {
-                crate::state::control::DesiredState::Present
-            };
+            if kind != "remove" {
+                workspace.desired = crate::state::control::DesiredState::Present;
+            }
             Ok(())
         })?;
         let mut journal = Self {
@@ -374,7 +425,101 @@ impl OperationJournal {
         self.save()
     }
 
+    pub fn start_mutation(&mut self) -> Result<()> {
+        self.record.mutation_started = true;
+        self.save()?;
+        if self.record.kind == "remove" {
+            crate::state::LocalStateManager::new()?.update_control(
+                Path::new(&self.record.project),
+                |c| {
+                    c.workspace(&self.record.workspace).desired =
+                        crate::state::control::DesiredState::Absent;
+                    Ok(())
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Cancel only an operation proven to have stopped before external effects.
+    pub async fn cancel(project: &Path, id: &str) -> Result<OperationRecord> {
+        let project_lease = project_policy_lease(project, true).await?;
+        let record = Self::inspect(project, id)?;
+        if record.status == "cancelled" {
+            return Ok(record);
+        }
+        anyhow::ensure!(record.status != "ready" && record.can_cancel_without_effects(), "This operation may have changed resources; resume it instead of discarding recovery intent");
+        let project_id = crate::state::LocalStateManager::new()?.control(project).id;
+        let key = identity_digest(&[&project_id.0, &record.workspace]);
+        let root = crate::paths::devflow_config_dir()?.join("operations");
+        let lease = OperationLease::acquire(&root.join(format!("{key}.lock"))).await?;
+        let filename = format!("{key}-{}.json", identity_digest(&[&record.kind]));
+        let candidates = [
+            root.join(&project_id.0).join(&filename),
+            root.join(filename),
+            root.join(format!(
+                "{}-{}.json",
+                identity_digest(&[&record.project, &record.workspace]),
+                record.kind
+            )),
+        ];
+        let mut current = None;
+        for path in candidates {
+            if path.try_exists()? {
+                let latest: OperationRecord = serde_json::from_slice(&std::fs::read(&path)?)?;
+                if latest.id == id {
+                    current = Some((path, latest));
+                    break;
+                }
+            }
+        }
+        let (path, record) =
+            current.context("Operation has changed; inspect its current status")?;
+        anyhow::ensure!(
+            record.status != "ready" && record.can_cancel_without_effects(),
+            "Operation changed while cancellation was requested"
+        );
+        let mut journal = Self {
+            record,
+            path,
+            _lease: lease,
+            _project_lease: project_lease,
+            finished: false,
+        };
+        journal.record.mutation_started = false;
+        journal.cancel_without_effects("Cancelled before resource changes")?;
+        Ok(journal.record.clone())
+    }
+
+    fn cancel_without_effects(&mut self, reason: &str) -> Result<()> {
+        anyhow::ensure!(
+            !self.record.mutation_started,
+            "operation has resource effects"
+        );
+        self.record.status = "cancelled".into();
+        self.record.error = Some(reason.into());
+        self.record.updated_at = chrono::Utc::now();
+        self.save()?;
+        crate::state::LocalStateManager::new()?.update_control(
+            Path::new(&self.record.project),
+            |c| {
+                let workspace = c.workspace(&self.record.workspace);
+                if workspace.operation_id.as_deref() == Some(&self.record.id) {
+                    workspace.desired = self.record.previous_desired.clone();
+                    workspace.operation_id = None;
+                }
+                Ok(())
+            },
+        )?;
+        Self::archive(&self.record, &self.record.project_id)?;
+        self.finished = true;
+        Ok(())
+    }
+
     pub fn phase(&mut self, phase: &str) -> Result<()> {
+        if phase != "preflight" {
+            self.record.mutation_started = true;
+        }
         self.record.updated_at = chrono::Utc::now();
         if let Some(step) = self.record.steps.iter_mut().find(|s| s.name == phase) {
             step.attempts += 1;
@@ -469,6 +614,17 @@ impl OperationJournal {
     }
 
     pub fn fail(&mut self, error: anyhow::Error) -> anyhow::Error {
+        if !self.record.mutation_started {
+            if let Err(save_error) = self.cancel_without_effects(&format!("{error:#}")) {
+                log::error!("Could not persist no-effect cancellation: {save_error:#}");
+            } else {
+                return OperationError {
+                    operation: self.record.clone(),
+                    message: format!("{error:#}"),
+                }
+                .into();
+            }
+        }
         self.record.status = "failed".into();
         self.record.error = Some(format!("{error:#}"));
         self.record.updated_at = chrono::Utc::now();

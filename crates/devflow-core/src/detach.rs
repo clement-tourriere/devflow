@@ -12,6 +12,19 @@ use std::path::Path;
 /// (stdin/stdout/stderr → null), and record the child's pid at `pid_path`.
 /// Returns the child pid.
 pub fn spawn_self_detached<S: AsRef<std::ffi::OsStr>>(pid_path: &Path, args: &[S]) -> Result<u32> {
+    let child = spawn_detached(args)?;
+
+    if let Some(parent) = pid_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(pid_path, child.id().to_string())
+        .with_context(|| format!("Failed to write pidfile {}", pid_path.display()))?;
+
+    Ok(child.id())
+}
+
+/// Launch an explicitly requested companion; the child owns its startup receipt.
+pub fn spawn_detached<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Result<std::process::Child> {
     let exe = std::env::current_exe().context("Failed to resolve current executable")?;
     let child = std::process::Command::new(exe)
         .args(args)
@@ -21,13 +34,7 @@ pub fn spawn_self_detached<S: AsRef<std::ffi::OsStr>>(pid_path: &Path, args: &[S
         .spawn()
         .context("Failed to spawn detached process")?;
 
-    if let Some(parent) = pid_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    std::fs::write(pid_path, child.id().to_string())
-        .with_context(|| format!("Failed to write pidfile {}", pid_path.display()))?;
-
-    Ok(child.id())
+    Ok(child)
 }
 
 /// Read the pid recorded at `pid_path`. Returns `None` when the file is

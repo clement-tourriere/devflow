@@ -9,12 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Workspace plans and desktop recovery** — Inspect code/data selections before effects, retain exact selections on retry, and inspect/resume/cancel eligible operations from shared CLI and desktop APIs.
 - **Reusable data** — Versioned, sealed PostgreSQL baselines with recorded data origins, exact engine identities, and dependency-aware removal.
 - **Recovery and cleanup** — Stable resource identities, durable operation inspection/resume, project relocation, previewable retention, workspace pins/expiry, and bounded fingerprinted caches.
 - **Provider contracts** — Versioned capability descriptors and plugin negotiation, with generated desktop choices and provider documentation.
 
 ### Changed
 
+- **Native operations** — Git, jj, Docker, filesystem and ZFS operations use direct libraries. Explicit execution, hooks, terminals and executable providers remain supported.
+- **Proxy distribution** — Package the optional standalone companion and checksums; `DEVFLOW_INSTALL_PROXY=1` installs it alongside the standard CLI.
+- **Validation labels** — Linux real-project environments (including ZFS/XFS/Btrfs), live Neon/DBLab/Xata accounts and interactive desktop sessions are explicitly **untested**. Automated Linux checks remain release gates.
 - **Workspace lifecycle** — CLI, TUI, and desktop share readiness and service operation policy; required background hooks finish before dependent commands, and optional hooks expose completion receipts.
 - **Local data safety** — Recoverable ZFS replacement, cancellation-safe database quiescence, and cross-process port reservations protect concurrent workspace creation and reset.
 - **Desktop and proxy** — Configuration uses a format-preserving raw editor; the optional proxy runs as a companion with one runtime owner.
@@ -28,6 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Release readiness** — Added `devflow doctor --strict`, `devflow service doctor --strict`, and `scripts/release-check.sh` for CI/agent health gates and local release-candidate verification.
 - **Actionable diagnostics** — Doctor JSON, GUI, and TUI surfaces now include aggregate summaries and suggested next steps for failed checks.
 - **First-run onboarding** — `devflow init` now reports structured onboarding next steps for services, hooks, agent guide generation, strict doctor validation, and first workspace creation.
+
+### Fixed
+
+- Preserve exact baseline generations and engine images through recreation, nested descendants and reset; reject incompatible existing containers.
+- Preserve Git staging/merge state during jj inspection and recover stale jj workspaces without losing local edits.
+- Keep failed removal and project destruction recoverable, confine payload writes, and validate destination cache inputs before reuse.
+- Record failed/concurrent executions truthfully, enforce controller ownership, and preserve existing project hooks during installation.
 
 ### Removed
 

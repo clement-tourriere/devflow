@@ -3,65 +3,13 @@
 //! configured with `type: shared`) running and reconciles managed process
 //! desired state plus `watch`/`retry` behavior.
 //!
-//! It reuses the same detached-spawn + pidfile pattern as the proxy. The
+//! Foreground and detached starts share a verified owner lease. The
 //! reconcile loop runs service engine reconciliation plus process desired-state,
 //! watch, and retry reconciliation.
 
-use std::path::PathBuf;
-use std::time::Duration;
-
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-
+use devflow_core::controller::{self, status_path, DaemonStatus};
 const DEFAULT_INTERVAL_SECS: u64 = 30;
-
-fn devflow_config_dir() -> Result<PathBuf> {
-    let dir = devflow_core::paths::devflow_config_dir()?;
-    std::fs::create_dir_all(&dir).ok();
-    Ok(dir)
-}
-
-fn pid_path() -> Result<PathBuf> {
-    Ok(devflow_config_dir()?.join("daemon.pid"))
-}
-
-fn status_path() -> Result<PathBuf> {
-    Ok(devflow_config_dir()?.join("daemon-status.json"))
-}
-
-#[derive(Serialize, Deserialize, Default)]
-struct DaemonStatus {
-    last_reconcile: Option<String>,
-    interval_secs: u64,
-    projects: usize,
-    engines_total: usize,
-    engines_running: usize,
-    processes_reconciled: usize,
-    processes_failed: usize,
-    detail: Vec<DaemonEngineLine>,
-    process_detail: Vec<DaemonProcessLine>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct DaemonEngineLine {
-    project: String,
-    service: String,
-    provider: String,
-    running: bool,
-}
-
-#[derive(Serialize, Deserialize)]
-struct DaemonProcessLine {
-    project: String,
-    workspace: String,
-    process: String,
-    action: String,
-    success: bool,
-}
-
-fn read_pid() -> Option<i32> {
-    devflow_core::detach::read_pid(&pid_path().ok()?)
-}
 
 pub(super) async fn handle_daemon_command(
     action: super::DaemonCommands,
@@ -75,47 +23,46 @@ pub(super) async fn handle_daemon_command(
         } => {
             let interval = interval.unwrap_or(DEFAULT_INTERVAL_SECS).max(1);
 
-            // Refuse to double-start.
-            if !once && !foreground {
-                if let Some(pid) = read_pid() {
-                    if devflow_core::detach::process_alive(pid) {
-                        if json_output {
-                            println!(
-                                "{}",
-                                serde_json::json!({"error": "already_running", "pid": pid})
-                            );
-                        } else {
-                            anyhow::bail!(
-                                "Daemon already running (pid {}). Stop it first with: devflow daemon stop",
-                                pid
-                            );
-                        }
-                        return Ok(());
-                    }
-                }
-            }
-
             if once {
-                let status = reconcile_once(interval).await?;
+                let status = controller::run_once(interval).await?;
                 print_status(&status, json_output);
                 return Ok(());
             }
 
             if foreground {
-                run_loop(interval).await
+                controller::run_loop(interval).await
             } else {
                 // Detach: re-exec ourselves in foreground mode in the background.
-                let pid = devflow_core::detach::spawn_self_detached(
-                    &pid_path()?,
-                    &[
-                        "daemon",
-                        "start",
-                        "--foreground",
-                        "--interval",
-                        &interval.to_string(),
-                    ],
-                )
+                let mut child = devflow_core::detach::spawn_detached(&[
+                    "daemon",
+                    "start",
+                    "--foreground",
+                    "--interval",
+                    &interval.to_string(),
+                ])
                 .context("Failed to spawn daemon process")?;
+                let pid = child.id();
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    if controller::owner()
+                        .ok()
+                        .flatten()
+                        .is_some_and(|owner| owner.pid == pid)
+                    {
+                        break;
+                    }
+                    if let Some(status) = child.try_wait()? {
+                        anyhow::bail!("Controller startup failed ({status}); another process may own its lease");
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        anyhow::bail!(
+                            "Controller did not claim its lease before the startup deadline"
+                        );
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
                 if json_output {
                     println!(
                         "{}",
@@ -131,7 +78,7 @@ pub(super) async fn handle_daemon_command(
             }
         }
         super::DaemonCommands::Stop => {
-            if let Some(pid) = devflow_core::detach::stop(&pid_path()?)? {
+            if let Some(pid) = controller::stop().await? {
                 if json_output {
                     println!("{}", serde_json::json!({"status": "stopped", "pid": pid}));
                 } else {
@@ -140,12 +87,13 @@ pub(super) async fn handle_daemon_command(
             } else if json_output {
                 println!("{}", serde_json::json!({"status": "not_running"}));
             } else {
-                println!("Controller daemon is not running (no pidfile).");
+                println!("Controller daemon is not running.");
             }
             Ok(())
         }
         super::DaemonCommands::Status => {
-            let running = devflow_core::detach::pidfile_alive(&pid_path()?);
+            let owner = controller::owner()?;
+            let running = owner.is_some();
             let status: DaemonStatus = std::fs::read_to_string(status_path()?)
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
@@ -155,7 +103,7 @@ pub(super) async fn handle_daemon_command(
                     "{}",
                     serde_json::json!({
                         "running": running,
-                        "pid": read_pid(),
+                        "pid": owner.as_ref().map(|identity| identity.pid),
                         "last_reconcile": status.last_reconcile,
                         "projects": status.projects,
                         "engines_running": status.engines_running,
@@ -198,93 +146,6 @@ pub(super) async fn handle_daemon_command(
                 }
             }
             Ok(())
-        }
-    }
-}
-
-/// Run a single reconcile pass and persist the status file.
-async fn reconcile_once(interval: u64) -> Result<DaemonStatus> {
-    let results = devflow_core::services::factory::reconcile_all_projects().await;
-    let process_results = devflow_core::processes::reconcile_all_projects_processes().await;
-
-    let mut detail = Vec::new();
-    let mut total = 0;
-    let mut running = 0;
-    for pr in &results {
-        for e in &pr.engines {
-            total += 1;
-            if e.running {
-                running += 1;
-            }
-            detail.push(DaemonEngineLine {
-                project: pr.project.clone(),
-                service: e.service_name.clone(),
-                provider: e.provider.clone(),
-                running: e.running,
-            });
-        }
-    }
-
-    let process_detail: Vec<DaemonProcessLine> = process_results
-        .iter()
-        .map(|p| DaemonProcessLine {
-            project: p.project.clone(),
-            workspace: p.workspace.clone(),
-            process: p.process.clone(),
-            action: p.action.clone(),
-            success: p.success,
-        })
-        .collect();
-    let processes_reconciled = process_detail.len();
-    let processes_failed = process_detail.iter().filter(|p| !p.success).count();
-
-    let status = DaemonStatus {
-        // chrono is available via devflow-core's re-exports; format RFC3339.
-        last_reconcile: Some(now_rfc3339()),
-        interval_secs: interval,
-        projects: results.len(),
-        engines_total: total,
-        engines_running: running,
-        processes_reconciled,
-        processes_failed,
-        detail,
-        process_detail,
-    };
-
-    if let Ok(path) = status_path() {
-        if let Ok(json) = serde_json::to_string_pretty(&status) {
-            let _ = std::fs::write(path, json);
-        }
-    }
-    Ok(status)
-}
-
-fn now_rfc3339() -> String {
-    chrono::Utc::now().to_rfc3339()
-}
-
-/// The long-running reconcile loop. Reconciles immediately, then every
-/// `interval` seconds, until SIGINT/SIGTERM.
-async fn run_loop(interval: u64) -> Result<()> {
-    log::info!("Controller daemon starting (reconcile every {}s)", interval);
-    loop {
-        match reconcile_once(interval).await {
-            Ok(s) => log::info!(
-                "Reconciled {} project(s): {}/{} engines running, {} process action(s)",
-                s.projects,
-                s.engines_running,
-                s.engines_total,
-                s.processes_reconciled
-            ),
-            Err(e) => log::warn!("Reconcile failed: {e:#}"),
-        }
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(interval)) => {}
-            _ = tokio::signal::ctrl_c() => {
-                log::info!("Controller daemon shutting down");
-                let _ = std::fs::remove_file(pid_path()?);
-                return Ok(());
-            }
         }
     }
 }

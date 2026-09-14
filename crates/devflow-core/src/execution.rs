@@ -1,4 +1,5 @@
 //! Typed command execution shared by CLI and desktop callers.
+pub mod records;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +78,7 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize)]
 pub struct ExecutionOutput {
     pub workspace: String,
+    pub execution_id: String,
     pub service_key: String,
     pub command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -125,24 +127,9 @@ pub async fn execute_in_workspace(
         "workspace setup needs attention; resume its pending operation before executing a command"
     );
 
-    // Record execution state. Derive the project dir the same way as every
-    // sibling command so the service key resolves against the same project
-    // identity (cwd first, then the config file's directory).
-    let state_project_dir = project_dir.to_path_buf();
     let service_key = LocalStateManager::new()?
-        .resolve_workspace_service_key_by_dir(&state_project_dir, workspace_name)?;
-    {
-        if let Ok(mut state) = LocalStateManager::new() {
-            if let Some(mut ws) = state.get_workspace_by_dir(&state_project_dir, workspace_name) {
-                ws.executed_command = Some(full_cmd.clone());
-                ws.execution_status = Some(if detach { "detached" } else { "running" }.to_string());
-                ws.executed_at = Some(chrono::Utc::now());
-                if let Err(e) = state.register_workspace_by_dir(&state_project_dir, ws) {
-                    log::warn!("Failed to record execution state: {}", e);
-                }
-            }
-        }
-    }
+        .resolve_workspace_service_key_by_dir(project_dir, workspace_name)?;
+    let mut execution = records::Guard::new(project_dir, workspace_name, &work_dir, spec)?;
 
     if detach {
         // Detached/interactive execution via configured multiplexer
@@ -194,18 +181,31 @@ pub async fn execute_in_workspace(
 
         let project_key =
             crate::services::ownership::identity_digest(&[&config.resource_project_identity()]);
-        let session = format!("devflow-{}-{}", &project_key[..12], service_key);
+        let session = format!(
+            "devflow-{}-{}-{}",
+            &project_key[..12],
+            service_key,
+            &execution.record.id[..8]
+        );
+        execution.record.session = Some(session.clone());
+        if is_interactive {
+            execution.record.command = CommandSpec::Program {
+                program: std::env::var("SHELL").unwrap_or_else(|_| "sh".into()),
+                args: vec![],
+            };
+        }
+        execution.save()?;
+        anyhow::ensure!(template.contains("{cmd}"), "execute.detach_command must include {{cmd}} so the session can report its execution lifecycle");
+        let runner = CommandSpec::Program {
+            program: std::env::current_exe()?.display().to_string(),
+            args: vec!["execution-run".into(), execution.path.display().to_string()],
+        }
+        .shell_command();
 
-        // Build the {cmd} replacement
-        let cmd_replacement = if is_interactive {
-            String::new()
-        } else if template.contains("sh -c") {
-            // Custom template already includes sh -c — pass raw command
-            let escaped = full_cmd.replace('\'', "'\\''");
-            format!("'{}'", escaped)
+        let cmd_replacement = if template.contains("sh -c") {
+            shell_quote(&runner)
         } else {
-            let escaped = full_cmd.replace('\'', "'\\''");
-            format!("sh -c '{}'", escaped)
+            format!("sh -c {}", shell_quote(&runner))
         };
 
         let expanded = template
@@ -250,29 +250,46 @@ pub async fn execute_in_workspace(
             )
         };
 
-        if !status.success() && !json_output {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let handoff = loop {
+            let current = execution.read()?;
+            if !matches!(current.state, records::ExecutionState::Starting) {
+                execution.transfer();
+                break Some(current);
+            }
+            if !status.success() || tokio::time::Instant::now() >= deadline {
+                break execution.cancel_start(status.code().filter(|c| *c != 0).unwrap_or(-1))?;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        };
+        let detached = handoff.is_some();
+        let exit_code = handoff
+            .as_ref()
+            .and_then(|record| record.exit_code)
+            .or_else(|| (!detached).then_some(status.code().filter(|c| *c != 0).unwrap_or(-1)));
+        let stderr = if status.success() && !detached {
+            Some("Detached launcher exited without starting the execution runner; check execute.detach_command".into())
+        } else {
+            stderr
+        };
+        if !detached && !json_output {
             anyhow::bail!(
-                "Multiplexer command failed with exit code: {}",
-                status.code().unwrap_or(-1)
+                "{}",
+                stderr
+                    .as_deref()
+                    .unwrap_or("Failed to launch detached execution")
             );
         }
 
         Ok(ExecutionOutput {
             workspace: workspace_name.to_string(),
+            execution_id: execution.record.id.clone(),
             service_key,
             command: full_cmd,
             session: Some(session),
             worktree: work_dir.display().to_string(),
-            detached: true,
-            // In --json mode a failed multiplexer launch is reported through
-            // the composed document (mirroring the foreground path) instead
-            // of bailing before any JSON reaches stdout — attach-style
-            // multiplexers (zellij) legitimately fail without a tty there.
-            exit_code: if status.success() {
-                None
-            } else {
-                Some(status.code().unwrap_or(-1))
-            },
+            detached,
+            exit_code,
             stdout,
             stderr,
         })
@@ -290,40 +307,8 @@ pub async fn execute_in_workspace(
             .env("DEVFLOW_WORKSPACE", workspace_name)
             .env("DEVFLOW_WORKSPACE_KEY", &service_key)
             .env("DEVFLOW_BRANCH", workspace_name);
-        let (status, stdout, stderr) = if json_output {
-            let output = command
-                .output()
-                .await
-                .context("Failed to execute command")?;
-            let stderr = captured_text(&output.stderr);
-            if let Some(ref diagnostics) = stderr {
-                eprint!("{diagnostics}");
-            }
-            (output.status, captured_text(&output.stdout), stderr)
-        } else {
-            (
-                command
-                    .status()
-                    .await
-                    .context("Failed to execute command")?,
-                None,
-                None,
-            )
-        };
-
-        // Update state on completion
-        let execution_status = if status.success() { "done" } else { "failed" };
-        {
-            let project_dir = project_dir.to_path_buf();
-            if let Ok(mut state_mgr) = LocalStateManager::new() {
-                if let Some(mut ws) = state_mgr.get_workspace_by_dir(&project_dir, workspace_name) {
-                    ws.execution_status = Some(execution_status.to_string());
-                    if let Err(e) = state_mgr.register_workspace_by_dir(&project_dir, ws) {
-                        log::warn!("Failed to update execution state: {}", e);
-                    }
-                }
-            }
-        }
+        let (status, stdout, stderr) =
+            run_recorded(&mut command, &mut execution, json_output).await?;
 
         if !status.success() && !json_output {
             anyhow::bail!(
@@ -343,6 +328,7 @@ pub async fn execute_in_workspace(
 
         Ok(ExecutionOutput {
             workspace: workspace_name.to_string(),
+            execution_id: execution.record.id.clone(),
             service_key,
             command: full_cmd,
             session: None,
@@ -355,6 +341,66 @@ pub async fn execute_in_workspace(
     }
 }
 
+async fn run_recorded(
+    command: &mut tokio::process::Command,
+    execution: &mut records::Guard,
+    capture: bool,
+) -> Result<(std::process::ExitStatus, Option<String>, Option<String>)> {
+    execution.claim()?;
+    command.kill_on_drop(true);
+    if capture {
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            execution.finish(-1)?;
+            return Err(error).context("Failed to execute command");
+        }
+    };
+    execution.record.child = child
+        .id()
+        .and_then(crate::process_identity::ProcessIdentity::read);
+    execution.save()?;
+    let result = if capture {
+        let output = child.wait_with_output().await?;
+        let stderr = captured_text(&output.stderr);
+        if let Some(text) = &stderr {
+            eprint!("{text}");
+        }
+        (output.status, captured_text(&output.stdout), stderr)
+    } else {
+        (child.wait().await?, None, None)
+    };
+    execution.finish(result.0.code().unwrap_or(-1))?;
+    Ok(result)
+}
+
+/// Entry point used inside a detached terminal session. The record owns its
+/// exact argument vector and workdir; there is no internal command wrapper.
+pub async fn run_saved(path: &std::path::Path) -> Result<i32> {
+    let mut execution = records::Guard::open(path)?;
+    anyhow::ensure!(
+        matches!(execution.record.state, records::ExecutionState::Starting),
+        "Execution has already been claimed or completed"
+    );
+    let mut command = execution.record.command.command();
+    command
+        .current_dir(&execution.record.workdir)
+        .env("DEVFLOW_WORKSPACE", &execution.record.workspace);
+    let key = LocalStateManager::new()?.resolve_workspace_service_key_by_dir(
+        &execution.record.project,
+        &execution.record.workspace,
+    )?;
+    command
+        .env("DEVFLOW_WORKSPACE_KEY", key)
+        .env("DEVFLOW_BRANCH", &execution.record.workspace);
+    let (status, _, _) = run_recorded(&mut command, &mut execution, false).await?;
+    Ok(status.code().unwrap_or(-1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::ExecutionOutput;
@@ -363,6 +409,7 @@ mod tests {
     fn execution_output_preserves_the_previous_conditional_fields() {
         let foreground = serde_json::to_value(ExecutionOutput {
             workspace: "feature/auth".into(),
+            execution_id: "fixture".into(),
             service_key: "feature_auth-abc123".into(),
             command: "cargo test".into(),
             session: None,
@@ -381,6 +428,7 @@ mod tests {
 
         let detached = serde_json::to_value(ExecutionOutput {
             workspace: "feature/auth".into(),
+            execution_id: "fixture".into(),
             service_key: "feature_auth-abc123".into(),
             command: "codex".into(),
             session: Some("feature_auth-abc123".into()),

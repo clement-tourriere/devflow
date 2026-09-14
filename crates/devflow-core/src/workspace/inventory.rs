@@ -382,6 +382,7 @@ pub async fn build_workspace_inventory(
         .filter_map(|w| w.workspace.as_deref().map(|name| (name, w)))
         .collect();
 
+    let executions = crate::execution::records::list(project_dir)?;
     let mut nodes = Vec::with_capacity(registry.len());
     for workspace in registry {
         let canonical_service_key = crate::config::workspace_service_key(&workspace.name);
@@ -451,6 +452,30 @@ pub async fn build_workspace_inventory(
             .get(&workspace.name)
             .cloned()
             .unwrap_or_default();
+        let execution = executions
+            .iter()
+            .find(|execution| execution.workspace == workspace.name && execution.active())
+            .or_else(|| {
+                executions
+                    .iter()
+                    .find(|execution| execution.workspace == workspace.name)
+            });
+        let execution_status = execution.map(|execution| {
+            match execution.state {
+                crate::execution::records::ExecutionState::Starting
+                | crate::execution::records::ExecutionState::Running => {
+                    if execution.session.is_some() {
+                        "detached"
+                    } else {
+                        "running"
+                    }
+                }
+                crate::execution::records::ExecutionState::Exited => "done",
+                crate::execution::records::ExecutionState::Failed => "failed",
+                crate::execution::records::ExecutionState::Interrupted => "interrupted",
+            }
+            .to_owned()
+        });
         nodes.push(WorkspaceNode {
             control,
             children: children.remove(&workspace.name).unwrap_or_default(),
@@ -459,8 +484,14 @@ pub async fn build_workspace_inventory(
             worktree_path: path,
             health: health.to_string(),
             created_at: workspace.created_at.to_rfc3339(),
-            executed_command: workspace.executed_command,
-            execution_status: workspace.execution_status,
+            executed_command: execution
+                .map(|execution| execution.command.shell_command())
+                .or(workspace.executed_command),
+            execution_status: execution_status.or_else(|| {
+                workspace
+                    .execution_status
+                    .filter(|status| !matches!(status.as_str(), "running" | "detached"))
+            }),
             services,
             processes,
             name: workspace.name,

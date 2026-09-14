@@ -1,3 +1,4 @@
+pub mod application;
 pub mod config;
 pub mod hooks;
 pub mod processes;

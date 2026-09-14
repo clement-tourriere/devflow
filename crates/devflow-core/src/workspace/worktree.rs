@@ -90,70 +90,79 @@ pub fn create_worktree_with_files(
     copy_files_override: Option<&[String]>,
     copy_ignored_override: Option<bool>,
 ) -> Result<WorktreeSetupResult> {
-    // Check for existing worktree first
-    if let Some(existing_path) = vcs.worktree_path(workspace_name)? {
-        let resolved = std::fs::canonicalize(&existing_path).unwrap_or(existing_path);
-        crate::cache::materialize(
-            config,
-            &vcs.main_worktree_dir()
-                .unwrap_or_else(|| project_dir.to_path_buf()),
-            &resolved,
-        )?;
-        return Ok(WorktreeSetupResult {
-            path: resolved,
-            created: false,
-        });
-    }
+    create_worktree_with_files_at(
+        vcs,
+        config,
+        project_dir,
+        workspace_name,
+        copy_files_override,
+        copy_ignored_override,
+        &resolve_worktree_path(config, project_dir, workspace_name),
+    )
+}
 
-    // Resolve target path
-    let wt_path = resolve_worktree_path(config, project_dir, workspace_name);
-
-    // Create the worktree via git2 (checkout of tracked files only; libgit2's
-    // single-threaded checkout can still take a while on large repos)
-    let checkout_started = std::time::Instant::now();
-    vcs.create_worktree(workspace_name, &wt_path)
-        .with_context(|| {
-            format!(
-                "Failed to create worktree for workspace '{}'",
-                workspace_name
-            )
-        })?;
-    log::debug!(
-        "Created worktree checkout at '{}' in {:.2?}",
-        wt_path.display(),
-        checkout_started.elapsed()
-    );
+pub(crate) fn create_worktree_with_files_at(
+    vcs: &dyn VcsProvider,
+    config: &Config,
+    project_dir: &Path,
+    workspace_name: &str,
+    copy_files_override: Option<&[String]>,
+    copy_ignored_override: Option<bool>,
+    planned_path: &Path,
+) -> Result<WorktreeSetupResult> {
+    let (wt_path, created) = if let Some(path) = vcs.worktree_path(workspace_name)? {
+        vcs.prepare_worktree(&path)?;
+        (path, false)
+    } else {
+        let path = planned_path.to_path_buf();
+        vcs.create_worktree(workspace_name, &path)
+            .with_context(|| {
+                format!("Failed to create worktree for workspace '{workspace_name}'")
+            })?;
+        (path, true)
+    };
 
     // Copy configured files from main worktree
     let main_dir = vcs
         .main_worktree_dir()
         .unwrap_or_else(|| project_dir.to_path_buf());
-    copy_worktree_payload(
-        Some(vcs),
-        config,
-        &main_dir,
-        &wt_path,
-        copy_files_override,
-        copy_ignored_override,
-    );
-
+    if main_dir.canonicalize()? != wt_path.canonicalize()? {
+        copy_worktree_payload(
+            Some(vcs),
+            config,
+            &main_dir,
+            &wt_path,
+            copy_files_override,
+            copy_ignored_override,
+        )?;
+    }
     crate::cache::materialize(config, &main_dir, &wt_path)?;
     let resolved = std::fs::canonicalize(&wt_path).unwrap_or(wt_path);
     Ok(WorktreeSetupResult {
         path: resolved,
-        created: true,
+        created,
     })
 }
 
-/// Copy the configured worktree payload from `main_dir` into `wt_path`:
-/// `worktree.copy_files`, AI tool config dirs (`copy_ai_configs` +
-/// `extra_ai_dirs`), and gitignored entries (`copy_ignored`). Existing
-/// destination entries are never overwritten, so this is safe both for
-/// freshly created worktrees and for adopting manually created ones (the git
-/// hook path — which runs on every checkout, so a no-op invocation must stay
-/// cheap: the CoW probe only runs when something will actually be copied).
-/// `vcs` is only needed for `copy_ignored`; pass `None` to skip that phase
-/// gracefully. Returns the number of entries copied.
+/// Copy only explicitly configured payloads through confined directory handles.
+#[derive(Debug, serde::Serialize)]
+pub struct PayloadCopyEntry {
+    pub path: PathBuf,
+    pub disposition: crate::files::CopyDisposition,
+}
+#[derive(Debug, Default, serde::Serialize)]
+pub struct PayloadCopyResult {
+    pub entries: Vec<PayloadCopyEntry>,
+}
+impl PayloadCopyResult {
+    pub fn copied(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.disposition == crate::files::CopyDisposition::Copied)
+            .count()
+    }
+}
+
 pub fn copy_worktree_payload(
     vcs: Option<&dyn VcsProvider>,
     config: &Config,
@@ -161,193 +170,69 @@ pub fn copy_worktree_payload(
     wt_path: &Path,
     copy_files_override: Option<&[String]>,
     copy_ignored_override: Option<bool>,
-) -> usize {
-    use rayon::prelude::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let wt_config = &config.worktree;
-    let copied = AtomicUsize::new(0);
-
-    // Use overrides if provided, otherwise fall back to config values.
-    let files_to_copy = copy_files_override.unwrap_or(&wt_config.copy_files);
-    let copy_ignored = copy_ignored_override.unwrap_or(wt_config.copy_ignored);
-
-    // Plan the cheap phases first so a no-op run (every re-checkout in an
-    // already-populated worktree) does no probing and no VCS work.
-    let planned_files: Vec<&String> = files_to_copy
+) -> Result<PayloadCopyResult> {
+    let source = crate::files::WorkspaceFiles::open(main_dir)?;
+    let target = crate::files::WorkspaceFiles::open(wt_path)?;
+    let mut paths: Vec<PathBuf> = copy_files_override
+        .unwrap_or(&config.worktree.copy_files)
         .iter()
-        .filter(|entry| {
-            let src = main_dir.join(entry.as_str());
-            let dst = wt_path.join(entry.as_str());
-            src.exists() && !dst.exists()
-        })
+        .map(PathBuf::from)
         .collect();
-
-    let planned_ai_dirs: Vec<&str> = if wt_config.copy_ai_configs {
-        crate::config::AI_TOOL_DIRS
-            .iter()
-            .copied()
-            .chain(wt_config.extra_ai_dirs.iter().map(|s| s.as_str()))
-            .filter(|dir_name| main_dir.join(dir_name).is_dir() && !wt_path.join(dir_name).exists())
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    if planned_files.is_empty() && planned_ai_dirs.is_empty() && !copy_ignored {
-        return 0;
+    if config.worktree.copy_ai_configs {
+        log::warn!("worktree.copy_ai_configs is deprecated; list the required files in worktree.copy_files");
+        paths.extend(crate::config::AI_TOOL_DIRS.iter().map(PathBuf::from));
+        paths.extend(config.worktree.extra_ai_dirs.iter().map(PathBuf::from));
     }
-    check_cow_support(main_dir, wt_path, copy_ignored);
-
-    // Copy explicitly listed files/directories using parallel reflink.
-    let copy_started = std::time::Instant::now();
-    planned_files.par_iter().for_each(|entry| {
-        let src = main_dir.join(entry.as_str());
-        let dst = wt_path.join(entry.as_str());
-        if src.is_dir() {
-            reflink_copy_dir(&src, &dst);
-            copied.fetch_add(1, Ordering::Relaxed);
-        } else if src.is_file() {
-            if let Some(parent) = dst.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            if let Err(e) = reflink_copy::reflink_or_copy(&src, &dst) {
-                log::warn!("Failed to copy '{}' to worktree: {}", entry, e);
-            } else {
-                copied.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-    });
-    if !planned_files.is_empty() {
-        log::debug!(
-            "Copied {} configured file(s) into worktree in {:.2?}",
-            planned_files.len(),
-            copy_started.elapsed()
+    if copy_ignored_override.unwrap_or(config.worktree.copy_ignored) {
+        log::warn!("worktree.copy_ignored is deprecated; declare input-keyed caches for reusable build artifacts");
+        paths.extend(
+            vcs.context("copy_ignored requires a VCS provider")?
+                .list_ignored_entries()?,
         );
     }
-
-    // Copy AI tool config directories (.claude, .cursor, etc.) if enabled.
-    if !planned_ai_dirs.is_empty() {
-        let ai_copy_started = std::time::Instant::now();
-        planned_ai_dirs.par_iter().for_each(|dir_name| {
-            let src = main_dir.join(dir_name);
-            let dst = wt_path.join(dir_name);
-            reflink_copy_dir(&src, &dst);
-            copied.fetch_add(1, Ordering::Relaxed);
-        });
-        log::debug!(
-            "Copied AI tool config dirs into worktree in {:.2?}",
-            ai_copy_started.elapsed()
-        );
+    paths.sort();
+    paths.dedup();
+    let mut result = PayloadCopyResult::default();
+    for path in paths {
+        let disposition = target
+            .copy_entry_from(&source, &path)
+            .with_context(|| format!("Failed to copy worktree payload {}", path.display()))?;
+        result.entries.push(PayloadCopyEntry { path, disposition });
     }
-
-    // Copy gitignored entries (node_modules, .venv, target, etc.) from the
-    // main worktree using parallel reflink.
-    //
-    // Uses list_ignored_entries() which returns collapsed directory-level
-    // entries (e.g. "node_modules" as one entry) instead of enumerating
-    // every file inside each ignored directory.
-    let Some(vcs) = vcs else {
-        if copy_ignored {
-            log::warn!("copy_ignored is enabled but no VCS provider is available; skipping");
-        }
-        return copied.load(Ordering::Relaxed);
-    };
-    if copy_ignored {
-        let ignored_copy_started = std::time::Instant::now();
-        match vcs.list_ignored_entries() {
-            Ok(ignored_entries) => {
-                let entry_count = ignored_entries.len();
-                ignored_entries.par_iter().for_each(|rel_path| {
-                    let src = main_dir.join(rel_path);
-                    let dst = wt_path.join(rel_path);
-                    if !src.exists() || dst.exists() {
-                        return;
-                    }
-                    if src.is_dir() {
-                        reflink_copy_dir(&src, &dst);
-                        copied.fetch_add(1, Ordering::Relaxed);
-                    } else if src.is_file() {
-                        if let Some(parent) = dst.parent() {
-                            std::fs::create_dir_all(parent).ok();
-                        }
-                        if let Err(e) = reflink_copy::reflink_or_copy(&src, &dst) {
-                            log::warn!(
-                                "Failed to copy ignored entry '{}': {}",
-                                rel_path.display(),
-                                e
-                            );
-                        } else {
-                            copied.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-                });
-                log::debug!(
-                    "Copied {} gitignored entrie(s) into worktree in {:.2?}",
-                    entry_count,
-                    ignored_copy_started.elapsed()
-                );
-            }
-            Err(e) => {
-                log::warn!("Failed to enumerate ignored entries: {}", e);
-            }
-        }
-    }
-
-    copied.load(Ordering::Relaxed)
-}
-
-/// Probe copy-on-write support between the main worktree and the new worktree
-/// and warn when file copies will degrade to full byte copies.
-///
-/// Native block cloning falls back to a full copy on filesystems without
-/// reflink support (e.g. ext4), so
-/// without this probe the user never learns why worktree creation is slow.
-fn check_cow_support(main_dir: &Path, wt_path: &Path, copy_ignored: bool) {
-    use crate::vcs::cow_worktree::{detect_cow_capability_cross, CowCapability};
-
-    if !cfg!(any(target_os = "linux", target_os = "macos")) {
-        return;
-    }
-
-    match detect_cow_capability_cross(main_dir, wt_path) {
-        CowCapability::None => {
-            let hint = if copy_ignored {
-                " Large gitignored directories (node_modules, target, .venv) are copied in full; \
-                 consider setting 'worktree.copy_ignored: false' or using a CoW filesystem \
-                 (Btrfs/XFS on Linux, APFS on macOS)."
-            } else {
-                " Consider a CoW filesystem (Btrfs/XFS on Linux, APFS on macOS)."
-            };
-            log::warn!(
-                "No copy-on-write support between '{}' and '{}': worktree file copies will be \
-                 full copies.{}",
-                main_dir.display(),
-                wt_path.display(),
-                hint
-            );
-        }
-        capability => {
-            log::debug!("Worktree file copies will use CoW ({:?})", capability);
-        }
-    }
-}
-
-/// Copy a workspace payload using native block cloning when available.
-/// Non-fatal errors are reported to the caller's log.
-pub fn reflink_copy_dir(src: &Path, dst: &Path) {
-    if let Err(error) = crate::fs_copy::copy_directory(src, dst, crate::fs_copy::CopyMode::Cow) {
-        log::warn!(
-            "Failed to copy directory '{}' to '{}': {:#}",
-            src.display(),
-            dst.display(),
-            error
-        );
-    }
+    Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn payload_rejects_symlink_escapes_and_reports_special_file_failure() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(source.join("payload")).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(source.join("payload/secret"), "secret").unwrap();
+        std::os::unix::fs::symlink(&outside, target.join("payload")).unwrap();
+        let mut config = Config::default();
+        config.worktree.copy_files = vec!["payload/secret".into()];
+        assert!(copy_worktree_payload(None, &config, &source, &target, None, None).is_err());
+        assert!(!outside.join("secret").exists());
+        std::fs::write(source.join(".env"), "SECRET=fixture").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.env"), target.join(".env")).unwrap();
+        config.worktree.copy_files = vec![".env".into()];
+        assert!(copy_worktree_payload(None, &config, &source, &target, None, None).is_err());
+        assert!(!outside.join("secret.env").exists());
+        let _socket =
+            std::os::unix::net::UnixListener::bind(source.join("payload/socket")).unwrap();
+        std::fs::remove_file(target.join("payload")).unwrap();
+        config.worktree.copy_files = vec!["payload".into()];
+        assert!(copy_worktree_payload(None, &config, &source, &target, None, None).is_err());
+        assert!(!target.join("payload").exists());
+    }
     use super::*;
     use crate::vcs::{GitRepository, VcsProvider};
 
@@ -439,7 +324,14 @@ mod tests {
         std::fs::write(src.join("bin/python-real"), "python").unwrap();
         std::os::unix::fs::symlink("python-real", src.join("bin/python")).unwrap();
 
-        reflink_copy_dir(&src, &dst);
+        std::fs::create_dir_all(&dst).unwrap();
+        crate::files::WorkspaceFiles::open(&dst)
+            .unwrap()
+            .copy_entry_from(
+                &crate::files::WorkspaceFiles::open(&src).unwrap(),
+                Path::new("bin"),
+            )
+            .unwrap();
 
         let copied_link = dst.join("bin/python");
         assert!(std::fs::symlink_metadata(&copied_link)

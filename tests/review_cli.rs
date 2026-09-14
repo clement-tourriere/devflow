@@ -17,7 +17,14 @@ impl Fixture {
         Self { _root: root, repo }
     }
     fn run(&self, args: &[&str]) -> (bool, Value) {
-        let output = Command::new(env!("CARGO_BIN_EXE_devflow"))
+        let output = self.command(args).output().unwrap();
+        let value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|e| panic!("one JSON document required: {e}; {output:?}"));
+        (output.status.success(), value)
+    }
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_devflow"));
+        command
             .current_dir(&self.repo)
             .env("DEVFLOW_CONFIG_DIR", self._root.path().join("config"))
             .env(
@@ -26,12 +33,8 @@ impl Fixture {
             )
             .env_remove("DEVFLOW_APPROVE_HOOKS")
             .args(["--json", "--non-interactive"])
-            .args(args)
-            .output()
-            .unwrap();
-        let value = serde_json::from_slice(&output.stdout)
-            .unwrap_or_else(|e| panic!("one JSON document required: {e}; {output:?}"));
-        (output.status.success(), value)
+            .args(args);
+        command
     }
 }
 
@@ -369,4 +372,343 @@ fn retired_helpers_report_migration_errors_without_project_setup() {
             "{result}"
         );
     }
+}
+
+#[test]
+fn rejected_removals_do_not_block_execution_or_change_desired_state() {
+    let f = Fixture::new("");
+    let (ok, created) = f.run(&["switch", "-c", "task", "--no-services", "--no-processes"]);
+    assert!(ok, "{created}");
+    std::fs::write(
+        Path::new(created["worktree_path"].as_str().unwrap()).join("untracked"),
+        "keep",
+    )
+    .unwrap();
+    for name in ["main", "task"] {
+        let (ok, rejected) = f.run(&["remove", name]);
+        assert!(!ok, "{rejected}");
+        let (ok, execution) = f.run(&["exec", "--workspace", name, "--", "printf", "ready"]);
+        assert!(ok, "{execution}");
+        assert_eq!(execution["stdout"], "ready");
+    }
+    let (_, inventory) = f.run(&["list"]);
+    let task = inventory["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["name"] == "task")
+        .unwrap();
+    assert_eq!(task["control"]["desired"], "ready");
+}
+
+#[test]
+fn failed_launch_is_terminal_and_concurrent_runs_keep_distinct_records() {
+    let f = Fixture::new("");
+    assert!(
+        f.run(&["switch", "-c", "task", "--no-services", "--no-processes"])
+            .0
+    );
+    assert!(
+        !f.run(&[
+            "exec",
+            "--workspace",
+            "task",
+            "--",
+            "devflow-fixture-nonexistent-program"
+        ])
+        .0
+    );
+    let (_, inventory) = f.run(&["list"]);
+    let task = inventory["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["name"] == "task")
+        .unwrap();
+    assert_eq!(task["execution_status"], "failed");
+    let mut slow = f
+        .command(&["exec", "--workspace", "task", "--", "sleep", "2"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let (ok, fast) = f.run(&["exec", "--workspace", "task", "--", "printf", "ok"]);
+    let (_, inventory) = f.run(&["list"]);
+    let task = inventory["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["name"] == "task")
+        .unwrap();
+    let active_status = task["execution_status"].clone();
+    let stopped = slow.wait().unwrap();
+    assert!(ok && stopped.success(), "{fast}");
+    assert!(fast["execution_id"].is_string());
+    assert_eq!(active_status, "running");
+}
+
+#[test]
+fn failed_detached_launch_does_not_claim_a_running_session() {
+    let f = Fixture::new("execute:\n  detach_command: 'false {cmd}'\n");
+    assert!(
+        f.run(&["switch", "-c", "task", "--no-services", "--no-processes"])
+            .0
+    );
+    let (ok, result) = f.run(&[
+        "exec",
+        "--workspace",
+        "task",
+        "--detach",
+        "--",
+        "printf",
+        "never",
+    ]);
+    assert!(!ok, "{result}");
+    assert_eq!(result["detached"], false);
+    let (_, inventory) = f.run(&["list"]);
+    let task = inventory["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["name"] == "task")
+        .unwrap();
+    assert_eq!(task["execution_status"], "failed");
+}
+
+#[test]
+fn controller_foreground_and_detached_starts_share_one_owner() {
+    let f = Fixture::new("");
+    let log_path = f._root.path().join("controller.log");
+    let mut last_status = Value::Null;
+    let mut first = f
+        .command(&["daemon", "start", "--foreground"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&log_path).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut ready = false;
+    while std::time::Instant::now() < deadline {
+        let (ok, status) = f.run(&["daemon", "status"]);
+        if ok && status["pid"] == first.id() && status["running"] == true {
+            ready = true;
+            break;
+        }
+        last_status = status;
+        if first.try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !ready {
+        let _ = first.kill();
+        let _ = first.wait();
+        panic!(
+            "controller did not acquire ownership: status={last_status}; log={}",
+            std::fs::read_to_string(log_path).unwrap()
+        );
+    }
+    let second = f.run(&["daemon", "start", "--foreground"]);
+    let detached = f.run(&["daemon", "start"]);
+    let once = f.run(&["daemon", "start", "--once"]);
+    let stopped = f.run(&["daemon", "stop"]);
+    let _ = first.kill();
+    let _ = first.wait();
+    assert!(ready);
+    assert!(!second.0, "{}", second.1);
+    assert!(!detached.0, "{}", detached.1);
+    assert!(!once.0, "{}", once.1);
+    assert!(stopped.0, "{}", stopped.1);
+    assert_eq!(f.run(&["daemon", "status"]).1["running"], false);
+    let started = f.run(&["daemon", "start"]);
+    let observed = f.run(&["daemon", "status"]);
+    let stopped = f.run(&["daemon", "stop"]);
+    assert!(
+        started.0 && stopped.0,
+        "started: {}; stopped: {}",
+        started.1,
+        stopped.1
+    );
+    assert_eq!(observed.1["pid"], started.1["pid"]);
+    assert_eq!(observed.1["running"], true);
+}
+
+#[test]
+fn workspace_plan_does_not_materialize_resources_and_is_recorded_on_execution() {
+    let f = Fixture::new("");
+    let (ok, plan) = f.run(&["plan", "planned", "--from", "main"]);
+    assert!(ok, "{plan}");
+    assert!(plan["code_revision"].is_string());
+    let path = Path::new(plan["worktree_path"].as_str().unwrap());
+    assert!(!path.exists());
+    assert!(git2::Repository::open(&f.repo)
+        .unwrap()
+        .find_branch("planned", git2::BranchType::Local)
+        .is_err());
+    let (ok, created) = f.run(&[
+        "switch",
+        "-c",
+        "planned",
+        "--from",
+        "main",
+        "--no-services",
+        "--no-processes",
+    ]);
+    assert!(ok, "{created}");
+    assert_eq!(
+        created["operation"]["plan"]["code_revision"],
+        plan["code_revision"]
+    );
+    assert_eq!(created["worktree_path"], plan["worktree_path"]);
+}
+
+#[test]
+fn detached_runner_reports_completion_and_cannot_replay_a_finished_execution() {
+    let f = Fixture::new("execute:\n  detach_command: '{cmd} </dev/null >/dev/null 2>&1 &'\n");
+    assert!(
+        f.run(&["switch", "-c", "task", "--no-services", "--no-processes"])
+            .0
+    );
+    let (ok, execution) = f.run(&[
+        "exec",
+        "--workspace",
+        "task",
+        "--detach",
+        "--",
+        "printf",
+        "finished",
+    ]);
+    assert!(ok, "{execution}");
+    assert_eq!(execution["detached"], true);
+    let root = f._root.path().join("config/executions");
+    let project_dir = std::fs::read_dir(root)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let record_path = project_dir.join(format!(
+        "{}.json",
+        execution["execution_id"].as_str().unwrap()
+    ));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let completed = loop {
+        let record: Value = serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+        if record["state"] == "exited" {
+            break record;
+        }
+        assert!(std::time::Instant::now() < deadline, "{record}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(completed["exit_code"], 0);
+    let repeated = f
+        .command(&["execution-run", record_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!repeated.status.success());
+    let after: Value = serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    assert_eq!(after, completed);
+}
+
+#[test]
+fn successful_launcher_without_runner_is_a_failed_execution() {
+    let f = Fixture::new("execute:\n  detach_command: 'true {cmd}'\n");
+    let (ok, result) = f.run(&[
+        "exec",
+        "--workspace",
+        "main",
+        "--detach",
+        "--",
+        "printf",
+        "never",
+    ]);
+    assert!(!ok, "{result}");
+    assert_eq!(result["detached"], false);
+    assert!(result["stderr"]
+        .as_str()
+        .unwrap()
+        .contains("without starting"));
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_payload_copy_is_retried_before_workspace_is_ready() {
+    use devflow_core::vcs::{GitRepository, VcsProvider};
+    let f = Fixture::new("");
+    let outside = f._root.path().join("outside");
+    std::os::unix::fs::symlink(&outside, f.repo.join(".env")).unwrap();
+    support::commit(&f.repo);
+    std::fs::remove_file(f.repo.join(".env")).unwrap();
+    std::fs::write(f.repo.join(".env"), "fixture-payload").unwrap();
+    let path = f.repo.join(".devflow.yml");
+    std::fs::write(
+        &path,
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("copy_files: []", "copy_files: [.env]"),
+    )
+    .unwrap();
+    let (ok, failed) = f.run(&["switch", "-c", "task", "--no-services", "--no-processes"]);
+    assert!(!ok, "{failed}");
+    assert!(!outside.exists());
+    let tree = GitRepository::new(&f.repo)
+        .unwrap()
+        .worktree_path("task")
+        .unwrap()
+        .unwrap();
+    std::fs::remove_file(tree.join(".env")).unwrap();
+    let (ok, retried) = f.run(&["switch", "task", "--no-services", "--no-processes"]);
+    assert!(ok, "{retried}");
+    assert_eq!(retried["operation"]["status"], "ready");
+    assert_eq!(
+        std::fs::read_to_string(tree.join(".env")).unwrap(),
+        "fixture-payload"
+    );
+    assert!(!outside.exists());
+}
+
+#[test]
+fn retry_keeps_the_planned_revision_when_the_parent_advances() {
+    let f = Fixture::new("");
+    let (_, plan) = f.run(&["plan", "task", "--from", "main"]);
+    let path = Path::new(plan["worktree_path"].as_str().unwrap());
+    std::fs::create_dir_all(path).unwrap();
+    let (ok, failed) = f.run(&[
+        "switch",
+        "-c",
+        "task",
+        "--from",
+        "main",
+        "--no-services",
+        "--no-processes",
+    ]);
+    assert!(!ok, "{failed}");
+    std::fs::remove_dir(path).unwrap();
+    std::fs::write(f.repo.join("later-change"), "not in the selected revision").unwrap();
+    support::commit(&f.repo);
+    let (ok, retried) = f.run(&[
+        "switch",
+        "-c",
+        "task",
+        "--from",
+        "main",
+        "--no-services",
+        "--no-processes",
+    ]);
+    assert!(ok, "{retried}");
+    let actual = git2::Repository::open(path)
+        .unwrap()
+        .head()
+        .unwrap()
+        .peel_to_commit()
+        .unwrap()
+        .id()
+        .to_string();
+    assert_eq!(actual, plan["code_revision"].as_str().unwrap());
+    assert_eq!(
+        retried["operation"]["plan"]["code_revision"],
+        plan["code_revision"]
+    );
+    assert!(!path.join("later-change").exists());
 }

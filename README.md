@@ -27,7 +27,7 @@ devflow switch -c feature/auth
 
 Work on multiple features, reviews, migrations, or AI-agent tasks in parallel — without sharing a database or stashing state. Drive it from the CLI, a terminal dashboard (`devflow tui`), or a desktop GUI.
 
-Default CLI builds include local services, the native process supervisor, and the TUI. Optional build features are `proxy`, `service-neon`, `service-xata`, and `service-dblab`; use `cargo build --all-features` for all integrations. Commit generation uses an external command.
+Default CLI builds include local services, the native process supervisor, and the TUI. Optional build features are `proxy`, `service-neon`, `service-xata`, and `service-dblab`; use `cargo build --all-features` for all integrations. Use Git and your preferred editor or agent for commits.
 
 For separate code/data origins, explicit adoption of existing resources, and interrupted-operation recovery, see [Data ownership and recovery](docs-site/src/content/docs/guides/ownership-and-recovery.md).
 
@@ -46,14 +46,25 @@ Every workspace's app is reachable at a predictable HTTPS URL, every workspace's
 - **Two isolation models, chosen per service** — physical (a Copy-on-Write Docker container per workspace) or logical (one shared global engine with a database, bucket, or DB index per workspace)
 - **Multi-service** — PostgreSQL, ClickHouse, MySQL, Redis, RustFS object storage, any Docker image, or custom plugin providers; cloud branching via Neon/DBLab/Xata (experimental)
 - **Project processes** — workspace-scoped web servers, workers, and schedulers with native start/stop/status/logs, ready checks, dependency ordering, port bumping, and service env interpolation
-- **Managed worktrees** — per-workspace directories from a path template, with env files, gitignored caches, and AI tool configs (`.claude/`, `.cursor/`, …) copied in automatically
+- **Managed worktrees** — per-workspace directories from a path template, with configured payloads and caches whose inputs are checked before reuse; broad ignored-file and AI-directory copying is disabled by default
 - **Lifecycle hooks** — MiniJinja-templated commands and built-in actions at every phase, with conditions, an approval system, and recipes that detect your project's stack
 - **Optional HTTPS proxy** — discover Docker containers and host processes through `https://name.localhost` URLs; inspect CA setup instructions and configure trust with your system tools
 - **Controller daemon** — `devflow daemon start` keeps every registered project's shared engines and process desired state reconciled
 - **Seeding** — initialize databases from a PostgreSQL URL, a local dump file, or S3
-- **Built for AI agents** — `--json` and `--non-interactive` everywhere, agent launch/context/workspace-helper commands, and AI-generated commit messages
+- **Built for AI agents** — `--json` and `--non-interactive` everywhere, literal-argument execution, saved operation recovery, and isolated workspace commands
 
 Cloud branching providers and plugin providers are newer and still maturing — check `devflow --help-all` and the changelog for what is available in your build.
+
+### v0.8.0 validation status
+
+| Area | Status |
+| --- | --- |
+| macOS core workflows and local Docker fixtures | Tested: Rust, Docker, CLI, UI build and documentation checks passed |
+| Linux real-project use, including ZFS, XFS and Btrfs | **Untested**; automated Linux CI checks run separately |
+| Neon, DBLab and Xata live accounts | **Untested**; providers remain experimental and require optional build features |
+| Interactive desktop session | **Untested**; compilation, frontend build and result-handling tests passed |
+
+See the [v0.8.0 release notes](docs/releases/v0.8.0.md) for changes, migration notes and validation details.
 
 ## Install
 
@@ -104,6 +115,7 @@ eval "$(devflow shell-init)"
 ```bash
 devflow switch                  # Pick a workspace interactively
 devflow switch -c feature/api    # Create and switch to a workspace
+devflow --json plan feature/api  # Preview code, data, paths, and setup requirements
 devflow list                    # Parent tree with paths, services, and process health
 devflow status                  # Show current workspace information
 devflow connection feature/api   # Show service connection info
@@ -115,6 +127,8 @@ devflow tui                     # Open the terminal dashboard
 Run `devflow --help-all` to see advanced service, hook, proxy, agent, and config commands.
 
 `devflow --json list` has one stable document shape regardless of service count. It includes `schema_version`, project/VCS context, `context_workspace`, `default_workspace`, `roots`, workspace nodes, and `warnings`. Workspace names remain the raw VCS names users typed; a separate backend `service_key` is used for databases, containers, and generated paths. `identity_status` and `canonical_service_key` distinguish new canonical keys from safely retained or unresolved legacy identities. Parent relationships record immutable creation provenance, so children stay attached to their recorded parent even if that parent is later missing.
+
+`devflow --json plan agent/task --from main --data-from baseline:clean@2` previews an exact baseline selection before creating resources. Incomplete operations can be inspected and resumed with `devflow operation`; cancellation is limited to failures proven to have made no resource changes. The desktop exposes baseline selection and workspace recovery through the same core API. See [ownership and recovery](docs-site/src/content/docs/guides/ownership-and-recovery.md).
 
 ## Services
 

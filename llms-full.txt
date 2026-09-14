@@ -253,7 +253,7 @@ services:
 worktree:
   path_template: "../{repo}.{workspace}" # {workspace} is the reported service_key
   copy_files: [".env.local", ".env"]
-  copy_ignored: true                  # Copy gitignored files too
+  copy_ignored: false                 # Broad copying is deprecated; use explicit caches
 
 hooks:
   post-create:
@@ -387,12 +387,13 @@ crates/devflow-core/    Core library (no CLI/TTY dependencies)
     vcs/
       mod.rs            VcsProvider trait (Git + Jujutsu auto-detection)
       git.rs            Git implementation (git2 crate)
-      jj.rs             Jujutsu implementation (jj CLI)
+      jj.rs             Native Jujutsu implementation (embedded jj-lib)
       cow_worktree.rs   CoW worktree creation
     state/local_state.rs  User-level state (SQLite)
     docker/             Docker discovery + compose parsing + settings
     workspace/          Lifecycle orchestration (create, switch, delete, worktree, hooks)
-    commit.rs           External-command commit message generation
+    execution.rs        Typed explicit execution and durable run records
+    controller.rs       Exclusive native controller ownership and reconciliation
 
 crates/devflow-proxy/   Auto-HTTPS reverse proxy (hyper/rustls/bollard, mDNS)
 crates/devflow-terminal/ PTY manager for the Tauri GUI

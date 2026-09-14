@@ -344,8 +344,6 @@ def main():
         }})
     elif method == "doctor":
         ok({{"checks": [{{"name": "{name}", "available": True, "detail": "Plugin is running"}}]}})
-    elif method == "cleanup_old_workspaces":
-        ok([])
     elif method == "destroy_project":
         ok([])
     else:

@@ -32,7 +32,8 @@ pub(super) fn copy_worktree_files(config: &Config, main_worktree_dir: &str) -> R
         &current_dir,
         None,
         None,
-    );
+    )?
+    .copied();
 
     if copied > 0 {
         println!(
@@ -78,14 +79,14 @@ pub(super) async fn handle_git_hook(
     worktree: bool,
     main_worktree_dir: Option<String>,
 ) -> Result<()> {
-    // If called from a worktree, copy files first
-    if worktree {
-        if let Some(ref main_dir) = main_worktree_dir {
-            copy_worktree_files(config, main_dir)?;
-        }
-    }
-
+    let _ = (worktree, main_worktree_dir); // Accepted for older installed hooks.
     let vcs_repo = vcs::detect_vcs_provider(".")?;
+    if vcs_repo.is_worktree() {
+        let main_dir = vcs_repo
+            .main_worktree_dir()
+            .ok_or_else(|| anyhow::anyhow!("Cannot resolve primary worktree"))?;
+        copy_worktree_files(config, &main_dir.to_string_lossy())?;
+    }
 
     // Hook scripts installed by pre-worktree-only releases invoke plain
     // `devflow git-hook` on every in-place checkout in the PRIMARY checkout
@@ -93,7 +94,7 @@ pub(super) async fn handle_git_hook(
     // switch flow would hard-fail the primary/default invariant on every
     // non-main checkout after a binary upgrade — mirror the new script's
     // primary-checkout guard here so old installed hooks stay silent no-ops.
-    if !worktree && !vcs_repo.is_worktree() {
+    if !vcs_repo.is_worktree() {
         log::info!(
             "Primary checkout post-checkout hook: no lifecycle action (re-run `devflow install-hooks` to refresh the installed hook script)"
         );

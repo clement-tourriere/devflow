@@ -49,6 +49,11 @@ pub struct LocalProvider {
 }
 
 impl LocalProvider {
+    fn image_path(&self, workspace_id: &str) -> PathBuf {
+        self.data_root
+            .join("images")
+            .join(format!("{workspace_id}.image"))
+    }
     fn seal_path(&self, workspace_id: &str) -> PathBuf {
         self.data_root
             .join("sealed")
@@ -76,6 +81,10 @@ impl LocalProvider {
         let workspaces = self.store().list_workspaces(&project.id)?;
         let mut current = workspace;
         for _ in 0..=workspaces.len() {
+            let pinned = self.image_path(&current.id);
+            if pinned.try_exists()? {
+                return Ok(std::fs::read_to_string(pinned)?);
+            }
             let seal = self.seal_path(&current.id);
             if seal.exists() {
                 return Ok(std::fs::read_to_string(seal)?);
@@ -140,6 +149,10 @@ impl LocalProvider {
         let seal = self.seal_path(&workspace.id);
         if seal.exists() {
             std::fs::remove_file(seal)?;
+        }
+        let image = self.image_path(&workspace.id);
+        if image.try_exists()? {
+            std::fs::remove_file(image)?;
         }
         // Delete from state
         self.store().delete_workspace(&workspace.id)?;
@@ -468,6 +481,23 @@ impl ServiceProvider for LocalProvider {
             port,
             storage_metadata: None,
         })?;
+        let image = if let Some(parent) = &parent {
+            self.workspace_image(&project, parent)?
+        } else {
+            project.image.clone()
+        };
+        self.runtime.ensure_image(&image).await?;
+        let image = self
+            .runtime
+            .client()
+            .inspect_image(&image)
+            .await?
+            .id
+            .context("Docker image lacks immutable identity")?;
+        crate::services::ownership::atomic_write(
+            &self.image_path(&workspace.id),
+            image.as_bytes(),
+        )?;
         if let Some(parent) = &parent {
             anyhow::ensure!(
                 parent.name != workspace_name,
@@ -520,11 +550,7 @@ impl ServiceProvider for LocalProvider {
         let start_started = std::time::Instant::now();
         self.runtime
             .start_workspace(&StartWorkspaceSpec {
-                image: from_workspace
-                    .map(|p| self.sealed_image(p))
-                    .transpose()?
-                    .flatten()
-                    .unwrap_or_else(|| project.image.clone()),
+                image,
                 container_name: reserved.container_name.clone(),
                 data_dir,
                 port,
@@ -1035,6 +1061,41 @@ impl ServiceProvider for LocalProvider {
             detail: format!("{}/state.db", self.data_root.display()),
         });
 
+        if docker_result.available {
+            let project = self.store().project_for_owner(&self.owner_key)?;
+            if let Some(project) = project {
+                let workspaces = self.store().list_workspaces(&project.id)?;
+                for workspace in workspaces {
+                    let result: Result<()> = async {
+                        let image = self.workspace_image(&project, &workspace)?;
+                        self.runtime
+                            .verify_workspace(&StartWorkspaceSpec {
+                                image,
+                                container_name: workspace.container_name.clone(),
+                                data_dir: PathBuf::from(&workspace.data_dir),
+                                port: workspace.port,
+                                pg_user: self.pg_user.clone(),
+                                pg_password: self.pg_password.clone(),
+                                pg_db: self.pg_db.clone(),
+                                project_name: self.project_name.clone(),
+                                service_name: self.service_name.clone(),
+                                workspace_name: workspace.name.clone(),
+                                docker_settings: self.docker_settings.clone(),
+                            })
+                            .await
+                    }
+                    .await;
+                    checks.push(DoctorCheck {
+                        name: format!("Workspace engine: {}", workspace.name),
+                        available: result.is_ok(),
+                        detail: result.err().map(|e| format!("{e:#}")).unwrap_or_else(|| {
+                            "Immutable image and container settings match".into()
+                        }),
+                    });
+                }
+            }
+        }
+
         Ok(DoctorReport { checks })
     }
 
@@ -1090,7 +1151,7 @@ impl ServiceProvider for LocalProvider {
                 &workspace.container_name,
                 &self.pg_user,
                 &self.pg_db,
-                &project.image,
+                &self.workspace_image(&project, &workspace)?,
             )
             .await
         }

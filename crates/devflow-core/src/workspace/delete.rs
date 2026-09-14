@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -232,6 +232,11 @@ fn remove_materialized_worktree(
     force: bool,
 ) -> Result<bool> {
     if !path.exists() {
+        if let Some(repo) = repo {
+            if vcs_owns_worktree_path(repo, workspace_name, path)? {
+                repo.remove_worktree(path, force)?;
+            }
+        }
         return Ok(true);
     }
 
@@ -270,14 +275,6 @@ fn remove_materialized_worktree(
 
     match repo.remove_worktree(path, force) {
         Ok(()) => Ok(true),
-        Err(error) if force => {
-            log::warn!(
-                "Failed to remove VCS-owned worktree via VCS, falling back to filesystem removal: {}",
-                error
-            );
-            std::fs::remove_dir_all(path).context("Failed to remove worktree directory")?;
-            Ok(true)
-        }
         Err(error) => {
             Err(error.context(format!("Refusing to delete workspace '{}'", workspace_name)))
         }
@@ -357,6 +354,8 @@ async fn delete_workspace_inner(
             messages
         );
     }
+    journal.start_mutation()?;
+    journal.phase("remove-resources")?;
 
     let vcs_provider = vcs::detect_vcs_provider(project_dir).ok();
     let mut hook_results = Vec::new();
@@ -565,12 +564,17 @@ async fn delete_workspace_inner(
         }
     }
 
-    if vcs_ref_deleted || options.force {
-        if let Ok(mut state_mgr) = LocalStateManager::new() {
-            if let Err(error) = state_mgr.unregister_workspace_by_dir(project_dir, workspace_name) {
-                log::warn!("Failed to unregister workspace from devflow state: {error}");
-            }
+    if vcs_ref_deleted && service_failures == 0 {
+        let mut state = LocalStateManager::new()?;
+        if deleting_services {
+            state.update_control(project_dir, |control| {
+                let workspace = control.workspace(workspace_name);
+                workspace.data.clear();
+                workspace.generation = crate::state::ResourceId(uuid::Uuid::new_v4().to_string());
+                Ok(())
+            })?;
         }
+        state.unregister_workspace_by_dir(project_dir, workspace_name)?;
     }
 
     Ok(DeleteWorkspaceResult {

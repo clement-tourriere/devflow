@@ -1,3 +1,4 @@
+mod proxy_commands;
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
 

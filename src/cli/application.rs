@@ -35,6 +35,10 @@ pub enum BaselineCommands {
 }
 #[derive(Subcommand)]
 pub enum OperationCommands {
+    /// Cancel an operation that has not changed any external resources.
+    Cancel {
+        id: String,
+    },
     List {
         #[arg(long)]
         history: bool,
@@ -104,6 +108,21 @@ pub async fn handle(
         None
     };
     let result = match cmd {
+        Commands::Plan {
+            workspace,
+            from,
+            data_from,
+        } => serde_json::to_value(devflow_core::workspace::plan::resolve(
+            config,
+            project,
+            workspace,
+            &devflow_core::workspace::switch::SwitchOptions {
+                create_if_missing: true,
+                from_workspace: from.clone(),
+                data_from_workspace: data_from.clone(),
+                ..Default::default()
+            },
+        )?)?,
         Commands::Exec {
             workspace,
             shell,
@@ -169,6 +188,9 @@ pub async fn handle(
             }
             OperationCommands::Inspect { id } => {
                 serde_json::to_value(OperationJournal::inspect(project, id)?)?
+            }
+            OperationCommands::Cancel { id } => {
+                serde_json::to_value(OperationJournal::cancel(project, id).await?)?
             }
             OperationCommands::Resume { id } => {
                 application::resume_operation(config, project, id).await?

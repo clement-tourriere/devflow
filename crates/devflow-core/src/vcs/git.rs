@@ -1,44 +1,33 @@
 use anyhow::{Context, Result};
 use git2::{ErrorCode, Repository, WorktreeAddOptions, WorktreePruneOptions};
-use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::worktree_cleanup::Cleanup;
 use super::{VcsProvider, WorkspaceInfo, WorktreeCreateResult, WorktreeInfo};
 
-/// Post-checkout hook installed into `.git/hooks` for git repos and colocated
-/// jj repos alike: adopt linked worktrees, deliberately ignore in-place branch
-/// checkouts in the primary worktree — devflow is worktree-only.
+/// Linked worktree discovery happens in native devflow code.
 pub(crate) fn worktree_only_post_checkout_script() -> String {
     r#"#!/bin/sh
 # devflow auto-generated hook
-# Linked worktrees are adopted automatically. In-place branch checkouts in the
-# primary worktree are deliberately ignored: devflow is worktree-only.
-
-# For post-checkout hook, check if this is a workspace checkout (not file checkout)
-# Parameters: $1=previous HEAD, $2=new HEAD, $3=checkout type (1=workspace, 0=file)
-if [ "$3" = "0" ]; then
-    # This is a file checkout, not a workspace checkout - skip devflow execution
-    exit 0
+[ "$3" = "0" ] && exit 0
+if command -v devflow >/dev/null 2>&1; then
+    devflow git-hook
 fi
-
-# Detect if we're in a worktree (git-dir differs from common-dir)
-GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
-GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
-
-if [ "$GIT_DIR" != "$GIT_COMMON_DIR" ]; then
-    # Worktree: resolve main worktree root from common dir
-    MAIN_WORKTREE=$(cd "$GIT_COMMON_DIR/.." && pwd)
-    if command -v devflow >/dev/null 2>&1; then
-        devflow git-hook --worktree --main-worktree-dir "$MAIN_WORKTREE"
-    fi
-    exit 0
-fi
-
-# Primary worktree checkout: no lifecycle action. Use `devflow switch` to
-# materialize/select another workspace.
-exit 0
 "#
-    .to_string()
+    .to_owned()
+}
+
+pub(super) fn pre_commit_script() -> String {
+    r#"#!/bin/sh
+# devflow auto-generated hook
+# This hook runs devflow pre-commit lifecycle hooks before each commit.
+
+if command -v devflow >/dev/null 2>&1; then
+    devflow hook run pre-commit
+    exit $?
+fi
+"#
+    .to_owned()
 }
 
 pub struct GitRepository {
@@ -203,16 +192,7 @@ impl GitRepository {
     }
 
     fn generate_pre_commit_script(&self) -> String {
-        r#"#!/bin/sh
-# devflow auto-generated hook
-# This hook runs devflow pre-commit lifecycle hooks before each commit.
-
-if command -v devflow >/dev/null 2>&1; then
-    devflow hook run pre-commit
-    exit $?
-fi
-"#
-        .to_string()
+        pre_commit_script()
     }
 
     pub fn get_repo_root(&self) -> &Path {
@@ -372,6 +352,19 @@ impl VcsProvider for GitRepository {
         Ok(())
     }
 
+    fn workspace_revision(&self, name: &str) -> Result<Option<String>> {
+        match self.repo.find_branch(name, git2::BranchType::Local) {
+            Ok(branch) => Ok(Some(branch.get().peel_to_commit()?.id().to_string())),
+            Err(error) if error.code() == ErrorCode::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+    fn create_workspace_at(&self, name: &str, revision: &str) -> Result<()> {
+        let commit = self.repo.find_commit(git2::Oid::from_str(revision)?)?;
+        self.repo.branch(name, &commit, false)?;
+        Ok(())
+    }
+
     fn delete_workspace(&self, name: &str) -> Result<()> {
         let mut workspace = self
             .repo
@@ -416,9 +409,10 @@ impl VcsProvider for GitRepository {
         let worktree_names = self.repo.worktrees().context("Failed to list worktrees")?;
 
         for wt_name in worktree_names.iter() {
-            let Ok(Some(name)) = wt_name else { continue };
+            let name = wt_name?.context("Worktree metadata name is not UTF-8")?;
 
-            if let Ok(wt) = self.repo.find_worktree(name) {
+            {
+                let wt = self.repo.find_worktree(name)?;
                 let wt_path = wt
                     .path()
                     .canonicalize()
@@ -439,10 +433,31 @@ impl VcsProvider for GitRepository {
             }
         }
 
+        for cleanup in Cleanup::list(self.repo.commondir())? {
+            if let Some(entry) = result
+                .iter_mut()
+                .find(|wt| super::paths_equal(&wt.path, &cleanup.original))
+            {
+                entry.workspace = cleanup.bookmark;
+            } else {
+                result.push(WorktreeInfo {
+                    path: cleanup.original,
+                    workspace: cleanup.bookmark,
+                    is_main: false,
+                });
+            }
+        }
         Ok(result)
     }
 
     fn create_worktree(&self, workspace: &str, path: &Path) -> Result<WorktreeCreateResult> {
+        anyhow::ensure!(
+            !Cleanup::list(self.repo.commondir())?
+                .iter()
+                .any(|cleanup| cleanup.bookmark.as_deref() == Some(workspace)
+                    || super::paths_equal(&cleanup.original, path)),
+            "Worktree has pending cleanup; finish removal before recreating it"
+        );
         let parent = path.parent().context("worktree path has no parent")?;
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create worktree parent '{}'", parent.display()))?;
@@ -521,40 +536,124 @@ impl VcsProvider for GitRepository {
     }
 
     fn remove_worktree(&self, path: &Path, force: bool) -> Result<()> {
-        // Find the worktree by path
-        let worktree_names = self.repo.worktrees().context("Failed to list worktrees")?;
-
-        for wt_name in worktree_names.iter() {
-            let Ok(Some(name)) = wt_name else { continue };
-
-            if let Ok(wt) = self.repo.find_worktree(name) {
-                if wt.path() == path {
-                    if !force {
-                        ensure_worktree_clean(path)?;
-                    }
-                    // Prune the worktree (removes git metadata + working tree)
-                    let mut prune_opts = WorktreePruneOptions::new();
-                    prune_opts.valid(true);
-                    prune_opts.working_tree(true);
-                    if force {
-                        prune_opts.locked(true);
-                    }
-                    wt.prune(Some(&mut prune_opts)).with_context(|| {
-                        format!("Failed to prune worktree at '{}'", path.display())
-                    })?;
-                    return Ok(());
+        anyhow::ensure!(
+            !super::paths_equal(path, &self.primary_root),
+            "Cannot remove the primary worktree"
+        );
+        anyhow::ensure!(
+            self.repo
+                .workdir()
+                .is_none_or(|current| !super::paths_equal(path, current)),
+            "Cannot remove the current worktree"
+        );
+        let receipt = Cleanup::receipt(self.repo.commondir(), path);
+        let _lease = crate::services::ownership::OperationLease::try_acquire(
+            &receipt.with_extension("lock"),
+        )?
+        .context("Another worktree cleanup is active for this directory")?;
+        let mut cleanup = if let Some(cleanup) = Cleanup::read(&receipt)? {
+            anyhow::ensure!(
+                super::paths_equal(path, &cleanup.original),
+                "Cleanup receipt path mismatch"
+            );
+            cleanup
+        } else {
+            let names = self.repo.worktrees()?;
+            let mut found = None;
+            for name in names.iter().flatten().flatten() {
+                let wt = self.repo.find_worktree(name)?;
+                if super::paths_equal(wt.path(), path) {
+                    found = Some((name.to_owned(), wt));
+                    break;
                 }
             }
+            let (name, wt) =
+                found.with_context(|| format!("No worktree found at path '{}'", path.display()))?;
+            anyhow::ensure!(
+                matches!(wt.is_locked()?, git2::WorktreeLockStatus::Unlocked),
+                "Worktree is locked; unlock it before removal"
+            );
+            if !force {
+                ensure_worktree_clean(path)?;
+            }
+            if !path.try_exists()? {
+                let mut opts = WorktreePruneOptions::new();
+                opts.valid(true).working_tree(false);
+                wt.prune(Some(&mut opts))?;
+                return Ok(());
+            }
+            let repo = Repository::open(path)?;
+            let head = repo.head()?;
+            let bookmark = head
+                .is_branch()
+                .then(|| head.shorthand().ok().map(str::to_owned))
+                .flatten();
+            let revision = head.peel_to_commit()?.id().to_string();
+            let registration = self.repo.commondir().join("worktrees").join(&name);
+            Cleanup::begin(
+                &receipt,
+                name,
+                path,
+                revision,
+                bookmark,
+                Some(&registration),
+            )?
+        };
+        // Metadata remains discoverable until traversal has succeeded; the
+        // receipt still identifies the staged directory if .git is gone.
+        cleanup.verify_registration()?;
+        cleanup.remove_directory(&receipt)?;
+        cleanup.verify_registration()?;
+        match self.repo.find_worktree(&cleanup.internal) {
+            Ok(wt) => {
+                let mut opts = WorktreePruneOptions::new();
+                opts.valid(true).working_tree(false);
+                wt.prune(Some(&mut opts))
+                    .context("Cannot remove worktree registration; cleanup receipt retained")?;
+            }
+            Err(error)
+                if error.code() == ErrorCode::NotFound
+                    && !self
+                        .repo
+                        .commondir()
+                        .join("worktrees")
+                        .join(&cleanup.internal)
+                        .try_exists()? => {}
+            Err(error) => return Err(error.into()),
         }
+        std::fs::remove_file(receipt)?;
+        Ok(())
+    }
 
-        anyhow::bail!("No worktree found at path '{}'", path.display());
+    fn worktree_is_locked(&self, path: &Path) -> Result<bool> {
+        for name in self.repo.worktrees()?.iter().flatten().flatten() {
+            let wt = self.repo.find_worktree(name)?;
+            if super::paths_equal(wt.path(), path) {
+                return Ok(!matches!(
+                    wt.is_locked()?,
+                    git2::WorktreeLockStatus::Unlocked
+                ));
+            }
+        }
+        Ok(false)
     }
 
     fn worktree_is_dirty(&self, path: &Path) -> Result<bool> {
+        if Cleanup::read(&Cleanup::receipt(self.repo.commondir(), path))?.is_some()
+            || !path.try_exists()?
+        {
+            return Ok(false);
+        }
         Ok(!worktree_changes(path)?.is_empty())
     }
 
     fn worktree_path(&self, workspace: &str) -> Result<Option<PathBuf>> {
+        if let Some(cleanup) = Cleanup::list(self.repo.commondir())?
+            .into_iter()
+            .find(|record| record.bookmark.as_deref() == Some(workspace))
+        {
+            return Ok(Some(cleanup.original));
+        }
         let worktree_names = self.repo.worktrees().context("Failed to list worktrees")?;
 
         for wt_name in worktree_names.iter() {
@@ -587,75 +686,32 @@ impl VcsProvider for GitRepository {
     }
 
     fn install_hooks(&self) -> Result<()> {
-        let hooks_dir = self.repo.commondir().join("hooks");
-        fs::create_dir_all(&hooks_dir).context("Failed to create hooks directory")?;
-
-        let hook_script = self.generate_hook_script();
-        let pre_commit_script = self.generate_pre_commit_script();
-
-        // Install post-checkout hook
-        let post_checkout_hook = hooks_dir.join("post-checkout");
-        fs::write(&post_checkout_hook, &hook_script)
-            .context("Failed to write post-checkout hook")?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&post_checkout_hook)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&post_checkout_hook, perms)
-                .context("Failed to set hook permissions")?;
-        }
-
-        // Install pre-commit hook
-        let pre_commit_hook = hooks_dir.join("pre-commit");
-        fs::write(&pre_commit_hook, &pre_commit_script)
-            .context("Failed to write pre-commit hook")?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&pre_commit_hook)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&pre_commit_hook, perms)
-                .context("Failed to set hook permissions")?;
-        }
-
-        Ok(())
+        super::hooks::install(
+            &self.repo,
+            &[
+                ("post-checkout", self.generate_hook_script()),
+                ("pre-commit", self.generate_pre_commit_script()),
+            ],
+        )
     }
 
     fn uninstall_hooks(&self) -> Result<()> {
-        let hooks_dir = self.repo.commondir().join("hooks");
-
-        let post_checkout_hook = hooks_dir.join("post-checkout");
-        if post_checkout_hook.exists() && self.is_devflow_hook(&post_checkout_hook)? {
-            fs::remove_file(&post_checkout_hook).context("Failed to remove post-checkout hook")?;
-        }
-
-        let pre_commit_hook = hooks_dir.join("pre-commit");
-        if pre_commit_hook.exists() && self.is_devflow_hook(&pre_commit_hook)? {
-            fs::remove_file(&pre_commit_hook).context("Failed to remove pre-commit hook")?;
-        }
-
-        Ok(())
+        super::hooks::uninstall(&self.repo, &["post-checkout", "pre-commit"])
     }
 
     fn is_devflow_hook(&self, hook_path: &Path) -> Result<bool> {
-        if !hook_path.exists() {
-            return Ok(false);
-        }
-
-        let content = fs::read_to_string(hook_path).context("Failed to read hook file")?;
-
-        Ok(content.contains("devflow auto-generated hook"))
+        super::hooks::is_owned(hook_path)
     }
 
     fn hook_paths(&self) -> Vec<PathBuf> {
-        let hooks_dir = self.repo.path().join("hooks");
-        ["post-checkout", "post-merge", "pre-commit", "post-rewrite"]
-            .iter()
-            .map(|hook| hooks_dir.join(hook))
-            .collect()
+        super::hooks::directory(&self.repo)
+            .map(|dir| {
+                ["post-checkout", "pre-commit"]
+                    .iter()
+                    .map(|name| dir.join(name))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn provider_name(&self) -> &'static str {
@@ -712,6 +768,9 @@ impl VcsProvider for GitRepository {
             let Ok(wt) = self.repo.find_worktree(name) else {
                 continue;
             };
+            if Cleanup::read(&Cleanup::receipt(self.repo.commondir(), wt.path()))?.is_some() {
+                continue;
+            }
             if wt.validate().is_ok() && wt.path().exists() {
                 continue;
             }

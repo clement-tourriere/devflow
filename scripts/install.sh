@@ -7,6 +7,7 @@
 #
 # Options (environment variables, or a version as the first argument):
 #   DEVFLOW_VERSION      Release tag to install (e.g. v0.5.0). Default: latest
+#   DEVFLOW_INSTALL_PROXY  Set to 1 to install the optional proxy companion
 #   DEVFLOW_INSTALL_DIR  Install directory. Default: ~/.local/bin
 #
 # Upgrade by rerunning this installer.
@@ -104,6 +105,25 @@ main() {
 
     installed_version="$("$install_dir/devflow" --version)"
     say "Installed $installed_version to $install_dir/devflow"
+
+    if [ "${DEVFLOW_INSTALL_PROXY:-0}" = "1" ]; then
+        proxy_asset="$asset-proxy"
+        download "$base_url/$proxy_asset" "$tmp_dir/devflow-proxy"
+        download "$base_url/$proxy_asset.sha256" "$tmp_dir/devflow-proxy.sha256"
+        expected="$(awk '{print $1}' "$tmp_dir/devflow-proxy.sha256")"
+        if command -v sha256sum >/dev/null 2>&1; then
+            actual="$(sha256sum "$tmp_dir/devflow-proxy" | awk '{print $1}')"
+        else
+            actual="$(shasum -a 256 "$tmp_dir/devflow-proxy" | awk '{print $1}')"
+        fi
+        [ "$actual" = "$expected" ] || err "checksum mismatch for $proxy_asset"
+        chmod +x "$tmp_dir/devflow-proxy"
+        "$tmp_dir/devflow-proxy" --version >/dev/null 2>&1 || err "proxy companion failed to run"
+        staged="$install_dir/.devflow-proxy-install.$$"
+        cp "$tmp_dir/devflow-proxy" "$staged" || err "cannot write to $install_dir"
+        mv -f "$staged" "$install_dir/devflow-proxy"
+        say "Installed optional proxy to $install_dir/devflow-proxy"
+    fi
 
     case ":$PATH:" in
         *":$install_dir:"*) ;;

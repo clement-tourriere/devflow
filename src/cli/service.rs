@@ -1,6 +1,7 @@
+use devflow_core::application::service_resources::{self, Request as ResourceRequest};
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use devflow_core::config::{Config, EffectiveConfig};
 #[cfg(feature = "service-local")]
 use devflow_core::docker;
@@ -1306,24 +1307,6 @@ pub(super) async fn handle_service_provider_command(
         return Ok(());
     }
 
-    let _policy_lease = match &cmd {
-        super::ServiceCommands::Create { .. } => Some(
-            devflow_core::workspace::operation::project_policy_lease(
-                &super::operation_project_dir(config_path),
-                false,
-            )
-            .await?,
-        ),
-        super::ServiceCommands::Delete { .. } | super::ServiceCommands::Destroy { .. } => Some(
-            devflow_core::workspace::operation::project_policy_lease(
-                &super::operation_project_dir(config_path),
-                true,
-            )
-            .await?,
-        ),
-        _ => None,
-    };
-
     // Orchestratable mutation commands: Create and Delete operate on all auto_workspace services
     let is_orchestratable_mutation = matches!(
         &cmd,
@@ -1362,10 +1345,6 @@ pub(super) async fn handle_service_provider_command(
             from,
         } => {
             let service_key = resolve_effective_service_key(config_path, &workspace_name)?;
-            let parent_service_key = from
-                .as_deref()
-                .map(|parent| resolve_effective_service_key(config_path, parent))
-                .transpose()?;
             let project_dir = super::operation_project_dir(config_path);
             let hook_opts = devflow_core::workspace::LifecycleOptions {
                 hook_approval: if non_interactive || json_output {
@@ -1388,9 +1367,19 @@ pub(super) async fn handle_service_provider_command(
             .await?;
 
             // Single-service path (explicit --service or single service)
-            let info = provider
-                .create_workspace(&service_key, parent_service_key.as_deref())
-                .await?;
+            let info = service_resources::mutate(
+                config,
+                &project_dir,
+                &resolved_name,
+                &workspace_name,
+                provider.as_ref(),
+                &ResourceRequest::Create {
+                    parent: from.clone(),
+                },
+            )
+            .await?
+            .workspace_info
+            .context("Service create returned no workspace")?;
 
             // Fire post-service-create hooks
             devflow_core::workspace::hooks::run_lifecycle_hooks(
@@ -1435,9 +1424,6 @@ pub(super) async fn handle_service_provider_command(
             }
         }
         super::ServiceCommands::Delete { workspace_name } => {
-            let service_key =
-                resolve_operation_service_key(config_path, &workspace_name, provider.as_ref())
-                    .await?;
             let project_dir = super::operation_project_dir(config_path);
             let hook_opts = devflow_core::workspace::LifecycleOptions {
                 hook_approval: if non_interactive || json_output {
@@ -1460,7 +1446,15 @@ pub(super) async fn handle_service_provider_command(
             .await?;
 
             // Single-service path (explicit --service or single service)
-            provider.delete_workspace(&service_key).await?;
+            service_resources::mutate(
+                config,
+                &project_dir,
+                &resolved_name,
+                &workspace_name,
+                provider.as_ref(),
+                &ResourceRequest::Delete,
+            )
+            .await?;
 
             // Fire post-service-delete hooks
             devflow_core::workspace::hooks::run_lifecycle_hooks(
@@ -1739,7 +1733,16 @@ pub(super) async fn handle_service_provider_command(
                 }
             }
 
-            let destroyed = provider.destroy_project().await?;
+            let destroyed = service_resources::mutate(
+                config,
+                &super::operation_project_dir(config_path),
+                &resolved_name,
+                "(service)",
+                provider.as_ref(),
+                &ResourceRequest::Destroy,
+            )
+            .await?
+            .destroyed;
 
             // Remove the service entry from local state
             if let Some(ref path) = config_path {
@@ -2265,10 +2268,6 @@ async fn handle_orchestrated_mutation(
             from,
         } => {
             let service_key = resolve_effective_service_key(config_path, &workspace_name)?;
-            let parent_service_key = from
-                .as_deref()
-                .map(|parent| resolve_effective_service_key(config_path, parent))
-                .transpose()?;
             // Fire pre-service-create hooks before orchestrated creation
             devflow_core::workspace::hooks::run_lifecycle_hooks(
                 config,
@@ -2279,10 +2278,13 @@ async fn handle_orchestrated_mutation(
             )
             .await?;
 
-            let results = services::factory::orchestrate_create(
+            let results = service_resources::mutate_all(
                 config,
-                &service_key,
-                parent_service_key.as_deref(),
+                &project_dir,
+                &workspace_name,
+                &ResourceRequest::Create {
+                    parent: from.clone(),
+                },
             )
             .await?;
             let success_count = results.iter().filter(|r| r.success).count();
@@ -2323,7 +2325,7 @@ async fn handle_orchestrated_mutation(
                     "workspace": workspace_name,
                     "service_key": service_key,
                     "parent": from,
-                    "parent_service_key": parent_service_key,
+                    "parent_service_key": results.iter().find_map(|r| r.workspace_info.as_ref().and_then(|w| w.parent_workspace.clone())),
                     "ok": fail_count == 0,
                     "succeeded": success_count,
                     "failed": fail_count,
@@ -2394,7 +2396,13 @@ async fn handle_orchestrated_mutation(
             )
             .await?;
 
-            let results = services::factory::orchestrate_delete(config, &service_key).await?;
+            let results = service_resources::mutate_all(
+                config,
+                &project_dir,
+                &workspace_name,
+                &ResourceRequest::Delete,
+            )
+            .await?;
             let success_count = results.iter().filter(|r| r.success).count();
             let fail_count = results.iter().filter(|r| !r.success).count();
 
@@ -2604,6 +2612,26 @@ pub(super) async fn offer_discovered_containers(
     }
 }
 
+#[cfg(not(feature = "service-local"))]
+async fn handle_discover(
+    _service_type: Option<&str>,
+    _global: bool,
+    _project_root: Option<&Path>,
+    _json_output: bool,
+) -> Result<()> {
+    anyhow::bail!("Docker discovery requires the service-local build feature")
+}
+
+#[cfg(not(feature = "service-local"))]
+pub(super) async fn offer_discovered_containers(
+    _service_type: &str,
+    _project_root: Option<&Path>,
+    _non_interactive: bool,
+    _json_output: bool,
+) -> Option<DiscoveredServiceInfo> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::{public_workspace_info, validate_scaffoldable_service};
@@ -2684,24 +2712,4 @@ mod tests {
             assert!(validate_scaffoldable_service(service_type, provider).is_err());
         }
     }
-}
-
-#[cfg(not(feature = "service-local"))]
-async fn handle_discover(
-    _service_type: Option<&str>,
-    _global: bool,
-    _project_root: Option<&Path>,
-    _json_output: bool,
-) -> Result<()> {
-    anyhow::bail!("Docker discovery requires the service-local build feature")
-}
-
-#[cfg(not(feature = "service-local"))]
-pub(super) async fn offer_discovered_containers(
-    _service_type: &str,
-    _project_root: Option<&Path>,
-    _non_interactive: bool,
-    _json_output: bool,
-) -> Option<DiscoveredServiceInfo> {
-    None
 }

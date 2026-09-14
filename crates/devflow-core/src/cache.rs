@@ -33,6 +33,8 @@ pub struct CacheResult {
     pub policy: CachePolicy,
     pub bytes: u64,
     pub reused: bool,
+    /// A cache miss permits the workspace's normal build to proceed.
+    pub miss_reason: Option<String>,
 }
 fn relative(path: &Path) -> Result<()> {
     anyhow::ensure!(
@@ -90,7 +92,30 @@ fn copy_tree(
         depth < 128,
         "cache directory nesting exceeds 128 levels (possible symlink cycle)"
     );
-    let meta = source.metadata(from)?;
+    let meta = source.symlink_metadata(from)?;
+    if meta.file_type().is_symlink() {
+        anyhow::ensure!(depth > 0, "cache artifact root must not be a symlink");
+        let target = source.read_link_contents(from)?;
+        let mut levels = depth - 1;
+        for component in target.components() {
+            match component {
+                Component::Normal(_) => levels += 1,
+                Component::CurDir => (),
+                Component::ParentDir if levels > 0 => levels -= 1,
+                _ => anyhow::bail!("cache symlink escapes its artifact: {}", from.display()),
+            }
+        }
+        if let Some(parent) = to.parent() {
+            dest.create_dir_all(parent)?;
+        }
+        #[cfg(unix)]
+        {
+            dest.symlink_contents(target, to)?;
+            return Ok(());
+        }
+        #[cfg(not(unix))]
+        anyhow::bail!("cache symlink preservation requires Unix");
+    }
     if meta.is_dir() {
         dest.create_dir_all(to)?;
         for entry in source.read_dir(from)? {
@@ -155,7 +180,7 @@ pub fn materialize(
     source: &Path,
     target: &Path,
 ) -> Result<Vec<CacheResult>> {
-    if config.worktree.caches.is_empty() {
+    if config.worktree.caches.is_empty() || source.canonicalize()? == target.canonicalize()? {
         return Ok(Vec::new());
     }
     let input = Dir::open_ambient_dir(source, cap_std::ambient_authority())?;
@@ -164,7 +189,35 @@ pub fn materialize(
     let mut results = Vec::new();
     for spec in &config.worktree.caches {
         relative(Path::new(&spec.path))?;
-        let fingerprint = fingerprint(&input, spec)?;
+        let desired = fingerprint(&output, spec);
+        let source_fingerprint = fingerprint(&input, spec);
+        let (fingerprint, source_matches) = match (desired, source_fingerprint) {
+            (Ok(desired), Ok(source)) => (desired.clone(), desired == source),
+            (Ok(desired), Err(error))
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                (desired, false)
+            }
+            (Err(error), _) | (_, Err(error)) => {
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_none_or(|e| e.kind() != std::io::ErrorKind::NotFound)
+                {
+                    return Err(error);
+                }
+                results.push(CacheResult {
+                    path: spec.path.clone(),
+                    fingerprint: String::new(),
+                    policy: spec.policy,
+                    bytes: 0,
+                    reused: false,
+                    miss_reason: Some("fingerprint input is missing".into()),
+                });
+                continue;
+            }
+        };
         let root = crate::paths::devflow_config_dir()?
             .join("caches")
             .join(&identity.0)
@@ -174,6 +227,17 @@ pub fn materialize(
         let artifact = root.join("artifact");
         let receipt = root.join("receipt.json");
         let reused = receipt.is_file();
+        if !reused && (!source_matches || !input.try_exists(&spec.path)?) {
+            results.push(CacheResult {
+                path: spec.path.clone(),
+                fingerprint,
+                policy: spec.policy,
+                bytes: 0,
+                reused: false,
+                miss_reason: Some("no artifact matches the destination inputs".into()),
+            });
+            continue;
+        }
         let bytes = if reused {
             serde_json::from_slice::<serde_json::Value>(&std::fs::read(&receipt)?)?["bytes"]
                 .as_u64()
@@ -278,12 +342,16 @@ pub fn materialize(
             policy: spec.policy,
             bytes,
             reused,
+            miss_reason: None,
         });
     }
     Ok(results)
 }
 fn make_writable(dir: &Dir, path: &Path) -> Result<()> {
-    let meta = dir.metadata(path)?;
+    let meta = dir.symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        return Ok(());
+    }
     let mut permissions = meta.permissions();
     #[cfg(unix)]
     {

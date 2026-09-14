@@ -1,7 +1,9 @@
 pub mod cow_worktree;
 pub mod git;
+mod hooks;
 pub mod jj;
 mod jj_native;
+mod worktree_cleanup;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -55,14 +57,26 @@ pub trait VcsProvider: Send {
     fn default_workspace(&self) -> Result<Option<String>>;
     fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>>;
     fn create_workspace(&self, name: &str, base: Option<&str>) -> Result<()>;
+    fn create_workspace_at(&self, _name: &str, _revision: &str) -> Result<()> {
+        anyhow::bail!("VCS provider cannot create a workspace from a resolved revision")
+    }
     fn delete_workspace(&self, name: &str) -> Result<()>;
     fn workspace_exists(&self, name: &str) -> Result<bool>;
+    /// Recorded code revision without changing the index or working copy.
+    fn workspace_revision(&self, _name: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
 
     // ── Worktree operations ────────────────────────────────────────
     fn supports_worktrees(&self) -> bool;
     fn is_worktree(&self) -> bool;
     fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>>;
     fn create_worktree(&self, workspace: &str, path: &Path) -> Result<WorktreeCreateResult>;
+    /// Prepare an existing checkout for use, including native jj recovery.
+    /// Inspection methods never perform this transition.
+    fn prepare_worktree(&self, _path: &Path) -> Result<()> {
+        Ok(())
+    }
     /// Remove the worktree at `path`.
     ///
     /// Without `force`, implementations must refuse when the worktree has
@@ -243,8 +257,8 @@ pub fn resolve_project_root(start: &Path) -> PathBuf {
 /// (worktree removal, current/primary workspace guards) — keep it shared so
 /// those decisions can never disagree.
 pub(crate) fn paths_equal(left: &Path, right: &Path) -> bool {
-    let left = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
-    let right = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
+    let left = crate::paths::resolve_expected_path(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = crate::paths::resolve_expected_path(right).unwrap_or_else(|_| right.to_path_buf());
     left == right
 }
 

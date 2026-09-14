@@ -803,6 +803,7 @@ mod tests {
             "services_switched": 1,
         });
         let execution = ExecutionOutput {
+            execution_id: "fixture".into(),
             workspace: "feature/auth".into(),
             service_key: "feature_auth-abc123".into(),
             command: "cargo test".into(),
@@ -842,6 +843,7 @@ mod tests {
             "workspace": "feature/auth",
         });
         let execution = ExecutionOutput {
+            execution_id: "fixture".into(),
             workspace: "feature/auth".into(),
             service_key: "feature_auth-abc123".into(),
             command: "exit 7".into(),

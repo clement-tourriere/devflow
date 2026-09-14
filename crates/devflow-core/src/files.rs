@@ -16,7 +16,68 @@ pub struct WorkspaceFiles {
     dir: Dir,
 }
 
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyDisposition {
+    Copied,
+    Missing,
+    Exists,
+}
+
 impl WorkspaceFiles {
+    /// Copy an entry through directory capabilities. Publish only complete
+    /// entries; symlinks are copied as links and are never followed recursively.
+    pub fn copy_entry_from(&self, source: &Self, path: &Path) -> Result<CopyDisposition> {
+        Self::validate(path)?;
+        let metadata = match source.dir.symlink_metadata(path) {
+            Ok(value) => value,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(CopyDisposition::Missing),
+            Err(e) => return Err(e.into()),
+        };
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        self.dir.create_dir_all(parent)?;
+        let destination = self.dir.open_dir(parent)?;
+        let name = path.file_name().context("payload path has no name")?;
+        match destination.symlink_metadata(name) {
+            Ok(meta) => {
+                anyhow::ensure!(
+                    !meta.file_type().is_symlink(),
+                    "payload destination {} is a symlink",
+                    path.display()
+                );
+                return Ok(CopyDisposition::Exists);
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        let stage = format!(".devflow-payload-{}", uuid::Uuid::new_v4());
+        destination.create_dir(&stage)?;
+        let staging = destination.open_dir(&stage)?;
+        let result = (|| {
+            copy_entry(&source.dir, path, &staging, Path::new("entry"))?;
+            if metadata.is_file() {
+                match staging.hard_link("entry", &destination, name) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                        return Ok(CopyDisposition::Exists)
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            } else {
+                anyhow::ensure!(
+                    !destination.try_exists(name)?,
+                    "payload destination appeared during copy"
+                );
+                staging.rename("entry", &destination, name)?;
+            }
+            Ok(CopyDisposition::Copied)
+        })();
+        let _ = destination.remove_dir_all(stage);
+        result
+    }
     pub fn open(root: &Path) -> Result<Self> {
         Ok(Self {
             dir: Dir::open_ambient_dir(root, cap_std::ambient_authority())
@@ -141,6 +202,40 @@ impl WorkspaceFiles {
         }
         Ok(changed)
     }
+}
+
+fn copy_entry(source: &Dir, from: &Path, target: &Dir, to: &Path) -> Result<()> {
+    let metadata = source.symlink_metadata(from)?;
+    if metadata.file_type().is_symlink() {
+        let link = source.read_link_contents(from)?;
+        #[cfg(unix)]
+        target.symlink_contents(link, to)?;
+        #[cfg(windows)]
+        {
+            if source.metadata(from)?.is_dir() {
+                target.symlink_dir(link, to)?;
+            } else {
+                target.symlink_file(link, to)?;
+            }
+        }
+    } else if metadata.is_dir() {
+        target.create_dir(to)?;
+        let input = source.open_dir(from)?;
+        let output = target.open_dir(to)?;
+        for entry in input.entries()? {
+            let name = entry?.file_name();
+            copy_entry(&input, Path::new(&name), &output, Path::new(&name))?;
+        }
+        target.set_permissions(to, metadata.permissions())?;
+    } else {
+        anyhow::ensure!(
+            metadata.is_file(),
+            "payload includes a socket, device or other special file"
+        );
+        // cap-std uses descriptor-based native cloning/copying where available.
+        source.copy(from, target, to)?;
+    }
+    Ok(())
 }
 
 #[cfg(all(test, unix))]

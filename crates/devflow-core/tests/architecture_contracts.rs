@@ -246,6 +246,8 @@ fn cache_copies_are_independent_and_shared_artifacts_are_read_only() {
     let b = tempfile::tempdir().unwrap();
     std::fs::create_dir(project.path().join("artifacts")).unwrap();
     std::fs::write(project.path().join("lock"), "v1").unwrap();
+    std::fs::write(a.path().join("lock"), "v1").unwrap();
+    std::fs::write(b.path().join("lock"), "v1").unwrap();
     std::fs::write(project.path().join("artifacts/value"), "original").unwrap();
     let mut config = Config::default();
     config.worktree.caches = vec![devflow_core::cache::CacheSpec {
@@ -254,9 +256,40 @@ fn cache_copies_are_independent_and_shared_artifacts_are_read_only() {
         policy: devflow_core::cache::CachePolicy::Copy,
         max_bytes: 1024,
     }];
+    #[cfg(unix)]
+    {
+        std::fs::create_dir(project.path().join("artifacts/bin")).unwrap();
+        std::os::unix::fs::symlink("../value", project.path().join("artifacts/bin/tool")).unwrap();
+    }
+    assert!(
+        devflow_core::cache::materialize(&config, project.path(), project.path())
+            .unwrap()
+            .is_empty()
+    );
+    let incompatible = tempfile::tempdir().unwrap();
+    std::fs::write(incompatible.path().join("lock"), "another branch").unwrap();
+    let miss =
+        devflow_core::cache::materialize(&config, project.path(), incompatible.path()).unwrap();
+    assert!(miss[0].miss_reason.is_some());
+    assert!(!incompatible.path().join("artifacts").exists());
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("artifacts/value")).unwrap(),
+        "original"
+    );
     let first = devflow_core::cache::materialize(&config, project.path(), a.path()).unwrap();
     assert!(!first[0].reused);
     std::fs::write(a.path().join("artifacts/value"), "changed").unwrap();
+    #[cfg(unix)]
+    {
+        assert_eq!(
+            std::fs::read_link(a.path().join("artifacts/bin/tool")).unwrap(),
+            std::path::Path::new("../value")
+        );
+        assert_eq!(
+            std::fs::read_to_string(a.path().join("artifacts/bin/tool")).unwrap(),
+            "changed"
+        );
+    }
     config.worktree.caches[0].policy = devflow_core::cache::CachePolicy::SharedReadOnly;
     let second = devflow_core::cache::materialize(&config, project.path(), b.path()).unwrap();
     assert!(second[0].reused);
@@ -275,6 +308,9 @@ fn cache_copies_are_independent_and_shared_artifacts_are_read_only() {
     config.worktree.caches[0].policy = devflow_core::cache::CachePolicy::Copy;
     devflow_core::cache::materialize(&config, project.path(), a.path()).unwrap();
     std::fs::write(project.path().join("lock"), "v2").unwrap();
+    // A different source branch must not invalidate this destination's inputs.
+    assert!(devflow_core::cache::materialize(&config, project.path(), a.path()).unwrap()[0].reused);
+    std::fs::write(a.path().join("lock"), "v2").unwrap();
     assert!(
         devflow_core::cache::materialize(&config, project.path(), a.path())
             .unwrap_err()
@@ -285,6 +321,20 @@ fn cache_copies_are_independent_and_shared_artifacts_are_read_only() {
         std::fs::read_to_string(a.path().join("artifacts/value")).unwrap(),
         "changed"
     );
+    #[cfg(unix)]
+    {
+        let escaped = tempfile::tempdir().unwrap();
+        std::fs::write(escaped.path().join("lock"), "unsafe").unwrap();
+        std::fs::write(project.path().join("lock"), "unsafe").unwrap();
+        std::os::unix::fs::symlink("../lock", project.path().join("artifacts/escape")).unwrap();
+        assert!(
+            devflow_core::cache::materialize(&config, project.path(), escaped.path())
+                .unwrap_err()
+                .to_string()
+                .contains("escapes")
+        );
+        assert!(!escaped.path().join("artifacts").exists());
+    }
     config.worktree.caches[0].path = "../escape".into();
     assert!(devflow_core::cache::materialize(&config, project.path(), a.path()).is_err());
 }
@@ -390,4 +440,211 @@ print(json.dumps({'ok':True,'result':result}))
         LocalStateManager::new().unwrap().control(root.path()).id,
         id
     );
+}
+
+#[tokio::test]
+async fn operation_cancellation_accepts_only_proven_no_effect_failures() {
+    let _environment = support::isolated_config();
+    let root = repository();
+    let mut rejected = OperationJournal::begin(root.path(), "trunk", "remove", None, None, false)
+        .await
+        .unwrap();
+    let id = rejected.record.id.clone();
+    let failure = rejected.fail(anyhow::anyhow!("policy rejected"));
+    assert_eq!(
+        failure
+            .downcast_ref::<devflow_core::workspace::operation::OperationError>()
+            .unwrap()
+            .operation
+            .status,
+        "cancelled"
+    );
+    drop(rejected);
+    assert!(OperationJournal::pending(root.path()).unwrap().is_empty());
+    assert_eq!(
+        OperationJournal::cancel(root.path(), &id)
+            .await
+            .unwrap()
+            .status,
+        "cancelled"
+    );
+
+    let mut legacy = OperationJournal::begin(root.path(), "task", "remove", None, None, false)
+        .await
+        .unwrap();
+    legacy.record.schema_version = 2;
+    legacy.record.mutation_started = true;
+    let legacy_id = legacy.record.id.clone();
+    legacy.fail(anyhow::anyhow!(
+        "Refusing to delete workspace 'task':\nworkspace is dirty"
+    ));
+    drop(legacy);
+    assert_eq!(
+        OperationJournal::cancel(root.path(), &legacy_id)
+            .await
+            .unwrap()
+            .status,
+        "cancelled"
+    );
+
+    let mut partial = OperationJournal::begin(root.path(), "partial", "remove", None, None, false)
+        .await
+        .unwrap();
+    partial.phase("remove-resources").unwrap();
+    let partial_id = partial.record.id.clone();
+    partial.fail(anyhow::anyhow!("provider failed after deletion started"));
+    drop(partial);
+    assert!(OperationJournal::cancel(root.path(), &partial_id)
+        .await
+        .is_err());
+    assert_eq!(OperationJournal::pending(root.path()).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn cancelled_execution_kills_its_child_and_records_interruption() {
+    use devflow_core::execution::{self, records::ExecutionState, CommandSpec};
+    let _environment = support::isolated_config();
+    let root = repository();
+    let spec = CommandSpec::Program {
+        program: "sleep".into(),
+        args: vec!["30".into()],
+    };
+    {
+        let config = Config::default();
+        let execution =
+            execution::execute_in_workspace(&config, root.path(), "trunk", &spec, false, true);
+        tokio::pin!(execution);
+        tokio::select! {
+            result = &mut execution => panic!("long execution ended early: {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(300)) => (),
+        }
+    }
+    let record = execution::records::list(root.path()).unwrap().remove(0);
+    assert!(matches!(record.state, ExecutionState::Interrupted));
+    let child = record.child.unwrap();
+    for _ in 0..100 {
+        if !child.is_alive() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(!child.is_alive());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn project_teardown_rejects_dirty_worktrees_and_retains_state_after_cleanup_failure() {
+    use devflow_core::{
+        project::{destroy, DestroyOptions},
+        vcs::{GitRepository, VcsProvider},
+    };
+    use std::os::unix::fs::PermissionsExt;
+    let _environment = support::isolated_config();
+    let root = repository();
+    let mut config = Config::default();
+    config.git.main_workspace = "trunk".into();
+    config.worktree.path_template = "worktrees/{workspace}".into();
+    let config_path = root.path().join(".devflow.yml");
+    std::fs::write(&config_path, serde_yaml_ng::to_string(&config).unwrap()).unwrap();
+    let options = application::SwitchOptions {
+        create_if_missing: true,
+        lifecycle: devflow_core::workspace::LifecycleOptions {
+            skip_hooks: true,
+            skip_services: true,
+            skip_processes: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let switched = application::switch_workspace(&config, root.path(), "task", &options)
+        .await
+        .unwrap();
+    assert!(switched.ready(), "{switched:?}");
+    let path = switched.worktree.unwrap().path;
+    std::fs::create_dir(path.join("blocked")).unwrap();
+    std::fs::write(path.join("blocked/value"), "preserve").unwrap();
+    assert!(destroy(root.path(), DestroyOptions::default(), None)
+        .await
+        .is_err());
+    assert_eq!(
+        std::fs::read_to_string(path.join("blocked/value")).unwrap(),
+        "preserve"
+    );
+    std::fs::set_permissions(path.join("blocked"), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let result = destroy(
+        root.path(),
+        DestroyOptions {
+            force_worktrees: true,
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    if path.join("blocked").exists() {
+        std::fs::set_permissions(path.join("blocked"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+    if !result.succeeded() {
+        let receipts = root.path().join(".git/devflow-removals");
+        for entry in std::fs::read_dir(receipts).unwrap() {
+            let receipt = entry.unwrap().path();
+            if receipt.extension().is_some_and(|ext| ext == "json") {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(receipt).unwrap()).unwrap();
+                let staged = std::path::PathBuf::from(value["staged"].as_str().unwrap());
+                if staged.join("blocked").exists() {
+                    std::fs::set_permissions(
+                        staged.join("blocked"),
+                        std::fs::Permissions::from_mode(0o700),
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        assert!(!result.state_cleared);
+        assert!(result
+            .resources
+            .iter()
+            .any(|r| r.kind == "worktree" && !r.success));
+        assert!(config_path.exists());
+        assert!(LocalStateManager::new()
+            .unwrap()
+            .get_workspace_by_dir(root.path(), "task")
+            .is_some());
+        assert!(GitRepository::new(root.path())
+            .unwrap()
+            .worktree_path("task")
+            .unwrap()
+            .is_some());
+        assert!(destroy(
+            root.path(),
+            DestroyOptions {
+                force_worktrees: true
+            },
+            None
+        )
+        .await
+        .unwrap()
+        .succeeded());
+    }
+}
+
+#[tokio::test]
+async fn controller_start_tolerates_a_status_probe_holding_the_lease() {
+    let _environment = support::isolated_config();
+    let path = devflow_core::paths::devflow_config_dir()
+        .unwrap()
+        .join("daemon.lock");
+    let probe = devflow_core::services::ownership::OperationLease::try_acquire(&path)
+        .unwrap()
+        .unwrap();
+    let start = devflow_core::controller::run_once(30);
+    tokio::pin!(start);
+    tokio::select! {
+        result = &mut start => panic!("startup confused a probe with an owner: {:?}", result.err()),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => (),
+    }
+    drop(probe);
+    start.await.unwrap();
+    assert!(devflow_core::controller::owner().unwrap().is_none());
 }

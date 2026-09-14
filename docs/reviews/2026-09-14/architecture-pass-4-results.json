@@ -1,0 +1,67 @@
+{
+  "reviewed_commit": "e96442ce046d9becd0f45b79b3cee33c88b1ccde",
+  "platform": "aarch64-apple-darwin",
+  "probe_source_sha256": "d5eb6a9e911f87b70961230f64fb148fb16b086fb3e2587e948e492a4a629cad",
+  "probes": {
+    "failed_remove": {
+      "directory_retained": true,
+      "first_error": "Failed to remove jj workspace directory '/private/var/folders/2q/5zhtbhjj6dx0m6sz60zbd_sm0000gn/T/.tmp8SEbzx/restricted/child': Permission denied (os error 13)",
+      "registered_after_failure": false,
+      "retry_error": "No jj workspace is registered at '/var/folders/2q/5zhtbhjj6dx0m6sz60zbd_sm0000gn/T/.tmp8SEbzx/restricted/child'"
+    },
+    "hooks_replacement": {
+      "internal_git_wrappers": 2,
+      "post_checkout_preserved": false,
+      "pre_commit_preserved": false
+    },
+    "merge_state": {
+      "conflicts_after": false,
+      "conflicts_before": true,
+      "list_error": null,
+      "merge_head_after": false,
+      "state_after": "Clean",
+      "state_before": "Merge"
+    },
+    "payload_escape": {
+      "default_env_escaped": true,
+      "default_env_reported_copied": 1,
+      "escaped_file_created": true,
+      "external_content": "fixture secret\n",
+      "reported_copied": 1
+    },
+    "staging": {
+      "index_after": "base\n",
+      "index_before": "staged\n",
+      "list_error": null,
+      "worktree_after": "unstaged\n"
+    },
+    "stale_child": {
+      "child_after": "base\n",
+      "child_open_error": "Jujutsu working copy is stale; run 'jj workspace update-stale' before retrying",
+      "primary_after": "new main\n"
+    }
+  },
+  "validation": {
+    "core_all_features_lib": {
+      "passed": 260,
+      "ignored": 1,
+      "failed": 0
+    },
+    "cli_review_contracts": {
+      "passed": 13,
+      "failed": 0
+    },
+    "process_boundary": {
+      "passed": 1,
+      "failed": 0
+    },
+    "ui_results": {
+      "passed": 4,
+      "failed": 0
+    },
+    "cargo_fmt_check": "passed",
+    "generated_llms_check": "passed",
+    "live_zfs": "not run: requires Linux kernel and ZFS pool",
+    "docker_and_cloud": "not rerun during this pass"
+  }
+}

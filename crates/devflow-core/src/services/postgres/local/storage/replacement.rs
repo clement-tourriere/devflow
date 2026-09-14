@@ -24,6 +24,9 @@ pub(super) enum DatasetMutation {
 
 #[async_trait]
 pub(super) trait DatasetOps: Sync {
+    async fn validate_leaf(&self, _dataset: &str) -> Result<()> {
+        Ok(())
+    }
     async fn exists(&self, dataset: &str) -> Result<bool>;
     async fn origin(&self, dataset: &str) -> Result<String>;
     async fn apply(&self, mutation: DatasetMutation) -> Result<()>;
@@ -131,6 +134,14 @@ pub(super) async fn replace(
     record: &mut Replacement,
     journal: &Path,
 ) -> Result<()> {
+    let (source, _) = record
+        .snapshot
+        .rsplit_once('@')
+        .context("snapshot has no dataset")?;
+    ops.validate_leaf(source).await?;
+    if record.had_original {
+        ops.validate_leaf(&record.target).await?;
+    }
     record.save(journal)?;
     let result: Result<()> = async {
         ops.apply(DatasetMutation::Snapshot(record.snapshot.clone()))
@@ -346,6 +357,9 @@ mod linux_integration {
     use super::super::zfs_native::NativeZfs;
     #[async_trait]
     impl DatasetOps for Zfs {
+        async fn validate_leaf(&self, dataset: &str) -> Result<()> {
+            NativeZfs.validate_leaf(dataset).await
+        }
         async fn exists(&self, dataset: &str) -> Result<bool> {
             NativeZfs.exists(dataset).await
         }
@@ -375,6 +389,47 @@ mod linux_integration {
             panic!("this test requires Linux ZFS");
         }
         let pool = std::env::var("DEVFLOW_TEST_ZFS_POOL").expect("set a disposable ZFS pool");
+        {
+            let temp = tempfile::tempdir().unwrap();
+            let dataset = format!("{pool}/devflow_test_{}", uuid::Uuid::new_v4().simple());
+            NativeZfs.create(&dataset, None).await.unwrap();
+            let _owned = OwnedDataset(dataset.clone());
+            let source = format!("{dataset}/source");
+            let nested = format!("{source}/pgdata");
+            let target = format!("{dataset}/target");
+            NativeZfs
+                .create(&source, Some(&temp.path().join("source")))
+                .await
+                .unwrap();
+            NativeZfs
+                .create(&nested, Some(&temp.path().join("source/pgdata")))
+                .await
+                .unwrap();
+            NativeZfs
+                .create(&target, Some(&temp.path().join("target")))
+                .await
+                .unwrap();
+            std::fs::write(temp.path().join("target/generation"), "old").unwrap();
+            let journal = temp.path().join("replacement.json");
+            let mut record = Replacement {
+                target,
+                staged: format!("{dataset}/stage"),
+                backup: format!("{dataset}/backup"),
+                snapshot: format!("{source}@new"),
+                mountpoint: temp.path().join("target"),
+                had_original: true,
+                committed: false,
+            };
+            assert!(replace(&NativeZfs, &mut record, &journal).await.is_err());
+            assert!(
+                !journal.exists(),
+                "unsupported source must be rejected before replacement begins"
+            );
+            assert_eq!(
+                std::fs::read_to_string(temp.path().join("target/generation")).unwrap(),
+                "old"
+            );
+        }
         for after in [false, true] {
             // Both sides of snapshot, clone, unmount, both renames and remount.
             for fail_at in 1..=6 {

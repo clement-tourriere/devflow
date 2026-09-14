@@ -1,4 +1,5 @@
 //! Application policy shared by CLI, TUI, desktop and automation.
+pub mod service_resources;
 use crate::config::Config;
 use crate::services::{factory, ServiceOperation, ServiceProvider, UnsupportedOperation};
 use crate::state::LocalStateManager;
@@ -190,12 +191,6 @@ pub async fn plan_service_cleanup(
         }
     }
     for workspace in &registered {
-        if matches!(
-            workspace.execution_status.as_deref(),
-            Some("running" | "detached")
-        ) {
-            protect(&workspace.name, "active execution")?;
-        }
         if let Some(parent) = workspace
             .data_parent
             .as_ref()
@@ -203,6 +198,11 @@ pub async fn plan_service_cleanup(
             .filter(|p| !p.starts_with("baseline:"))
         {
             protect(parent, "recorded data parent")?;
+        }
+    }
+    for execution in crate::execution::records::list(project)? {
+        if execution.active() {
+            protect(&execution.workspace, "active execution")?;
         }
     }
     for operation in OperationJournal::pending(project)? {
@@ -389,6 +389,23 @@ pub async fn resume_operation(
         "cancelled operations cannot be resumed"
     );
     let request = &record.request;
+    if let Some(resource_request) = request.get("resource_request") {
+        let service = request["service"]
+            .as_str()
+            .context("Service missing from resource operation")?;
+        let provider = factory::resolve_provider(config, Some(service)).await?;
+        return Ok(serde_json::to_value(
+            service_resources::mutate(
+                config,
+                project,
+                service,
+                &record.workspace,
+                provider.provider.as_ref(),
+                &serde_json::from_value(resource_request.clone())?,
+            )
+            .await?,
+        )?);
+    }
     if record.kind == "switch" {
         let options: SwitchOptions = serde_json::from_value(
             request

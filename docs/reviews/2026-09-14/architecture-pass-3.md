@@ -1,5 +1,7 @@
 # Third architecture review
 
+Follow-up: the findings below are addressed in [remaining-fixes.md](remaining-fixes.md). This file retains the original review evidence.
+
 Reviewed commit: **`37a3a9a63ec561653504771603d372d2bc5a6b1b`**, committed on `refactor/workspace-data-architecture` before this pass. The implementation commit contains 199 changed files and the previous validation evidence. This review is a separate, uncommitted artifact.
 
 **Keep the focus on reliable code/data workspaces. Fix the remaining lifecycle defects and finish removing redundant interfaces before adding more infrastructure.** The new baseline model is valuable, but name reuse, transitive data inheritance, and partial teardown are not yet dependable. The user's additional request to minimize subprocesses is addressed in [the subprocess audit](subprocess-audit.md), with a [57-site inventory](subprocess-inventory.json).

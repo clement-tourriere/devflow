@@ -25,7 +25,15 @@ impl Default for ProxyStatus {
     }
 }
 fn executable() -> Result<std::path::PathBuf> {
-    which::which("devflow-proxy").context("optional proxy companion is not installed; build/install the devflow-proxy binary with --no-default-features --features proxy")
+    if let Some(sibling) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("devflow-proxy")))
+    {
+        if let Ok(path) = which::which(&sibling) {
+            return Ok(path);
+        }
+    }
+    which::which("devflow-proxy").context("optional proxy companion is not installed; rerun the installer with DEVFLOW_INSTALL_PROXY=1 or build devflow-proxy with --no-default-features --features proxy")
 }
 fn api_port() -> u16 {
     crate::config::GlobalConfig::load()
@@ -62,19 +70,41 @@ pub async fn status() -> Result<ProxyStatus> {
     }
     Ok(status)
 }
-pub async fn command(args: &[&str]) -> Result<serde_json::Value> {
+fn command_builder(args: &[&str], json: bool) -> Result<tokio::process::Command> {
     let mut command = tokio::process::Command::new(executable()?);
+    if json {
+        command.arg("--json");
+    }
     command
-        .args(["--json", "--non-interactive", "proxy"])
+        .args(["--non-interactive", "proxy"])
         .args(args)
         .kill_on_drop(true);
+    Ok(command)
+}
+
+/// CLI forwarding keeps foreground streams and terminal interaction intact.
+pub async fn forward(args: &[&str], json: bool) -> Result<Option<serde_json::Value>> {
+    if json {
+        return command(args).await.map(Some);
+    }
+    let status = command_builder(args, false)?.status().await?;
+    anyhow::ensure!(status.success(), "proxy companion failed ({status})");
+    Ok(None)
+}
+
+pub async fn command(args: &[&str]) -> Result<serde_json::Value> {
+    let mut command = command_builder(args, true)?;
     let output = tokio::time::timeout(std::time::Duration::from_secs(30), command.output())
         .await
         .context("proxy companion command timed out")??;
     anyhow::ensure!(
         output.status.success(),
         "proxy companion failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        if output.stderr.is_empty() {
+            String::from_utf8_lossy(&output.stdout)
+        } else {
+            String::from_utf8_lossy(&output.stderr)
+        }
     );
     serde_json::from_slice(&output.stdout).context("proxy companion returned invalid JSON")
 }

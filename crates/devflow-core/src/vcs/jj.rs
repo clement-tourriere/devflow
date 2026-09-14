@@ -84,7 +84,7 @@ impl JjRepository {
     }
 
     fn workspace_entries(&self) -> Result<Vec<JjWorkspaceEntry>> {
-        pollster::block_on(async { State::load(&self.root).await?.entries() })
+        pollster::block_on(async { State::inspect(&self.root).await?.entries() })
     }
 
     fn load_configured_default_workspace(primary_root: &Path) -> Result<Option<String>> {
@@ -95,7 +95,7 @@ impl JjRepository {
     }
 
     fn bookmark_names(&self) -> Result<Vec<String>> {
-        pollster::block_on(async { Ok(State::load(&self.root).await?.bookmarks()) })
+        pollster::block_on(async { Ok(State::inspect(&self.root).await?.bookmarks()) })
     }
 
     /// Resolve the default bookmark from devflow config when available. For an
@@ -231,10 +231,12 @@ impl VcsProvider for JjRepository {
     // ── Workspace operations (mapped to bookmarks) ────────────────────
 
     fn current_workspace(&self) -> Result<Option<String>> {
-        let bookmarks = self.bookmark_names()?;
-        let default = self.detect_default_bookmark()?;
-        Ok(self
-            .workspace_entries()?
+        let state = pollster::block_on(State::inspect(&self.root))?;
+        let bookmarks = state.bookmarks();
+        let default =
+            Self::select_default_bookmark(&bookmarks, self.configured_default.as_deref())?;
+        Ok(state
+            .entries()?
             .into_iter()
             .find(|workspace| Self::paths_equal(&workspace.path, &self.root))
             .and_then(|workspace| {
@@ -251,9 +253,16 @@ impl VcsProvider for JjRepository {
     }
 
     fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
-        let names = self.bookmark_names()?;
-        let current = self.current_workspace()?;
-        let default = self.detect_default_bookmark()?;
+        let state = pollster::block_on(State::inspect(&self.root))?;
+        let names = state.bookmarks();
+        let default = Self::select_default_bookmark(&names, self.configured_default.as_deref())?;
+        let current = state
+            .entries()?
+            .iter()
+            .find(|entry| Self::paths_equal(&entry.path, &self.root))
+            .and_then(|entry| {
+                Self::raw_workspace_for_internal(&entry.internal_name, &names, default.as_deref())
+            });
 
         Ok(names
             .into_iter()
@@ -301,6 +310,39 @@ impl VcsProvider for JjRepository {
         })
     }
 
+    fn workspace_revision(&self, name: &str) -> Result<Option<String>> {
+        use jj_lib::object_id::ObjectId;
+        pollster::block_on(async {
+            let state = State::inspect(&self.root).await?;
+            let names = state.bookmarks();
+            if !names.iter().any(|n| n == name) {
+                return Ok(None);
+            }
+            let default =
+                Self::select_default_bookmark(&names, self.configured_default.as_deref())?;
+            let commit = if let Some(internal) =
+                Self::internal_workspace_for_raw(&state.entries()?, name, default.as_deref())
+            {
+                state
+                    .commit_for_internal(WorkspaceName::new(&internal))
+                    .await?
+            } else {
+                state.bookmark_commit(name).await?
+            };
+            Ok(Some(commit.id().hex()))
+        })
+    }
+    fn create_workspace_at(&self, name: &str, revision: &str) -> Result<()> {
+        use jj_lib::repo::Repo;
+        pollster::block_on(async {
+            let mut state = State::load(&self.root).await?;
+            let id = jj_lib::backend::CommitId::try_from_hex(revision)
+                .context("Invalid jj commit identity")?;
+            let commit = state.repo.store().get_commit_async(&id).await?;
+            state.set_bookmark(name, &commit).await
+        })
+    }
+
     fn delete_workspace(&self, name: &str) -> Result<()> {
         pollster::block_on(async {
             let mut state = State::load(&self.root).await?;
@@ -341,11 +383,13 @@ impl VcsProvider for JjRepository {
     }
 
     fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>> {
-        let bookmarks = self.bookmark_names()?;
-        let default = self.detect_default_bookmark()?;
+        let state = pollster::block_on(State::inspect(&self.root))?;
+        let bookmarks = state.bookmarks();
+        let default =
+            Self::select_default_bookmark(&bookmarks, self.configured_default.as_deref())?;
 
-        Ok(self
-            .workspace_entries()?
+        let mut worktrees: Vec<_> = state
+            .entries()?
             .into_iter()
             .map(|entry| WorktreeInfo {
                 is_main: Self::paths_equal(&entry.path, &self.primary_root),
@@ -356,10 +400,32 @@ impl VcsProvider for JjRepository {
                 ),
                 path: entry.path,
             })
-            .collect())
+            .collect();
+        for cleanup in super::worktree_cleanup::Cleanup::list(state.workspace.repo_path())? {
+            if !worktrees
+                .iter()
+                .any(|wt| Self::paths_equal(&wt.path, &cleanup.original))
+            {
+                worktrees.push(WorktreeInfo {
+                    is_main: false,
+                    workspace: cleanup.bookmark,
+                    path: cleanup.original,
+                });
+            }
+        }
+        Ok(worktrees)
     }
 
     fn create_worktree(&self, workspace: &str, path: &Path) -> Result<WorktreeCreateResult> {
+        let state = pollster::block_on(State::inspect(&self.root))?;
+        anyhow::ensure!(
+            !super::worktree_cleanup::Cleanup::list(state.workspace.repo_path())?
+                .iter()
+                .any(|cleanup| cleanup.bookmark.as_deref() == Some(workspace)
+                    || Self::paths_equal(&cleanup.original, path)),
+            "jj workspace has pending cleanup; finish removal before recreating it"
+        );
+        drop(state);
         self.prune_worktrees()?;
         pollster::block_on(async {
             let state = State::load(&self.root).await?;
@@ -425,20 +491,45 @@ impl VcsProvider for JjRepository {
     }
 
     fn remove_worktree(&self, path: &Path, force: bool) -> Result<()> {
+        use super::worktree_cleanup::Cleanup;
+        anyhow::ensure!(
+            !Self::paths_equal(path, &self.primary_root) && !Self::paths_equal(path, &self.root),
+            "Cannot remove the current or primary jj workspace"
+        );
+        let repo_path = pollster::block_on(State::inspect(&self.root))?
+            .workspace
+            .repo_path()
+            .to_path_buf();
+        let receipt = Cleanup::receipt(&repo_path, path);
+        let _lease = crate::services::ownership::OperationLease::try_acquire(
+            &receipt.with_extension("lock"),
+        )?
+        .context("Another jj cleanup is active for this directory")?;
+        if let Some(mut cleanup) = Cleanup::read(&receipt)? {
+            anyhow::ensure!(
+                Self::paths_equal(&cleanup.original, path),
+                "jj cleanup receipt path mismatch"
+            );
+            pollster::block_on(async {
+                let mut state = State::load(&self.root).await?;
+                state
+                    .verify_removal_generation(
+                        &cleanup.internal,
+                        &cleanup.saved_commit,
+                        &cleanup.original,
+                    )
+                    .await?;
+                cleanup.remove_directory(&receipt)?;
+                state.forget(&cleanup.internal).await
+            })?;
+            std::fs::remove_file(receipt)?;
+            return Ok(());
+        }
         let entry = self
             .workspace_entries()?
             .into_iter()
             .find(|entry| Self::paths_equal(&entry.path, path))
             .with_context(|| format!("No jj workspace is registered at '{}'", path.display()))?;
-
-        if Self::paths_equal(&entry.path, &self.primary_root) {
-            bail!("Cannot remove jj's primary workspace");
-        }
-        if Self::paths_equal(&entry.path, &self.root) {
-            bail!(
-                "Cannot remove the current jj workspace; run devflow from another workspace first"
-            );
-        }
 
         if !force && entry.path.exists() && self.worktree_is_dirty(&entry.path)? {
             bail!(
@@ -451,31 +542,46 @@ impl VcsProvider for JjRepository {
         if entry.path.exists() {
             drop(pollster::block_on(State::load(&entry.path))?);
         }
-        pollster::block_on(async {
+        let (saved_commit, bookmark) = pollster::block_on(async {
             let mut state = State::load(&self.root).await?;
             let default = Self::select_default_bookmark(
                 &state.bookmarks(),
                 self.configured_default.as_deref(),
             )?;
-            if let Some(raw) = Self::raw_workspace_for_internal(
+            let raw = Self::raw_workspace_for_internal(
                 &entry.internal_name,
                 &state.bookmarks(),
                 default.as_deref(),
-            ) {
-                let commit = state
-                    .commit_for_internal(WorkspaceName::new(&entry.internal_name))
-                    .await?;
-                state.set_bookmark(&raw, &commit).await?;
+            );
+            let commit = state
+                .commit_for_internal(WorkspaceName::new(&entry.internal_name))
+                .await?;
+            if let Some(raw) = &raw {
+                state.set_bookmark(raw, &commit).await?;
             }
+            use jj_lib::object_id::ObjectId;
+            Ok::<_, anyhow::Error>((commit.id().hex(), raw))
+        })?;
+        if entry.path.try_exists()? {
+            let mut cleanup = Cleanup::begin(
+                &receipt,
+                entry.internal_name.clone(),
+                &entry.path,
+                saved_commit.clone(),
+                bookmark,
+                None,
+            )?;
+            cleanup.remove_directory(&receipt)?;
+        }
+        pollster::block_on(async {
+            let mut state = State::load(&self.root).await?;
+            state
+                .verify_removal_generation(&entry.internal_name, &saved_commit, &entry.path)
+                .await?;
             state.forget(&entry.internal_name).await
         })?;
-        if entry.path.exists() {
-            std::fs::remove_dir_all(&entry.path).with_context(|| {
-                format!(
-                    "Failed to remove jj workspace directory '{}'",
-                    entry.path.display()
-                )
-            })?;
+        if receipt.try_exists()? {
+            std::fs::remove_file(receipt)?;
         }
 
         Ok(())
@@ -485,20 +591,24 @@ impl VcsProvider for JjRepository {
         if !path.exists() {
             return Ok(false);
         }
-        pollster::block_on(async {
-            let state = State::load(path).await?;
-            Ok(state.untracked
-                || !state
-                    .working_commit()
-                    .await?
-                    .is_empty(state.repo.as_ref())
-                    .await?)
-        })
+        pollster::block_on(async { State::inspect(path).await?.is_dirty().await })
+    }
+
+    fn prepare_worktree(&self, path: &Path) -> Result<()> {
+        pollster::block_on(State::load(path)).map(drop)
     }
 
     fn worktree_path(&self, workspace: &str) -> Result<Option<PathBuf>> {
-        let entries = self.workspace_entries()?;
-        let default = self.detect_default_bookmark()?;
+        let state = pollster::block_on(State::inspect(&self.root))?;
+        if let Some(cleanup) = super::worktree_cleanup::Cleanup::list(state.workspace.repo_path())?
+            .into_iter()
+            .find(|cleanup| cleanup.bookmark.as_deref() == Some(workspace))
+        {
+            return Ok(Some(cleanup.original));
+        }
+        let entries = state.entries()?;
+        let default =
+            Self::select_default_bookmark(&state.bookmarks(), self.configured_default.as_deref())?;
         let Some(internal_name) =
             Self::internal_workspace_for_raw(&entries, workspace, default.as_deref())
         else {
@@ -522,10 +632,17 @@ impl VcsProvider for JjRepository {
         // of the bookmark's workspace is permanently blocked. Only native
         // registration metadata is touched: no directories, no bookmarks.
         for entry in self.workspace_entries()? {
+            let state = pollster::block_on(State::inspect(&self.root))?;
+            if super::worktree_cleanup::Cleanup::receipt(state.workspace.repo_path(), &entry.path)
+                .try_exists()?
+            {
+                continue;
+            }
+            drop(state);
             // `default` is jj's reserved primary workspace; never forget it,
             // even if its recorded path looks missing (e.g. an unmounted
             // volume) — losing the primary registration is unrecoverable.
-            if entry.internal_name == "default" || entry.path.exists() {
+            if entry.internal_name == "default" || entry.path.try_exists()? {
                 continue;
             }
             if let Err(error) = pollster::block_on(async {
@@ -546,74 +663,37 @@ impl VcsProvider for JjRepository {
     // ── Hooks ──────────────────────────────────────────────────────
 
     fn install_hooks(&self) -> Result<()> {
-        // jj doesn't have native hook support (as of 0.24+).
-        // For colocated repos, install into .git/hooks (same as Git).
-        // For pure jj repos, we rely on devflow's own hook engine triggered
-        // by `devflow git-hook` which the user runs manually or via shell integration.
-        let git_hooks_dir = self.primary_root.join(".git").join("hooks");
-        if git_hooks_dir.parent().map(|p| p.exists()).unwrap_or(false) {
-            // Colocated repo — install into .git/hooks
-            std::fs::create_dir_all(&git_hooks_dir).context("Failed to create hooks directory")?;
-
-            let hook_script = self.generate_hook_script();
-
-            let hook_name = "post-checkout";
-            let hook_path = git_hooks_dir.join(hook_name);
-            std::fs::write(&hook_path, &hook_script)
-                .with_context(|| format!("Failed to write {} hook", hook_name))?;
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&hook_path)?.permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&hook_path, perms)
-                    .context("Failed to set hook permissions")?;
-            }
-
-            log::info!("Installed hooks into colocated .git/hooks");
+        if self.primary_root.join(".git").exists() {
+            super::hooks::install(
+                &git2::Repository::open(&self.primary_root)?,
+                &[("post-checkout", self.generate_hook_script())],
+            )?;
         } else {
-            // Pure jj repo — no hook directory to install into.
-            // Keep guidance on stderr through the logging layer. Core library
-            // code must never write to stdout because JSON-mode callers own
-            // stdout's single-document protocol.
-            log::warn!(
-                "jj does not support native hooks. Use 'devflow git-hook' via shell integration."
-            );
+            log::warn!("jj has no Git hooks; use devflow lifecycle hooks");
         }
-
         Ok(())
     }
 
     fn uninstall_hooks(&self) -> Result<()> {
-        // Only relevant for colocated repos
-        let git_hooks_dir = self.primary_root.join(".git").join("hooks");
-        if git_hooks_dir.exists() {
-            let hook_name = "post-checkout";
-            let hook_path = git_hooks_dir.join(hook_name);
-            if hook_path.exists() && self.is_devflow_hook(&hook_path)? {
-                std::fs::remove_file(&hook_path)
-                    .with_context(|| format!("Failed to remove {} hook", hook_name))?;
-            }
+        if self.primary_root.join(".git").exists() {
+            super::hooks::uninstall(
+                &git2::Repository::open(&self.primary_root)?,
+                &["post-checkout"],
+            )?;
         }
         Ok(())
     }
 
     fn is_devflow_hook(&self, hook_path: &Path) -> Result<bool> {
-        if !hook_path.exists() {
-            return Ok(false);
-        }
-        let content = std::fs::read_to_string(hook_path)
-            .with_context(|| format!("Failed to read hook: {}", hook_path.display()))?;
-        Ok(content.contains("devflow"))
+        super::hooks::is_owned(hook_path)
     }
 
     fn hook_paths(&self) -> Vec<PathBuf> {
-        let hooks_dir = self.root.join(".git").join("hooks");
-        ["post-checkout", "post-merge"]
-            .iter()
-            .map(|hook| hooks_dir.join(hook))
-            .collect()
+        git2::Repository::open(&self.root)
+            .ok()
+            .and_then(|repo| super::hooks::directory(&repo).ok())
+            .map(|dir| vec![dir.join("post-checkout")])
+            .unwrap_or_default()
     }
 
     // ── Meta ───────────────────────────────────────────────────────
@@ -645,6 +725,7 @@ impl JjRepository {
             } else {
                 Workspace::init_internal_git(&settings, path, Default::default()).await?;
             }
+            drop(State::load(path).await?);
             Ok::<_, anyhow::Error>(())
         })?;
 
@@ -667,6 +748,206 @@ impl JjRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git_commit(
+        git: &git2::Repository,
+        reference: &str,
+        parent: Option<git2::Oid>,
+        content: &str,
+    ) -> git2::Oid {
+        let blob = git.blob(content.as_bytes()).unwrap();
+        let mut builder = git.treebuilder(None).unwrap();
+        builder.insert("file", blob, 0o100644).unwrap();
+        let tree = git.find_tree(builder.write().unwrap()).unwrap();
+        let sig = git2::Signature::now("Fixture", "fixture@example.invalid").unwrap();
+        let parent = parent.map(|id| git.find_commit(id).unwrap());
+        git.commit(
+            Some(reference),
+            &sig,
+            &sig,
+            "fixture",
+            &tree,
+            &parent.iter().collect::<Vec<_>>(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn inspection_and_snapshot_preserve_git_staging_and_inspection_preserves_merge() {
+        let root = tempfile::tempdir().unwrap();
+        let git = git2::Repository::init_opts(
+            root.path(),
+            git2::RepositoryInitOptions::new().initial_head("main"),
+        )
+        .unwrap();
+        let base = git_commit(&git, "HEAD", None, "base\n");
+        git.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+            .unwrap();
+        let jj = JjRepository::init(root.path(), true).unwrap();
+        std::fs::write(root.path().join("file"), "staged\n").unwrap();
+        let mut index = git.index().unwrap();
+        index.add_path(Path::new("file")).unwrap();
+        index.write().unwrap();
+        let staged = index.get_path(Path::new("file"), 0).unwrap().id;
+        std::fs::write(root.path().join("file"), "unstaged\n").unwrap();
+        jj.list_workspaces().unwrap();
+        jj.list_worktrees().unwrap();
+        jj.worktree_is_dirty(root.path()).unwrap();
+        jj.prepare_worktree(root.path()).unwrap();
+        jj.create_workspace("staging-preserved", Some("main"))
+            .unwrap();
+        index.read(true).unwrap();
+        assert_eq!(index.get_path(Path::new("file"), 0).unwrap().id, staged);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("file")).unwrap(),
+            "unstaged\n"
+        );
+        git_commit(&git, "HEAD", Some(base), "ours\n");
+        git.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+            .unwrap();
+        let theirs = git_commit(&git, "refs/heads/theirs", Some(base), "theirs\n");
+        jj.prepare_worktree(root.path()).unwrap();
+        git.merge(&[&git.find_annotated_commit(theirs).unwrap()], None, None)
+            .unwrap();
+        let contents = std::fs::read(root.path().join("file")).unwrap();
+        jj.list_workspaces().unwrap();
+        jj.list_worktrees().unwrap();
+        assert!(jj.prepare_worktree(root.path()).is_err());
+        index.read(true).unwrap();
+        assert!(index.has_conflicts());
+        assert_eq!(git.state(), git2::RepositoryState::Merge);
+        assert!(git.path().join("MERGE_HEAD").exists());
+        assert_eq!(std::fs::read(root.path().join("file")).unwrap(), contents);
+    }
+
+    #[test]
+    fn stale_workspace_recovers_natively_and_keeps_local_edits() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("primary");
+        let child = temp.path().join("child");
+        let jj = JjRepository::init(&root, false).unwrap();
+        std::fs::write(root.join("file"), "base\n").unwrap();
+        jj.create_workspace("feature", Some("main")).unwrap();
+        jj.create_worktree("feature", &child).unwrap();
+        std::fs::write(child.join("local"), "keep\n").unwrap();
+        std::fs::write(root.join("file"), "new main\n").unwrap();
+        jj.prepare_worktree(&root).unwrap();
+        let child_jj = JjRepository::new(&child).unwrap();
+        child_jj.list_workspaces().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(child.join("file")).unwrap(),
+            "base\n"
+        );
+        child_jj.prepare_worktree(&child).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(child.join("file")).unwrap(),
+            "new main\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(child.join("local")).unwrap(),
+            "keep\n"
+        );
+        child_jj.prepare_worktree(&child).unwrap();
+    }
+
+    #[test]
+    fn stale_workspace_preserves_conflicting_parent_and_child_edits() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("primary");
+        let child = temp.path().join("child");
+        let jj = JjRepository::init(&root, false).unwrap();
+        std::fs::write(root.join("file"), "base\n").unwrap();
+        jj.create_workspace("feature", Some("main")).unwrap();
+        jj.create_worktree("feature", &child).unwrap();
+        std::fs::write(child.join("file"), "child edit\n").unwrap();
+        std::fs::write(root.join("file"), "parent edit\n").unwrap();
+        jj.prepare_worktree(&root).unwrap();
+        jj.prepare_worktree(&child).unwrap();
+        let conflict = std::fs::read_to_string(child.join("file")).unwrap();
+        assert!(
+            conflict.contains("parent edit") && conflict.contains("child edit"),
+            "{conflict}"
+        );
+        assert!(conflict.contains("<<<<<<<"), "{conflict}");
+        jj.prepare_worktree(&child).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(child.join("file")).unwrap(),
+            conflict
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_directory_removal_keeps_registration_and_can_retry() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("primary");
+        let parent = temp.path().join("restricted");
+        let child = parent.join("child");
+        let jj = JjRepository::init(&root, false).unwrap();
+        jj.create_workspace("feature", Some("main")).unwrap();
+        jj.create_worktree("feature", &child).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = jj.remove_worktree(&child, true);
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if result.is_err() {
+            assert!(jj.worktree_path("feature").unwrap().is_some());
+        }
+        if result.is_err() {
+            jj.remove_worktree(&child, true).unwrap();
+        }
+        assert!(!child.exists());
+        assert!(jj.worktree_path("feature").unwrap().is_none());
+    }
+
+    #[test]
+    fn cleanup_receipt_survives_forgotten_registration_and_blocks_recreation_until_finished() {
+        use super::super::worktree_cleanup::Cleanup;
+        use jj_lib::object_id::ObjectId;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("primary");
+        let child = temp.path().join("child");
+        let jj = JjRepository::init(&root, false).unwrap();
+        jj.create_workspace("feature", Some("main")).unwrap();
+        jj.create_worktree("feature", &child).unwrap();
+        let receipt = pollster::block_on(async {
+            let mut state = State::load(&root).await.unwrap();
+            let entry = state
+                .entries()
+                .unwrap()
+                .into_iter()
+                .find(|entry| super::super::paths_equal(&entry.path, &child))
+                .unwrap();
+            let commit = state
+                .commit_for_internal(WorkspaceName::new(&entry.internal_name))
+                .await
+                .unwrap();
+            let receipt = Cleanup::receipt(state.workspace.repo_path(), &child);
+            let mut cleanup = Cleanup::begin(
+                &receipt,
+                entry.internal_name.clone(),
+                &child,
+                commit.id().hex(),
+                Some("feature".into()),
+                None,
+            )
+            .unwrap();
+            cleanup.remove_directory(&receipt).unwrap();
+            state.forget(&entry.internal_name).await.unwrap();
+            receipt
+        });
+        assert!(jj.worktree_path("feature").unwrap().is_some());
+        assert!(jj
+            .list_worktrees()
+            .unwrap()
+            .iter()
+            .any(|wt| wt.workspace.as_deref() == Some("feature")));
+        assert!(jj.create_worktree("feature", &child).is_err());
+        jj.remove_worktree(&child, true).unwrap();
+        assert!(!receipt.exists());
+        jj.create_worktree("feature", &child).unwrap();
+        jj.remove_worktree(&child, true).unwrap();
+    }
 
     #[test]
     fn native_forget_keeps_remote_bookmark_and_sparse_workspace_rules() {

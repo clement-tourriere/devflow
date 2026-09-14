@@ -312,6 +312,10 @@ impl Connection {
     fn apply(&self, mutation: DatasetMutation) -> Result<()> {
         match mutation {
             DatasetMutation::Snapshot(name) => {
+                let (source, _) = name
+                    .rsplit_once('@')
+                    .context("ZFS snapshot needs a dataset and name")?;
+                self.require_workspace_dataset(&self.dataset(source)?)?;
                 let name = CString::new(name)?;
                 self.check(
                     unsafe {
@@ -473,6 +477,10 @@ async fn blocking<T: Send + 'static>(
 }
 #[async_trait::async_trait]
 impl DatasetOps for NativeZfs {
+    async fn validate_leaf(&self, name: &str) -> Result<()> {
+        let name = name.to_owned();
+        blocking(move |zfs| zfs.require_workspace_dataset(&zfs.dataset(&name)?)).await
+    }
     async fn exists(&self, name: &str) -> Result<bool> {
         let name = name.to_owned();
         blocking(move |zfs| Ok(zfs.open(&name)?.is_some())).await

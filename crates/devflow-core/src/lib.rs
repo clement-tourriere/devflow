@@ -5,6 +5,7 @@ pub mod files;
 pub mod fs_copy;
 pub mod hooks;
 pub mod paths;
+pub mod process_identity;
 pub mod processes;
 pub mod project;
 pub mod services;
@@ -23,3 +24,5 @@ pub mod baseline;
 pub mod companion;
 
 pub mod cache;
+
+pub mod controller;

@@ -7,6 +7,8 @@ sidebar:
 
 The optional proxy discovers Docker containers and managed host processes, then routes HTTPS requests to them. The default `.localhost` suffix resolves to the host loopback address in browsers, without a DNS helper.
 
+Install the companion by setting `DEVFLOW_INSTALL_PROXY=1` when running the installer. The standard `devflow proxy` command delegates to the installed companion; source builds can also embed proxy support with `--features proxy`.
+
 ## Quick start
 
 ```bash

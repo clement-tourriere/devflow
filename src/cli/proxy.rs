@@ -5,6 +5,10 @@ pub(super) async fn handle_proxy_command(
     action: super::ProxyCommands,
     json_output: bool,
 ) -> Result<()> {
+    anyhow::ensure!(
+        !json_output || !matches!(&action, super::ProxyCommands::Start { daemon: false, .. }),
+        "JSON proxy startup requires --daemon; foreground mode streams status"
+    );
     match action {
         super::ProxyCommands::Start {
             daemon,
@@ -240,7 +244,11 @@ pub(super) async fn handle_proxy_command(
             super::TrustCommands::Install => {
                 let ca = devflow_proxy::ca::CertificateAuthority::load_or_generate()?;
                 devflow_proxy::platform::install_system_trust(&ca)?;
-                println!("CA certificate installed to system trust store");
+                if json_output {
+                    println!("{}", serde_json::json!({"status":"installed"}));
+                } else {
+                    println!("CA certificate installed to system trust store");
+                }
             }
             super::TrustCommands::Verify => {
                 let trusted = devflow_proxy::platform::verify_system_trust()?;
@@ -254,10 +262,19 @@ pub(super) async fn handle_proxy_command(
             }
             super::TrustCommands::Remove => {
                 devflow_proxy::platform::remove_system_trust()?;
-                println!("CA certificate removed from system trust store");
+                if json_output {
+                    println!("{}", serde_json::json!({"status":"removed"}));
+                } else {
+                    println!("CA certificate removed from system trust store");
+                }
             }
             super::TrustCommands::Info => {
-                println!("{}", devflow_proxy::platform::trust_info());
+                let instructions = devflow_proxy::platform::trust_info();
+                if json_output {
+                    println!("{}", serde_json::json!({"instructions":instructions}));
+                } else {
+                    println!("{instructions}");
+                }
             }
         },
     }

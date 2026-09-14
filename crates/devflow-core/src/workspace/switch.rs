@@ -9,7 +9,7 @@ use crate::state::{DevflowWorkspace, LocalStateManager};
 use crate::vcs;
 
 use super::hooks::{run_lifecycle_hooks_best_effort, run_lifecycle_hooks_with_result};
-use super::worktree::create_worktree_with_files;
+use super::worktree::create_worktree_with_files_at;
 use super::{LifecycleOptions, ServiceResult, SwitchWorkspaceResult, WorktreeSetupResult};
 
 /// Options specific to workspace switching.
@@ -117,6 +117,28 @@ async fn switch_workspace_inner(
     let opts = &options.lifecycle;
     let vcs_provider =
         vcs::detect_vcs_provider(project_dir).context("Failed to open VCS repository")?;
+    let mut resolved_options = options.clone();
+    resolved_options.from_workspace = journal.record.code_parent.clone();
+    resolved_options.data_from_workspace = journal.record.data_parent.clone();
+    let mut plan = if journal.record.plan.is_null() {
+        super::plan::resolve(config, project_dir, workspace_name, &resolved_options)?
+    } else {
+        serde_json::from_value::<super::plan::WorkspacePlan>(journal.record.plan.clone())?
+    };
+    // Retry keeps exact code/data origins and the creation path. Setup settings
+    // may be repaired explicitly between attempts and are recorded as executed.
+    plan.payloads = options
+        .copy_files
+        .clone()
+        .unwrap_or_else(|| config.worktree.copy_files.clone());
+    plan.caches = config.worktree.caches.clone();
+    plan.hooks = if opts.skip_hooks {
+        serde_json::Value::Null
+    } else {
+        serde_json::to_value(&config.hooks)?
+    };
+    journal.record.plan = serde_json::to_value(&plan)?;
+    journal.save()?;
 
     if !vcs_provider.supports_worktrees() {
         anyhow::bail!(
@@ -160,31 +182,27 @@ async fn switch_workspace_inner(
 
     let mut vcs_ref_created = false;
     let mut parent_for_new = journal.record.code_parent.clone();
-    journal.record.worktree_path = Some(
-        super::worktree::resolve_existing_or_planned_worktree_path(
-            config,
-            project_dir,
-            workspace_name,
-        )
-        .display()
-        .to_string(),
-    );
+    journal.record.worktree_path = Some(plan.worktree_path.display().to_string());
     journal.phase("materialize")?;
     let worktree_result: Option<WorktreeSetupResult>;
 
     // 2. VCS reference creation / worktree materialization
     let vcs_phase_started = std::time::Instant::now();
     let existing_path = vcs_provider.worktree_path(workspace_name)?;
-    if let Some(wt_path) = existing_path {
-        let resolved = std::fs::canonicalize(&wt_path).unwrap_or(wt_path);
-        worktree_result = Some(WorktreeSetupResult {
-            path: resolved,
-            created: false,
-        });
+    if existing_path.is_some() {
+        worktree_result = Some(create_worktree_with_files_at(
+            vcs_provider.as_ref(),
+            config,
+            project_dir,
+            workspace_name,
+            options.copy_files.as_deref(),
+            options.copy_ignored,
+            &plan.worktree_path,
+        )?);
     } else {
         let workspace_exists = vcs_provider.workspace_exists(workspace_name)?;
         if !workspace_exists {
-            if !options.create_if_missing {
+            if !options.create_if_missing && !journal.record.post_create_pending {
                 anyhow::bail!(
                     "Workspace '{}' does not exist. Use the create flag to create it.",
                     workspace_name
@@ -200,18 +218,33 @@ async fn switch_workspace_inner(
                 journal.record.data_parent.as_deref(),
                 None,
             )?;
-            vcs_provider.create_workspace(workspace_name, parent_for_new.as_deref())?;
+            if let Some(revision) = plan
+                .code_revision
+                .as_ref()
+                .filter(|_| !plan.snapshot_required)
+            {
+                vcs_provider.create_workspace_at(workspace_name, revision)?;
+            } else {
+                vcs_provider.create_workspace(workspace_name, parent_for_new.as_deref())?;
+            }
             vcs_ref_created = true;
+            if plan.snapshot_required {
+                plan.code_revision = vcs_provider.workspace_revision(workspace_name)?;
+                plan.snapshot_required = false;
+                journal.record.plan = serde_json::to_value(&plan)?;
+                journal.save()?;
+            }
         }
 
         worktree_result = Some(
-            match create_worktree_with_files(
+            match create_worktree_with_files_at(
                 vcs_provider.as_ref(),
                 config,
                 project_dir,
                 workspace_name,
                 options.copy_files.as_deref(),
                 options.copy_ignored,
+                &plan.worktree_path,
             ) {
                 Ok(worktree) => worktree,
                 Err(error) => {
@@ -256,12 +289,8 @@ async fn switch_workspace_inner(
         .as_ref()
         .map(|w| w.path.display().to_string());
     journal.completed("materialize")?;
-    let origins = crate::baseline::bind_origins(
-        config,
-        project_dir,
-        workspace_name,
-        journal.record.data_parent.as_deref(),
-    )?;
+    let origins =
+        crate::baseline::bind_resolved_origins(project_dir, workspace_name, &plan.data_origins)?;
     journal.phase("services")?;
     // 4. Service orchestration
     let services_skipped = opts.skip_services || config.resolve_services().is_empty();

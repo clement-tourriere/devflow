@@ -59,6 +59,61 @@ pub struct DockerDoctorResult {
     pub version: Option<String>,
 }
 
+fn workspace_config(spec: &StartWorkspaceSpec) -> ContainerCreateBody {
+    // Create and start a new container
+    let mount = format!("{}:{PGDATA_CONTAINER_PATH}", spec.data_dir.display());
+
+    let mut port_bindings: PortMap = HashMap::new();
+    port_bindings.insert(
+        "5432/tcp".to_string(),
+        Some(vec![PortBinding {
+            host_ip: Some("127.0.0.1".to_string()),
+            host_port: Some(spec.port.to_string()),
+        }]),
+    );
+
+    let mut labels = HashMap::new();
+    labels.insert("devflow.managed".to_string(), "true".to_string());
+    labels.insert("devflow.project".to_string(), spec.project_name.clone());
+    labels.insert("devflow.service".to_string(), spec.service_name.clone());
+    labels.insert("devflow.service-type".to_string(), "postgres".to_string());
+    labels.insert("devflow.workspace".to_string(), spec.workspace_name.clone());
+
+    let mut host_config = HostConfig {
+        binds: Some(vec![mount]),
+        port_bindings: Some(port_bindings),
+        ..Default::default()
+    };
+
+    let mut config = ContainerCreateBody {
+        image: Some(spec.image.clone()),
+        user: get_host_uid_gid(),
+        env: Some(vec![
+            format!("POSTGRES_USER={}", spec.pg_user),
+            format!("POSTGRES_PASSWORD={}", spec.pg_password),
+            format!("POSTGRES_DB={}", spec.pg_db),
+            // postgres:18+ moved the default PGDATA to a version-scoped
+            // directory; pin it explicitly so the server always uses the
+            // bind-mounted path regardless of image version.
+            format!("PGDATA={PGDATA_CONTAINER_PATH}"),
+        ]),
+        labels: Some(labels),
+        ..Default::default()
+    };
+
+    if !spec.docker_settings.is_empty() {
+        crate::docker::settings::apply_custom_settings(
+            &mut config,
+            &mut host_config,
+            &spec.docker_settings,
+        );
+    }
+
+    config.host_config = Some(host_config);
+
+    config
+}
+
 pub struct DockerRuntime {
     client: Docker,
 }
@@ -143,10 +198,59 @@ impl DockerRuntime {
         }
     }
 
+    /// Inspect the exact engine, ownership and runtime settings without changes.
+    pub async fn verify_workspace(&self, spec: &StartWorkspaceSpec) -> anyhow::Result<()> {
+        let config = workspace_config(spec);
+        let actual = self
+            .client
+            .inspect_container(&spec.container_name, None)
+            .await?;
+        let image = self
+            .client
+            .inspect_image(&spec.image)
+            .await?
+            .id
+            .context("Docker image identity missing")?;
+        anyhow::ensure!(actual.image.as_ref() == Some(&image), "Container '{}' uses a different engine image; stop and remove that container before retrying (keep its data directory)", spec.container_name);
+        let existing = actual.config.context("Container configuration missing")?;
+        let actual_env = existing.env.unwrap_or_default();
+        for expected in config.env.as_ref().into_iter().flatten() {
+            anyhow::ensure!(actual_env.contains(expected), "Container '{}' has different database environment; recreate its container while retaining data", spec.container_name);
+        }
+        for (key, value) in config.labels.as_ref().into_iter().flatten() {
+            anyhow::ensure!(
+                existing.labels.as_ref().and_then(|labels| labels.get(key)) == Some(value),
+                "Container '{}' ownership label '{}' differs",
+                spec.container_name,
+                key
+            );
+        }
+        if let Some(user) = &config.user {
+            anyhow::ensure!(
+                existing.user.as_ref() == Some(user),
+                "Container user differs from workspace specification"
+            );
+        }
+        let expected = serde_json::to_value(&config.host_config)?;
+        let actual = serde_json::to_value(actual.host_config)?;
+        for (key, value) in expected.as_object().context("Host configuration missing")? {
+            if !value.is_null() {
+                anyhow::ensure!(actual.get(key) == Some(value), "Container '{}' has a different {} setting; recreate its container while retaining data", spec.container_name, key);
+            }
+        }
+        Ok(())
+    }
+
     pub async fn start_workspace(&self, spec: &StartWorkspaceSpec) -> anyhow::Result<()> {
         self.ensure_image(&spec.image).await?;
 
-        match self.container_status(&spec.container_name).await? {
+        let config = workspace_config(spec);
+
+        let status = self.container_status(&spec.container_name).await?;
+        if status != ContainerStatus::NotFound {
+            self.verify_workspace(spec).await?;
+        }
+        match status {
             ContainerStatus::Running => return Ok(()),
             ContainerStatus::Paused => {
                 self.unpause_workspace(&spec.container_name).await?;
@@ -166,57 +270,6 @@ impl DockerRuntime {
             }
             ContainerStatus::NotFound => {}
         }
-
-        // Create and start a new container
-        let mount = format!("{}:{PGDATA_CONTAINER_PATH}", spec.data_dir.display());
-
-        let mut port_bindings: PortMap = HashMap::new();
-        port_bindings.insert(
-            "5432/tcp".to_string(),
-            Some(vec![PortBinding {
-                host_ip: Some("127.0.0.1".to_string()),
-                host_port: Some(spec.port.to_string()),
-            }]),
-        );
-
-        let mut labels = HashMap::new();
-        labels.insert("devflow.managed".to_string(), "true".to_string());
-        labels.insert("devflow.project".to_string(), spec.project_name.clone());
-        labels.insert("devflow.service".to_string(), spec.service_name.clone());
-        labels.insert("devflow.service-type".to_string(), "postgres".to_string());
-        labels.insert("devflow.workspace".to_string(), spec.workspace_name.clone());
-
-        let mut host_config = HostConfig {
-            binds: Some(vec![mount]),
-            port_bindings: Some(port_bindings),
-            ..Default::default()
-        };
-
-        let mut config = ContainerCreateBody {
-            image: Some(spec.image.clone()),
-            user: get_host_uid_gid(),
-            env: Some(vec![
-                format!("POSTGRES_USER={}", spec.pg_user),
-                format!("POSTGRES_PASSWORD={}", spec.pg_password),
-                format!("POSTGRES_DB={}", spec.pg_db),
-                // postgres:18+ moved the default PGDATA to a version-scoped
-                // directory; pin it explicitly so the server always uses the
-                // bind-mounted path regardless of image version.
-                format!("PGDATA={PGDATA_CONTAINER_PATH}"),
-            ]),
-            labels: Some(labels),
-            ..Default::default()
-        };
-
-        if !spec.docker_settings.is_empty() {
-            crate::docker::settings::apply_custom_settings(
-                &mut config,
-                &mut host_config,
-                &spec.docker_settings,
-            );
-        }
-
-        config.host_config = Some(host_config);
 
         let options = CreateContainerOptions {
             name: Some(spec.container_name.clone()),

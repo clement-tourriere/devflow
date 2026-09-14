@@ -11,7 +11,7 @@ sidebar:
 Cloud providers map devflow workspaces onto managed database branching — no local containers at all. They implement the same provider interface, so `switch`, `connection`, hooks, and cleanup behave identically.
 
 :::caution
-These providers are **experimental**: less exercised than the local/shared paths, and subject to upstream API changes. Pin expectations accordingly.
+Neon, DBLab and Xata are **experimental** and **untested against live accounts for v0.8.0**. Compilation and contract tests do not establish live API compatibility. Enable their optional build features explicitly; they are excluded from the standard release binary.
 :::
 
 ## Neon

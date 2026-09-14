@@ -20,8 +20,7 @@ use crate::vcs;
 /// Options for [`destroy`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DestroyOptions {
-    /// Remove worktrees even when the VCS refuses (e.g. uncommitted changes),
-    /// falling back to plain filesystem deletion.
+    /// Explicitly accept dirty-worktree deletion; ownership and locks still apply.
     pub force_worktrees: bool,
 }
 
@@ -60,6 +59,7 @@ pub struct ServiceDestroyOutcome {
 #[derive(Debug, Clone, Serialize)]
 pub struct DestroyOutcome {
     pub project_name: String,
+    pub resources: Vec<ResourceDestroyOutcome>,
     pub processes_stopped: usize,
     pub process_results: Vec<ProcessResult>,
     pub services_destroyed: Vec<ServiceDestroyOutcome>,
@@ -70,9 +70,31 @@ pub struct DestroyOutcome {
     pub local_config_deleted: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ResourceDestroyOutcome {
+    pub kind: String,
+    pub resource: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+fn resource(kind: &str, name: impl Into<String>, result: Result<()>) -> ResourceDestroyOutcome {
+    ResourceDestroyOutcome {
+        kind: kind.into(),
+        resource: name.into(),
+        success: result.is_ok(),
+        error: result.err().map(|e| format!("{e:#}")),
+    }
+}
+fn optional_vcs(project: &Path) -> Result<Option<Box<dyn vcs::VcsProvider>>> {
+    vcs::detect_vcs_kind(project)
+        .map(|_| vcs::detect_vcs_provider(project))
+        .transpose()
+}
+
 impl DestroyOutcome {
     pub fn succeeded(&self) -> bool {
         self.state_cleared
+            && self.resources.iter().all(|resource| resource.success)
             && self
                 .services_destroyed
                 .iter()
@@ -87,10 +109,11 @@ impl DestroyOutcome {
 /// Describe what [`destroy`] would tear down for the project at `project_dir`.
 pub fn destroy_plan(project_dir: &Path) -> Result<DestroyPlan> {
     let config = Config::load_effective_for_dir(project_dir)?;
-    let vcs_repo = vcs::detect_vcs_provider(project_dir).ok();
+    let vcs_repo = optional_vcs(project_dir)?;
     let worktrees = vcs_repo
         .as_ref()
-        .and_then(|repo| repo.list_worktrees().ok())
+        .map(|repo| repo.list_worktrees())
+        .transpose()?
         .unwrap_or_default()
         .into_iter()
         .filter(|wt| !wt.is_main)
@@ -134,7 +157,30 @@ pub async fn destroy(
         crate::workspace::operation::project_policy_lease(project_dir, true).await?;
     let config = Config::load_effective_for_dir(project_dir)?;
     let project_name = config.project_name();
-    let vcs_repo = vcs::detect_vcs_provider(project_dir).ok();
+    let vcs_repo = optional_vcs(project_dir)?;
+    let worktrees = vcs_repo
+        .as_ref()
+        .map(|repo| repo.list_worktrees())
+        .transpose()?
+        .unwrap_or_default();
+    let mut resources = Vec::new();
+    // Validate every checkout before stopping a process or deleting data.
+    if let Some(repo) = &vcs_repo {
+        anyhow::ensure!(
+            !repo.is_worktree(),
+            "Destroy must run from the primary checkout"
+        );
+        for wt in worktrees.iter().filter(|wt| !wt.is_main) {
+            anyhow::ensure!(
+                !repo.worktree_is_locked(&wt.path)?,
+                "Worktree {} is locked",
+                wt.path.display()
+            );
+            if !options.force_worktrees {
+                anyhow::ensure!(!repo.worktree_is_dirty(&wt.path)?, "Worktree {} has uncommitted changes; preserve them or explicitly force deletion", wt.path.display());
+            }
+        }
+    }
     // Local state and hook approvals are keyed by the committed config path.
     let state_key = Config::find_config_file_in(project_dir)
         .unwrap_or_else(|| project_dir.join(".devflow.yml"));
@@ -195,6 +241,7 @@ pub async fn destroy(
         // Keep configuration and ownership references so failed deletions can be retried.
         return Ok(DestroyOutcome {
             project_name,
+            resources,
             processes_stopped,
             process_results,
             services_destroyed,
@@ -206,113 +253,162 @@ pub async fn destroy(
         });
     }
 
-    // 3. Remove worktrees — never silently rm-rf one the VCS refuses to drop
-    // (uncommitted work) unless the caller forced it.
-    let mut worktrees_removed = 0usize;
-    if let Some(ref repo) = vcs_repo {
-        if let Ok(worktrees) = repo.list_worktrees() {
-            for wt in worktrees.iter().filter(|wt| !wt.is_main) {
-                emit(
-                    progress,
-                    format!("Removing worktree: {}", wt.path.display()),
-                );
-                match repo.remove_worktree(&wt.path, options.force_worktrees) {
-                    Ok(()) => worktrees_removed += 1,
-                    Err(e) if !options.force_worktrees => {
-                        log::warn!(
-                            "Skipping worktree '{}' during destroy: {}",
-                            wt.path.display(),
-                            e
-                        );
-                        emit(progress, format!("  Skipping {}: {}", wt.path.display(), e));
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to remove worktree via VCS: {}", e);
-                        if wt.path.exists() {
-                            if let Err(e2) = std::fs::remove_dir_all(&wt.path) {
-                                log::warn!("Failed to remove worktree directory: {}", e2);
-                                emit(
-                                    progress,
-                                    format!(
-                                        "  Warning: could not remove {}: {}",
-                                        wt.path.display(),
-                                        e2
-                                    ),
-                                );
-                                continue;
-                            }
-                        }
-                        worktrees_removed += 1;
-                    }
-                }
+    // Remove only paths still owned by the VCS. Keep state/config on any failure.
+    let mut worktrees_removed = 0;
+    if let Some(repo) = &vcs_repo {
+        for wt in worktrees.iter().filter(|wt| !wt.is_main) {
+            let result = resource(
+                "worktree",
+                wt.path.display().to_string(),
+                repo.remove_worktree(&wt.path, options.force_worktrees),
+            );
+            if result.success {
+                worktrees_removed += 1;
             }
+            resources.push(result);
         }
     }
-
-    // 4. Uninstall VCS hooks.
     let mut hooks_uninstalled = false;
-    if let Some(ref repo) = vcs_repo {
-        match repo.uninstall_hooks() {
-            Ok(_) => {
-                hooks_uninstalled = true;
-                emit(progress, "Uninstalled VCS hooks".to_string());
-            }
-            Err(e) => log::warn!("Failed to uninstall hooks: {}", e),
+    if resources.iter().all(|r| r.success) {
+        if let Some(repo) = &vcs_repo {
+            let result = resource("hooks", "managed Git hooks", repo.uninstall_hooks());
+            hooks_uninstalled = result.success;
+            resources.push(result);
         }
     }
-
-    // 5. Clear hook approvals (before the registry entry disappears).
-    if let Ok(state_mgr) = LocalStateManager::new() {
-        if let Some(project_key) = state_mgr.get_project_key_for(&state_key) {
-            if let Ok(mut store) = ApprovalStore::load() {
-                if let Err(e) = store.clear_project(&project_key) {
-                    log::warn!("Failed to clear hook approvals: {}", e);
+    let mut config_deleted = false;
+    let mut local_config_deleted = false;
+    let mut state_cleared = false;
+    if resources.iter().all(|r| r.success) {
+        // Read all fallible state before removing the configuration needed for retry.
+        let mut state = LocalStateManager::new()?;
+        if let Some(key) = state.get_project_key_for(&state_key) {
+            resources.push(resource(
+                "approvals",
+                &key,
+                ApprovalStore::load().and_then(|mut store| store.clear_project(&key).map(|_| ())),
+            ));
+        }
+        if resources.iter().all(|r| r.success) {
+            // Save recoverable contents before staging; only discard ownership
+            // after both configuration deletions succeed. A failure restores
+            // the configuration so the remaining cleanup can be retried.
+            let paths = [
+                Config::find_config_file_in(project_dir),
+                project_dir
+                    .join(".devflow.local.yml")
+                    .try_exists()?
+                    .then(|| project_dir.join(".devflow.local.yml")),
+            ];
+            let backups = paths
+                .iter()
+                .enumerate()
+                .filter_map(|(index, path)| path.as_ref().map(|path| (index, path)))
+                .map(|(index, path)| -> Result<_> {
+                    Ok((
+                        index,
+                        path.clone(),
+                        std::fs::read(path)?,
+                        std::fs::symlink_metadata(path)?.permissions(),
+                        std::fs::read_link(path).ok(),
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let mut staged = Vec::new();
+            for (index, path, _, _, _) in &backups {
+                let stage =
+                    path.with_file_name(format!(".devflow-destroy-{}", uuid::Uuid::new_v4()));
+                match std::fs::rename(path, &stage) {
+                    Ok(()) => staged.push((*index, path.clone(), stage)),
+                    Err(error) => {
+                        resources.push(resource(
+                            "config",
+                            path.display().to_string(),
+                            Err(error.into()),
+                        ));
+                        break;
+                    }
                 }
             }
-        }
-    }
-
-    // 6. Clear local state (workspace registry, services, current workspace).
-    let mut state_cleared = false;
-    match LocalStateManager::new() {
-        Ok(mut state_mgr) => match state_mgr.remove_project(&state_key) {
-            Ok(()) => {
-                state_cleared = true;
-                emit(
-                    progress,
-                    "Cleared project state and workspace registry".to_string(),
+            if resources.iter().all(|r| r.success) {
+                for (index, original, stage) in &staged {
+                    let result = resource(
+                        "config",
+                        original.display().to_string(),
+                        std::fs::remove_file(stage).map_err(Into::into),
+                    );
+                    if *index == 0 {
+                        config_deleted = result.success;
+                    } else {
+                        local_config_deleted = result.success;
+                    }
+                    resources.push(result);
+                }
+            }
+            if resources.iter().all(|r| r.success) {
+                let result = resource(
+                    "state",
+                    "project registry",
+                    state.remove_project(&state_key),
                 );
+                state_cleared = result.success;
+                resources.push(result);
             }
-            Err(e) => log::warn!("Failed to clear project state: {}", e),
-        },
-        Err(e) => log::warn!("Failed to open local state: {}", e),
-    }
-
-    // 7. Delete config files.
-    let mut config_deleted = false;
-    if let Some(config_path) = Config::find_config_file_in(project_dir) {
-        match std::fs::remove_file(&config_path) {
-            Ok(()) => {
-                config_deleted = true;
-                emit(progress, format!("Deleted {}", config_path.display()));
+            if !state_cleared {
+                for (index, original, stage) in &staged {
+                    let restore = (|| -> Result<()> {
+                        anyhow::ensure!(
+                            std::fs::symlink_metadata(original)
+                                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound),
+                            "Configuration path was replaced during cleanup: {}",
+                            original.display()
+                        );
+                        if std::fs::symlink_metadata(stage).is_ok() {
+                            return Ok(std::fs::rename(stage, original)?);
+                        }
+                        let (_, _, bytes, permissions, link) =
+                            backups.iter().find(|b| b.0 == *index).unwrap();
+                        if let Some(target) = link {
+                            #[cfg(unix)]
+                            {
+                                std::os::unix::fs::symlink(target, original)?;
+                            }
+                            #[cfg(windows)]
+                            {
+                                std::os::windows::fs::symlink_file(target, original)?;
+                            }
+                        } else {
+                            use std::io::Write;
+                            let mut file = std::fs::OpenOptions::new()
+                                .write(true)
+                                .create_new(true)
+                                .open(original)?;
+                            file.write_all(bytes)?;
+                            file.set_permissions(permissions.clone())?;
+                            file.sync_all()?;
+                        }
+                        Ok(())
+                    })();
+                    if restore.is_ok() {
+                        if *index == 0 {
+                            config_deleted = false;
+                        } else {
+                            local_config_deleted = false;
+                        }
+                    }
+                    resources.push(resource(
+                        "config_restore",
+                        original.display().to_string(),
+                        restore,
+                    ));
+                }
             }
-            Err(e) => log::warn!("Failed to delete config file: {}", e),
-        }
-    }
-    let mut local_config_deleted = false;
-    let local_config_path = project_dir.join(".devflow.local.yml");
-    if local_config_path.exists() {
-        match std::fs::remove_file(&local_config_path) {
-            Ok(()) => {
-                local_config_deleted = true;
-                emit(progress, format!("Deleted {}", local_config_path.display()));
-            }
-            Err(e) => log::warn!("Failed to delete local config file: {}", e),
         }
     }
 
     Ok(DestroyOutcome {
         project_name,
+        resources,
         processes_stopped,
         process_results,
         services_destroyed,

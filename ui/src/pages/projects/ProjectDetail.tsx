@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   getProjectDetail,
   listWorkspaces,
+  listBaselines,
   listServices,
   addService,
   createWorkspace,
@@ -46,6 +47,7 @@ import type {
   ProcessStatus,
   ProcessResult,
 } from "../../types";
+import WorkspaceOperations from "../../components/WorkspaceOperations";
 import Modal from "../../components/Modal";
 import ConfirmDialog from "../../components/ConfirmDialog";
 import AddServiceModal from "../../components/AddServiceModal";
@@ -178,6 +180,11 @@ function ProjectDetail() {
   const [showCreateWorkspace, setShowCreateWorkspace] = useState(false);
   const [newWorkspaceName, setNewWorkspaceName] = useState("");
   const [fromWorkspace, setFromWorkspace] = useState("");
+  const [dataFromWorkspace, setDataFromWorkspace] = useState("");
+  const [baselines, setBaselines] = useState<Array<{reference: string; service: string}>>([]);
+  useEffect(() => {
+    if (showCreateWorkspace) listBaselines(projectPath).then((entries) => setBaselines(entries.filter((entry) => entry.status === "sealed"))).catch((error) => toast.error(`Could not load baselines: ${error}`));
+  }, [projectPath, showCreateWorkspace]);
   const [copyFiles, setCopyFiles] = useState<string[]>([]);
   const [copyIgnored, setCopyIgnored] = useState(false);
   const [deletingWorkspace, setDeletingWorkspace] = useState<string | null>(null);
@@ -383,6 +390,7 @@ function ProjectDetail() {
           fromWorkspace || undefined,
           copyFiles,
           copyIgnored,
+          dataFromWorkspace || undefined,
         ),
         310000,
         "Workspace creation timed out. Refreshing state; parts of it may exist — retry if needed."
@@ -393,6 +401,7 @@ function ProjectDetail() {
       setShowCreateWorkspace(false);
       setNewWorkspaceName("");
       setFromWorkspace("");
+      setDataFromWorkspace("");
       setCopyFiles(detail?.worktree_copy_files ?? []);
       setCopyIgnored(detail?.worktree_copy_ignored ?? false);
       await reload();
@@ -1093,6 +1102,8 @@ function ProjectDetail() {
         </div>
       )}
       {detail.has_config && (<>
+
+      <WorkspaceOperations projectPath={projectPath} revision={workspaces} onUpdated={reload} />
 
       {/* Workspaces card */}
       <div className="card">
@@ -2397,6 +2408,14 @@ function ProjectDetail() {
                 {b.name}{b.is_default ? " (default)" : ""}
               </option>
             ))}
+          </select>
+        </div>
+        <div style={{ marginBottom: 16 }}>
+          <label htmlFor="workspace-data-origin">Data source</label>
+          <select id="workspace-data-origin" value={dataFromWorkspace} onChange={(e) => setDataFromWorkspace(e.target.value)} style={{width: "100%", marginTop: 4}}>
+            <option value="">Same as code parent</option>
+            {baselines.map((baseline) => <option key={baseline.reference} value={baseline.reference}>{baseline.reference} ({baseline.service})</option>)}
+            {workspaces.map((workspace) => <option key={workspace.name} value={workspace.name}>Workspace: {workspace.name}</option>)}
           </select>
         </div>
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>

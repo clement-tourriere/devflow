@@ -1,40 +1,22 @@
-use devflow_core::config::{document::ConfigDocument, Config};
+use devflow_core::config::document::ConfigDocument;
 use std::path::Path;
 
-#[tauri::command]
-pub async fn get_config_document(project_path: String) -> Result<ConfigDocument, String> {
-    ConfigDocument::open(Path::new(&project_path)).map_err(crate::commands::format_error)
+#[derive(serde::Serialize)]
+pub struct ConfigTextDocument {
+    path: std::path::PathBuf,
+    format: String,
+    content: String,
 }
 
 #[tauri::command]
-pub async fn get_config_json(project_path: String) -> Result<serde_json::Value, String> {
-    let document = get_config_document(project_path).await?;
-    serde_json::to_value(document.config).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn save_config_json(
-    project_path: String,
-    config: serde_json::Value,
-    original: Option<serde_json::Value>,
-) -> Result<(), String> {
-    let document = get_config_document(project_path).await?;
-    let config: Config = serde_json::from_value(config).map_err(|e| e.to_string())?;
-    if let Some(original) = original {
-        let original: Config = serde_json::from_value(original).map_err(|e| e.to_string())?;
-        if serde_json::to_value(&original).map_err(|e| e.to_string())?
-            != serde_json::to_value(&document.config).map_err(|e| e.to_string())?
-        {
-            return Err("Configuration changed on disk; reload before saving".into());
-        }
-    }
-    ConfigDocument::write_config(&document.path, &config).map_err(crate::commands::format_error)
-}
-
-// Names retained for existing clients; contents use the discovered format.
-#[tauri::command]
-pub async fn get_config_yaml(project_path: String) -> Result<String, String> {
-    Ok(get_config_document(project_path).await?.content)
+pub async fn get_config_document(project_path: String) -> Result<ConfigTextDocument, String> {
+    let doc =
+        ConfigDocument::open(Path::new(&project_path)).map_err(crate::commands::format_error)?;
+    Ok(ConfigTextDocument {
+        path: doc.path,
+        format: doc.format,
+        content: doc.content,
+    })
 }
 
 #[tauri::command]
@@ -43,7 +25,8 @@ pub async fn save_config_yaml(
     content: String,
     original: Option<String>,
 ) -> Result<(), String> {
-    let mut document = get_config_document(project_path).await?;
+    let mut document =
+        ConfigDocument::open(Path::new(&project_path)).map_err(crate::commands::format_error)?;
     if let Some(original) = original {
         document.content = original;
     }

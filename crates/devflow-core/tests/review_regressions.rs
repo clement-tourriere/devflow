@@ -6,6 +6,30 @@ use devflow_core::services::factory::create_provider_from_named_config;
 use devflow_core::services::shared::SharedPostgresProvider;
 use devflow_core::services::ServiceProvider;
 
+struct ImageTagCleanup(String);
+impl Drop for ImageTagCleanup {
+    fn drop(&mut self) {
+        let image = self.0.clone();
+        std::thread::spawn(move || {
+            let _ = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    bollard::Docker::connect_with_local_defaults()?
+                        .remove_image(
+                            &image,
+                            None::<bollard::query_parameters::RemoveImageOptions>,
+                            None,
+                        )
+                        .await
+                });
+        })
+        .join()
+        .unwrap();
+    }
+}
+
 struct ContainerCleanup(String);
 impl Drop for ContainerCleanup {
     fn drop(&mut self) {
@@ -558,13 +582,29 @@ async fn versioned_baselines_seal_data_and_reset_to_the_recorded_generation() {
     let store_path = temp.path().join("state.db");
     let _cleanup = LocalProjectCleanup(store_path.clone());
     support::init_repository(temp.path(), "main");
-    let service:devflow_core::config::NamedServiceConfig=serde_json::from_value(serde_json::json!({"name":"db","type":"local","service_type":"postgres","auto_workspace":true,"default":true,"local":{"data_root":temp.path(),"storage":"copy","image":"postgres:17","port_range_start":57450}})).unwrap();
-    let config = Config {
+    let runtime = devflow_core::services::postgres::local::docker::DockerRuntime::new().unwrap();
+    runtime.ensure_image("postgres:17").await.unwrap();
+    runtime.ensure_image("redis:7-alpine").await.unwrap();
+    let tag_repo = format!("devflow-review-engine-{}", uuid::Uuid::new_v4());
+    let tag = format!("{tag_repo}:fixture");
+    let _tag_cleanup = ImageTagCleanup(tag.clone());
+    let tag_options = bollard::query_parameters::TagImageOptions {
+        repo: Some(tag_repo),
+        tag: Some("fixture".into()),
+    };
+    runtime
+        .client()
+        .tag_image("postgres:17", Some(tag_options.clone()))
+        .await
+        .unwrap();
+    let service:devflow_core::config::NamedServiceConfig=serde_json::from_value(serde_json::json!({"name":"db","type":"local","service_type":"postgres","auto_workspace":true,"default":true,"local":{"data_root":temp.path(),"storage":"copy","image":tag,"port_range_start":57450}})).unwrap();
+    let mut config = Config {
         project_id: Some(format!("baseline-test-{}", uuid::Uuid::new_v4())),
         project_root: Some(temp.path().to_path_buf()),
         services: Some(vec![service]),
         ..Config::default()
     };
+    config.worktree.path_template = "worktrees/{workspace}".into();
     let source = temp.path().join("seed.sql");
     std::fs::write(
         &source,
@@ -657,7 +697,7 @@ async fn versioned_baselines_seal_data_and_reset_to_the_recorded_generation() {
     };
     let docker = bollard::Docker::connect_with_local_defaults().unwrap();
     let inspected = docker.inspect_container(&container, None).await.unwrap();
-    assert_eq!(inspected.config.unwrap().image, first.engine_fingerprint);
+    assert_eq!(inspected.image, first.engine_fingerprint);
     assert!(
         matches!(reset.data_origin,Some(devflow_core::baseline::DataOrigin::Baseline {reference,..}) if reference==first.reference)
     );
@@ -676,6 +716,145 @@ async fn versioned_baselines_seal_data_and_reset_to_the_recorded_generation() {
             .as_deref(),
         Some("stopped")
     );
+    // An ordinary descendant must inherit its ancestor's immutable engine,
+    // even after the configured mutable tag points at an incompatible image.
+    runtime
+        .client()
+        .tag_image("redis:7-alpine", Some(tag_options.clone()))
+        .await
+        .unwrap();
+    let nested_options = devflow_core::workspace::switch::SwitchOptions {
+        data_from_workspace: Some("agent/a".into()),
+        ..options.clone()
+    };
+    let nested = devflow_core::application::switch_workspace(
+        &config,
+        temp.path(),
+        "agent/nested",
+        &nested_options,
+    )
+    .await
+    .unwrap();
+    assert!(nested.ready(), "{nested:?}");
+    assert_eq!(
+        local_sql(&store_path, &nested.service_key, "SELECT value FROM marker").await,
+        "v1"
+    );
+    let nested_container = {
+        let store =
+            devflow_core::services::postgres::local::state::Store::open(&store_path).unwrap();
+        let project = store.list_projects().unwrap().remove(0);
+        store
+            .get_workspace_by_name(&project.id, &nested.service_key)
+            .unwrap()
+            .unwrap()
+            .container_name
+    };
+    assert_eq!(
+        runtime
+            .client()
+            .inspect_container(&nested_container, None)
+            .await
+            .unwrap()
+            .image,
+        first.engine_fingerprint
+    );
+    runtime
+        .client()
+        .tag_image("postgres:17", Some(tag_options))
+        .await
+        .unwrap();
+    let deletion = devflow_core::workspace::delete::DeleteOptions {
+        force: true,
+        lifecycle: devflow_core::workspace::LifecycleOptions {
+            skip_hooks: true,
+            skip_processes: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    devflow_core::workspace::delete::delete_workspace(
+        &config,
+        temp.path(),
+        "agent/nested",
+        &deletion,
+    )
+    .await
+    .unwrap();
+    let generation = devflow_core::state::LocalStateManager::new()
+        .unwrap()
+        .control(temp.path())
+        .workspaces["agent/a"]
+        .generation
+        .clone();
+    devflow_core::workspace::delete::delete_workspace(&config, temp.path(), "agent/a", &deletion)
+        .await
+        .unwrap();
+    let newer = devflow_core::workspace::switch::SwitchOptions {
+        data_from_workspace: Some(second.reference.clone()),
+        ..options.clone()
+    };
+    let recreated =
+        devflow_core::application::switch_workspace(&config, temp.path(), "agent/a", &newer)
+            .await
+            .unwrap();
+    assert!(recreated.ready(), "{recreated:?}");
+    assert_ne!(
+        generation,
+        devflow_core::state::LocalStateManager::new()
+            .unwrap()
+            .control(temp.path())
+            .workspaces["agent/a"]
+            .generation
+    );
+    assert_eq!(
+        local_sql(
+            &store_path,
+            &recreated.service_key,
+            "SELECT value FROM marker"
+        )
+        .await,
+        "v2"
+    );
+    // Removing only code retains the data binding and protects its baseline.
+    let retain = devflow_core::workspace::delete::DeleteOptions {
+        keep_services: true,
+        ..deletion.clone()
+    };
+    devflow_core::workspace::delete::delete_workspace(&config, temp.path(), "agent/a", &retain)
+        .await
+        .unwrap();
+    assert!(
+        devflow_core::baseline::remove(&config, temp.path(), &second.reference)
+            .await
+            .is_err()
+    );
+    assert!(
+        devflow_core::application::switch_workspace(&config, temp.path(), "agent/a", &options)
+            .await
+            .is_err()
+    );
+    assert!(git2::Repository::open(temp.path())
+        .unwrap()
+        .find_branch("agent/a", git2::BranchType::Local)
+        .is_err());
+    let retained =
+        devflow_core::application::switch_workspace(&config, temp.path(), "agent/a", &newer)
+            .await
+            .unwrap();
+    assert!(retained.ready(), "{retained:?}");
+    assert_eq!(
+        local_sql(
+            &store_path,
+            &retained.service_key,
+            "SELECT value FROM marker"
+        )
+        .await,
+        "v2"
+    );
+    devflow_core::workspace::delete::delete_workspace(&config, temp.path(), "agent/a", &deletion)
+        .await
+        .unwrap();
     devflow_core::baseline::remove(&config, temp.path(), &second.reference)
         .await
         .unwrap();
@@ -694,4 +873,62 @@ async fn versioned_baselines_seal_data_and_reset_to_the_recorded_generation() {
         .await
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn existing_postgres_container_rejects_incompatible_engine_and_runtime_spec() {
+    use devflow_core::services::postgres::local::docker::{DockerRuntime, StartWorkspaceSpec};
+    let _environment = support::isolated_config();
+    let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let runtime = DockerRuntime::new().unwrap();
+    runtime.ensure_image("postgres:17").await.unwrap();
+    runtime.ensure_image("redis:7-alpine").await.unwrap();
+    let name = format!("devflow-review-spec-{}", uuid::Uuid::new_v4());
+    let _cleanup = ContainerCleanup(name.clone());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let spec = StartWorkspaceSpec {
+        image: "postgres:17".into(),
+        container_name: name.clone(),
+        data_dir: root.path().into(),
+        port,
+        pg_user: "devflow".into(),
+        pg_password: "fixture".into(),
+        pg_db: "fixture".into(),
+        project_name: name.clone(),
+        service_name: "db".into(),
+        workspace_name: "main".into(),
+        docker_settings: Default::default(),
+    };
+    runtime.start_workspace(&spec).await.unwrap();
+    runtime.verify_workspace(&spec).await.unwrap();
+    let wrong_image = StartWorkspaceSpec {
+        image: "redis:7-alpine".into(),
+        ..spec.clone()
+    };
+    assert!(runtime
+        .start_workspace(&wrong_image)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("image"));
+    let wrong_port = StartWorkspaceSpec {
+        port: port.saturating_sub(1),
+        ..spec.clone()
+    };
+    assert!(runtime.start_workspace(&wrong_port).await.is_err());
+    runtime.stop_workspace(&name).await.unwrap();
+    assert!(runtime.start_workspace(&wrong_port).await.is_err());
+    assert!(!runtime
+        .client()
+        .inspect_container(&name, None)
+        .await
+        .unwrap()
+        .state
+        .unwrap()
+        .running
+        .unwrap());
+    runtime.start_workspace(&spec).await.unwrap();
 }

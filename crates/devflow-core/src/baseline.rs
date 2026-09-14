@@ -257,15 +257,15 @@ pub async fn remove(config: &Config, project: &Path, reference: &str) -> Result<
         .find(|b| b.reference == reference)
         .context("baseline not found")?;
     anyhow::ensure!(
-        !control.workspaces.values().any(|w| w.desired
-            != crate::state::control::DesiredState::Absent
-            && w.data
-                .values()
-                .any(|d| matches!(d,DataOrigin::Baseline { reference:r,.. } if r == reference))),
+        !control.workspaces.values().any(|w| w
+            .data
+            .values()
+            .any(|d| matches!(d,DataOrigin::Baseline { reference:r,.. } if r == reference))),
         "baseline has dependent workspaces"
     );
     let provider = factory::resolve_provider(config, Some(&baseline.service)).await?;
     journal.set_request(serde_json::json!({"reference":reference}), config)?;
+    journal.phase("delete")?;
     if let Err(error) = provider
         .provider
         .delete_baseline(&baseline.service_key)
@@ -283,7 +283,7 @@ pub async fn remove(config: &Config, project: &Path, reference: &str) -> Result<
 }
 
 /// Resolve once and persist exact per-service origins before any provider mutation.
-pub fn bind_origins(
+pub fn resolve_origins(
     config: &Config,
     project: &Path,
     workspace: &str,
@@ -294,55 +294,96 @@ pub fn bind_origins(
         .filter(|p| p.starts_with("baseline:"))
         .map(|p| resolve(project, p))
         .transpose()?;
-    LocalStateManager::new()?.update_control(project, |control| {
-        let binding = control.workspace(workspace);
-        for service in config
-            .resolve_services()
-            .iter()
-            .filter(|s| s.auto_workspace)
-        {
-            if binding.data.contains_key(&service.name) {
+    let mut control = state.control(project);
+    let binding = control.workspace(workspace);
+    for service in config
+        .resolve_services()
+        .iter()
+        .filter(|s| s.auto_workspace)
+    {
+        if let Some(DataOrigin::Baseline { reference, .. }) = binding.data.get(&service.name) {
+            if parent.is_some_and(|parent| {
+                reference == parent || reference.starts_with(&format!("{parent}@"))
+            }) {
                 continue;
             }
-            let origin = if let Some(baseline) = &baseline {
-                if baseline.service == service.name {
-                    DataOrigin::Baseline {
-                        reference: baseline.reference.clone(),
-                        service_key: baseline.service_key.clone(),
-                        generation: baseline.resource_id.0.clone(),
-                        engine_fingerprint: baseline
-                            .engine_fingerprint
-                            .clone()
-                            .context("sealed baseline lacks an engine fingerprint")?,
-                    }
-                } else {
-                    DataOrigin::Empty
-                }
-            } else if !matches!(
-                service.service_type.as_str(),
-                "postgres" | "mysql" | "mariadb" | "clickhouse"
-            ) || (service.service_type == "clickhouse"
-                && matches!(service.provider_type.as_str(), "shared" | "global"))
-            {
-                DataOrigin::Empty
-            } else if let Some(parent) = parent {
-                DataOrigin::Workspace {
-                    workspace: parent.into(),
-                    service_key: state.resolve_workspace_service_key_by_dir(project, parent)?,
+        }
+        let origin = if let Some(baseline) = &baseline {
+            if baseline.service == service.name {
+                DataOrigin::Baseline {
+                    reference: baseline.reference.clone(),
+                    service_key: baseline.service_key.clone(),
+                    generation: baseline.resource_id.0.clone(),
+                    engine_fingerprint: baseline
+                        .engine_fingerprint
+                        .clone()
+                        .context("sealed baseline lacks an engine fingerprint")?,
                 }
             } else {
                 DataOrigin::Empty
-            };
+            }
+        } else if !matches!(
+            service.service_type.as_str(),
+            "postgres" | "mysql" | "mariadb" | "clickhouse"
+        ) || (service.service_type == "clickhouse"
+            && matches!(service.provider_type.as_str(), "shared" | "global"))
+        {
+            DataOrigin::Empty
+        } else if let Some(parent) = parent {
+            DataOrigin::Workspace {
+                workspace: parent.into(),
+                service_key: state.resolve_workspace_service_key_by_dir(project, parent)?,
+            }
+        } else {
+            DataOrigin::Empty
+        };
+        if let Some(existing) = binding.data.get(&service.name) {
+            anyhow::ensure!(serde_json::to_value(existing)? == serde_json::to_value(&origin)?,
+                    "Workspace '{workspace}' retains a different data origin for service '{}'; remove its retained services before selecting a new origin", service.name);
+        } else {
             binding.data.insert(service.name.clone(), origin);
         }
-        if let Some(baseline) = &baseline {
-            anyhow::ensure!(
-                binding.data.contains_key(&baseline.service),
-                "baseline service must be configured with auto_workspace: true"
-            );
+    }
+    if let Some(baseline) = &baseline {
+        anyhow::ensure!(
+            binding.data.contains_key(&baseline.service),
+            "baseline service must be configured with auto_workspace: true"
+        );
+    }
+    Ok(binding.data.clone())
+}
+
+pub fn bind_resolved_origins(
+    project: &Path,
+    workspace: &str,
+    origins: &BTreeMap<String, DataOrigin>,
+) -> Result<BTreeMap<String, DataOrigin>> {
+    LocalStateManager::new()?.update_control(project, |control| {
+        let binding = control.workspace(workspace);
+        for (service, origin) in origins {
+            if let Some(previous) = binding.data.get(service) {
+                anyhow::ensure!(
+                    serde_json::to_value(previous)? == serde_json::to_value(origin)?,
+                    "Data binding changed after workspace planning"
+                );
+            }
+            binding.data.insert(service.clone(), origin.clone());
         }
         Ok(binding.data.clone())
     })
+}
+
+pub fn bind_origins(
+    config: &Config,
+    project: &Path,
+    workspace: &str,
+    parent: Option<&str>,
+) -> Result<BTreeMap<String, DataOrigin>> {
+    bind_resolved_origins(
+        project,
+        workspace,
+        &resolve_origins(config, project, workspace, parent)?,
+    )
 }
 
 /// Import the exact bytes that were fingerprinted, even if an input changes later.

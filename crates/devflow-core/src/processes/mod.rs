@@ -9,7 +9,6 @@
 mod external;
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use indexmap::IndexMap;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -300,78 +299,12 @@ pub enum ProcessApprovalMode {
     NoApproval,
 }
 
-/// Runtime abstraction for process supervision.
-///
-/// devflow ships one native runner; external integrations implement this port.
-/// The trait keeps lifecycle/CLI code decoupled from the underlying supervisor.
-#[async_trait]
-pub trait ProcessRuntime: Send + Sync {
-    async fn start(
-        &self,
-        config: &Config,
-        project_dir: &Path,
-        workspace: &str,
-        names: &[String],
-        force: bool,
-    ) -> Result<Vec<ProcessResult>>;
-
-    async fn start_with_approval(
-        &self,
-        config: &Config,
-        project_dir: &Path,
-        workspace: &str,
-        names: &[String],
-        force: bool,
-        approval_mode: ProcessApprovalMode,
-    ) -> Result<Vec<ProcessResult>>;
-
-    async fn stop(
-        &self,
-        config: &Config,
-        project_dir: &Path,
-        workspace: &str,
-        names: &[String],
-    ) -> Result<Vec<ProcessResult>>;
-
-    async fn restart(
-        &self,
-        config: &Config,
-        project_dir: &Path,
-        workspace: &str,
-        names: &[String],
-    ) -> Result<Vec<ProcessResult>>;
-
-    fn status(
-        &self,
-        config: &Config,
-        project_dir: &Path,
-        workspace: Option<&str>,
-    ) -> Result<Vec<ProcessStatus>>;
-
-    fn logs(
-        &self,
-        config: &Config,
-        project_dir: &Path,
-        workspace: &str,
-        name: &str,
-        tail: Option<usize>,
-    ) -> Result<String>;
-
-    fn cleanup_workspace_state(
-        &self,
-        config: &Config,
-        project_dir: &Path,
-        workspace: &str,
-    ) -> Result<()>;
-}
-
 /// Built-in runtime that supervises host processes directly from devflow.
 #[derive(Debug, Default)]
 pub struct NativeProcessRuntime;
 
-#[async_trait]
-impl ProcessRuntime for NativeProcessRuntime {
-    async fn start(
+impl NativeProcessRuntime {
+    pub async fn start(
         &self,
         config: &Config,
         project_dir: &Path,
@@ -390,7 +323,7 @@ impl ProcessRuntime for NativeProcessRuntime {
         .await
     }
 
-    async fn start_with_approval(
+    pub async fn start_with_approval(
         &self,
         config: &Config,
         project_dir: &Path,
@@ -403,7 +336,7 @@ impl ProcessRuntime for NativeProcessRuntime {
             .await
     }
 
-    async fn stop(
+    pub async fn stop(
         &self,
         config: &Config,
         project_dir: &Path,
@@ -413,7 +346,7 @@ impl ProcessRuntime for NativeProcessRuntime {
         stop_workspace_processes_native(config, project_dir, workspace, names).await
     }
 
-    async fn restart(
+    pub async fn restart(
         &self,
         config: &Config,
         project_dir: &Path,
@@ -423,7 +356,7 @@ impl ProcessRuntime for NativeProcessRuntime {
         restart_workspace_processes_native(config, project_dir, workspace, names).await
     }
 
-    fn status(
+    pub fn status(
         &self,
         config: &Config,
         project_dir: &Path,
@@ -432,7 +365,7 @@ impl ProcessRuntime for NativeProcessRuntime {
         list_workspace_processes_native(config, project_dir, workspace)
     }
 
-    fn logs(
+    pub fn logs(
         &self,
         config: &Config,
         project_dir: &Path,
@@ -443,7 +376,7 @@ impl ProcessRuntime for NativeProcessRuntime {
         process_logs_native(config, project_dir, workspace, name, tail)
     }
 
-    fn cleanup_workspace_state(
+    pub fn cleanup_workspace_state(
         &self,
         config: &Config,
         project_dir: &Path,
@@ -454,7 +387,7 @@ impl ProcessRuntime for NativeProcessRuntime {
 }
 
 /// Resolve the configured process runtime.
-pub fn runtime_for_config(config: &Config) -> Result<Box<dyn ProcessRuntime>> {
+pub fn runtime_for_config(config: &Config) -> Result<NativeProcessRuntime> {
     let provider = config
         .processes
         .as_ref()
@@ -462,7 +395,7 @@ pub fn runtime_for_config(config: &Config) -> Result<Box<dyn ProcessRuntime>> {
         .unwrap_or("native")
         .to_ascii_lowercase();
     match provider.as_str() {
-        "native" => Ok(Box::new(NativeProcessRuntime)),
+        "native" => Ok(NativeProcessRuntime),
         "pitchfork" => anyhow::bail!("Embedded Pitchfork was retired; use processes.provider: native or an external supervisor command"),
         other => anyhow::bail!(
             "unknown process provider '{}'; expected native",

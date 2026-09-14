@@ -353,9 +353,12 @@ pub async fn destroy_project(
             .services_destroyed
             .iter()
             .filter_map(|s| s.error.as_deref())
+            .chain(result.resources.iter().filter_map(|r| r.error.as_deref()))
             .collect::<Vec<_>>()
             .join("; ");
-        return Err(format!("Project cleanup incomplete; configuration and ownership state retained for retry. {errors}"));
+        return Err(format!(
+            "Project cleanup incomplete. Inspect the remaining resources and retry. {errors}"
+        ));
     }
     Ok(result)
 }

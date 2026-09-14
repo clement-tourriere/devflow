@@ -554,48 +554,6 @@ pub struct OrchestrationResult {
 /// Iterates over all services with `auto_workspace: true` and calls
 /// `create_workspace()` on each. Collects results with partial failure
 /// tolerance — one service failing doesn't prevent others from succeeding.
-pub async fn orchestrate_create(
-    config: &Config,
-    workspace_name: &str,
-    from_workspace: Option<&str>,
-) -> Result<Vec<OrchestrationResult>> {
-    let providers = create_auto_workspace_providers(config).await?;
-
-    // Services are independent (separate containers, ports, state rows), so
-    // create them concurrently — total wall-clock becomes the slowest service
-    // instead of the sum of all of them.
-    let results = futures_util::future::join_all(providers.iter().map(|named| async move {
-        let started = std::time::Instant::now();
-        let result = match named
-            .provider
-            .create_workspace(workspace_name, from_workspace)
-            .await
-        {
-            Ok(info) => OrchestrationResult {
-                service_name: named.name.clone(),
-                success: true,
-                message: format!("Created workspace '{}' on {}", workspace_name, named.name),
-                workspace_info: Some(info),
-            },
-            Err(e) => OrchestrationResult {
-                service_name: named.name.clone(),
-                success: false,
-                message: format!("Failed to create workspace on {}: {:#}", named.name, e),
-                workspace_info: None,
-            },
-        };
-        log::debug!(
-            "Service '{}' workspace creation took {:.2?}",
-            named.name,
-            started.elapsed()
-        );
-        result
-    }))
-    .await;
-
-    Ok(results)
-}
-
 /// Delete a workspace across all auto-workspace services.
 ///
 /// Iterates over all services with `auto_workspace: true` and calls

@@ -1,7 +1,7 @@
 //! Shared filesystem locations for devflow's user-level files.
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The devflow user config directory (workspace registry, hook approvals,
 /// global config, daemon pid/status files).
@@ -18,4 +18,28 @@ pub fn devflow_config_dir() -> Result<PathBuf> {
     Ok(dirs::config_dir()
         .context("Failed to get user config directory")?
         .join("devflow"))
+}
+
+// Canonicalize the existing prefix without materializing the planned directory.
+pub(crate) fn resolve_expected_path(path: &Path) -> Result<PathBuf> {
+    for ancestor in path.ancestors() {
+        match ancestor.canonicalize() {
+            Ok(mut prefix) => {
+                for part in path.strip_prefix(ancestor)?.components() {
+                    match part {
+                        std::path::Component::ParentDir => {
+                            prefix.pop();
+                        }
+                        std::path::Component::Normal(name) => prefix.push(name),
+                        std::path::Component::CurDir => (),
+                        _ => anyhow::bail!("Invalid workspace path"),
+                    }
+                }
+                return Ok(prefix);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    anyhow::bail!("Workspace path has no existing parent")
 }
