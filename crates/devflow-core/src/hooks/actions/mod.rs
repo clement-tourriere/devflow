@@ -1,7 +1,6 @@
 pub mod copy;
 pub mod docker_exec;
 pub mod http;
-pub mod notify;
 pub mod replace;
 pub mod shell;
 pub mod write_env;
@@ -97,7 +96,10 @@ pub async fn execute_action(
             title,
             message,
             level,
-        } => notify::execute(title, message, level, context, template_engine),
+        } => {
+            let _ = (title, message, level);
+            anyhow::bail!("The notify hook action was retired; use an explicitly approved shell hook for your notification tool, or consume lifecycle results in your frontend")
+        }
         super::HookAction::SyncAiConfigs => {
             anyhow::bail!("AI configuration merging was retired; remove this hook and use explicit file copies")
         }

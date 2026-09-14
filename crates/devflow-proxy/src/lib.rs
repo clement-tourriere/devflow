@@ -56,18 +56,8 @@ fn default_bind_address() -> String {
     "0.0.0.0".to_string()
 }
 pub fn default_domain_suffix() -> String {
-    // `.local` on every platform, so the SAME name works inside and outside
-    // containers:
-    // - From the host, the mDNS responder (Bonjour on macOS, Avahi on Linux)
-    //   resolves it with no hosts/resolver edits.
-    // - Inside containers, Docker's embedded DNS resolves it via the network
-    //   aliases devflow registers.
-    // `.localhost` cannot satisfy "same name everywhere": RFC 6761 lets client
-    // runtimes (musl, Node, browsers, …) resolve `*.localhost` to loopback
-    // WITHOUT consulting DNS, so inside a container the name short-circuits to
-    // the container itself instead of the target. Use
-    // `--domain-suffix localhost` to opt into the loopback-only behavior.
-    "local".to_string()
+    // Browser loopback names need neither a helper process nor LAN discovery.
+    "localhost".to_string()
 }
 fn default_auto_network() -> bool {
     true
@@ -129,7 +119,7 @@ pub async fn run_proxy(config: ProxyConfig) -> Result<ProxyHandle> {
 
     // Create the mDNS responder so friendly `.local` names resolve from the host
     // (HTTP services -> 127.0.0.1, database endpoints -> container IP).
-    let mdns = if config.mdns {
+    let mdns = if config.mdns && config.domain_suffix == "local" {
         Some(Arc::new(mdns::MdnsResponder::new()))
     } else {
         None

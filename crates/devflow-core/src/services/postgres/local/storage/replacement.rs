@@ -4,22 +4,29 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone)]
+pub(super) enum DatasetMutation {
+    Snapshot(String),
+    Clone {
+        snapshot: String,
+        target: String,
+    },
+    Rename {
+        source: String,
+        target: String,
+    },
+    Mount {
+        dataset: String,
+        path: Option<PathBuf>,
+    },
+    Destroy(String),
+}
+
 #[async_trait]
-pub(super) trait DatasetCommands: Sync {
-    async fn run(&self, args: &[String]) -> Result<String>;
-    async fn exists(&self, dataset: &str) -> Result<bool> {
-        let names = self
-            .run(&[
-                "list".into(),
-                "-H".into(),
-                "-o".into(),
-                "name".into(),
-                "-t".into(),
-                "all".into(),
-            ])
-            .await?;
-        Ok(names.lines().any(|name| name == dataset))
-    }
+pub(super) trait DatasetOps: Sync {
+    async fn exists(&self, dataset: &str) -> Result<bool>;
+    async fn origin(&self, dataset: &str) -> Result<String>;
+    async fn apply(&self, mutation: DatasetMutation) -> Result<()>;
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -39,34 +46,17 @@ impl Replacement {
     }
 }
 
-async fn run(ops: &dyn DatasetCommands, args: &[&str]) -> Result<()> {
-    ops.run(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
-        .await?;
-    Ok(())
-}
-
-async fn mount(ops: &dyn DatasetCommands, dataset: &str, path: &Path) -> Result<()> {
-    let property = format!("mountpoint={}", path.display());
-    run(ops, &["set", &property, dataset]).await?;
-    let mounted = ops
-        .run(&[
-            "get".into(),
-            "-H".into(),
-            "-o".into(),
-            "value".into(),
-            "mounted".into(),
-            dataset.into(),
-        ])
-        .await?;
-    if mounted.trim() != "yes" {
-        run(ops, &["mount", dataset]).await?;
-    }
-    Ok(())
+async fn mount(ops: &dyn DatasetOps, dataset: &str, path: &Path) -> Result<()> {
+    ops.apply(DatasetMutation::Mount {
+        dataset: dataset.into(),
+        path: Some(path.into()),
+    })
+    .await
 }
 
 /// Recover only names recorded by this operation; never infer ownership from a
 /// prefix or recursively delete another workspace's dataset.
-pub(super) async fn recover(ops: &dyn DatasetCommands, path: &Path, target: &str) -> Result<()> {
+pub(super) async fn recover(ops: &dyn DatasetOps, path: &Path, target: &str) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
@@ -79,7 +69,10 @@ pub(super) async fn recover(ops: &dyn DatasetCommands, path: &Path, target: &str
         if ops.exists(&record.backup).await? {
             // Dependent snapshots may prevent reclamation. Keep their explicit
             // recovery record for later GC; they do not block the new dataset.
-            if let Err(error) = run(ops, &["destroy", "-r", &record.backup]).await {
+            if let Err(error) = ops
+                .apply(DatasetMutation::Destroy(record.backup.clone()))
+                .await
+            {
                 let retired = path.with_file_name(format!(
                     "{}.retired.json",
                     crate::services::ownership::identity_digest(&[&record.backup])
@@ -96,24 +89,20 @@ pub(super) async fn recover(ops: &dyn DatasetCommands, path: &Path, target: &str
         let backup_exists = ops.exists(&record.backup).await?;
         if backup_exists || !record.had_original {
             if ops.exists(&record.target).await? {
-                let origin = ops
-                    .run(&[
-                        "get".into(),
-                        "-H".into(),
-                        "-o".into(),
-                        "value".into(),
-                        "origin".into(),
-                        record.target.clone(),
-                    ])
-                    .await?;
+                let origin = ops.origin(&record.target).await?;
                 anyhow::ensure!(
                     origin.trim() == record.snapshot,
                     "refusing to remove a dataset with an unexpected origin"
                 );
-                run(ops, &["destroy", "-r", &record.target]).await?;
+                ops.apply(DatasetMutation::Destroy(record.target.clone()))
+                    .await?;
             }
             if backup_exists {
-                run(ops, &["rename", &record.backup, &record.target]).await?;
+                ops.apply(DatasetMutation::Rename {
+                    source: record.backup.clone(),
+                    target: record.target.clone(),
+                })
+                .await?;
             }
         }
         if record.had_original {
@@ -124,21 +113,13 @@ pub(super) async fn recover(ops: &dyn DatasetCommands, path: &Path, target: &str
             mount(ops, &record.target, &record.mountpoint).await?;
         }
         if ops.exists(&record.staged).await? {
-            run(ops, &["destroy", "-r", &record.staged]).await?;
+            ops.apply(DatasetMutation::Destroy(record.staged.clone()))
+                .await?;
         }
         // Snapshot creation can itself have failed, so query before deleting.
-        let snapshots = ops
-            .run(&[
-                "list".into(),
-                "-H".into(),
-                "-t".into(),
-                "snapshot".into(),
-                "-o".into(),
-                "name".into(),
-            ])
-            .await?;
-        if snapshots.lines().any(|s| s == record.snapshot) {
-            run(ops, &["destroy", &record.snapshot]).await?;
+        if ops.exists(&record.snapshot).await? {
+            ops.apply(DatasetMutation::Destroy(record.snapshot.clone()))
+                .await?;
         }
     }
     std::fs::remove_file(path)?;
@@ -146,48 +127,45 @@ pub(super) async fn recover(ops: &dyn DatasetCommands, path: &Path, target: &str
 }
 
 pub(super) async fn replace(
-    ops: &dyn DatasetCommands,
+    ops: &dyn DatasetOps,
     record: &mut Replacement,
     journal: &Path,
 ) -> Result<()> {
     record.save(journal)?;
     let result: Result<()> = async {
-        run(ops, &["snapshot", &record.snapshot]).await?;
-        // The clone is prepared without touching or mounting over the target.
-        run(
-            ops,
-            &[
-                "clone",
-                "-o",
-                "mountpoint=none",
-                &record.snapshot,
-                &record.staged,
-            ],
-        )
+        ops.apply(DatasetMutation::Snapshot(record.snapshot.clone()))
+            .await?;
+        ops.apply(DatasetMutation::Clone {
+            snapshot: record.snapshot.clone(),
+            target: record.staged.clone(),
+        })
         .await?;
         anyhow::ensure!(
             ops.exists(&record.staged).await?,
             "staged dataset was not created"
         );
-        let origin = ops
-            .run(&[
-                "get".into(),
-                "-H".into(),
-                "-o".into(),
-                "value".into(),
-                "origin".into(),
-                record.staged.clone(),
-            ])
-            .await?;
+        let origin = ops.origin(&record.staged).await?;
         anyhow::ensure!(
             origin.trim() == record.snapshot,
             "staged dataset has an unexpected origin"
         );
         if record.had_original {
-            run(ops, &["set", "mountpoint=none", &record.target]).await?;
-            run(ops, &["rename", &record.target, &record.backup]).await?;
+            ops.apply(DatasetMutation::Mount {
+                dataset: record.target.clone(),
+                path: None,
+            })
+            .await?;
+            ops.apply(DatasetMutation::Rename {
+                source: record.target.clone(),
+                target: record.backup.clone(),
+            })
+            .await?;
         }
-        run(ops, &["rename", &record.staged, &record.target]).await?;
+        ops.apply(DatasetMutation::Rename {
+            source: record.staged.clone(),
+            target: record.target.clone(),
+        })
+        .await?;
         mount(ops, &record.target, &record.mountpoint).await?;
         record.committed = true;
         record.save(journal)?;
@@ -254,40 +232,40 @@ mod tests {
         fail_at: usize,
     }
     #[async_trait]
-    impl DatasetCommands for Model {
-        async fn run(&self, args: &[String]) -> Result<String> {
+    impl DatasetOps for Model {
+        async fn exists(&self, dataset: &str) -> Result<bool> {
+            Ok(self.data.lock().unwrap().contains_key(dataset))
+        }
+        async fn origin(&self, dataset: &str) -> Result<String> {
+            self.data
+                .lock()
+                .unwrap()
+                .get(dataset)
+                .cloned()
+                .context("missing dataset")
+        }
+        async fn apply(&self, mutation: DatasetMutation) -> Result<()> {
             let mut data = self.data.lock().unwrap();
-            if args[0] == "list" {
-                return Ok(data.keys().cloned().collect::<Vec<_>>().join("\n"));
-            }
-            if args[0] == "get" {
-                return Ok(if args[4] == "mounted" {
-                    "yes".into()
-                } else {
-                    data.get(args.last().unwrap()).cloned().unwrap()
-                });
-            }
             let mut count = self.mutation.lock().unwrap();
             *count += 1;
             anyhow::ensure!(*count != self.fail_at, "injected mutation failure");
-            match args[0].as_str() {
-                "snapshot" => {
-                    data.insert(args[1].clone(), "snapshot".into());
+            match mutation {
+                DatasetMutation::Snapshot(name) => {
+                    data.insert(name, "snapshot".into());
                 }
-                "clone" => {
-                    data.insert(args[4].clone(), args[3].clone());
+                DatasetMutation::Clone { snapshot, target } => {
+                    data.insert(target, snapshot);
                 }
-                "rename" => {
-                    let value = data.remove(&args[1]).context("source missing")?;
-                    data.insert(args[2].clone(), value);
+                DatasetMutation::Rename { source, target } => {
+                    let value = data.remove(&source).context("source missing")?;
+                    data.insert(target, value);
                 }
-                "destroy" => {
-                    data.remove(args.last().unwrap());
+                DatasetMutation::Destroy(name) => {
+                    data.remove(&name);
                 }
-                "set" | "mount" => {}
-                _ => anyhow::bail!("unexpected command: {args:?}"),
+                DatasetMutation::Mount { .. } => {}
             }
-            Ok(String::new())
+            Ok(())
         }
     }
 
@@ -365,35 +343,29 @@ mod linux_integration {
         fail_at: usize,
         after: bool,
     }
-    async fn command(args: &[String]) -> Result<String> {
-        let output = tokio::process::Command::new("zfs")
-            .args(args)
-            .output()
-            .await?;
-        anyhow::ensure!(
-            output.status.success(),
-            "zfs {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        Ok(String::from_utf8(output.stdout)?)
-    }
+    use super::super::zfs_native::NativeZfs;
     #[async_trait]
-    impl DatasetCommands for Zfs {
-        async fn run(&self, args: &[String]) -> Result<String> {
-            let mutation = !matches!(args[0].as_str(), "get" | "list");
-            let fail = mutation && self.count.fetch_add(1, Ordering::SeqCst) + 1 == self.fail_at;
+    impl DatasetOps for Zfs {
+        async fn exists(&self, dataset: &str) -> Result<bool> {
+            NativeZfs.exists(dataset).await
+        }
+        async fn origin(&self, dataset: &str) -> Result<String> {
+            NativeZfs.origin(dataset).await
+        }
+        async fn apply(&self, mutation: DatasetMutation) -> Result<()> {
+            let fail = self.count.fetch_add(1, Ordering::SeqCst) + 1 == self.fail_at;
             anyhow::ensure!(!fail || self.after, "injected failure before mutation");
-            let result = command(args).await?;
+            NativeZfs.apply(mutation).await?;
             anyhow::ensure!(!fail || !self.after, "injected failure after mutation");
-            Ok(result)
+            Ok(())
         }
     }
     struct OwnedDataset(String);
     impl Drop for OwnedDataset {
         fn drop(&mut self) {
-            let _ = std::process::Command::new("zfs")
-                .args(["destroy", "-r", &self.0])
-                .status();
+            if let Err(error) = NativeZfs.destroy_sync(&self.0) {
+                eprintln!("ZFS fixture cleanup failed: {error:#}");
+            }
         }
     }
     #[tokio::test]
@@ -408,14 +380,7 @@ mod linux_integration {
             for fail_at in 1..=6 {
                 let temp = tempfile::tempdir().unwrap();
                 let dataset = format!("{pool}/devflow_test_{}", uuid::Uuid::new_v4().simple());
-                command(&[
-                    "create".into(),
-                    "-o".into(),
-                    "mountpoint=none".into(),
-                    dataset.clone(),
-                ])
-                .await
-                .unwrap();
+                NativeZfs.create(&dataset, None).await.unwrap();
                 let _owned = OwnedDataset(dataset.clone());
                 let parent = format!("{dataset}/parent");
                 let target = format!("{dataset}/child");
@@ -423,14 +388,7 @@ mod linux_integration {
                     (&parent, temp.path().join("parent"), "new"),
                     (&target, temp.path().join("child"), "old"),
                 ] {
-                    command(&[
-                        "create".into(),
-                        "-o".into(),
-                        format!("mountpoint={}", path.display()),
-                        name.clone(),
-                    ])
-                    .await
-                    .unwrap();
+                    NativeZfs.create(name, Some(&path)).await.unwrap();
                     std::fs::write(path.join("generation"), data).unwrap();
                 }
                 let mut record = Replacement {

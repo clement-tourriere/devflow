@@ -256,19 +256,6 @@ fi
         result
     }
 
-    /// Diff of the index against HEAD (staged changes). HEAD may be unborn,
-    /// in which case the whole index is the diff.
-    fn staged_diff_internal(&self) -> Result<git2::Diff<'_>> {
-        let head_tree = self
-            .repo
-            .head()
-            .ok()
-            .and_then(|head| head.peel_to_tree().ok());
-        self.repo
-            .diff_tree_to_index(head_tree.as_ref(), None, None)
-            .context("Failed to diff index against HEAD")
-    }
-
     /// Build a collision-resistant internal worktree name for Git metadata.
     fn worktree_name_for_branch(workspace: &str) -> String {
         crate::config::workspace_service_key(workspace)
@@ -704,52 +691,6 @@ impl VcsProvider for GitRepository {
         Ok(ignored)
     }
 
-    fn staged_diff(&self) -> Result<String> {
-        let diff = self.staged_diff_internal()?;
-        let mut out = String::new();
-        diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
-            match line.origin() {
-                '+' | '-' | ' ' => out.push(line.origin()),
-                _ => {}
-            }
-            out.push_str(&String::from_utf8_lossy(line.content()));
-            true
-        })
-        .context("Failed to format staged diff")?;
-        Ok(out)
-    }
-
-    fn staged_summary(&self) -> Result<String> {
-        let diff = self.staged_diff_internal()?;
-        let stats = diff.stats().context("Failed to compute diff stats")?;
-        let buf = stats
-            .to_buf(git2::DiffStatsFormat::FULL, 80)
-            .context("Failed to format diff stats")?;
-        Ok(String::from_utf8_lossy(&buf).to_string())
-    }
-
-    fn has_staged_changes(&self) -> Result<bool> {
-        let statuses = self
-            .repo
-            .statuses(None)
-            .context("Failed to get git status")?;
-
-        for entry in statuses.iter() {
-            let s = entry.status();
-            if s.intersects(
-                git2::Status::INDEX_NEW
-                    | git2::Status::INDEX_MODIFIED
-                    | git2::Status::INDEX_DELETED
-                    | git2::Status::INDEX_RENAMED
-                    | git2::Status::INDEX_TYPECHANGE,
-            ) {
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
-    }
-
     fn ensure_initial_commit(&self) -> Result<()> {
         // If we can resolve HEAD, the repo already has commits.
         if self.repo.head().is_ok() {
@@ -757,24 +698,6 @@ impl VcsProvider for GitRepository {
         }
         // Unborn HEAD — create the initial empty commit.
         self.create_initial_commit()?;
-        Ok(())
-    }
-
-    fn commit(&self, message: &str) -> Result<()> {
-        // Use git CLI for commit — handles hooks, GPG signing, etc.
-        let root = self.get_repo_root();
-        let output = std::process::Command::new("git")
-            .args(["commit", "-m", message])
-            .current_dir(root)
-            .output()
-            .context("Failed to run 'git commit'")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            anyhow::bail!("git commit failed: {}{}", stdout, stderr);
-        }
-
         Ok(())
     }
 

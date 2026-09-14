@@ -1,6 +1,6 @@
 ---
 title: Installation
-description: Install devflow with the install script or from source, keep it updated with devflow update, and verify your system with devflow doctor.
+description: Install devflow with the install script or from source, update it with the same installer, and verify your system with devflow doctor.
 sidebar:
   order: 1
 ---
@@ -9,6 +9,7 @@ sidebar:
 
 - **Docker** or a compatible container runtime (OrbStack, Colima, …) for local services
 - **Rust toolchain** only if building from source
+- Git and Jujutsu repository support is embedded; the jj adapter uses **jj-lib 0.45.1**. Devflow creates unsigned workspace snapshots; use jj directly for signed commits.
 - Optional: **bun** + Tauri prerequisites if you want to develop the desktop GUI
 
 ## Install script (recommended)
@@ -38,16 +39,7 @@ cargo install --path .
 
 ## Updating
 
-devflow can update itself in place — it downloads the new release binary, verifies its checksum, and atomically swaps the executable (rolling back if the new binary fails to run):
-
-```bash
-devflow update                   # Update to the latest release
-devflow update --check           # Only check whether an update exists
-devflow update --version 0.5.0   # Install a specific version
-devflow update --force           # Reinstall the current version
-```
-
-If you installed from source, keep using `cargo install --path .` instead — `devflow update` would replace your custom build with the release binary.
+Rerun the install script to install the latest verified release, or use your package manager. For source builds, run `cargo install --path . --force` with your chosen features. The self-update command has been retired.
 
 ## Verify
 
@@ -56,7 +48,7 @@ devflow --version
 devflow doctor
 ```
 
-`devflow doctor` checks that Docker and your VCS (git/jj) are reachable, validates configuration, and reports which Copy-on-Write storage method your filesystem supports (APFS clones on macOS, ZFS/Btrfs/XFS reflinks on Linux, full-copy fallback elsewhere).
+`devflow doctor` checks Docker connectivity and your repository through the embedded Git/Jujutsu libraries, validates configuration, and reports which Copy-on-Write storage method your filesystem supports (APFS clones on macOS, ZFS/Btrfs/XFS reflinks on Linux, full-copy fallback elsewhere).
 
 ## Copy-on-Write storage
 
@@ -64,13 +56,23 @@ devflow auto-detects the best storage method available — no setup needed on ma
 
 | Filesystem | Platform | CoW method | Setup required |
 | --- | --- | --- | --- |
-| APFS | macOS | `cp -c` clone | None (automatic) |
-| ZFS | Linux | Snapshots + clones | `devflow setup-zfs` |
+| APFS | macOS | Native `clonefile` | None (automatic) |
+| ZFS | Linux | Snapshots + clones | External ZFS provisioning |
 | Btrfs | Linux | Reflink copy | None |
 | XFS | Linux | Reflink copy | None (if created with reflink support) |
 | ext4 / other | Any | Full copy (fallback) | None — works, just slower |
 
-On Linux without a CoW filesystem, `devflow setup-zfs` creates a file-backed ZFS pool — no spare disk required. `devflow init` offers this automatically when ZFS tools are detected.
+ZFS pools and permission delegation are managed outside devflow. Configure `local.data_root` to point at an existing dataset. Runtime ZFS operations use the system OpenZFS 2.x `libzfs` library; APFS, reflink, and ordinary copies use native filesystem libraries. The Git, jj, `zfs`, and `cp` executables are not needed for workspace and data operations. Install the system OpenZFS runtime and load its kernel module before using devflow. Leave `ZFS_MOUNT_HELPER` unset or `0`, and keep data datasets unshared (`sharenfs=off`, `sharesmb=off`). Native operations do not load modules or invoke mount/sharing helpers.
+
+For example, after an administrator has created a `devflow` dataset mounted at `/var/lib/devflow/data`, delegate the operations needed for workspace snapshots and replacements:
+
+```bash
+sudo zfs allow "$USER" create,destroy,snapshot,clone,mount,mountpoint,promote,rename,rollback devflow
+```
+
+Set `local.data_root: /var/lib/devflow/data` and `local.storage: zfs` in the service configuration. The dataset and its mountpoint must be writable by the user running devflow.
+
+Desktop launches inherit their environment. Set `DEVFLOW_TOOL_PATH` to an explicit platform-separated list of absolute tool directories when launching the desktop from a Dock or menu; devflow prepends these paths without running a login shell. Absolute executable paths in approved hooks are another option.
 
 ## Next steps
 

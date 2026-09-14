@@ -1,29 +1,28 @@
 ---
 title: Reverse proxy
-description: Trusted HTTPS URLs for Docker containers and devflow-managed host processes — automatic discovery, mDNS names that work everywhere, and a local CA.
+description: HTTPS URLs for Docker containers and devflow-managed host processes, with native discovery and explicit certificate setup.
 sidebar:
   order: 7
 ---
 
-Stop hand-editing `/etc/hosts`, juggling ports, and clicking through certificate warnings. The built-in proxy watches Docker and devflow process state, giving every container and port-backed host process a stable `https://name.local` URL the moment it starts — with a locally-trusted certificate. Webhooks, OAuth callbacks, and cross-service calls just work, per branch.
+The optional proxy discovers Docker containers and managed host processes, then routes HTTPS requests to them. The default `.localhost` suffix resolves to the host loopback address in browsers, without a DNS helper.
 
 ## Quick start
 
 ```bash
-devflow proxy start --daemon      # needs root for ports 80/443, or use custom ports
-devflow proxy trust install      # trust the local CA once, system-wide
+devflow proxy start --daemon     # ports 80/443 require permission; custom ports are supported
+devflow proxy trust info         # follow the platform's manual CA setup instructions
+devflow proxy trust verify
 
 docker run -d --name myapp nginx
-curl https://myapp.local          # works — from the host AND from other containers
+curl --resolve myapp.localhost:443:127.0.0.1 https://myapp.localhost
 ```
 
-## One suffix everywhere: `.local`
+## Domain names
 
-The same `name.local` resolves from the **host** (devflow advertises it over mDNS — Bonjour on macOS, Avahi on Linux; no `/etc/hosts` edits) and from **inside containers** (Docker DNS aliases on a shared `devflow` network).
+Use `.localhost` for HTTP access from the host. It resolves to the calling machine's loopback address, so inside a container it refers to that container. Use Docker service names for container-to-container traffic.
 
-`.localhost` can't do that: many runtimes (musl, Node, browsers — per RFC 6761) hard-resolve `*.localhost` to loopback without consulting DNS, so inside a container the name points at the container itself. Prefer loopback-only names anyway? `devflow proxy start --domain-suffix localhost`.
-
-On Linux, mDNS publishing needs `avahi-daemon` + `avahi-utils` (preinstalled on most desktops).
+Custom suffixes require DNS configuration. On macOS, `--domain-suffix local` enables native Bonjour registration. Automatic Linux Avahi helper processes have been removed; provision DNS externally when using custom names there. Direct database endpoints under `.localhost` are shown using their upstream IP, since a loopback name cannot identify a container's database. For portable host access, use `devflow service connection` and the published host port.
 
 ## How routing works
 
@@ -97,26 +96,24 @@ docker exec web2 curl -s http://web1.local                  # same name as the h
 docker network inspect devflow --format '{{range .Containers}}{{.Name}} {{end}}'
 ```
 
-Disable with `--no-auto-network` or `auto_network: false` in global config.
+For custom suffixes, disable with `--no-auto-network` or `auto_network: false` in global config.
 
 ## HTTPS & certificates
 
-First start generates a local CA (`~/.devflow/proxy/ca.crt`, key mode 0600). Per-domain certs (1-year) are minted on demand via SNI and cached in memory.
+First start generates a local CA and stores its private key with mode 0600. Certificates are minted on demand via SNI and cached in memory.
 
 ```bash
-devflow proxy trust install    # add CA to the system trust store
-devflow proxy trust verify
-devflow proxy trust remove
-devflow proxy trust info       # manual instructions per platform
+devflow proxy trust info       # system certificate manager / distribution instructions
+devflow proxy trust verify     # compare the actual CA with native trusted roots
 ```
 
-macOS uses the login keychain; Debian/Ubuntu/Alpine use `/usr/local/share/ca-certificates` + `update-ca-certificates`; Fedora/RHEL use `update-ca-trust`. On Linux, `sudo` (TTY) or `pkexec` is used; otherwise manual instructions are printed.
+Install or remove the CA through your operating system's certificate manager. devflow does not run `sudo`, `pkexec`, or `security`, and the desktop displays the same setup instructions. Linux certificate-bundle updates remain part of system setup. Firefox may require a manual CA import.
 
 ## Configuration & API
 
 ```bash
 devflow proxy start [--daemon] [--https-port 443] [--http-port 80] [--api-port 2019]
-                    [--domain-suffix local] [--no-mdns] [--no-auto-network]
+                    [--domain-suffix localhost] [--no-mdns] [--no-auto-network]
 devflow proxy status | list | stop        # all support --json
 ```
 
@@ -137,7 +134,7 @@ A localhost-only JSON API serves dashboards: `GET /api/status`, `GET /api/target
 
 ## Optional desktop companion
 
-The desktop connects to one loopback proxy endpoint and invokes `devflow-proxy` for explicit lifecycle and CA commands. Install the companion on `PATH`:
+The desktop connects to one loopback proxy endpoint and invokes `devflow-proxy` for explicit lifecycle commands. Install the companion on `PATH`:
 
 ```sh
 cargo install --path . --no-default-features --features proxy --bin devflow-proxy

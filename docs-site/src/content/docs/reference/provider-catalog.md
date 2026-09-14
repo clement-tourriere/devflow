@@ -3,7 +3,7 @@ title: Provider catalog
 description: Generated provider configuration and operation contracts.
 ---
 
-Generated from `devflow --json capabilities`. Build availability is reported at runtime in `available`; this table lists the catalog across builds. Plugins negotiate their own capabilities. Local Redis without a `generic` block retains legacy shared allocation.
+Generated from the core provider descriptors, also exposed by `devflow --json capabilities`. Build availability is reported at runtime in `available`; this table lists the catalog across builds. Plugins negotiate their own capabilities. Local Redis without a `generic` block retains legacy shared allocation.
 
 | Provider | Services | Data strategy | Operations | Required setup | Allocation limit |
 | --- | --- | --- | --- | --- | --- |

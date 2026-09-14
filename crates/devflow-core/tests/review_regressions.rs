@@ -9,12 +9,7 @@ use devflow_core::services::ServiceProvider;
 struct ContainerCleanup(String);
 impl Drop for ContainerCleanup {
     fn drop(&mut self) {
-        let _ = std::process::Command::new("docker")
-            .args(["rm", "-f", &self.0])
-            .output();
-        let _ = std::process::Command::new("docker")
-            .args(["volume", "rm", &format!("{}-data", self.0)])
-            .output();
+        support::docker_cleanup(&self.0);
     }
 }
 
@@ -562,29 +557,7 @@ async fn versioned_baselines_seal_data_and_reset_to_the_recorded_generation() {
     let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let store_path = temp.path().join("state.db");
     let _cleanup = LocalProjectCleanup(store_path.clone());
-    for args in [
-        vec!["init", "-b", "main"],
-        vec![
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.invalid",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "fixture",
-        ],
-    ] {
-        assert!(std::process::Command::new("git")
-            .current_dir(temp.path())
-            .args(args)
-            .output()
-            .unwrap()
-            .status
-            .success());
-    }
+    support::init_repository(temp.path(), "main");
     let service:devflow_core::config::NamedServiceConfig=serde_json::from_value(serde_json::json!({"name":"db","type":"local","service_type":"postgres","auto_workspace":true,"default":true,"local":{"data_root":temp.path(),"storage":"copy","image":"postgres:17","port_range_start":57450}})).unwrap();
     let config = Config {
         project_id: Some(format!("baseline-test-{}", uuid::Uuid::new_v4())),

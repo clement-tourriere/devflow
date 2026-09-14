@@ -7,7 +7,7 @@ sidebar:
 
 A **workspace** is devflow's unit of isolation: one materialized VCS directory plus its service instances, processes, hook-generated files, and registry state. Git uses the primary checkout for the default workspace and a linked worktree for every additional workspace. Jujutsu uses native workspaces.
 
-For jj, the raw devflow workspace name is also a bookmark. `devflow commit` advances that bookmark to the commit it just finalized, and workspace removal refreshes it before forgetting the native workspace. A direct `jj commit` does not advance bookmarks automatically; if you commit outside devflow and need the bookmark immediately, run `jj bookmark set <workspace> --revision @-`.
+For jj, the raw devflow workspace name is also a bookmark. Commit directly with jj, then use `jj bookmark set <workspace> --revision @-` when you need the bookmark to advance immediately. Workspace removal also refreshes the bookmark before forgetting the native workspace.
 
 devflow treats jj's native primary workspace (internal name `default`) as the stable project root. Keep that internal workspace registered under `default`; if it is renamed or forgotten, devflow fails closed instead of guessing that another workspace is the primary. Raw user-facing workspace identities remain bookmarks and are unaffected by this internal-name requirement.
 

@@ -38,7 +38,6 @@ devflow also **exports** variables into the processes it spawns — shell hook c
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `DEVFLOW_COMMIT_COMMAND=…` | external CLI for message generation (e.g. `claude -p`) — preferred path | — |
 
 ## Internal
 
@@ -49,3 +48,5 @@ devflow also **exports** variables into the processes it spawns — shell hook c
 AWS credentials for [S3 seeding](/devflow/guides/seeding/) use the standard `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` (or `AWS_REGION`) variables.
 
 `DEVFLOW_PROXY_DIR` optionally isolates the companion's CA files, PID file and runtime lease. Without it the existing `~/.devflow/proxy` location is retained. This does not install or trust a certificate.
+
+Desktop launches may set `DEVFLOW_TOOL_PATH` to an explicit list of absolute tool directories (separated with the platform PATH separator). These are prepended to the inherited PATH; shell startup files are not evaluated.

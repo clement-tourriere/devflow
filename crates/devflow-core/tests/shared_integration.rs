@@ -17,15 +17,7 @@ use devflow_core::services::shared::{
 };
 use devflow_core::services::ServiceProvider;
 
-/// Remove a test container and its data volume, ignoring errors.
-fn docker_cleanup(container: &str) {
-    let _ = std::process::Command::new("docker")
-        .args(["rm", "-f", container])
-        .output();
-    let _ = std::process::Command::new("docker")
-        .args(["volume", "rm", "-f", &format!("{container}-data")])
-        .output();
-}
+use support::docker_cleanup;
 
 #[tokio::test]
 #[ignore = "requires Docker"]

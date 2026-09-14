@@ -129,7 +129,6 @@ Conditions are template-rendered first, then evaluated. Built-ins:
 | `shell` | run a command (same as `command:`) | `command` |
 | `docker-exec` | exec inside a container | `container`, `command`, `user` |
 | `http` | HTTP request (webhooks, health checks) | `url`, `method`, `body` |
-| `notify` | desktop notification | `message`, `title` |
 
 `devflow hook actions` lists the authoritative set with all fields. Actions are shell-free and skip the approval system.
 

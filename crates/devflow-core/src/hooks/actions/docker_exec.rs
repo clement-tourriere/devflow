@@ -1,14 +1,18 @@
-use anyhow::{Context, Result};
+#[cfg(feature = "service-local")]
+use anyhow::Context;
+use anyhow::Result;
 use std::path::Path;
 
 use super::ActionResult;
 use crate::hooks::template::TemplateEngine;
 use crate::hooks::HookContext;
 
+pub const AVAILABLE: bool = cfg!(feature = "service-local");
+
 /// Execute a command inside a Docker container.
 ///
 /// Uses the Docker Engine API (bollard) when the `service-local` feature is
-/// available; otherwise falls back to the `docker` CLI.
+/// available; minimal builds report an unsupported feature.
 pub async fn execute(
     container_template: &str,
     command_template: &str,
@@ -108,28 +112,21 @@ async fn run_in_container(
 
 #[cfg(not(feature = "service-local"))]
 async fn run_in_container(
-    container: &str,
-    command: &str,
-    user: Option<&str>,
-    working_dir: &Path,
+    _container: &str,
+    _command: &str,
+    _user: Option<&str>,
+    _working_dir: &Path,
 ) -> Result<(i64, String, String)> {
-    let mut cmd = tokio::process::Command::new("docker");
-    cmd.arg("exec");
-    if let Some(user) = user {
-        cmd.args(["-u", user]);
+    anyhow::bail!("docker-exec hooks require a devflow build with the service-local feature")
+}
+
+#[cfg(all(test, not(feature = "service-local")))]
+mod tests {
+    #[tokio::test]
+    async fn minimal_build_reports_missing_docker_api_support() {
+        let error = super::run_in_container("unused", "unused", None, std::path::Path::new("."))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("service-local"));
     }
-    cmd.arg(container);
-    cmd.args(["sh", "-c", command]);
-    cmd.current_dir(working_dir);
-
-    let output = cmd
-        .output()
-        .await
-        .with_context(|| format!("Failed to docker exec in container: {}", container))?;
-
-    Ok((
-        output.status.code().unwrap_or(-1) as i64,
-        String::from_utf8_lossy(&output.stdout).to_string(),
-        String::from_utf8_lossy(&output.stderr).to_string(),
-    ))
 }

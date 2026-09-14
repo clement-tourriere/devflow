@@ -11,12 +11,6 @@ import type {
   DestroyServiceResult,
   HookPhaseEntry,
   VcsHooksActionResult,
-  ActionTypeInfo,
-  HookRunResult,
-  TriggerMapping,
-  RecipeDetectionInfo,
-  RecipeHookPreview,
-  InstallRecipeResult,
   ProxyStatus,
   ContainerEntry,
   CertificateStatus,
@@ -245,51 +239,6 @@ export const installVcsHooks = (projectPath: string) =>
   invoke<VcsHooksActionResult>("install_vcs_hooks", { projectPath });
 export const uninstallVcsHooks = (projectPath: string) =>
   invoke<VcsHooksActionResult>("uninstall_vcs_hooks", { projectPath });
-export const getActionTypes = () =>
-  invoke<ActionTypeInfo[]>("get_action_types");
-export const saveHooks = (projectPath: string, hooks: unknown) =>
-  invoke<void>("save_hooks", { projectPath, hooks });
-export const runHook = (
-  projectPath: string,
-  phase: string,
-  hookName: string,
-  workspaceName?: string
-) =>
-  invoke<HookRunResult>("run_hook", {
-    projectPath,
-    phase,
-    hookName,
-    workspaceName,
-  });
-export const getTriggerMappings = (projectPath: string) =>
-  invoke<TriggerMapping[]>("get_trigger_mappings", { projectPath });
-export const detectRecipes = (projectPath: string) =>
-  invoke<RecipeDetectionInfo[]>("detect_recipes", { projectPath });
-export const previewRecipe = (
-  projectPath: string,
-  recipeName: string,
-  params: Record<string, string>
-) =>
-  invoke<RecipeHookPreview[]>("preview_recipe", {
-    projectPath,
-    recipeName,
-    params,
-  });
-export const installRecipe = (
-  projectPath: string,
-  recipeName: string,
-  params: Record<string, string>
-) =>
-  invoke<InstallRecipeResult>("install_recipe", {
-    projectPath,
-    recipeName,
-    params,
-  });
-export const installRecipes = (
-  projectPath: string,
-  selections: { name: string; params: Record<string, string> }[]
-) => invoke<InstallRecipeResult>("install_recipes", { projectPath, selections });
-
 // Proxy
 export const startProxy = () => invoke<ProxyStatus>("start_proxy");
 export const stopProxy = () => invoke<void>("stop_proxy");
@@ -298,8 +247,6 @@ export const listContainers = () =>
   invoke<ContainerEntry[]>("list_containers");
 export const getCertificateStatus = () =>
   invoke<CertificateStatus>("get_certificate_status");
-export const installCertificate = () => invoke<void>("install_certificate");
-export const removeCertificate = () => invoke<void>("remove_certificate");
 
 // Config
 export const getConfigJson = (projectPath: string) =>

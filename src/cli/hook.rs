@@ -245,7 +245,7 @@ fn handle_hook_explain(phase: Option<&str>, json_output: bool) -> Result<()> {
         ("post-switch",          "After switching to a workspace/worktree",          false, "VCS",     "Runs every time you switch workspaces. Use for updating .env files, restarting dev servers."),
         ("pre-remove",           "Before removing a workspace",                      true,  "VCS",     "Runs before `devflow remove`. Use for cleanup tasks or archival."),
         ("post-remove",          "After removing a workspace",                       false, "VCS",     "Runs after workspace removal. Use for notifying external systems."),
-        ("pre-commit",           "Before committing",                             true,  "VCS",     "Runs before `devflow commit`. Use for linting, formatting, or test checks."),
+        ("pre-commit",           "Before committing",                             true,  "VCS",     "Runs through the installed Git pre-commit hook. Use for linting, formatting, or test checks."),
         ("pre-service-create",   "Before creating a service workspace",              true,  "Service", "Runs before service provisioning. Use for pre-flight checks."),
         ("post-service-create",  "After creating a service workspace",               true,  "Service", "Runs after service provisioning. THE most common hook — use for npm ci, migrations, writing .env files."),
         ("pre-service-delete",   "Before deleting a service workspace",              true,  "Service", "Runs before service teardown. Use for data export or backups."),
@@ -811,7 +811,6 @@ fn handle_hook_actions(json_output: bool) -> Result<()> {
         ("copy", "Copy a file", "action:\n  type: copy\n  from: .env.example\n  to: .env.local"),
         ("docker-exec", "Execute a command inside a Docker container", "action:\n  type: docker-exec\n  container: myapp-postgres\n  command: \"psql -U postgres -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto'\""),
         ("http", "Make an HTTP request", "action:\n  type: http\n  url: \"https://hooks.slack.com/services/XXX\"\n  method: POST\n  headers:\n    Content-Type: application/json\n  body: '{\"text\": \"Workspace {{ workspace }} ready\"}'"),
-        ("notify", "Send a desktop notification", "action:\n  type: notify\n  title: devflow\n  message: \"Workspace {{ workspace }} is ready\"\n  level: success"),
     ];
 
     if json_output {

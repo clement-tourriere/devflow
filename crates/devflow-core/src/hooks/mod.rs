@@ -257,7 +257,7 @@ pub enum HookAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         headers: Option<HashMap<String, String>>,
     },
-    /// Send a desktop notification
+    /// Retired notification wrapper, retained for an actionable migration error.
     Notify {
         title: String,
         message: String,

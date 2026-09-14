@@ -1,6 +1,7 @@
 pub mod cow_worktree;
 pub mod git;
 pub mod jj;
+mod jj_native;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -112,32 +113,6 @@ pub trait VcsProvider: Send {
         Ok(Vec::new())
     }
 
-    // ── Commit operations ──────────────────────────────────────────
-    /// Return a unified diff of all staged (index) changes.
-    ///
-    /// For git this is `git diff --cached`.  For jj this is `jj diff`.
-    fn staged_diff(&self) -> Result<String> {
-        anyhow::bail!("{} does not support staged_diff", self.provider_name())
-    }
-
-    /// Return a summary of staged changes (short stat-like output).
-    fn staged_summary(&self) -> Result<String> {
-        anyhow::bail!("{} does not support staged_summary", self.provider_name())
-    }
-
-    /// Create a commit with the given message.
-    fn commit(&self, _message: &str) -> Result<()> {
-        anyhow::bail!("{} does not support commit", self.provider_name())
-    }
-
-    /// Check whether there are staged changes ready to commit.
-    fn has_staged_changes(&self) -> Result<bool> {
-        anyhow::bail!(
-            "{} does not support has_staged_changes",
-            self.provider_name()
-        )
-    }
-
     /// Ensure the repository has at least one commit so the default workspace
     /// is materialised and `list_workspaces` returns it.
     ///
@@ -175,7 +150,7 @@ impl std::fmt::Display for VcsKind {
 /// Detection order:
 /// 1. **jj-only** — `.jj/` exists but `.git/` does not → `JjRepository`
 /// 2. **jj colocated** — both `.jj/` and `.git/` exist → `JjRepository`
-///    when the `jj` CLI is available; otherwise fall back to `GitRepository`
+///    through the embedded jj-lib adapter
 /// 3. **git-only** — `.git/` exists without `.jj/` → `GitRepository`
 /// 4. Neither → error
 ///
@@ -185,20 +160,14 @@ pub fn detect_vcs_provider<P: AsRef<Path>>(path: P) -> Result<Box<dyn VcsProvide
 
     // Walk up to find .jj or .git
     let (has_jj, has_git) = find_vcs_markers(start);
-    let jj_available = tool_available("jj");
 
-    match effective_vcs_kind(has_jj, has_git, jj_available) {
+    match effective_vcs_kind(has_jj, has_git) {
         Some(VcsKind::Jj) => {
             let provider = JjRepository::new(start)?;
             log::debug!("Detected VCS: jj (colocated={})", has_git);
             Ok(Box::new(provider))
         }
         Some(VcsKind::Git) => {
-            if has_jj && has_git && !jj_available {
-                log::warn!(
-                    "Detected colocated jj/git repository, but the 'jj' CLI is unavailable; falling back to git"
-                );
-            }
             let provider = GitRepository::new(start)?;
             log::debug!("Detected VCS: git");
             Ok(Box::new(provider))
@@ -209,12 +178,11 @@ pub fn detect_vcs_provider<P: AsRef<Path>>(path: P) -> Result<Box<dyn VcsProvide
     }
 }
 
-fn effective_vcs_kind(has_jj: bool, has_git: bool, jj_available: bool) -> Option<VcsKind> {
-    match (has_jj, has_git, jj_available) {
-        (true, true, false) => Some(VcsKind::Git),
-        (true, _, _) => Some(VcsKind::Jj),
-        (false, true, _) => Some(VcsKind::Git),
-        (false, false, _) => None,
+fn effective_vcs_kind(has_jj: bool, has_git: bool) -> Option<VcsKind> {
+    match (has_jj, has_git) {
+        (true, _) => Some(VcsKind::Jj),
+        (false, true) => Some(VcsKind::Git),
+        (false, false) => None,
     }
 }
 
@@ -238,7 +206,7 @@ pub fn resolve_project_root(start: &Path) -> PathBuf {
     // necessarily expose a Git common-dir that can unify their identity. Ask
     // jj for its explicit workspace roots before trying the Git fallback.
     let (has_jj, _) = find_vcs_markers(&canonical);
-    if has_jj && tool_available("jj") {
+    if has_jj {
         if let Ok(repo) = JjRepository::new(&canonical) {
             if let Some(primary) = repo.main_worktree_dir() {
                 return primary.canonicalize().unwrap_or(primary);
@@ -290,35 +258,15 @@ pub fn detect_vcs_kind<P: AsRef<Path>>(path: P) -> Option<VcsKind> {
     }
 }
 
-/// Check whether a CLI tool is available on PATH.
-fn tool_available(name: &str) -> bool {
-    which::which(name).is_ok()
-}
-
-/// Return which VCS tools are available on the system.
-///
-/// Returns a vec of `VcsKind` values — always includes `Git` (since
-/// git2 is embedded as a fallback even without the CLI).
+/// Both VCS implementations are embedded and need no external executable.
 pub fn available_vcs_tools() -> Vec<VcsKind> {
-    let mut tools = Vec::new();
-    // Git is always available via the embedded git2 library
-    tools.push(VcsKind::Git);
-    if tool_available("jj") {
-        tools.push(VcsKind::Jj);
-    }
-    tools
+    vec![VcsKind::Git, VcsKind::Jj]
 }
 
 /// Initialize a new VCS repository at `path`.
 ///
-/// Selection logic (in priority order):
-/// 1. If `preference` is `Some(kind)`, use that VCS.
-/// 2. Auto-detect which tools are available (`jj`, `git`).
-///    - If only one is available, use it.
-///    - If both are available and `interactive` is true, prompt the user.
-///    - If both are available and `interactive` is false, default to **git**.
-/// 3. If **neither** CLI is available, use `git2::Repository::init()` as an
-///    embedded fallback (no external binary required).
+/// Honor the requested VCS, otherwise offer both embedded implementations in
+/// interactive mode and default to Git in automation.
 ///
 /// Returns the `VcsKind` that was initialized.
 pub fn init_vcs_repository<P: AsRef<Path>>(
@@ -333,28 +281,12 @@ pub fn init_vcs_repository<P: AsRef<Path>>(
         return init_specific_vcs(path, kind);
     }
 
-    let has_jj = tool_available("jj");
-    let has_git_cli = tool_available("git");
-
-    match (has_jj, has_git_cli) {
-        (true, true) => {
-            // Both available — ask user or default to git.
-            let chosen = if interactive {
-                prompt_vcs_choice()?
-            } else {
-                VcsKind::Git
-            };
-            init_specific_vcs(path, chosen)
-        }
-        (true, false) => init_specific_vcs(path, VcsKind::Jj),
-        (false, true) => init_specific_vcs(path, VcsKind::Git),
-        (false, false) => {
-            // No CLI available — use git2 library as embedded fallback.
-            log::info!("No git or jj CLI found; using embedded git2 library to initialize");
-            GitRepository::init(path)?;
-            Ok(VcsKind::Git)
-        }
-    }
+    let chosen = if interactive {
+        prompt_vcs_choice()?
+    } else {
+        VcsKind::Git
+    };
+    init_specific_vcs(path, chosen)
 }
 
 /// Initialize a specific VCS at `path`.
@@ -376,7 +308,7 @@ fn init_specific_vcs(path: &Path, kind: VcsKind) -> Result<VcsKind> {
 fn prompt_vcs_choice() -> Result<VcsKind> {
     let options = vec!["Git", "Jujutsu (jj)"];
     let choice = inquire::Select::new("Which VCS would you like to initialize?", options)
-        .with_help_message("Both git and jj are available on your system")
+        .with_help_message("Both Git and Jujutsu are built into devflow")
         .prompt()
         .unwrap_or("Git");
     if choice.starts_with("Jujutsu") {
@@ -434,12 +366,11 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn test_effective_vcs_kind_falls_back_to_git_for_colocated_without_jj() {
-        assert_eq!(effective_vcs_kind(true, true, false), Some(VcsKind::Git));
-        assert_eq!(effective_vcs_kind(true, true, true), Some(VcsKind::Jj));
-        assert_eq!(effective_vcs_kind(true, false, false), Some(VcsKind::Jj));
-        assert_eq!(effective_vcs_kind(false, true, false), Some(VcsKind::Git));
-        assert_eq!(effective_vcs_kind(false, false, false), None);
+    fn test_effective_vcs_kind_uses_native_adapters() {
+        assert_eq!(effective_vcs_kind(true, true), Some(VcsKind::Jj));
+        assert_eq!(effective_vcs_kind(true, false), Some(VcsKind::Jj));
+        assert_eq!(effective_vcs_kind(false, true), Some(VcsKind::Git));
+        assert_eq!(effective_vcs_kind(false, false), None);
     }
 
     #[test]

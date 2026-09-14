@@ -13,7 +13,6 @@ export interface DevflowConfig {
   processes?: ProcessesConfig | null;
   hooks?: Record<string, Record<string, unknown>> | null;
   execute?: ExecuteConfig | null;
-  commit?: CommitConfig | null;
 }
 
 export interface GitConfig {
@@ -154,14 +153,6 @@ export interface ExecuteConfig {
 }
 
 
-
-export interface CommitConfig {
-  generation?: CommitGenerationConfig | null;
-}
-
-export interface CommitGenerationConfig {
-  command?: string | null;
-}
 
 // Defaults matching Rust Default impls — used to fill fields omitted by skip_serializing_if
 

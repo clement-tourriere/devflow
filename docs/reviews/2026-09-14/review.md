@@ -22,8 +22,8 @@ The service probes used disposable containers and temporary data. The local stor
 
 Reproduction material:
 
-- [CLI probe source](cli_probes.py) and [captured command results](cli-results.json).
-- [Service invariant probe source](service_invariants.rs) and [observed results](service-results.txt).
+- [Maintained CLI regressions](../../../tests/review_cli.rs) and [captured command results](cli-results.json).
+- [Maintained service regressions](../../../crates/devflow-core/tests/review_regressions.rs) and [observed results](service-results.txt).
 
 The service probes are archived outside the regular test suite because they intentionally assert behavior the current implementation violates. This review changes no application implementation.
 

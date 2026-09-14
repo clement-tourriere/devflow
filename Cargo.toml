@@ -74,11 +74,8 @@ inquire = { version = "0.9", default-features = false, features = ["crossterm"] 
 # Date/time handling
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 
-# HTTP client (for proxy status queries and self-update)
+# HTTP client for proxy status queries
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
-
-# Checksum verification for self-update (release .sha256 assets)
-sha2 = "0.10"
 
 # Ordered maps for deterministic hook execution
 indexmap = { version = "2", default-features = false, features = ["serde"] }
@@ -92,6 +89,7 @@ ratatui = { version = "0.30", default-features = false, features = ["crossterm"]
 crossterm = { version = "0.29", default-features = false, features = ["events", "use-dev-tty"], optional = true }
 
 [dev-dependencies]
+git2 = { version = "0.21", default-features = false }
 tempfile = "3.20"
 serde_json = "1.0"
 

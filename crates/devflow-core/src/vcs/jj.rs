@@ -5,13 +5,18 @@
 //! - jj **workspaces** → worktrees
 //! - jj **colocated repos** are supported (`.jj` + `.git` side by side)
 //!
-//! This provider shells out to the `jj` CLI since there is no stable Rust
-//! library equivalent to `git2`. Commands are run with `--no-pager` and
-//! `--color=never` for machine-friendly output.
+//! Repository operations use jj-lib, including snapshots and native workspaces.
+//! No jj executable is required.
 
+use super::jj_native::{self as native, State};
 use anyhow::{bail, Context, Result};
+use jj_lib::{
+    default_backend_factories::default_working_copy_factory,
+    op_store::RefTarget,
+    ref_name::{RefName, WorkspaceName},
+    workspace::Workspace,
+};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use super::{VcsProvider, WorkspaceInfo, WorktreeCreateResult, WorktreeInfo};
 
@@ -29,34 +34,16 @@ pub struct JjRepository {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct JjWorkspaceEntry {
-    internal_name: String,
-    path: PathBuf,
+pub(super) struct JjWorkspaceEntry {
+    pub internal_name: String,
+    pub path: PathBuf,
 }
-
-const WORKSPACE_LIST_TEMPLATE: &str =
-    r#"json(self.name()) ++ "\t" ++ json(stringify(self.root())) ++ "\n""#;
-const BOOKMARK_LIST_TEMPLATE: &str =
-    r#"if(!self.remote() && self.present(), json(self.name()) ++ "\n")"#;
 
 impl JjRepository {
     /// Open the jj repository at `path` (or a parent containing `.jj/`).
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let root = Self::find_repo_root(path.as_ref())
             .context("Failed to find jj repository (no .jj/ directory)")?;
-
-        // Verify `jj` is available
-        let output = Command::new("jj")
-            .args(["--version"])
-            .output()
-            .context("Failed to execute 'jj'. Is Jujutsu installed?")?;
-
-        if !output.status.success() {
-            bail!(
-                "jj --version failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
 
         let mut repository = Self {
             primary_root: root.clone(),
@@ -87,52 +74,6 @@ impl JjRepository {
         }
     }
 
-    /// Run a jj command and return its stdout.
-    fn jj(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("jj")
-            .args(["--no-pager", "--color=never"])
-            .args(args)
-            .current_dir(&self.root)
-            .output()
-            .with_context(|| format!("Failed to run jj {}", args.join(" ")))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("jj {} failed: {}", args.join(" "), stderr.trim());
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    }
-
-    fn parse_workspace_entries(output: &str) -> Result<Vec<JjWorkspaceEntry>> {
-        output
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| {
-                let (internal_name, path) = line.split_once('\t').with_context(|| {
-                    format!("Unexpected `jj workspace list` template output: {line:?}")
-                })?;
-                let internal_name: String =
-                    serde_json::from_str(internal_name).with_context(|| {
-                        format!("Invalid workspace-name JSON from `jj workspace list`: {line:?}")
-                    })?;
-                let path: String =
-                    serde_json::from_str(path.trim_end_matches('\r')).with_context(|| {
-                        format!("Invalid workspace-path JSON from `jj workspace list`: {line:?}")
-                    })?;
-                if internal_name.is_empty() || path.is_empty() {
-                    bail!("Unexpected empty field in `jj workspace list` output: {line:?}");
-                }
-                let path = PathBuf::from(path);
-                let path = path.canonicalize().unwrap_or(path);
-                Ok(JjWorkspaceEntry {
-                    internal_name,
-                    path,
-                })
-            })
-            .collect()
-    }
-
     fn primary_workspace_entry(entries: &[JjWorkspaceEntry]) -> Result<&JjWorkspaceEntry> {
         entries
             .iter()
@@ -143,8 +84,7 @@ impl JjRepository {
     }
 
     fn workspace_entries(&self) -> Result<Vec<JjWorkspaceEntry>> {
-        let output = self.jj(&["workspace", "list", "--template", WORKSPACE_LIST_TEMPLATE])?;
-        Self::parse_workspace_entries(&output)
+        pollster::block_on(async { State::load(&self.root).await?.entries() })
     }
 
     fn load_configured_default_workspace(primary_root: &Path) -> Result<Option<String>> {
@@ -155,16 +95,7 @@ impl JjRepository {
     }
 
     fn bookmark_names(&self) -> Result<Vec<String>> {
-        let output = self.jj(&["bookmark", "list", "--template", BOOKMARK_LIST_TEMPLATE])?;
-        output
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| {
-                serde_json::from_str::<String>(line.trim_end_matches('\r')).with_context(|| {
-                    format!("Invalid bookmark-name JSON from `jj bookmark list`: {line:?}")
-                })
-            })
-            .collect()
+        pollster::block_on(async { Ok(State::load(&self.root).await?.bookmarks()) })
     }
 
     /// Resolve the default bookmark from devflow config when available. For an
@@ -195,27 +126,6 @@ impl JjRepository {
             .or_else(|| names.iter().find(|name| name.as_str() == "master"))
             .cloned()
             .or_else(|| names.first().cloned()))
-    }
-
-    /// Whether `bookmark` points at an ancestor of (or exactly) `revision`,
-    /// i.e. moving it to `revision` is a pure forward move.
-    fn bookmark_is_ancestor_of(&self, bookmark: &str, revision: &str) -> Result<bool> {
-        let revset = format!("{} & ::{revision}", Self::bookmark_revset(bookmark));
-        let output = self.jj(&["log", "--no-graph", "-r", &revset, "--template", "\"x\""])?;
-        Ok(!output.trim().is_empty())
-    }
-
-    fn local_bookmark_removal_args(name: &str) -> Vec<String> {
-        vec![
-            "bookmark".to_owned(),
-            "forget".to_owned(),
-            format!("exact:{name}"),
-        ]
-    }
-
-    fn bookmark_revset(name: &str) -> String {
-        let quoted = serde_json::to_string(name).expect("serializing a Rust string cannot fail");
-        format!("bookmarks(exact:{quoted})")
     }
 
     fn raw_workspace_for_internal(
@@ -304,16 +214,6 @@ impl JjRepository {
             .map(|entry| entry.internal_name.clone())
     }
 
-    fn revision_for_workspace(&self, raw_workspace: &str) -> Result<String> {
-        let entries = self.workspace_entries()?;
-        let default = self.detect_default_bookmark()?;
-        Ok(
-            Self::internal_workspace_for_raw(&entries, raw_workspace, default.as_deref())
-                .map(|internal_name| format!("{internal_name}@"))
-                .unwrap_or_else(|| Self::bookmark_revset(raw_workspace)),
-        )
-    }
-
     fn paths_equal(left: &Path, right: &Path) -> bool {
         super::paths_equal(left, right)
     }
@@ -366,29 +266,61 @@ impl VcsProvider for JjRepository {
     }
 
     fn create_workspace(&self, name: &str, base: Option<&str>) -> Result<()> {
-        if self.workspace_exists(name)? {
-            log::info!("jj bookmark '{}' already exists, reusing", name);
-            return Ok(());
-        }
-
-        // Create the bookmark at an explicit revision without changing the
-        // source workspace's working-copy commit.
-        let revision = match base {
-            Some(base) => self.revision_for_workspace(base)?,
-            None => "@".to_owned(),
-        };
-        self.jj(&["bookmark", "create", "--revision", &revision, name])?;
-        Ok(())
+        pollster::block_on(async {
+            if let Some(base) = base {
+                if let Some(path) = self.worktree_path(base)? {
+                    if !Self::paths_equal(&path, &self.root) {
+                        drop(State::load(&path).await?);
+                    }
+                }
+            }
+            let mut state = State::load(&self.root).await?;
+            if state.bookmarks().iter().any(|n| n == name) {
+                return Ok(());
+            }
+            anyhow::ensure!(!name.is_empty(), "jj bookmark name cannot be empty");
+            let commit = if let Some(base) = base {
+                let entries = state.entries()?;
+                let default = Self::select_default_bookmark(
+                    &state.bookmarks(),
+                    self.configured_default.as_deref(),
+                )?;
+                if let Some(internal) =
+                    Self::internal_workspace_for_raw(&entries, base, default.as_deref())
+                {
+                    state
+                        .commit_for_internal(WorkspaceName::new(&internal))
+                        .await?
+                } else {
+                    state.bookmark_commit(base).await?
+                }
+            } else {
+                state.working_commit().await?
+            };
+            state.set_bookmark(name, &commit).await
+        })
     }
 
     fn delete_workspace(&self, name: &str) -> Result<()> {
-        // `bookmark delete` records a remote deletion which a later push can
-        // propagate. A devflow workspace removal, like deleting a local Git
-        // branch, must be local-only.
-        let args = Self::local_bookmark_removal_args(name);
-        let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-        self.jj(&args)?;
-        Ok(())
+        pollster::block_on(async {
+            let mut state = State::load(&self.root).await?;
+            let name = RefName::new(name);
+            let mut tx = state.repo.start_transaction();
+            // Forget locally without scheduling a remote deletion.
+            let remotes = state
+                .repo
+                .view()
+                .all_remote_bookmarks()
+                .filter(|(symbol, _)| symbol.name == name && symbol.remote.as_str() != "git")
+                .map(|(symbol, _)| symbol.to_owned())
+                .collect::<Vec<_>>();
+            for symbol in remotes {
+                tx.repo_mut().untrack_remote_bookmark(symbol.as_ref());
+            }
+            tx.repo_mut()
+                .set_local_bookmark_target(name, RefTarget::absent());
+            state.finish(tx, "devflow: forget local bookmark").await
+        })
     }
 
     fn workspace_exists(&self, name: &str) -> Result<bool> {
@@ -428,65 +360,68 @@ impl VcsProvider for JjRepository {
     }
 
     fn create_worktree(&self, workspace: &str, path: &Path) -> Result<WorktreeCreateResult> {
-        if !self.workspace_exists(workspace)? {
-            bail!("jj bookmark '{workspace}' does not exist");
-        }
-
-        // A stale registration (directory removed on disk, e.g. manual
-        // `rm -rf`) would otherwise block re-creation of this bookmark
-        // forever. Mirror the git provider: prune before the exists check.
-        let _ = <Self as VcsProvider>::prune_worktrees(self);
-
-        let internal_name = Self::workspace_name_for_branch(workspace);
-        // Check through the compat mapping, not just the current naming
-        // scheme: a live workspace materialized by an older release must not
-        // be shadowed by a second workspace for the same bookmark.
-        let entries = self.workspace_entries()?;
-        let default = self.detect_default_bookmark()?;
-        if let Some(existing) =
-            Self::internal_workspace_for_raw(&entries, workspace, default.as_deref())
-        {
-            bail!("jj workspace '{existing}' already exists");
-        }
-
-        let path_str = path.to_str().context("Worktree path is not valid UTF-8")?;
-        let revision = Self::bookmark_revset(workspace);
-
-        // This creates a fresh working-copy commit on top of the bookmark. It
-        // does not edit (and therefore cannot stale) the source workspace.
-        // Any failure is returned to the caller.
-        self.jj(&[
-            "workspace",
-            "add",
-            "--name",
-            &internal_name,
-            "--revision",
-            &revision,
-            path_str,
-        ])?;
-
-        // jj has no active-bookmark concept. Attach the raw identity to the
-        // initial working-copy commit. `devflow commit` refreshes it after
-        // each commit, and removal refreshes it once more before forgetting
-        // the native workspace.
-        let working_copy_revision = format!("{internal_name}@");
-        if let Err(error) = self.jj(&[
-            "bookmark",
-            "set",
-            "--revision",
-            &working_copy_revision,
-            workspace,
-        ]) {
-            let _ = self.jj(&["workspace", "forget", &internal_name]);
-            if path.exists() {
-                let _ = std::fs::remove_dir_all(path);
+        self.prune_worktrees()?;
+        pollster::block_on(async {
+            let state = State::load(&self.root).await?;
+            let base = state.bookmark_commit(workspace).await?;
+            let entries = state.entries()?;
+            let default = Self::select_default_bookmark(
+                &state.bookmarks(),
+                self.configured_default.as_deref(),
+            )?;
+            anyhow::ensure!(
+                Self::internal_workspace_for_raw(&entries, workspace, default.as_deref()).is_none(),
+                "jj workspace already exists for '{workspace}'"
+            );
+            let parent = path.parent().context("jj workspace path has no parent")?;
+            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir(path)
+                .with_context(|| format!("Cannot create jj workspace at {}", path.display()))?;
+            let internal = Self::workspace_name_for_branch(workspace);
+            let result: Result<()> = async {
+                let (mut new_workspace, repo) = Workspace::init_workspace_with_existing_repo(
+                    path,
+                    state.workspace.repo_path(),
+                    &state.repo,
+                    default_working_copy_factory().as_ref(),
+                    internal.clone().into(),
+                )
+                .await?;
+                let mut locked = new_workspace.start_working_copy_mutation().await?;
+                locked
+                    .locked_wc()
+                    .set_sparse_patterns(state.workspace.working_copy().sparse_patterns()?.to_vec())
+                    .await?;
+                let operation = locked.locked_wc().old_operation_id().clone();
+                locked.finish(operation).await?;
+                let mut tx = repo.start_transaction();
+                let commit = tx
+                    .repo_mut()
+                    .check_out(internal.clone().into(), &base)
+                    .await?;
+                tx.repo_mut().set_local_bookmark_target(
+                    RefName::new(workspace),
+                    RefTarget::normal(commit.id().clone()),
+                );
+                tx.repo_mut().rebase_descendants().await?;
+                if state.workspace.workspace_root().join(".git").exists() {
+                    jj_lib::git::export_refs(tx.repo_mut())?;
+                }
+                let repo = tx.commit("devflow: materialize workspace").await?;
+                new_workspace
+                    .check_out(repo.op_id().clone(), None, &commit)
+                    .await?;
+                Ok(())
             }
-            return Err(error.context(format!(
-                "Failed to attach jj bookmark '{workspace}' to its new workspace"
-            )));
-        }
-
-        Ok(WorktreeCreateResult::new())
+            .await;
+            if let Err(error) = result {
+                return Err(error.context(format!(
+                    "jj workspace creation did not finish; inspect {} before retrying",
+                    path.display()
+                )));
+            }
+            Ok(WorktreeCreateResult::new())
+        })
     }
 
     fn remove_worktree(&self, path: &Path, force: bool) -> Result<()> {
@@ -512,34 +447,28 @@ impl VcsProvider for JjRepository {
             );
         }
 
-        // Preserve the exact workspace head before its native identity is
-        // forgotten. This also repairs a bookmark left behind by commits made
-        // directly with `jj commit` instead of `devflow commit`. Best-effort
-        // only: jj refuses backwards/sideways bookmark moves (e.g. after the
-        // user ran `jj edit main` inside the workspace), and failing here
-        // must never block removal — aborting before `workspace forget`
-        // would leave the workspace registered while the force path deletes
-        // its directory, permanently blocking re-creation of that branch.
-        let bookmarks = self.bookmark_names()?;
-        let default = self.detect_default_bookmark()?;
-        if let Some(raw_workspace) =
-            Self::raw_workspace_for_internal(&entry.internal_name, &bookmarks, default.as_deref())
-        {
-            let working_copy_revision = format!("{}@", entry.internal_name);
-            if let Err(error) = self.jj(&[
-                "bookmark",
-                "set",
-                "--revision",
-                &working_copy_revision,
-                &raw_workspace,
-            ]) {
-                log::warn!(
-                    "Not preserving jj bookmark '{raw_workspace}' before removing its workspace: {error:#}"
-                );
-            }
+        // Preserve changes in the workspace being removed before forgetting it.
+        if entry.path.exists() {
+            drop(pollster::block_on(State::load(&entry.path))?);
         }
-
-        self.jj(&["workspace", "forget", &entry.internal_name])?;
+        pollster::block_on(async {
+            let mut state = State::load(&self.root).await?;
+            let default = Self::select_default_bookmark(
+                &state.bookmarks(),
+                self.configured_default.as_deref(),
+            )?;
+            if let Some(raw) = Self::raw_workspace_for_internal(
+                &entry.internal_name,
+                &state.bookmarks(),
+                default.as_deref(),
+            ) {
+                let commit = state
+                    .commit_for_internal(WorkspaceName::new(&entry.internal_name))
+                    .await?;
+                state.set_bookmark(&raw, &commit).await?;
+            }
+            state.forget(&entry.internal_name).await
+        })?;
         if entry.path.exists() {
             std::fs::remove_dir_all(&entry.path).with_context(|| {
                 format!(
@@ -553,36 +482,18 @@ impl VcsProvider for JjRepository {
     }
 
     fn worktree_is_dirty(&self, path: &Path) -> Result<bool> {
-        let entry = self
-            .workspace_entries()?
-            .into_iter()
-            .find(|entry| Self::paths_equal(&entry.path, path))
-            .with_context(|| format!("No jj workspace is registered at '{}'", path.display()))?;
-        if !entry.path.exists() {
+        if !path.exists() {
             return Ok(false);
         }
-        let path_str = entry
-            .path
-            .to_str()
-            .context("Worktree path is not valid UTF-8")?;
-        let output = Command::new("jj")
-            .args([
-                "--no-pager",
-                "--color=never",
-                "--repository",
-                path_str,
-                "diff",
-                "--summary",
-            ])
-            .output()
-            .context("Failed to inspect jj workspace changes")?;
-        if !output.status.success() {
-            bail!(
-                "jj diff failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        Ok(!output.stdout.is_empty())
+        pollster::block_on(async {
+            let state = State::load(path).await?;
+            Ok(state.untracked
+                || !state
+                    .working_commit()
+                    .await?
+                    .is_empty(state.repo.as_ref())
+                    .await?)
+        })
     }
 
     fn worktree_path(&self, workspace: &str) -> Result<Option<PathBuf>> {
@@ -617,7 +528,12 @@ impl VcsProvider for JjRepository {
             if entry.internal_name == "default" || entry.path.exists() {
                 continue;
             }
-            if let Err(error) = self.jj(&["workspace", "forget", &entry.internal_name]) {
+            if let Err(error) = pollster::block_on(async {
+                State::load(&self.root)
+                    .await?
+                    .forget(&entry.internal_name)
+                    .await
+            }) {
                 log::debug!(
                     "Failed to forget stale jj workspace '{}': {error:#}",
                     entry.internal_name
@@ -705,146 +621,32 @@ impl VcsProvider for JjRepository {
     fn provider_name(&self) -> &'static str {
         "jj"
     }
-
-    fn staged_diff(&self) -> Result<String> {
-        // In jj, the working copy *is* the staging area. `jj diff` shows
-        // changes in the current working-copy commit.
-        let output = Command::new("jj")
-            .args(["diff", "--no-pager", "--color=never"])
-            .current_dir(&self.root)
-            .output()
-            .context("Failed to run 'jj diff'")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("jj diff failed: {}", stderr);
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    }
-
-    fn staged_summary(&self) -> Result<String> {
-        let output = Command::new("jj")
-            .args(["diff", "--stat", "--no-pager", "--color=never"])
-            .current_dir(&self.root)
-            .output()
-            .context("Failed to run 'jj diff --stat'")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("jj diff --stat failed: {}", stderr);
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    }
-
-    fn has_staged_changes(&self) -> Result<bool> {
-        // In jj, check if the working copy has any modifications
-        let output = Command::new("jj")
-            .args(["diff", "--stat", "--no-pager", "--color=never"])
-            .current_dir(&self.root)
-            .output()
-            .context("Failed to run 'jj diff --stat'")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("jj diff --stat failed: {}", stderr);
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(!stdout.trim().is_empty())
-    }
-
-    fn commit(&self, message: &str) -> Result<()> {
-        let entries = self.workspace_entries()?;
-        let bookmarks = self.bookmark_names()?;
-        let default = self.detect_default_bookmark()?;
-        let raw_workspace = entries
-            .iter()
-            .find(|entry| Self::paths_equal(&entry.path, &self.root))
-            .and_then(|entry| {
-                Self::raw_workspace_for_internal(
-                    &entry.internal_name,
-                    &bookmarks,
-                    default.as_deref(),
-                )
-            });
-
-        // In jj, `jj commit -m "msg"` finalizes the working-copy commit
-        // and starts a new empty one.
-        let output = Command::new("jj")
-            .args(["commit", "-m", message, "--no-pager"])
-            .current_dir(&self.root)
-            .output()
-            .context("Failed to run 'jj commit'")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("jj commit failed: {}", stderr);
-        }
-
-        // Bookmarks do not automatically advance to the new committed child
-        // in jj. Keep devflow's raw workspace identity at the commit just
-        // finalized (`@-`); the new `@` is the empty working-copy commit.
-        // Advance only when the bookmark is an ancestor of that commit: in
-        // the primary workspace the mapped bookmark is the DEFAULT bookmark,
-        // and `@` may sit on an unrelated lineage (e.g. after `jj new
-        // feature-x`) — advancing would silently pull foreign commits onto
-        // the default bookmark, and a sideways refusal would fail the
-        // command after the commit already landed.
-        if let Some(raw_workspace) = raw_workspace {
-            match self.bookmark_is_ancestor_of(&raw_workspace, "@-") {
-                Ok(true) => {
-                    if let Err(error) =
-                        self.jj(&["bookmark", "set", "--revision", "@-", &raw_workspace])
-                    {
-                        log::warn!(
-                            "Commit succeeded, but did not advance jj bookmark '{raw_workspace}': {error:#}"
-                        );
-                    }
-                }
-                Ok(false) => {
-                    log::warn!(
-                        "Commit succeeded; leaving jj bookmark '{raw_workspace}' in place: it is not an ancestor of the committed revision"
-                    );
-                }
-                Err(error) => {
-                    log::warn!(
-                        "Commit succeeded; leaving jj bookmark '{raw_workspace}' in place: {error:#}"
-                    );
-                }
-            }
-        }
-
-        Ok(())
-    }
 }
 
 impl JjRepository {
-    /// Initialize a new jj repository at `path` with `jj git init`.
+    /// Initialize a jj repository at `path` using native library calls.
     ///
-    /// When `colocate` is true, passes `--colocate` so the repo also has a
-    /// `.git/` directory (the most common setup for devflow).
+    /// When `colocate` is true, share its working copy with the `.git/`
+    /// repository, adopting an existing Git repository when present.
     ///
-    /// Requires the `jj` CLI to be installed.
+    /// Uses the embedded jj-lib implementation.
     pub fn init<P: AsRef<Path>>(path: P, colocate: bool) -> Result<Self> {
         let path = path.as_ref();
-        let colocation_flag = if colocate {
-            "--colocate"
-        } else {
-            "--no-colocate"
-        };
-
-        let output = Command::new("jj")
-            .args(["git", "init", colocation_flag, "."])
-            .current_dir(path)
-            .output()
-            .context("Failed to run 'jj git init'. Is Jujutsu installed?")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("jj git init failed: {}", stderr.trim());
-        }
+        std::fs::create_dir_all(path)?;
+        let canonical = path.canonicalize()?;
+        let path = canonical.as_path();
+        pollster::block_on(async {
+            let settings = native::settings(path, None)?;
+            if colocate && path.join(".git").exists() {
+                let git = git2::Repository::open(path)?;
+                Workspace::init_external_git(&settings, path, git.path()).await?;
+            } else if colocate {
+                Workspace::init_colocated_git(&settings, path, Default::default()).await?;
+            } else {
+                Workspace::init_internal_git(&settings, path, Default::default()).await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        })?;
 
         let repository = Self::new(path)?;
         if repository.bookmark_names()?.is_empty() {
@@ -867,6 +669,193 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_forget_keeps_remote_bookmark_and_sparse_workspace_rules() {
+        use jj_lib::{
+            op_store::{RemoteRef, RemoteRefState},
+            repo_path::RepoPathBuf,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("primary");
+        let jj = JjRepository::init(&root, false).unwrap();
+        std::fs::write(root.join("included"), "include").unwrap();
+        std::fs::write(root.join("excluded"), "exclude").unwrap();
+        jj.create_workspace("feature", None).unwrap();
+        pollster::block_on(async {
+            let mut state = State::load(&root).await.unwrap();
+            let id = state.bookmark_commit("feature").await.unwrap().id().clone();
+            let mut tx = state.repo.start_transaction();
+            let remote = RefName::new("feature").to_remote_symbol("origin".as_ref());
+            tx.repo_mut().set_remote_bookmark(
+                remote,
+                RemoteRef {
+                    target: RefTarget::normal(id),
+                    state: RemoteRefState::Tracked,
+                },
+            );
+            state.finish(tx, "test: remote tracking").await.unwrap();
+            let mut locked = state.workspace.start_working_copy_mutation().await.unwrap();
+            locked
+                .locked_wc()
+                .set_sparse_patterns(vec![RepoPathBuf::from_internal_string("included").unwrap()])
+                .await
+                .unwrap();
+            let op = state.repo.op_id().clone();
+            locked.finish(op).await.unwrap();
+        });
+        let child = temp.path().join("child");
+        jj.create_worktree("feature", &child).unwrap();
+        assert!(child.join("included").exists());
+        assert!(!child.join("excluded").exists());
+        jj.remove_worktree(&child, false).unwrap();
+        jj.delete_workspace("feature").unwrap();
+        pollster::block_on(async {
+            let state = State::load(&root).await.unwrap();
+            let remote = state
+                .repo
+                .view()
+                .get_remote_bookmark(RefName::new("feature").to_remote_symbol("origin".as_ref()));
+            assert!(remote.target.is_present());
+            assert_eq!(remote.state, RemoteRefState::New);
+        });
+    }
+
+    #[test]
+    fn native_colocated_imports_existing_and_subsequent_git_commits() {
+        let temp = tempfile::tempdir().unwrap();
+        let git = git2::Repository::init(temp.path()).unwrap();
+        fn commit(git: &git2::Repository, content: &str) {
+            let blob = git.blob(content.as_bytes()).unwrap();
+            let mut tree = git.treebuilder(None).unwrap();
+            tree.insert("file", blob, 0o100644).unwrap();
+            let tree = git.find_tree(tree.write().unwrap()).unwrap();
+            let signature = git2::Signature::now("Native test", "test@example.com").unwrap();
+            let parent = git.head().ok().and_then(|h| h.peel_to_commit().ok());
+            let parents = parent.iter().collect::<Vec<_>>();
+            git.commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "test",
+                &tree,
+                &parents,
+            )
+            .unwrap();
+            git.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+                .unwrap();
+        }
+        commit(&git, "first");
+        let jj = JjRepository::init(temp.path(), true).unwrap();
+        commit(&git, "second");
+        jj.create_workspace("git-import", None).unwrap();
+        let child_root = tempfile::tempdir().unwrap();
+        let child = child_root.path().join("child");
+        jj.create_worktree("git-import", &child).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(child.join("file")).unwrap(),
+            "second"
+        );
+    }
+
+    #[test]
+    fn native_snapshot_respects_immutable_history_and_untracked_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let jj = JjRepository::init(temp.path(), false).unwrap();
+        let initial = pollster::block_on(async {
+            State::load(temp.path())
+                .await
+                .unwrap()
+                .bookmark_commit("main")
+                .await
+                .unwrap()
+                .id()
+                .clone()
+        });
+        std::fs::write(temp.path().join(".jj/repo/config.toml"), "[revset-aliases]\n'immutable_heads()' = 'bookmarks(exact:\"main\")'\n[snapshot]\nauto-track = 'glob:\"*.rs\"'\n[signing]\nbackend = 'ssh'\nbehavior = 'own'\nkey = '/does-not-exist'\n").unwrap();
+        std::fs::write(temp.path().join("tracked.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(temp.path().join("untracked.txt"), "keep").unwrap();
+        pollster::block_on(async {
+            let state = State::load(temp.path()).await.unwrap();
+            assert_eq!(state.bookmark_commit("main").await.unwrap().id(), &initial);
+            assert_eq!(
+                state.working_commit().await.unwrap().parent_ids(),
+                &[initial]
+            );
+        });
+        assert!(jj.worktree_is_dirty(temp.path()).unwrap());
+        assert!(temp.path().join("untracked.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn native_workspace_lifecycle_preserves_data_and_identity() {
+        for colocated in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("primary");
+            let repo = JjRepository::init(&root, colocated).unwrap();
+            std::fs::write(root.join("source.txt"), "source content").unwrap();
+            std::fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
+            std::fs::create_dir(root.join("ignored")).unwrap();
+            std::fs::write(root.join("ignored/secret"), "excluded").unwrap();
+            repo.create_workspace("feature/auth", Some("main")).unwrap();
+            let child = temp.path().join("child with spaces");
+            repo.create_worktree("feature/auth", &child).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(child.join("source.txt")).unwrap(),
+                "source content"
+            );
+            assert!(!child.join("ignored/secret").exists());
+            let child_repo = JjRepository::new(&child).unwrap();
+            assert_eq!(
+                child_repo.current_workspace().unwrap().as_deref(),
+                Some("feature/auth")
+            );
+            assert_eq!(
+                child_repo.main_worktree_dir(),
+                Some(root.canonicalize().unwrap())
+            );
+            assert!(!repo.worktree_is_dirty(&child).unwrap());
+            std::fs::write(child.join("source.txt"), "child changes").unwrap();
+            assert!(repo.worktree_is_dirty(&child).unwrap());
+            assert!(repo.remove_worktree(&child, false).is_err());
+            assert!(child.join("source.txt").exists());
+            repo.remove_worktree(&child, true).unwrap();
+            assert!(!child.exists());
+            repo.create_worktree("feature/auth", &child).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(child.join("source.txt")).unwrap(),
+                "child changes"
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("source.txt")).unwrap(),
+                "source content"
+            );
+            repo.remove_worktree(&child, false).unwrap();
+            repo.delete_workspace("feature/auth").unwrap();
+            assert!(!repo.workspace_exists("feature/auth").unwrap());
+        }
+    }
+
+    #[test]
+    fn native_workspaces_prune_missing_registrations_and_refuse_existing_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = JjRepository::init(temp.path().join("primary"), false).unwrap();
+        repo.create_workspace("feature/a", None).unwrap();
+        let child = temp.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::write(child.join("owned"), "keep").unwrap();
+        assert!(repo.create_worktree("feature/a", &child).is_err());
+        assert_eq!(
+            std::fs::read_to_string(child.join("owned")).unwrap(),
+            "keep"
+        );
+        std::fs::remove_dir_all(&child).unwrap();
+        repo.create_worktree("feature/a", &child).unwrap();
+        std::fs::remove_dir_all(&child).unwrap();
+        repo.prune_worktrees().unwrap();
+        assert!(repo.worktree_path("feature/a").unwrap().is_none());
+        repo.create_worktree("feature/a", &child).unwrap();
+    }
+
+    #[test]
     fn test_workspace_name_for_branch() {
         let main = JjRepository::workspace_name_for_branch("main");
         assert!(main.starts_with("jj_workspace_main_"));
@@ -879,26 +868,6 @@ mod tests {
             JjRepository::workspace_name_for_branch("default"),
             "default"
         );
-    }
-
-    #[test]
-    fn parses_explicit_workspace_ref_template_output() {
-        let entries = JjRepository::parse_workspace_entries(
-            "\"default\"\t\"/tmp/project\"\n\"jj-workspace-feature\"\t\"/tmp/project-feature\"\n",
-        )
-        .unwrap();
-
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].internal_name, "default");
-        assert_eq!(entries[0].path, PathBuf::from("/tmp/project"));
-        assert_eq!(entries[1].internal_name, "jj-workspace-feature");
-    }
-
-    #[test]
-    fn rejects_human_workspace_list_output() {
-        let error = JjRepository::parse_workspace_entries("default: abc123 (empty)\n")
-            .expect_err("human output must not be interpreted as a filesystem path");
-        assert!(error.to_string().contains("template output"));
     }
 
     #[test]
@@ -1018,14 +987,6 @@ mod tests {
     }
 
     #[test]
-    fn bookmark_revset_quotes_raw_identity() {
-        assert_eq!(
-            JjRepository::bookmark_revset("feature/quoted name"),
-            r#"bookmarks(exact:"feature/quoted name")"#
-        );
-    }
-
-    #[test]
     fn configured_default_bookmark_is_authoritative() {
         let bookmarks = vec!["main".to_owned(), "develop".to_owned()];
         assert_eq!(
@@ -1035,13 +996,5 @@ mod tests {
             Some("develop")
         );
         assert!(JjRepository::select_default_bookmark(&bookmarks, Some("missing")).is_err());
-    }
-
-    #[test]
-    fn workspace_removal_forgets_local_bookmark_without_scheduling_remote_delete() {
-        assert_eq!(
-            JjRepository::local_bookmark_removal_args("feature/auth"),
-            vec!["bookmark", "forget", "exact:feature/auth"]
-        );
     }
 }

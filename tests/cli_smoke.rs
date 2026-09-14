@@ -5,6 +5,8 @@
 //! verify argument parsing, and run safe read-only commands in a temp
 //! repo to verify basic functionality.
 
+mod support;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -32,27 +34,8 @@ fn run(args: &[&str]) -> std::process::Output {
 /// Run a command inside a temporary git repo.
 fn run_in_repo(args: &[&str]) -> std::process::Output {
     let tmp = tempfile::tempdir().unwrap();
-    // Initialize a git repo
-    Command::new("git")
-        .args(["init"])
-        .current_dir(tmp.path())
-        .output()
-        .expect("git init");
-    Command::new("git")
-        .args(["config", "user.email", "test@test.com"])
-        .current_dir(tmp.path())
-        .output()
-        .expect("git config email");
-    Command::new("git")
-        .args(["config", "user.name", "Test"])
-        .current_dir(tmp.path())
-        .output()
-        .expect("git config name");
-    Command::new("git")
-        .args(["commit", "--allow-empty", "-m", "init"])
-        .current_dir(tmp.path())
-        .output()
-        .expect("git commit");
+    support::init(tmp.path());
+    support::commit(tmp.path());
 
     Command::new(devflow_bin())
         .env("DEVFLOW_CONFIG_DIR", tmp.path().join("devflow-config"))
@@ -323,26 +306,8 @@ fn gc_list() {
 #[test]
 fn init_creates_config() {
     let tmp = tempfile::tempdir().unwrap();
-    Command::new("git")
-        .args(["init"])
-        .current_dir(tmp.path())
-        .output()
-        .expect("git init");
-    Command::new("git")
-        .args(["config", "user.email", "test@test.com"])
-        .current_dir(tmp.path())
-        .output()
-        .ok();
-    Command::new("git")
-        .args(["config", "user.name", "Test"])
-        .current_dir(tmp.path())
-        .output()
-        .ok();
-    Command::new("git")
-        .args(["commit", "--allow-empty", "-m", "init"])
-        .current_dir(tmp.path())
-        .output()
-        .ok();
+    support::init(tmp.path());
+    support::commit(tmp.path());
 
     let out = Command::new(devflow_bin())
         .env("DEVFLOW_CONFIG_DIR", tmp.path().join("devflow-config"))
@@ -362,11 +327,7 @@ fn init_creates_config() {
 #[test]
 fn json_init_reports_onboarding_next_steps() {
     let tmp = tempfile::tempdir().unwrap();
-    Command::new("git")
-        .args(["init"])
-        .current_dir(tmp.path())
-        .output()
-        .expect("git init");
+    support::init(tmp.path());
 
     let out = Command::new(devflow_bin())
         .env("DEVFLOW_CONFIG_DIR", tmp.path().join("devflow-config"))
@@ -402,38 +363,8 @@ fn json_switch_create_reports_agent_workdir() {
     let repo = tmp.path().join("repo");
     std::fs::create_dir(&repo).unwrap();
 
-    let init = Command::new("git")
-        .args(["init", "-b", "main"])
-        .current_dir(&repo)
-        .output()
-        .expect("git init");
-    if !init.status.success() {
-        Command::new("git")
-            .args(["init"])
-            .current_dir(&repo)
-            .output()
-            .expect("git init fallback");
-        Command::new("git")
-            .args(["checkout", "-b", "main"])
-            .current_dir(&repo)
-            .output()
-            .expect("git checkout main");
-    }
-    Command::new("git")
-        .args(["config", "user.email", "test@test.com"])
-        .current_dir(&repo)
-        .output()
-        .expect("git config email");
-    Command::new("git")
-        .args(["config", "user.name", "Test"])
-        .current_dir(&repo)
-        .output()
-        .expect("git config name");
-    Command::new("git")
-        .args(["commit", "--allow-empty", "-m", "init"])
-        .current_dir(&repo)
-        .output()
-        .expect("git commit");
+    support::init(&repo);
+    support::commit(&repo);
 
     std::fs::write(
         repo.join(".devflow.yml"),

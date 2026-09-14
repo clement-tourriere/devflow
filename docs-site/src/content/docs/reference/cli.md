@@ -139,7 +139,6 @@ devflow hook install <recipe> [--param KEY=VALUE]... [--yes]
 ## AI & automation
 
 ```bash
-devflow commit [--ai] [--edit] [--dry-run] [-m <msg>]
 devflow agent status | context [--format json] [--workspace <ws>]
 devflow agent skill                    # install bundled workspace helper skills
 devflow capabilities                   # machine-readable automation contract
@@ -149,9 +148,9 @@ devflow capabilities                   # machine-readable automation contract
 
 ```bash
 devflow proxy start [--daemon] [--https-port 443] [--http-port 80] [--api-port 2019]
-                    [--domain-suffix local] [--no-mdns] [--no-auto-network]
+                    [--domain-suffix localhost] [--no-mdns] [--no-auto-network]
 devflow proxy stop | status | list
-devflow proxy trust install | verify | remove | info
+devflow proxy trust verify | info
 ```
 
 See the [proxy guide](/devflow/guides/proxy/).
@@ -166,7 +165,6 @@ devflow doctor                                # diagnostics: docker, vcs, config
 devflow install-hooks | uninstall-hooks       # git hooks: post-checkout, pre-commit
 devflow shell-init [bash|zsh|fish]            # print the auto-cd wrapper
 devflow worktree-setup                        # set up devflow inside a manually created worktree
-devflow setup-zfs [--size 20G] [--pool-name p]  # file-backed ZFS pool (Linux)
 devflow gc [--list] [--all] [--force]         # detect/clean orphaned projects and leftover state
 devflow tui                                   # terminal dashboard
 devflow plugin list | check <name> | init <name> --lang bash|python

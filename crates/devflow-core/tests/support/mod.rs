@@ -33,3 +33,72 @@ impl Drop for IsolatedConfig {
         }
     }
 }
+
+/// Git fixtures use the same embedded library as production workspace code.
+#[allow(dead_code)]
+pub fn init_repository(root: &std::path::Path, branch: &str) {
+    let repo = git2::Repository::init_opts(
+        root,
+        git2::RepositoryInitOptions::new().initial_head(branch),
+    )
+    .unwrap();
+    let signature = git2::Signature::now("Test", "test@example.invalid").unwrap();
+    let tree = repo
+        .find_tree(repo.index().unwrap().write_tree().unwrap())
+        .unwrap();
+    repo.commit(Some("HEAD"), &signature, &signature, "fixture", &tree, &[])
+        .unwrap();
+}
+
+/// Cleanup must also work during unwinding, when the test runtime cannot be
+/// re-entered. A Rust thread owns a small runtime for the Docker API request.
+#[cfg(feature = "service-local")]
+#[allow(dead_code)]
+pub fn docker_cleanup(container: &str) {
+    let container = container.to_string();
+    std::thread::spawn(move || {
+        let result: anyhow::Result<()> = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let docker = bollard::Docker::connect_with_local_defaults()?;
+                match docker
+                    .remove_container(
+                        &container,
+                        Some(bollard::query_parameters::RemoveContainerOptions {
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                {
+                    Ok(())
+                    | Err(bollard::errors::Error::DockerResponseServerError {
+                        status_code: 404,
+                        ..
+                    }) => (),
+                    Err(error) => return Err(error.into()),
+                }
+                match docker
+                    .remove_volume(
+                        &format!("{container}-data"),
+                        None::<bollard::query_parameters::RemoveVolumeOptions>,
+                    )
+                    .await
+                {
+                    Ok(())
+                    | Err(bollard::errors::Error::DockerResponseServerError {
+                        status_code: 404,
+                        ..
+                    }) => Ok(()),
+                    Err(error) => Err(error.into()),
+                }
+            });
+        if let Err(error) = result {
+            eprintln!("Disposable Docker cleanup failed for {container}: {error:#}");
+        }
+    })
+    .join()
+    .unwrap();
+}

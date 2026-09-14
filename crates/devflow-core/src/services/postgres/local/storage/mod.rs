@@ -1,7 +1,7 @@
 pub mod local_driver;
 mod replacement;
 pub mod zfs_driver;
-pub mod zfs_setup;
+mod zfs_native;
 
 use std::path::Path;
 
@@ -385,23 +385,9 @@ impl StorageCoordinator {
             StorageDriver::Zfs => {
                 let config = parse_zfs_config(project)?;
                 let project_dataset = format!("{}/projects/{}", config.root_dataset, project.id);
-                // Recursively destroy the entire project dataset and children
-                let output = tokio::process::Command::new("zfs")
-                    .args(["destroy", "-r", "-f", &project_dataset])
-                    .output()
-                    .await;
-                if let Err(e) = output {
-                    log::warn!("failed to destroy ZFS dataset '{}': {}", project_dataset, e);
-                } else if let Ok(ref out) = output {
-                    if !out.status.success() {
-                        let stderr = String::from_utf8_lossy(&out.stderr);
-                        log::warn!(
-                            "zfs destroy failed for '{}': {}",
-                            project_dataset,
-                            stderr.trim()
-                        );
-                    }
-                }
+                use replacement::{DatasetMutation, DatasetOps};
+                zfs_native::NativeZfs.apply(DatasetMutation::Destroy(project_dataset.clone())).await
+                    .with_context(|| format!("failed to destroy ZFS dataset '{project_dataset}'; project files retained"))?;
                 // Also remove the local project directory if it exists
                 let project_dir = self.projects_root.join(&project.id);
                 if tokio::fs::metadata(&project_dir).await.is_ok() {

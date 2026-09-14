@@ -1,8 +1,8 @@
-pub mod commit;
 pub mod config;
 pub mod docker;
 pub mod doctor;
 pub mod files;
+pub mod fs_copy;
 pub mod hooks;
 pub mod paths;
 pub mod processes;

@@ -305,13 +305,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_different_process_cannot_take_a_reserved_port() {
+    fn a_separate_file_handle_cannot_take_a_reserved_port() {
         let temp = tempfile::tempdir().unwrap();
         let lease = PortReservation::try_acquire(temp.path(), &[64003])
             .unwrap()
             .unwrap();
         let probe = || {
-            std::process::Command::new("/usr/bin/python3").args(["-c", "import fcntl,sys; f=open(sys.argv[1],'r+'); fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)"]).arg(temp.path().join("64003.lock")).output().unwrap().status.success()
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(temp.path().join("64003.lock"))
+                .unwrap()
+                .try_lock()
+                .is_ok()
         };
         assert!(!probe());
         drop(lease);

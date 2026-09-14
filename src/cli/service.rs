@@ -671,67 +671,19 @@ pub(crate) async fn run_add_service_wizard(
     let effective_seed = from.map(|s| s.to_string()).or(discovered_seed);
 
     // Create the configured default workspace for local providers.
-    #[cfg(feature = "service-local")]
-    let is_effective_local = services::factory::ProviderType::is_local(&named_cfg.provider_type);
     if provider_uses_local_runtime(&named_cfg.provider_type) {
         let mut config_with_service = config.clone();
         if let Some(state_services) = state.get_services(config_path) {
             config_with_service.services = Some(state_services);
         }
 
-        #[cfg(feature = "service-local")]
-        if cfg!(target_os = "linux") && is_effective_local {
-            if let Some(data_root) =
-                super::init::attempt_zfs_auto_setup(non_interactive, json_output).await
-            {
-                let mut updated_cfg = named_cfg.clone();
-                if let Some(ref mut local) = updated_cfg.local {
-                    local.data_root = Some(data_root);
-                }
-                if let Err(e) = state.add_service(config_path, updated_cfg.clone(), true) {
-                    log::warn!(
-                        "Failed to persist updated service config in local state: {}",
-                        e
-                    );
-                }
-                if let Some(state_services) = state.get_services(config_path) {
-                    config_with_service.services = Some(state_services);
-                }
-                super::init::init_local_service_main(
-                    &config_with_service,
-                    &updated_cfg,
-                    effective_seed.as_deref(),
-                    json_output,
-                )
-                .await?;
-            } else {
-                super::init::init_local_service_main(
-                    &config_with_service,
-                    &named_cfg,
-                    effective_seed.as_deref(),
-                    json_output,
-                )
-                .await?;
-            }
-        } else {
-            super::init::init_local_service_main(
-                &config_with_service,
-                &named_cfg,
-                effective_seed.as_deref(),
-                json_output,
-            )
-            .await?;
-        }
-        #[cfg(not(feature = "service-local"))]
-        {
-            super::init::init_local_service_main(
-                &config_with_service,
-                &named_cfg,
-                effective_seed.as_deref(),
-                json_output,
-            )
-            .await?;
-        }
+        super::init::init_local_service_main(
+            &config_with_service,
+            &named_cfg,
+            effective_seed.as_deref(),
+            json_output,
+        )
+        .await?;
     }
 
     Ok(Some(named_cfg))

@@ -195,13 +195,18 @@ pub(super) async fn handle_proxy_command(
                                 let port = t["port"].as_u64().unwrap_or(0);
                                 println!(
                                     "{:<40} {:<20} {}:{}",
-                                    devflow_proxy::endpoint::display_endpoint(domain, port as u16),
+                                    devflow_proxy::endpoint::display_target_endpoint(
+                                        domain,
+                                        port as u16,
+                                        ip
+                                    ),
                                     name,
                                     ip,
                                     port,
                                 );
 
                                 if devflow_proxy::endpoint::is_direct_endpoint_port(port as u16)
+                                    && !domain.ends_with(".localhost")
                                     && !hostname_resolves_to(domain, ip)
                                 {
                                     unresolved_direct.push((domain.to_string(), ip.to_string()));

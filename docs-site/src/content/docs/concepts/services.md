@@ -58,8 +58,8 @@ For `type: local`, creating a workspace clones the parent's **entire data direct
 
 | Filesystem | Method |
 | --- | --- |
-| APFS (macOS) | `cp -c` clonefile |
-| ZFS (Linux) | dataset snapshot + clone (`devflow setup-zfs` creates a file-backed pool) |
+| APFS (macOS) | Native `clonefile`file |
+| ZFS (Linux) | dataset snapshot + clone (externally provisioned pool) |
 | Btrfs / XFS (Linux) | reflink copy |
 | Anything else | full copy fallback |
 

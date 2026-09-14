@@ -254,7 +254,11 @@ impl ProxyTabComponent {
         let items: Vec<ListItem> = std::iter::once(ListItem::new(header))
             .chain(self.targets.iter().enumerate().map(|(i, t)| {
                 #[cfg(feature = "proxy")]
-                let endpoint = devflow_proxy::endpoint::display_endpoint(&t.domain, t.port);
+                let endpoint = devflow_proxy::endpoint::display_target_endpoint(
+                    &t.domain,
+                    t.port,
+                    &t.container_ip,
+                );
                 #[cfg(not(feature = "proxy"))]
                 let endpoint = t.domain.clone();
                 let line = Line::from(vec![

@@ -1,3 +1,4 @@
+mod support;
 use serde_json::Value;
 use std::{path::Path, process::Command};
 
@@ -10,32 +11,9 @@ impl Fixture {
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
-        for args in [
-            vec!["init", "-b", "main"],
-            vec!["config", "user.email", "test@example.invalid"],
-            vec!["config", "user.name", "Test"],
-        ] {
-            assert!(Command::new("git")
-                .current_dir(&repo)
-                .args(args)
-                .output()
-                .unwrap()
-                .status
-                .success());
-        }
+        support::init(&repo);
         std::fs::write(repo.join(".devflow.yml"), format!("name: review\nworktree:\n  path_template: ../nested/workspaces/{{workspace}}\n  copy_files: []\n  copy_ai_configs: false\n{extra}")).unwrap();
-        for args in [
-            vec!["add", "."],
-            vec!["-c", "commit.gpgsign=false", "commit", "-m", "fixture"],
-        ] {
-            assert!(Command::new("git")
-                .current_dir(&repo)
-                .args(args)
-                .output()
-                .unwrap()
-                .status
-                .success());
-        }
+        support::commit(&repo);
         Self { _root: root, repo }
     }
     fn run(&self, args: &[&str]) -> (bool, Value) {
@@ -129,18 +107,7 @@ fn post_create_retries_after_a_confined_file_action_fails() {
     std::fs::create_dir(&outside).unwrap();
     std::fs::write(outside.join("marker"), "original").unwrap();
     std::os::unix::fs::symlink(&outside, f.repo.join("escape")).unwrap();
-    for args in [
-        vec!["add", "escape"],
-        vec!["-c", "commit.gpgsign=false", "commit", "-m", "symlink"],
-    ] {
-        assert!(Command::new("git")
-            .current_dir(&f.repo)
-            .args(args)
-            .output()
-            .unwrap()
-            .status
-            .success());
-    }
+    support::commit(&f.repo);
     let (ok, first) = f.run(&["switch", "-c", "task", "--no-services", "--no-processes"]);
     assert!(!ok, "{first}");
     assert_eq!(
@@ -335,4 +302,71 @@ fn pins_block_explicit_removal_until_unpinned() {
     assert!(ok, "{value}");
     let (ok, value) = f.run(&["remove", "pinned", "--force"]);
     assert!(ok, "{value}");
+}
+
+#[test]
+fn worktree_payload_copy_needs_no_helper_programs() {
+    for use_jj in [false, true] {
+        let f = Fixture::new("");
+        std::fs::write(f.repo.join(".devflow.yml"), "name: native-copy\nworktree:\n  path_template: ../worktrees/{workspace}\n  copy_files: [payload]\n  copy_ai_configs: false\n").unwrap();
+        std::fs::write(f.repo.join(".gitignore"), "payload/\n").unwrap();
+        std::fs::create_dir(f.repo.join("payload")).unwrap();
+        std::fs::write(f.repo.join("payload/marker"), "original").unwrap();
+        support::commit(&f.repo);
+        if use_jj {
+            devflow_core::vcs::JjRepository::init(&f.repo, true).unwrap();
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_devflow"))
+            .current_dir(&f.repo)
+            .env("PATH", f._root.path().join("no-tools"))
+            .env("DEVFLOW_CONFIG_DIR", f._root.path().join("config"))
+            .env(
+                "DEVFLOW_PROCESS_STATE_DIR",
+                f._root.path().join("processes"),
+            )
+            .args([
+                "--json",
+                "--non-interactive",
+                "switch",
+                "-c",
+                "native",
+                "--no-services",
+                "--no-processes",
+                "--no-verify",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let worktree = Path::new(result["worktree_path"].as_str().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("payload/marker")).unwrap(),
+            "original"
+        );
+        std::fs::write(worktree.join("payload/marker"), "changed").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(f.repo.join("payload/marker")).unwrap(),
+            "original"
+        );
+    }
+}
+
+#[test]
+fn retired_helpers_report_migration_errors_without_project_setup() {
+    let f = Fixture::new("");
+    for args in [
+        vec!["commit", "--ai"],
+        vec!["update", "--check"],
+        vec!["setup-zfs"],
+    ] {
+        let (ok, result) = f.run(&args);
+        assert!(!ok, "{result}");
+        assert!(
+            result["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("retired"),
+            "{result}"
+        );
+    }
 }

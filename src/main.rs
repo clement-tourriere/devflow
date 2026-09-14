@@ -22,7 +22,6 @@ Isolated dev environments for every workspace — automatically.
 Getting Started:
   init                Initialize devflow (guided setup wizard)
   doctor              Check system health and configuration
-  update              Update devflow to the latest release
 
 Daily Use:
   switch              Create or switch workspaces (-c to create new)
@@ -30,7 +29,6 @@ Daily Use:
   status              Show current workspace and service info
   connection          Show service connection info
   remove              Remove a workspace and its services
-  commit              Commit staged changes (--ai for AI message)
 
 Workspace Management:
   link                Link an existing workspace into devflow
@@ -71,7 +69,6 @@ Setup & Config:
   shell-init          Print shell integration script (enables worktree cd)
   completions         Generate shell completions
   worktree-setup      Set up devflow in a Git worktree
-  setup-zfs           Set up a file-backed ZFS pool for CoW storage (Linux)
   gc                  Detect and clean up orphaned projects (leftover state)
   daemon              Controller daemon for shared engines (start/stop/status)
 
@@ -120,7 +117,6 @@ Isolated dev environments for every workspace — automatically.
 Getting Started:
   init                Initialize devflow (guided setup wizard)
   doctor              Check system health and configuration
-  update              Update devflow to the latest release
 
 Daily Use:
   switch              Create or switch workspaces (-c to create new)
@@ -128,7 +124,6 @@ Daily Use:
   status              Show current workspace and service info
   connection          Show service connection info
   remove              Remove a workspace and its services
-  commit              Commit staged changes (--ai for AI message)
 
 Interactive:
   tui                 Launch the interactive terminal UI dashboard

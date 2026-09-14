@@ -49,10 +49,8 @@ hooks:
       command: "docker stop {{ repo }}-{{ workspace | sanitize }}-app 2>/dev/null || true"
       continue_on_error: true
   post-create:
-    notify:
-      action:
-        type: notify
-        message: "Workspace {{ workspace }} ready"
+    announce:
+      command: "printf '%s\\n' 'Workspace {{ workspace }} ready'"
 ```
 
 Conditions keep hooks polyglot-safe (`condition: "file_exists:requirements.txt"` for the Python path, `package.json` for Node) and context-aware (`is_worktree`, `workspace_matches:^agent/.*`, `trigger_is:vcs`). [All conditions →](/devflow/reference/hooks/#conditions)

@@ -1,8 +1,6 @@
-use std::{ffi::OsString, path::Path};
+use std::path::Path;
 
 use anyhow::{anyhow, Context};
-use tokio::process::Command;
-use uuid::Uuid;
 
 use super::zfs_driver::DriverDetection;
 
@@ -30,28 +28,7 @@ impl LocalDriver {
             };
         }
 
-        let probe_dir = projects_root.join(format!(".devflow-apfs-probe-{}", Uuid::new_v4()));
-        let src = probe_dir.join("src.bin");
-        let dst = probe_dir.join("dst.bin");
-
-        let result = async {
-            tokio::fs::create_dir_all(&probe_dir)
-                .await
-                .with_context(|| format!("failed to create probe dir '{}'", probe_dir.display()))?;
-            tokio::fs::write(&src, b"devflow")
-                .await
-                .with_context(|| format!("failed to write probe file '{}'", src.display()))?;
-
-            run_cp(vec![
-                OsString::from("-c"),
-                src.as_os_str().to_owned(),
-                dst.as_os_str().to_owned(),
-            ])
-            .await
-        }
-        .await;
-
-        let _ = tokio::fs::remove_dir_all(&probe_dir).await;
+        let result = crate::fs_copy::probe_cow(projects_root, projects_root);
 
         match result {
             Ok(()) => DriverDetection {
@@ -76,29 +53,7 @@ impl LocalDriver {
             };
         }
 
-        let probe_dir = projects_root.join(format!(".devflow-reflink-probe-{}", Uuid::new_v4()));
-        let src = probe_dir.join("src.bin");
-        let dst = probe_dir.join("dst.bin");
-
-        let result = async {
-            tokio::fs::create_dir_all(&probe_dir)
-                .await
-                .with_context(|| format!("failed to create probe dir '{}'", probe_dir.display()))?;
-            tokio::fs::write(&src, b"devflow")
-                .await
-                .with_context(|| format!("failed to write probe file '{}'", src.display()))?;
-
-            run_cp(vec![
-                OsString::from("-a"),
-                OsString::from("--reflink=always"),
-                src.as_os_str().to_owned(),
-                dst.as_os_str().to_owned(),
-            ])
-            .await
-        }
-        .await;
-
-        let _ = tokio::fs::remove_dir_all(&probe_dir).await;
+        let result = crate::fs_copy::probe_cow(projects_root, projects_root);
 
         match result {
             Ok(()) => DriverDetection {
@@ -136,67 +91,16 @@ impl LocalDriver {
         target: &Path,
         mode: LocalMode,
     ) -> anyhow::Result<()> {
-        tokio::fs::metadata(source)
-            .await
-            .with_context(|| format!("source directory '{}' not found", source.display()))?;
-
-        recreate_dir(target).await?;
-
-        let source_dot = source.join(".");
-        match mode {
-            LocalMode::ApfsClone => {
-                let clone_attempt = run_cp(vec![
-                    OsString::from("-cR"),
-                    source_dot.as_os_str().to_owned(),
-                    target.as_os_str().to_owned(),
-                ])
-                .await;
-
-                if clone_attempt.is_ok() {
-                    return Ok(());
-                }
-
-                run_cp(vec![
-                    OsString::from("-R"),
-                    source_dot.as_os_str().to_owned(),
-                    target.as_os_str().to_owned(),
-                ])
-                .await
-                .context("failed to clone directory with APFS fallback copy")?;
-            }
-            LocalMode::Reflink => {
-                let reflink_attempt = run_cp(vec![
-                    OsString::from("-a"),
-                    OsString::from("--reflink=auto"),
-                    source_dot.as_os_str().to_owned(),
-                    target.as_os_str().to_owned(),
-                ])
-                .await;
-
-                if reflink_attempt.is_ok() {
-                    return Ok(());
-                }
-
-                run_cp(vec![
-                    OsString::from("-a"),
-                    source_dot.as_os_str().to_owned(),
-                    target.as_os_str().to_owned(),
-                ])
-                .await
-                .context("failed to clone directory with reflink fallback copy")?;
-            }
-            LocalMode::Copy => {
-                run_cp(vec![
-                    OsString::from("-a"),
-                    source_dot.as_os_str().to_owned(),
-                    target.as_os_str().to_owned(),
-                ])
-                .await
-                .context("failed to copy directory")?;
-            }
-        }
-
-        Ok(())
+        let source = source.to_path_buf();
+        let target = target.to_path_buf();
+        let mode = match mode {
+            LocalMode::ApfsClone | LocalMode::Reflink => crate::fs_copy::CopyMode::Cow,
+            LocalMode::Copy => crate::fs_copy::CopyMode::Copy,
+        };
+        // Only the new staging directory is populated. Recreating its parent
+        // would delete the live data before the copy can be committed.
+        tokio::task::spawn_blocking(move || crate::fs_copy::copy_directory(&source, &target, mode))
+            .await?
     }
 
     pub async fn remove_dir(&self, data_dir: &Path) -> anyhow::Result<()> {
@@ -234,17 +138,50 @@ async fn recreate_dir(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_cp(args: Vec<OsString>) -> anyhow::Result<()> {
-    let output = Command::new("cp")
-        .args(args)
-        .output()
-        .await
-        .context("failed to execute cp command")?;
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
 
-    if output.status.success() {
-        return Ok(());
+    #[tokio::test]
+    async fn failed_staged_clone_preserves_live_data_and_workspace_siblings() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("workspace/pgdata");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("marker"), "live data").unwrap();
+        std::fs::write(target.parent().unwrap().join("receipt"), "keep").unwrap();
+        std::fs::write(source.join("marker"), "replacement").unwrap();
+        // An unsupported socket forces an actual filesystem copy error after
+        // staging begins, even when this test runs with elevated privileges.
+        let socket_path = source.join("socket");
+        let socket = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let driver = LocalDriver::new();
+        assert!(driver
+            .clone_dir(&source, &target, LocalMode::Copy)
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(target.join("marker")).unwrap(),
+            "live data"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.parent().unwrap().join("receipt")).unwrap(),
+            "keep"
+        );
+        drop(socket);
+        std::fs::remove_file(socket_path).unwrap();
+        driver
+            .clone_dir(&source, &target, LocalMode::Copy)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(target.join("marker")).unwrap(),
+            "replacement"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.parent().unwrap().join("receipt")).unwrap(),
+            "keep"
+        );
     }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    Err(anyhow!("cp command failed: {stderr}"))
 }

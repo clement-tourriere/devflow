@@ -9,7 +9,7 @@
 #   DEVFLOW_VERSION      Release tag to install (e.g. v0.5.0). Default: latest
 #   DEVFLOW_INSTALL_DIR  Install directory. Default: ~/.local/bin
 #
-# Once installed, upgrade with: devflow update
+# Upgrade by rerunning this installer.
 
 set -eu
 
@@ -116,7 +116,7 @@ main() {
 
     say ""
     say "Get started:  devflow init"
-    say "Stay updated: devflow update"
+    say "Stay updated by rerunning this installer."
 }
 
 main "$@"

@@ -611,7 +611,7 @@ fn retired_configuration_is_not_written_back() {
     assert!(!output.contains("respect_gitignore"));
     assert!(!output.contains("old-secret"));
     assert!(output.contains("copy_ignored: true"));
-    assert!(output.contains("my-generator"));
+    assert!(!output.contains("my-generator"));
 }
 
 #[test]

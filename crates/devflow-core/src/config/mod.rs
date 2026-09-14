@@ -47,9 +47,9 @@ pub struct Config {
     /// AI agent integration configuration.
     #[serde(default, skip_serializing)]
     pub agent: Option<AgentConfig>,
-    /// Commit message generation configuration (LLM).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commit: Option<CommitConfig>,
+    /// Retired commit settings, accepted only to emit a migration diagnostic.
+    #[serde(default, skip_serializing)]
+    pub commit: Option<serde_json::Value>,
     /// Execute configuration (detach command template, etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execute: Option<ExecuteConfig>,
@@ -377,24 +377,6 @@ pub struct ExecuteConfig {
     /// Preferred multiplexer: "tmux" or "zellij". Auto-detected if not set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multiplexer: Option<String>,
-}
-
-/// Configuration for commit message generation.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CommitConfig {
-    /// Commit generation settings.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generation: Option<CommitGenerationConfig>,
-}
-
-/// LLM configuration for generating commit messages.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CommitGenerationConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    /// Retired API settings are accepted only for migration diagnostics.
-    #[serde(default, flatten, skip_serializing)]
-    pub legacy: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

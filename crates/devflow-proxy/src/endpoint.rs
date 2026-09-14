@@ -40,6 +40,20 @@ pub fn display_endpoint(domain: &str, port: u16) -> String {
     }
 }
 
+/// Loopback-only HTTP names cannot represent a container's direct TCP address.
+pub fn display_target_endpoint(domain: &str, port: u16, upstream_ip: &str) -> String {
+    if is_direct_endpoint_port(port) && (domain == "localhost" || domain.ends_with(".localhost")) {
+        let host = if upstream_ip.contains(':') {
+            format!("[{upstream_ip}]")
+        } else {
+            upstream_ip.into()
+        };
+        display_endpoint(&host, port)
+    } else {
+        display_endpoint(domain, port)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -57,6 +71,18 @@ mod tests {
         assert_eq!(
             display_endpoint("web.app.local", 3000),
             "https://web.app.local"
+        );
+    }
+
+    #[test]
+    fn localhost_names_do_not_misdirect_database_connections() {
+        assert_eq!(
+            display_target_endpoint("db.project.localhost", 5432, "172.18.0.3"),
+            "postgresql://172.18.0.3:5432"
+        );
+        assert_eq!(
+            display_target_endpoint("web.project.localhost", 3000, "172.18.0.3"),
+            "https://web.project.localhost"
         );
     }
 }

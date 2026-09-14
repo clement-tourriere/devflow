@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "previous_commit": "37a3a9a63ec561653504771603d372d2bc5a6b1b",
+  "previous_sites": 57,
+  "remaining_sites": 12,
+  "removed_sites": 45,
+  "scope": "Production construction sites across all platform and feature branches; excludes tests, Rust threads/tasks and Docker API container execution",
+  "sites": [
+    {
+      "path": "crates/devflow-core/src/companion.rs",
+      "line": 66,
+      "expression": "let mut command = tokio::process::Command::new(executable()?);"
+    },
+    {
+      "path": "crates/devflow-core/src/detach.rs",
+      "line": 16,
+      "expression": "let child = std::process::Command::new(exe)"
+    },
+    {
+      "path": "crates/devflow-core/src/execution.rs",
+      "line": 31,
+      "expression": "let mut command = tokio::process::Command::new(program);"
+    },
+    {
+      "path": "crates/devflow-core/src/execution.rs",
+      "line": 36,
+      "expression": "let mut command = tokio::process::Command::new(\"sh\");"
+    },
+    {
+      "path": "crates/devflow-core/src/execution.rs",
+      "line": 226,
+      "expression": "let mut command = tokio::process::Command::new(\"sh\");"
+    },
+    {
+      "path": "crates/devflow-core/src/hooks/actions/shell.rs",
+      "line": 42,
+      "expression": "let mut cmd = Command::new(\"cmd\");"
+    },
+    {
+      "path": "crates/devflow-core/src/hooks/actions/shell.rs",
+      "line": 46,
+      "expression": "let mut cmd = Command::new(\"sh\");"
+    },
+    {
+      "path": "crates/devflow-core/src/hooks/executor.rs",
+      "line": 720,
+      "expression": "let output = std::process::Command::new(\"sh\")"
+    },
+    {
+      "path": "crates/devflow-core/src/processes/mod.rs",
+      "line": 1695,
+      "expression": "let mut cmd = Command::new(\"sh\");"
+    },
+    {
+      "path": "crates/devflow-core/src/processes/mod.rs",
+      "line": 2133,
+      "expression": "let mut command = Command::new(\"sh\");"
+    },
+    {
+      "path": "crates/devflow-core/src/services/plugin.rs",
+      "line": 191,
+      "expression": "let mut child = Command::new(&self.executable)"
+    },
+    {
+      "path": "crates/devflow-terminal/src/lib.rs",
+      "line": 98,
+      "expression": "let mut cmd = CommandBuilder::new(&shell);"
+    }
+  ],
+  "internal_wrapper_sites": 0
+}

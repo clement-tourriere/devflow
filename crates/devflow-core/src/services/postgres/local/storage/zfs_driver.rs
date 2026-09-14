@@ -1,7 +1,10 @@
-use std::{ffi::OsString, path::Path};
+use std::path::{Path, PathBuf};
 
+use super::{
+    replacement::{DatasetMutation, DatasetOps},
+    zfs_native::NativeZfs,
+};
 use anyhow::{anyhow, Context};
-use tokio::process::Command;
 use uuid::Uuid;
 
 use super::{ZfsBranchMetadata, ZfsProjectConfig};
@@ -31,27 +34,16 @@ impl ZfsDriver {
             };
         }
 
-        let list_output = match zfs_output(["list", "-H", "-o", "name,mountpoint"]).await {
-            Ok(output) => output,
-            Err(err) => {
+        let mountpoints = match NativeZfs.mountpoints().await {
+            Ok(mountpoints) => mountpoints,
+            Err(error) => {
                 return DriverDetection {
                     available: false,
-                    detail: format!("unable to run zfs list: {err}"),
+                    detail: format!("Native ZFS unavailable: {error:#}"),
                     root_dataset: None,
-                };
+                }
             }
         };
-
-        if !list_output.status.success() {
-            return DriverDetection {
-                available: false,
-                detail: format!(
-                    "zfs list failed: {}",
-                    String::from_utf8_lossy(&list_output.stderr).trim()
-                ),
-                root_dataset: None,
-            };
-        }
 
         let dataset = if let Ok(explicit) = std::env::var("DEVFLOW_ZFS_DATASET") {
             if explicit.trim().is_empty() {
@@ -60,10 +52,7 @@ impl ZfsDriver {
                 Some(explicit)
             }
         } else {
-            detect_dataset_from_mountpoints(
-                projects_root,
-                &String::from_utf8_lossy(&list_output.stdout),
-            )
+            detect_dataset_from_mountpoints(projects_root, &mountpoints)
         };
 
         let Some(root_dataset) = dataset else {
@@ -77,63 +66,36 @@ impl ZfsDriver {
             };
         };
 
-        let probe_name = format!("{root_dataset}/devflow_probe_{}", Uuid::new_v4());
-        let create_probe = zfs_output_os(vec![
-            OsString::from("create"),
-            OsString::from("-p"),
-            OsString::from(probe_name.clone()),
-        ])
+        let id = Uuid::new_v4();
+        let probe_name = format!("{root_dataset}/devflow_probe_{id}");
+        let probe_path = projects_root.join(format!(".devflow-zfs-probe-{id}"));
+        let result = async {
+            anyhow::ensure!(
+                !NativeZfs.exists(&probe_name).await?,
+                "probe dataset already exists"
+            );
+            let created = NativeZfs.create(&probe_name, Some(&probe_path)).await;
+            // Creation can succeed before mounting fails. Clean up that exact
+            // owned probe and report cleanup failures, including its identity.
+            let cleanup = NativeZfs
+                .apply(DatasetMutation::Destroy(probe_name.clone()))
+                .await;
+            if let Err(error) = cleanup {
+                return Err(error.context(format!("ZFS probe cleanup failed for {probe_name}")));
+            }
+            let _ = tokio::fs::remove_dir(&probe_path).await;
+            created
+        }
         .await;
-
-        match create_probe {
-            Ok(output) if output.status.success() => {
-                let _ = zfs_output_os(vec![
-                    OsString::from("destroy"),
-                    OsString::from("-r"),
-                    OsString::from(probe_name),
-                ])
-                .await;
-
-                DriverDetection {
-                    available: true,
-                    detail: format!("ZFS available with root dataset '{root_dataset}'"),
-                    root_dataset: Some(root_dataset),
-                }
-            }
-            Ok(output) => {
-                let _ = zfs_output_os(vec![
-                    OsString::from("destroy"),
-                    OsString::from("-r"),
-                    OsString::from(probe_name),
-                ])
-                .await;
-
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                let detail = if stderr.contains("may only be mounted by root")
-                    || stderr.contains("Insufficient privileges")
-                {
-                    format!(
-                        "ZFS dataset detected ('{root_dataset}') but mounting child datasets requires root privileges on Linux: {stderr}"
-                    )
-                } else {
-                    format!(
-                        "ZFS dataset detected ('{root_dataset}') but create permission probe failed: {stderr}"
-                    )
-                };
-
-                DriverDetection {
-                    available: false,
-                    detail,
-                    root_dataset: Some(root_dataset),
-                }
-            }
-            Err(err) => DriverDetection {
-                available: false,
-                detail: format!(
-                    "ZFS dataset detected ('{root_dataset}') but probe command failed: {err}"
+        DriverDetection {
+            available: result.is_ok(),
+            detail: match result {
+                Ok(()) => format!("Native ZFS available with root dataset '{root_dataset}'"),
+                Err(error) => format!(
+                    "ZFS dataset '{root_dataset}' cannot create and mount workspaces: {error:#}"
                 ),
-                root_dataset: Some(root_dataset),
             },
+            root_dataset: Some(root_dataset),
         }
     }
 
@@ -195,7 +157,7 @@ impl ZfsDriver {
                 "{}.json",
                 crate::services::ownership::identity_digest(&[&child_dataset])
             ));
-        super::replacement::recover(&ZfsCommands, &journal, &child_dataset).await?;
+        super::replacement::recover(&NativeZfs, &journal, &child_dataset).await?;
         let operation = Uuid::new_v4().to_string();
         let snapshot_full = format!("{}@devflow_{}", parent_metadata.dataset, operation);
         let mut replacement = super::replacement::Replacement {
@@ -207,7 +169,7 @@ impl ZfsDriver {
             had_original: dataset_exists(&child_dataset).await?,
             committed: false,
         };
-        super::replacement::replace(&ZfsCommands, &mut replacement, &journal).await?;
+        super::replacement::replace(&NativeZfs, &mut replacement, &journal).await?;
         anyhow::ensure!(
             child_data_dir.is_dir(),
             "cloned data directory is missing: {}",
@@ -233,27 +195,23 @@ impl ZfsDriver {
     ) -> anyhow::Result<()> {
         let metadata = parse_zfs_branch_metadata(workspace)?;
 
-        let destroy_result = zfs_output_os(vec![
-            OsString::from("destroy"),
-            OsString::from("-r"),
-            OsString::from(metadata.dataset.clone()),
-        ])
-        .await
-        .and_then(|out| out.success_or_stderr());
-
-        if let Err(e) = destroy_result {
-            if dataset_exists(&metadata.dataset).await.unwrap_or(false) {
-                // rm -rf on a still-mounted dataset would delete the data
-                // while leaving the dataset and its origin snapshot behind.
-                return Err(e.context(format!(
-                    "failed to destroy ZFS dataset '{}'; refusing to remove files from a mounted dataset",
+        // Never remove mounted files after an API failure or unknown state.
+        NativeZfs
+            .apply(DatasetMutation::Destroy(metadata.dataset.clone()))
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to destroy ZFS dataset '{}'; workspace files retained",
                     metadata.dataset
-                )));
-            }
-        }
-
+                )
+            })?;
         if let Some(snapshot) = metadata.origin_snapshot {
-            let _ = zfs_output_os(vec![OsString::from("destroy"), OsString::from(snapshot)]).await;
+            if let Err(error) = NativeZfs
+                .apply(DatasetMutation::Destroy(snapshot.clone()))
+                .await
+            {
+                log::warn!("Retained ZFS origin snapshot {snapshot}: {error:#}");
+            }
         }
 
         let workspace_root = branch_root_from_data_dir(Path::new(&workspace.data_dir))?;
@@ -267,35 +225,18 @@ impl ZfsDriver {
     }
 }
 
-fn detect_dataset_from_mountpoints(projects_root: &Path, zfs_list_output: &str) -> Option<String> {
-    let projects_root =
-        std::fs::canonicalize(projects_root).unwrap_or_else(|_| projects_root.to_path_buf());
-    let projects_root = projects_root.to_string_lossy().to_string();
-    let mut winner: Option<(String, usize)> = None;
-
-    for line in zfs_list_output.lines() {
-        let mut parts = line.split('\t');
-        let Some(dataset) = parts.next() else {
-            continue;
-        };
-        let Some(mountpoint) = parts.next() else {
-            continue;
-        };
-
-        if mountpoint == "-" || mountpoint == "legacy" {
-            continue;
-        }
-
-        if projects_root == mountpoint || projects_root.starts_with(&format!("{mountpoint}/")) {
-            let score = mountpoint.len();
-            match winner {
-                Some((_, best_score)) if best_score >= score => {}
-                _ => winner = Some((dataset.to_string(), score)),
-            }
-        }
-    }
-
-    winner.map(|(dataset, _)| dataset)
+fn detect_dataset_from_mountpoints(
+    projects_root: &Path,
+    mountpoints: &[(String, PathBuf)],
+) -> Option<String> {
+    let root = projects_root
+        .canonicalize()
+        .unwrap_or_else(|_| projects_root.to_path_buf());
+    mountpoints
+        .iter()
+        .filter(|(_, path)| root.starts_with(path))
+        .max_by_key(|(_, path)| path.components().count())
+        .map(|(name, _)| name.clone())
 }
 
 fn parse_zfs_branch_metadata(workspace: &Workspace) -> anyhow::Result<ZfsBranchMetadata> {
@@ -335,107 +276,52 @@ fn branch_dataset_name(config: &ZfsProjectConfig, project_id: &str, workspace_id
 }
 
 async fn ensure_dataset_exists(dataset: &str) -> anyhow::Result<()> {
-    if dataset_exists(dataset).await? {
-        return Ok(());
+    let mut parts = dataset.split('/');
+    let mut parent = parts.next().context("empty ZFS dataset")?.to_owned();
+    anyhow::ensure!(
+        NativeZfs.exists(&parent).await?,
+        "ZFS pool '{parent}' is missing"
+    );
+    for part in parts {
+        parent.push('/');
+        parent.push_str(part);
+        if !NativeZfs.exists(&parent).await? {
+            NativeZfs.create(&parent, None).await?;
+        }
     }
-
-    zfs_output_os(vec![
-        OsString::from("create"),
-        OsString::from("-p"),
-        OsString::from("-o"),
-        OsString::from("mountpoint=none"),
-        OsString::from(dataset.to_string()),
-    ])
-    .await
-    .with_context(|| format!("failed to create ZFS dataset '{dataset}'"))?
-    .success_or_stderr()?;
-
     Ok(())
 }
 
 async fn create_dataset_with_mountpoint(dataset: &str, mountpoint: &Path) -> anyhow::Result<()> {
-    zfs_output_os(vec![
-        OsString::from("create"),
-        OsString::from("-p"),
-        OsString::from("-o"),
-        OsString::from(format!("mountpoint={}", mountpoint.display())),
-        OsString::from(dataset.to_string()),
-    ])
-    .await
-    .with_context(|| format!("failed to create ZFS dataset '{dataset}'"))?
-    .success_or_stderr()?;
-
-    Ok(())
+    NativeZfs.create(dataset, Some(mountpoint)).await
 }
 
 async fn ensure_dataset_absent(dataset: &str) -> anyhow::Result<()> {
-    if !dataset_exists(dataset).await? {
-        return Ok(());
-    }
-
-    zfs_output_os(vec![
-        OsString::from("destroy"),
-        OsString::from("-r"),
-        OsString::from(dataset.to_string()),
-    ])
-    .await
-    .with_context(|| format!("failed to destroy existing ZFS dataset '{dataset}'"))?
-    .success_or_stderr()?;
-
-    Ok(())
-}
-
-struct ZfsCommands;
-#[async_trait::async_trait]
-impl super::replacement::DatasetCommands for ZfsCommands {
-    async fn run(&self, args: &[String]) -> anyhow::Result<String> {
-        let output = Command::new("zfs")
-            .args(args)
-            .output()
-            .await
-            .context("failed to execute zfs")?;
-        anyhow::ensure!(
-            output.status.success(),
-            "zfs {:?}: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        Ok(String::from_utf8(output.stdout)?)
-    }
+    NativeZfs
+        .apply(DatasetMutation::Destroy(dataset.to_owned()))
+        .await
 }
 
 async fn dataset_exists(dataset: &str) -> anyhow::Result<bool> {
-    use super::replacement::DatasetCommands;
-    ZfsCommands.exists(dataset).await
+    NativeZfs.exists(dataset).await
 }
 
-async fn zfs_output<const N: usize>(args: [&str; N]) -> anyhow::Result<std::process::Output> {
-    Command::new("zfs")
-        .args(args)
-        .output()
-        .await
-        .context("failed to execute zfs command")
-}
-
-async fn zfs_output_os(args: Vec<OsString>) -> anyhow::Result<std::process::Output> {
-    Command::new("zfs")
-        .args(args)
-        .output()
-        .await
-        .context("failed to execute zfs command")
-}
-
-trait OutputExt {
-    fn success_or_stderr(self) -> anyhow::Result<()>;
-}
-
-impl OutputExt for std::process::Output {
-    fn success_or_stderr(self) -> anyhow::Result<()> {
-        if self.status.success() {
-            return Ok(());
-        }
-        Err(anyhow!(String::from_utf8_lossy(&self.stderr)
-            .trim()
-            .to_string()))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn selects_deepest_mountpoint_by_path_components() {
+        let mounts = vec![
+            ("pool".into(), PathBuf::from("/data")),
+            ("pool/projects".into(), PathBuf::from("/data/projects")),
+        ];
+        assert_eq!(
+            detect_dataset_from_mountpoints(Path::new("/data/projects/new"), &mounts).as_deref(),
+            Some("pool/projects")
+        );
+        assert_eq!(
+            detect_dataset_from_mountpoints(Path::new("/data-other"), &mounts),
+            None
+        );
     }
 }

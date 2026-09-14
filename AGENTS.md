@@ -139,20 +139,9 @@ PROJECT_ROOT=$(devflow --json list | jq -r '.project.root')
 (cd "$PROJECT_ROOT" && devflow --json --non-interactive remove "$WORKSPACE" --force)
 ```
 
-## AI Commit Messages
+## Commits
 
-```bash
-# Generate commit message via external CLI tool (preferred)
-devflow commit --ai
-
-# Configure in .devflow.yml:
-# commit:
-#   generation:
-#     command: "claude -p --model haiku"
-#
-# Or via environment:
-# DEVFLOW_COMMIT_COMMAND="claude -p --model haiku"
-```
+Use Git and your preferred editor or agent directly. The devflow commit wrapper and commit-generation settings have been retired; Git continues to own commit hooks and signing.
 
 ## Automation Contract
 
@@ -196,4 +185,4 @@ Required hooks finish before readiness, even with `background: true`. Set `requi
 
 `exec -- PROGRAM ARGS` preserves literal arguments; use `exec --shell SCRIPT` explicitly for shell syntax. Cleanup protects configured defaults, materialized/locked worktrees, pins, active operations, and data dependencies. Preview with `retention plan`; `retention apply` returns individual failures.
 
-The native process runtime is the supported default. Proxy networking is an optional companion. AI permission merging and the built-in LLM API backend are retired; keep explicit guide generation, file-copy allowlists, and external commit commands.
+The native process runtime is the supported default. Proxy networking is an optional companion. AI permission merging and the built-in LLM API backend are retired; keep explicit guide generation, file-copy allowlists, and direct VCS commands.

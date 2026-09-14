@@ -8,7 +8,7 @@ license = "MIT"
 
 [features]
 default = ["service-local"]
-service-local = ["dep:bollard", "dep:rusqlite", "dep:rust-s3", "dep:tar", "dep:bytes", "dep:tempfile", "dep:url"]
+service-local = ["dep:bollard", "dep:rusqlite", "dep:rust-s3", "dep:tar", "dep:bytes", "dep:tempfile", "dep:url", "dep:libloading"]
 service-neon = ["dep:percent-encoding"]
 service-dblab = []
 service-xata = []
@@ -31,6 +31,8 @@ async-trait = "0.1"
 
 # Git operations
 git2 = { version = "0.21", default-features = false }
+jj-lib = { version = "=0.45.1", default-features = false, features = ["git"] }
+pollster = "1.0"
 
 # Text matching
 # Full default features: workspace matching patterns use \b/\s,
@@ -43,6 +45,8 @@ minijinja = { version = "2", default-features = false, features = ["builtins", "
 # File system
 dirs = { version = "6.0", default-features = false }
 cap-std = "4.0.3"
+filetime = "0.2"
+libloading = { version = "0.8", optional = true }
 
 # Logging
 log = { version = "0.4", default-features = false }
@@ -99,7 +103,7 @@ rayon = "1.12"
 glob = "0.3"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["signal", "process", "user"] }
+nix = { version = "0.31", default-features = false, features = ["signal", "process", "user", "mount"] }
 
 # rust-s3's lib target is named `s3`, which cargo-machete cannot map back.
 [package.metadata.cargo-machete]
@@ -107,3 +111,7 @@ ignored = ["rust-s3"]
 
 [dev-dependencies]
 tempfile = "3.27"
+
+[[example]]
+name = "benchmark_data"
+required-features = ["service-local"]

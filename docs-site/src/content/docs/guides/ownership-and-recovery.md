@@ -70,7 +70,7 @@ Shared inventory and connection inspection validate an existing engine's image, 
 
 The default CLI includes local services, the native process supervisor, and the TUI. `cargo build --no-default-features` builds the core CLI. Add `proxy`, `service-neon`, `service-xata`, or `service-dblab` as needed; `--all-features` enables all integrations. Cloud adapters have local HTTP contract tests; validate credentials and behavior against your account before relying on them.
 
-Commit generation uses an external command configured through `commit.generation.command` or `DEVFLOW_COMMIT_COMMAND`. Retired API/model/credential fields are accepted for migration, warned about, and omitted when saving normalized configuration.
+Commit settings are accepted only for migration diagnostics and omitted when saving normalized configuration. Use your VCS and preferred editor or agent directly.
 
 `processes.start_policy: config` starts configured processes, including the first child of an idle parent. Set `inherit_parent` to copy the parent's selected process set.
 

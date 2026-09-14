@@ -1,6 +1,5 @@
 mod agent;
 mod application;
-mod commit;
 mod config;
 mod daemon;
 mod gc;
@@ -12,7 +11,6 @@ mod process;
 #[cfg(feature = "proxy")]
 mod proxy;
 mod service;
-mod update;
 pub mod workspace;
 
 use std::path::PathBuf;
@@ -224,23 +222,11 @@ Examples:
     )]
     Status,
 
-    // ── VCS ──
-    #[command(
-        about = "Commit staged changes with optional AI-generated message",
-        long_about = "Commit staged changes with optional AI-generated message.\n\nWith no flags, opens your editor for a manual commit message.\nWith --ai, generates a commit message using the configured LLM\n(external CLI command preferred, API as fallback).\n\nExamples:\n  devflow commit                      # Open editor\n  devflow commit -m 'fix: typo'       # Direct message\n  devflow commit --ai                 # AI-generated message\n  devflow commit --ai --edit          # AI-generated, then edit\n  devflow commit --ai --dry-run       # Preview AI message only"
-    )]
+    /// Retired: use your VCS and preferred commit tools directly.
+    #[command(hide = true)]
     Commit {
-        #[arg(short, long, help = "Commit message (skips AI generation)")]
-        message: Option<String>,
-        #[arg(long, help = "Generate commit message using LLM")]
-        ai: bool,
-        #[arg(
-            long,
-            help = "Open editor to review/edit AI-generated message before committing"
-        )]
-        edit: bool,
-        #[arg(long, help = "Show generated message without committing")]
-        dry_run: bool,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     // ── Setup & Config ──
@@ -292,17 +278,11 @@ Examples:
         #[arg(long, help = "Exit non-zero when any doctor check fails")]
         strict: bool,
     },
-    #[command(
-        about = "Update devflow to the latest release",
-        long_about = "Update devflow to the latest GitHub release.\n\nDownloads the release binary for this platform, verifies its SHA-256 checksum,\nand atomically replaces the current executable (the previous binary is\nrestored if the new one fails to run).\n\nExamples:\n  devflow update                   # Update to the latest release\n  devflow update --check           # Only check whether an update exists\n  devflow update --version 0.5.0   # Install a specific version\n  devflow update --force           # Reinstall even if up to date"
-    )]
+    /// Retired: update using your installer or package manager.
+    #[command(hide = true)]
     Update {
-        #[arg(long, help = "Only check whether a newer release is available")]
-        check: bool,
-        #[arg(long, help = "Install a specific version (e.g. 0.5.0)")]
-        version: Option<String>,
-        #[arg(long, help = "Reinstall even if already on the target version")]
-        force: bool,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     #[command(
         about = "Install Git hooks",
@@ -340,11 +320,7 @@ Examples:
         hide = true
     )]
     WorktreeSetup,
-    #[command(
-        name = "setup-zfs",
-        about = "Set up a file-backed ZFS pool for Copy-on-Write storage (Linux)",
-        hide = true
-    )]
+    #[command(name = "setup-zfs", hide = true)]
     SetupZfs {
         #[arg(long, default_value = "devflow", help = "ZFS pool name")]
         pool_name: Option<String>,
@@ -400,7 +376,7 @@ Examples:
     // ── Proxy ──
     #[command(
         about = "Local reverse proxy (auto-HTTPS for containers and devflow processes)",
-        long_about = "Local reverse proxy for Docker containers and devflow-managed host processes.\n\nAuto-discovers Docker containers and process records, then provides HTTPS access via\n*.local domains (configurable with --domain-suffix). Uses a local CA\nfor certificate generation.\n\nExamples:\n  devflow proxy start                # Start the proxy\n  devflow proxy start --daemon       # Start in background\n  devflow proxy stop                 # Stop the proxy\n  devflow proxy status               # Show proxy status\n  devflow proxy list                 # List proxied targets\n  devflow proxy trust install        # Install CA certificate\n  devflow proxy trust verify         # Check if CA is trusted\n  devflow proxy trust remove         # Remove CA from trust store\n  devflow proxy trust info           # Show trust instructions",
+        long_about = "Local reverse proxy for Docker containers and devflow-managed host processes.\n\nAuto-discovers Docker containers and process records, then provides HTTPS access via\n*.localhost domains (configurable with --domain-suffix). Uses a local CA\nfor certificate generation.\n\nExamples:\n  devflow proxy start                # Start the proxy\n  devflow proxy start --daemon       # Start in background\n  devflow proxy stop                 # Stop the proxy\n  devflow proxy status               # Show proxy status\n  devflow proxy list                 # List proxied targets\n  devflow proxy trust verify         # Check if CA is trusted\n  devflow proxy trust info           # Show trust instructions",
         hide = true
     )]
     Proxy {
@@ -946,14 +922,14 @@ pub async fn handle_command(
         return gc::handle_gc_command(list, all, force, json_output, non_interactive).await;
     }
 
-    // Update command — self-contained, no config needed
-    if let Commands::Update {
-        check,
-        version,
-        force,
-    } = cmd
-    {
-        return update::handle_update_command(check, version, force, json_output).await;
+    if matches!(cmd, Commands::Update { .. }) {
+        anyhow::bail!("devflow update was retired; update through the installer or package manager used to install devflow");
+    }
+    if matches!(cmd, Commands::Commit { .. }) {
+        anyhow::bail!("devflow commit was retired; use git commit and your preferred editor or agent directly (preserving VCS hooks and signing)");
+    }
+    if matches!(cmd, Commands::SetupZfs { .. }) {
+        anyhow::bail!("Automatic ZFS setup was retired; provision and delegate a dataset externally, then configure local.data_root. See the storage guide; devflow never runs sudo");
     }
 
     // Commands that need service infrastructure (config loading, state injection)
@@ -1605,49 +1581,6 @@ pub async fn handle_command(
         Commands::Destroy { force } => {
             init::handle_destroy_project(force, json_output, non_interactive).await?;
         }
-        Commands::SetupZfs { pool_name, size } => {
-            if !cfg!(target_os = "linux") {
-                anyhow::bail!("setup-zfs is only supported on Linux");
-            }
-
-            #[cfg(not(feature = "service-local"))]
-            {
-                let _ = (pool_name, size);
-                anyhow::bail!("Local provider not compiled. Rebuild with --features service-local");
-            }
-
-            #[cfg(feature = "service-local")]
-            {
-                use devflow_core::services::postgres::local::storage::zfs_setup::*;
-
-                let pool = pool_name.unwrap_or_else(|| "devflow".to_string());
-                let img_size = size.unwrap_or_else(|| "10G".to_string());
-
-                let zfs_config = ZfsPoolSetupConfig {
-                    pool_name: pool.clone(),
-                    image_path: PathBuf::from(format!("/var/lib/devflow/{}.img", pool)),
-                    image_size: img_size.clone(),
-                    mountpoint: PathBuf::from("/var/lib/devflow/data"),
-                };
-
-                println!("Creating file-backed ZFS pool:");
-                println!("  Pool name:  {}", zfs_config.pool_name);
-                println!(
-                    "  Image:      {} (sparse, {})",
-                    zfs_config.image_path.display(),
-                    img_size
-                );
-                println!("  Mountpoint: {}", zfs_config.mountpoint.display());
-                println!();
-
-                let data_root = create_file_backed_pool(&zfs_config).await?;
-                println!();
-                println!("ZFS pool '{}' created successfully", pool);
-                println!("Data root: {}", data_root);
-                println!();
-                println!("Run 'devflow init' to set up a project using this pool.");
-            }
-        }
         Commands::Hook { action } => {
             hook::handle_hook_command(action, &config_merged, json_output, non_interactive).await?;
         }
@@ -1736,8 +1669,15 @@ pub async fn handle_command(
                 "build_features": {
                     "service_local": cfg!(feature = "service-local"), "tui": cfg!(feature = "tui"),
                     "proxy": cfg!(feature = "proxy"), "pitchfork": false,
-                    "llm_api": false, "external_commit_command": true,
+                    "llm_api": false, "external_commit_command": false,
+                    "native_directory_copy": true,
+                    "docker_exec_hooks": devflow_core::hooks::actions::docker_exec::AVAILABLE,
                     "neon": cfg!(feature = "service-neon"), "xata": cfg!(feature = "service-xata"), "dblab": cfg!(feature = "service-dblab"),
+                },
+                "process_boundaries": {
+                    "native": ["git_worktrees", "jj_workspaces", "zfs_storage", "directory_copy", "cow_probe", "executable_lookup", "docker_api"],
+                    "external_adapters": [],
+                    "explicit_execution": ["commands", "shell_hooks", "processes", "terminals", "sessions", "proxy_companion", "executable_plugins"],
                 },
                 "json_mode": {
                     "stdout_single_json_document": true,
@@ -1869,15 +1809,6 @@ pub async fn handle_command(
             } else {
                 println!("Uninstalled {} hooks", vcs_prov.provider_name());
             }
-        }
-        Commands::Commit {
-            message,
-            ai,
-            edit,
-            dry_run,
-        } => {
-            commit::handle_commit_command(message, ai, edit, dry_run, json_output, &config_merged)
-                .await?;
         }
         Commands::SyncAiConfigs => {
             anyhow::bail!("sync-ai-configs was retired; use explicit worktree.copy_files entries instead of merging tool permissions");

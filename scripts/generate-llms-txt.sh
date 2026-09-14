@@ -231,7 +231,6 @@ INTRO
 
 | Command | Description |
 |---|---|
-| `devflow commit [-m <msg>] [--ai] [--edit] [--dry-run]` | Commit staged changes |
 
 ### Info & diagnostics
 
@@ -250,7 +249,6 @@ INTRO
 | `devflow init [path] [--name <name>] [--force]` | Initialize the current directory or create and initialize `path`; JSON includes onboarding next_steps |
 | `devflow install-hooks` | Install Git hooks |
 | `devflow uninstall-hooks` | Remove Git hooks |
-| `devflow setup-zfs [--pool-name <n>] [--size <s>]` | Create file-backed ZFS pool |
 | `devflow shell-init [bash\|zsh\|fish]` | Print shell integration script |
 | `devflow tui` | Launch interactive terminal UI dashboard |
 | `devflow worktree-setup` | Set up devflow in a Git worktree |
@@ -424,7 +422,6 @@ commit:
 | `DEVFLOW_DISABLED_BRANCHES=main,release/*` | Disable for specific workspaces |
 | `DEVFLOW_CURRENT_BRANCH_DISABLED=true` | Disable for current workspace only |
 | `DEVFLOW_ZFS_DATASET=...` | Force a specific ZFS dataset |
-| `DEVFLOW_COMMIT_COMMAND=...` | External CLI for commit messages (e.g., "claude -p") |
 
 SECTION
 
@@ -489,7 +486,7 @@ SECTION
 
 | Filesystem | Platform | Method | Auto-detected? |
 |---|---|---|---|
-| APFS | macOS | `cp -c` clone | Yes |
+| APFS | macOS | Native `clonefile` | Yes |
 | ZFS | Linux | Snapshots + clones | Yes (checks `zfs list` mountpoints) |
 | Btrfs | Linux | Reflink copy | Yes |
 | XFS | Linux | Reflink copy | Yes (if created with `reflink=1`) |

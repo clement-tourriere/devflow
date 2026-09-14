@@ -115,10 +115,12 @@ async fn handle_api(
                 .into_iter()
                 .map(|target| {
                     let mut value = serde_json::to_value(&target).unwrap_or_default();
-                    value["endpoint_url"] = serde_json::json!(crate::endpoint::display_endpoint(
-                        &target.domain,
-                        target.port
-                    ));
+                    value["endpoint_url"] =
+                        serde_json::json!(crate::endpoint::display_target_endpoint(
+                            &target.domain,
+                            target.port,
+                            &target.container_ip
+                        ));
                     value["source"] = serde_json::json!(if target.workspace.is_some() {
                         "devflow-service"
                     } else if target.project.is_some() {

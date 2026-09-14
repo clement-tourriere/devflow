@@ -143,7 +143,7 @@ jobs:
           truncate -s 2G "$disk"
           trap 'sudo zpool destroy "$pool"; rm -f "$disk"' EXIT
           sudo zpool create -o cachefile=none -O mountpoint=none "$pool" "$disk"
-          sudo env DEVFLOW_TEST_ZFS_POOL="$pool" "$test_bin" linux_zfs_failures_preserve_mounted_data --ignored --nocapture
+          sudo env PATH=/nonexistent DEVFLOW_TEST_ZFS_POOL="$pool" "$test_bin" linux_zfs_failures_preserve_mounted_data --ignored --nocapture
 
   feature-builds:
     name: CLI feature builds
@@ -158,7 +158,7 @@ jobs:
       - run: cargo test --locked -p devflow -p devflow-core ${{ matrix.features }}
       - name: Check generated provider catalog
         if: matrix.features == '--all-features'
-        run: python3 scripts/generate-provider-manifest.py --check
+        run: cargo run -p devflow-core --example generate_provider_manifest -- --check
 
   coverage:
     name: Coverage
@@ -300,7 +300,13 @@ jobs:
           sudo modprobe zfs
 
       - name: Set up ZFS pool
-        run: $GITHUB_WORKSPACE/target/debug/devflow setup-zfs --pool-name devflow --size 2G
+        run: |
+          sudo mkdir -p /var/lib/devflow/data
+          sudo truncate -s 2G /var/lib/devflow/pgdata.img
+          sudo zpool create -m /var/lib/devflow/data devflow /var/lib/devflow/pgdata.img
+          sudo zfs set compression=lz4 recordsize=8k devflow
+          sudo chown "$(id -u):$(id -g)" /var/lib/devflow/data
+          sudo zfs allow "$(id -un)" create,destroy,snapshot,clone,mount,mountpoint,promote,rename,rollback devflow
 
       - name: Redirect devflow data to ZFS
         run: |
@@ -543,4 +549,4 @@ jobs:
             echo "Installed version '$installed' does not match tag '$expected'" >&2
             exit 1
           fi
-          devflow update --check
+          devflow --version

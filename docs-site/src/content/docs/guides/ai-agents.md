@@ -90,22 +90,9 @@ The bundled workspace helpers teach agents to list/switch/create workspaces with
 | `llms.txt` / `llms-full.txt` | machine-readable index / full flat context dump |
 
 
-## AI commit messages
+## Commits
 
-```bash
-devflow commit --ai             # generate Conventional Commit message and commit
-devflow commit --ai --edit      # review in $EDITOR first
-devflow commit --ai --dry-run   # print only
-```
-
-Generation runs the configured external command:
-
-```yaml
-commit:
-  generation:
-    command: "claude -p --model haiku"     # preferred
-```
-
+Use Git and your preferred agent directly for commit messages. The devflow commit wrapper and its generation settings were retired; Git owns hooks and signing.
 
 ## CI example (GitHub Actions)
 

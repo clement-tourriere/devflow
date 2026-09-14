@@ -1065,19 +1065,6 @@ fn list_workspace_processes_native(
                 }
                 let content = fs::read_to_string(entry.path())?;
                 let mut record: ProcessStateRecord = serde_json::from_str(&content)?;
-                if record.pid.is_none()
-                    && record.desired_state.as_deref() == Some("running")
-                    && matches!(record.status.as_str(), "pending" | "running" | "ready")
-                {
-                    if let Some(pid) = listening_pid_for_ports(&record.ports) {
-                        record.pid = Some(pid);
-                        record.status = "ready".to_string();
-                        record.last_error = None;
-                        if let Ok(content) = serde_json::to_string_pretty(&record) {
-                            let _ = fs::write(entry.path(), content);
-                        }
-                    }
-                }
                 let alive = record.pid.is_some_and(process_alive);
                 if !alive && matches!(record.status.as_str(), "running" | "ready") {
                     record.status = "stopped".to_string();
@@ -2561,37 +2548,6 @@ fn watch_signature(workdir: &Path, patterns: &[String]) -> Result<Option<String>
         }
     }
     Ok(Some(format!("{count}:{latest}")))
-}
-
-fn listening_pid_for_ports(ports: &[u16]) -> Option<u32> {
-    ports.iter().find_map(|port| listening_pid_for_port(*port))
-}
-
-#[cfg(unix)]
-fn listening_pid_for_port(port: u16) -> Option<u32> {
-    let output = std::process::Command::new("lsof")
-        .args(["-nP", &format!("-tiTCP:{port}"), "-sTCP:LISTEN"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|line| line.trim().parse::<u32>().ok())
-        .map(|pid| process_group_for_pid(pid).unwrap_or(pid))
-}
-
-#[cfg(unix)]
-fn process_group_for_pid(pid: u32) -> Option<u32> {
-    nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(pid as i32)))
-        .ok()
-        .map(|pgid| pgid.as_raw() as u32)
-}
-
-#[cfg(not(unix))]
-fn listening_pid_for_port(_port: u16) -> Option<u32> {
-    None
 }
 
 /// Signal-0 liveness probe, delegated to the single implementation in

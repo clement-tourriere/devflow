@@ -485,17 +485,7 @@ devflow hook setup
 
 ## AI and Automation
 
-### `devflow commit`
-
-Commit staged changes with a manual or AI-generated message.
-
-```bash
-devflow commit
-devflow commit -m "fix: typo"
-devflow commit --ai
-devflow commit --ai --edit
-devflow commit --ai --dry-run
-```
+Commit changes using your VCS and preferred editor or agent. The `devflow commit` wrapper was retired.
 
 ### `devflow agent status`
 
@@ -566,9 +556,7 @@ List discovered endpoints. Web services and devflow-managed host processes are s
 Manage the local CA trust.
 
 ```bash
-devflow proxy trust install
 devflow proxy trust verify
-devflow proxy trust remove
 devflow proxy trust info
 ```
 
@@ -637,19 +625,11 @@ devflow shell-init fish | source
 
 Set up devflow in an existing Git worktree by copying files and creating service instances. Usually called automatically by hooks.
 
-### `devflow setup-zfs`
-
-Create a file-backed ZFS pool for Copy-on-Write storage on Linux.
-
-```bash
-devflow setup-zfs
-devflow setup-zfs --size 20G
-devflow setup-zfs --pool-name mypool
-```
+Provision ZFS outside devflow and configure `local.data_root` to use the prepared dataset. Automatic ZFS provisioning was retired.
 
 ### `devflow capabilities`
 
-Show the machine-readable automation contract summary.
+Show the machine-readable automation contract summary, including `process_boundaries` and build availability for native Docker hooks.
 
 ```bash
 devflow capabilities
@@ -713,7 +693,6 @@ The current tabs are:
 | `DEVFLOW_CURRENT_BRANCH_DISABLED=true` | Disable devflow for the current workspace only |
 | `DEVFLOW_CONTEXT_BRANCH=...` | Override context workspace for parent resolution |
 | `DEVFLOW_ZFS_DATASET=...` | Force a specific ZFS dataset |
-| `DEVFLOW_COMMIT_COMMAND=...` | External CLI used for commit generation |
 | `DEVFLOW_APPROVE_HOOKS=1` | Auto-approve config-file hooks (CI/agent runs) |
 | `DEVFLOW_BACKGROUND_HOOK_TIMEOUT=30` | Seconds to await background hooks before CLI exit |
 

@@ -42,13 +42,13 @@ Every workspace's app is reachable at a predictable HTTPS URL, every workspace's
 
 ## Highlights
 
-- **Git and jj workspaces** — Git uses linked worktrees, Jujutsu uses native workspaces, and manually created worktrees can be adopted without an in-place checkout mode
+- **Git and jj workspaces** — embedded Git and Jujutsu libraries manage linked worktrees and native workspaces without CLI helpers, and manually created worktrees can be adopted without an in-place checkout mode
 - **Two isolation models, chosen per service** — physical (a Copy-on-Write Docker container per workspace) or logical (one shared global engine with a database, bucket, or DB index per workspace)
 - **Multi-service** — PostgreSQL, ClickHouse, MySQL, Redis, RustFS object storage, any Docker image, or custom plugin providers; cloud branching via Neon/DBLab/Xata (experimental)
 - **Project processes** — workspace-scoped web servers, workers, and schedulers with native start/stop/status/logs, ready checks, dependency ordering, port bumping, and service env interpolation
 - **Managed worktrees** — per-workspace directories from a path template, with env files, gitignored caches, and AI tool configs (`.claude/`, `.cursor/`, …) copied in automatically
 - **Lifecycle hooks** — MiniJinja-templated commands and built-in actions at every phase, with conditions, an approval system, and recipes that detect your project's stack
-- **Auto-HTTPS proxy** — every Docker container and port-backed devflow process gets a trusted `https://name.local` URL that resolves the same from the host and from inside containers; no `/etc/hosts` edits, no certificate warnings
+- **Optional HTTPS proxy** — discover Docker containers and host processes through `https://name.localhost` URLs; inspect CA setup instructions and configure trust with your system tools
 - **Controller daemon** — `devflow daemon start` keeps every registered project's shared engines and process desired state reconciled
 - **Seeding** — initialize databases from a PostgreSQL URL, a local dump file, or S3
 - **Built for AI agents** — `--json` and `--non-interactive` everywhere, agent launch/context/workspace-helper commands, and AI-generated commit messages
@@ -66,7 +66,7 @@ Installs the latest release binary to `~/.local/bin` (override with `DEVFLOW_INS
 Update at any time with:
 
 ```bash
-devflow update          # or: devflow update --check
+curl -fsSL https://raw.githubusercontent.com/clement-tourriere/devflow/main/scripts/install.sh | sh
 ```
 
 ## Quick start
@@ -164,7 +164,7 @@ devflow process logs api --tail 100 --follow
 devflow process stop --all
 ```
 
-When `processes.auto_start: true`, `devflow switch` starts configured processes after services and hooks are aligned. Auto-started commands use the same approval store as hooks, so agents can pre-approve with `devflow hook approvals add "npm run dev"` or set `DEVFLOW_APPROVE_HOOKS=1`. The desktop and CLI share native runtime records. Running processes with ports are also exposed through the devflow proxy as `https://<process>.<workspace>.<project>.<suffix>` (default suffix: `.local`). `devflow remove` preflights the worktree, runs removal hooks while the directory still exists, stops processes, deletes services, and only then removes the worktree and VCS ref. Run `devflow daemon start` to keep desired-state, `watch` restart-on-change, and `retry` reconciliation active in the background. See [Project processes](https://clement-tourriere.github.io/devflow/guides/processes/) and [Adding devflow to an existing project](https://clement-tourriere.github.io/devflow/getting-started/existing-project/) for Compose-to-devflow migration examples.
+When `processes.auto_start: true`, `devflow switch` starts configured processes after services and hooks are aligned. Auto-started commands use the same approval store as hooks, so agents can pre-approve with `devflow hook approvals add "npm run dev"` or set `DEVFLOW_APPROVE_HOOKS=1`. The desktop and CLI share native runtime records. Running processes with ports are also exposed through the devflow proxy as `https://<process>.<workspace>.<project>.<suffix>` (default suffix: `.localhost`). `devflow remove` preflights the worktree, runs removal hooks while the directory still exists, stops processes, deletes services, and only then removes the worktree and VCS ref. Run `devflow daemon start` to keep desired-state, `watch` restart-on-change, and `retry` reconciliation active in the background. See [Project processes](https://clement-tourriere.github.io/devflow/guides/processes/) and [Adding devflow to an existing project](https://clement-tourriere.github.io/devflow/getting-started/existing-project/) for Compose-to-devflow migration examples.
 
 ## Hooks and automation
 
@@ -185,7 +185,6 @@ Every command supports `--json` and `--non-interactive`, and the worktree-per-ta
 devflow --json --non-interactive switch -c agent/task-42   # isolated env for the task
 devflow agent context --format json                        # project + connection context for the agent
 devflow switch -c agent/fix-login -x claude -- 'Fix the login timeout bug'
-devflow commit --ai                                        # LLM-generated commit message
 ```
 
 AI tool configs (`.claude/`, `.cursor/`, `.opencode/`, `.agents/`) are copied into new worktrees automatically. In `--non-interactive` mode, unapproved hooks are skipped with a warning (set `DEVFLOW_APPROVE_HOOKS=1` to auto-approve in CI/agent runs). See `AGENTS.md` for the recommended coding-agent workflow.

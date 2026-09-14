@@ -9,38 +9,11 @@ use devflow_core::{
     state::LocalStateManager,
     workspace::operation::OperationJournal,
 };
-use std::{collections::BTreeMap, path::Path, sync::Mutex};
+use std::{collections::BTreeMap, sync::Mutex};
 
-fn git(root: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
-        .current_dir(root)
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
 fn repository() -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();
-    git(root.path(), &["init", "-b", "trunk"]);
-    git(
-        root.path(),
-        &[
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.invalid",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "fixture",
-        ],
-    );
+    support::init_repository(root.path(), "trunk");
     root
 }
 struct Fake {
@@ -188,22 +161,7 @@ async fn relocation_preserves_identity_namespace_and_operation_history() {
     let old = root.path().join("old");
     let new = root.path().join("new");
     std::fs::create_dir(&old).unwrap();
-    git(&old, &["init", "-b", "trunk"]);
-    git(
-        &old,
-        &[
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.invalid",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "fixture",
-        ],
-    );
+    support::init_repository(&old, "trunk");
     let mut registry = LocalStateManager::new().unwrap();
     registry.ensure_default_workspace(&old, "trunk").unwrap();
     let before = LocalStateManager::new().unwrap().control(&old);

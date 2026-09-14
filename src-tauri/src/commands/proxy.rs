@@ -62,17 +62,3 @@ pub async fn get_certificate_status() -> Result<serde_json::Value, String> {
         serde_json::json!({"exists":ca["cert_path"].is_string(),"installed":ca["installed"].as_bool().unwrap_or(false),"path":ca["cert_path"],"info":ca["info"]}),
     )
 }
-#[tauri::command]
-pub async fn install_certificate() -> Result<(), String> {
-    devflow_core::companion::command(&["trust", "install"])
-        .await
-        .map(|_| ())
-        .map_err(crate::commands::format_error)
-}
-#[tauri::command]
-pub async fn remove_certificate() -> Result<(), String> {
-    devflow_core::companion::command(&["trust", "remove"])
-        .await
-        .map(|_| ())
-        .map_err(crate::commands::format_error)
-}

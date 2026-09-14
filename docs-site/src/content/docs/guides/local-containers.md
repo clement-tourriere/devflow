@@ -107,7 +107,7 @@ Already running containers (started outside devflow) can be adopted: `devflow se
 
 ## Storage layout
 
-Data directories live under `data_root` (default `~/.local/share/devflow`), one per service per workspace, cloned from the parent on creation. `devflow doctor` shows the active CoW method; `devflow setup-zfs` provisions a file-backed ZFS pool on Linux when no CoW filesystem is available (see [Installation](/devflow/getting-started/installation/#copy-on-write-storage)).
+Data directories live under `data_root` (default `~/.local/share/devflow`), one per service per workspace, cloned from the parent on creation. `devflow doctor` shows the active CoW method; ZFS pools on Linux are provisioned externally (see [Installation](/devflow/getting-started/installation/#copy-on-write-storage)).
 
 ```yaml
 services:

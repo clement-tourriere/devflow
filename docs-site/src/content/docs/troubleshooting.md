@@ -43,7 +43,7 @@ devflow capabilities    # CoW method, automation guarantees
 
 - **Name doesn't resolve on the host** — is the proxy running (`devflow proxy status`)? On Linux, mDNS needs `avahi-daemon`. Fall back to the UPSTREAM IP from `devflow proxy list`.
 - **Database name doesn't resolve / connects nowhere** — direct TCP endpoints need host-routable container IPs (Linux native, OrbStack on macOS — not Docker Desktop).
-- **Browser certificate warning** — `devflow proxy trust install`, then restart the browser. `devflow proxy trust verify` to confirm.
+- **Browser certificate warning** — `devflow proxy trust info`, follow the system setup instructions, then restart the browser. `devflow proxy trust verify` to confirm.
 - **Container not proxied** — check `devproxy.enabled` label, that it's running, and `devflow proxy list`. Explicit `devproxy.domains` always wins.
 
 ## Shell & TUI

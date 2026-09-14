@@ -61,68 +61,28 @@ mod state;
 
 use state::AppState;
 
-/// When launched from the macOS Dock/Finder (or a Linux desktop entry), the
-/// process inherits launchd's minimal PATH — missing Homebrew, mise shims,
-/// docker, npm, etc. Every hook, doctor check, and docker-exec spawned from
-/// the GUI then fails with "command not found", while the same operation
-/// works from a terminal. Capture the user's real login-shell PATH once at
-/// startup and adopt it so spawned subprocesses behave like the CLI.
-#[cfg(unix)]
-fn bootstrap_login_path() {
-    use std::sync::mpsc;
-    use std::time::Duration;
-
-    let current = std::env::var("PATH").unwrap_or_default();
-    // If a Homebrew bin dir is already present we were almost certainly
-    // launched from a shell — skip the (slowish) interactive-shell probe.
-    if current.contains("/opt/homebrew/bin") || current.contains("/usr/local/bin") {
+/// GUI launches inherit their environment. An explicit path list can be
+/// supplied without evaluating interactive shell startup files.
+fn configure_tool_path() {
+    let Some(extra) = std::env::var_os("DEVFLOW_TOOL_PATH") else {
         return;
-    }
-
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        // -l -i so login + interactive rc files (where mise/direnv/PATH live) run.
-        let out = std::process::Command::new(&shell)
-            .args(["-l", "-i", "-c", "printf %s \"$PATH\""])
-            .output();
-        let _ = tx.send(out);
-    });
-
-    let login_path = match rx.recv_timeout(Duration::from_secs(4)) {
-        Ok(Ok(out)) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        }
-        _ => {
-            log::warn!("Could not capture login-shell PATH; GUI subprocesses may lack tools");
-            return;
-        }
     };
-    if login_path.is_empty() {
-        return;
-    }
-
-    // Merge: login PATH first, then anything already present, de-duplicated.
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
     let mut seen = std::collections::HashSet::new();
-    let merged: Vec<&str> = login_path
-        .split(':')
-        .chain(current.split(':'))
-        .filter(|p| !p.is_empty() && seen.insert(*p))
-        .collect();
-    let merged = merged.join(":");
-    log::info!(
-        "Adopted login-shell PATH ({} entries)",
-        merged.matches(':').count() + 1
-    );
-    std::env::set_var("PATH", merged);
+    let paths = std::env::split_paths(&extra)
+        .chain(std::env::split_paths(&inherited))
+        .filter(|path| path.is_absolute() && seen.insert(path.clone()));
+    match std::env::join_paths(paths) {
+        Ok(path) => std::env::set_var("PATH", path),
+        Err(error) => log::warn!("Invalid DEVFLOW_TOOL_PATH: {error}"),
+    }
 }
 
 fn main() {
     env_logger::init();
     log::info!("Starting devflow application");
 
-    #[cfg(unix)]
-    bootstrap_login_path();
+    configure_tool_path();
 
     let app_state = AppState::new();
 
@@ -178,22 +138,12 @@ fn main() {
             commands::hooks::get_hook_variables,
             commands::hooks::install_vcs_hooks,
             commands::hooks::uninstall_vcs_hooks,
-            commands::hooks::get_action_types,
-            commands::hooks::save_hooks,
-            commands::hooks::run_hook,
-            commands::hooks::get_trigger_mappings,
-            commands::hooks::detect_recipes,
-            commands::hooks::preview_recipe,
-            commands::hooks::install_recipe,
-            commands::hooks::install_recipes,
             // Proxy
             commands::proxy::start_proxy,
             commands::proxy::stop_proxy,
             commands::proxy::get_proxy_status,
             commands::proxy::list_containers,
             commands::proxy::get_certificate_status,
-            commands::proxy::install_certificate,
-            commands::proxy::remove_certificate,
             // Config
             commands::config::get_config_json,
             commands::config::save_config_json,

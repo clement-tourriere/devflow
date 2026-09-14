@@ -7,8 +7,6 @@ import {
   stopProxy,
   listContainers,
   getCertificateStatus,
-  installCertificate,
-  removeCertificate,
 } from "../../utils/invoke";
 import type { ProxyStatus, ContainerEntry, CertificateStatus } from "../../types";
 import { IconProxy, IconRefresh, IconCopy, IconExternal } from "../../components/icons";
@@ -57,26 +55,6 @@ function ProxyDashboard() {
       toast.error(`Proxy error: ${e}`);
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleInstallCert = async () => {
-    try {
-      await installCertificate();
-      toast.success("Certificate installed to system trust store");
-      refresh();
-    } catch (e) {
-      toast.error(`Certificate error: ${e}`);
-    }
-  };
-
-  const handleRemoveCert = async () => {
-    try {
-      await removeCertificate();
-      toast.success("Certificate trust removed");
-      refresh();
-    } catch (e) {
-      toast.error(`Certificate error: ${e}`);
     }
   };
 
@@ -170,20 +148,8 @@ function ProxyDashboard() {
                   {certStatus.path}
                 </p>
               )}
-              <div className="flex gap-2">
-                {certStatus.exists && !certStatus.installed && (
-                  <button className="btn btn-primary btn-sm" onClick={handleInstallCert}>
-                    Install to system
-                  </button>
-                )}
-                {certStatus.installed && (
-                  <button className="btn btn-danger btn-sm" onClick={handleRemoveCert}>
-                    Remove trust
-                  </button>
-                )}
-              </div>
               {certStatus.info && (
-                <p style={{ color: "var(--text-secondary)", fontSize: 12, marginTop: 8 }}>
+                <p style={{ color: "var(--text-secondary)", fontSize: 12, marginTop: 8, whiteSpace: "pre-wrap" }}>
                   {certStatus.info}
                 </p>
               )}

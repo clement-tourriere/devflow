@@ -118,14 +118,8 @@ impl Config {
         if config.agent.take().is_some() {
             log::warn!("{}: agent.auto_context was never implemented and has been removed; use devflow agent context", path.display());
         }
-        if let Some(generation) = config.commit.as_mut().and_then(|c| c.generation.as_mut()) {
-            if !generation.legacy.is_empty() {
-                log::warn!(
-                    "{}: API commit generation was removed; configure commit.generation.command",
-                    path.display()
-                );
-                generation.legacy.clear();
-            }
+        if config.commit.take().is_some() {
+            log::warn!("{}: devflow commit was retired; remove commit settings and use your VCS/editor/agent directly", path.display());
         }
         if let Some(hooks) = &mut config.hooks {
             for entries in hooks.values_mut() {
