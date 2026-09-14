@@ -5,9 +5,15 @@ Thank you for your interest in contributing to devflow! This document provides g
 ## Getting Started
 
 1. **Fork and clone** the repository
-2. **Install prerequisites**: Rust 1.70+, Docker
-3. **Build**: `cargo build`
-4. **Test**: `cargo test --workspace`
+2. **Install prerequisites**: the Rust version in `rust-toolchain.toml`, Docker, and [mise](https://mise.jdx.dev/) 2026.8.16 or newer
+3. **Install tools**: `mise install`
+4. **Build and test**: `mise run build` and `mise run test`
+
+The project configures a mise Cargo wrapper for [Mr. Boxington](https://mr-boxington.jdx.dev/setup)
+(`mbx`) to share compilation results across checkouts. Cargo commands run through
+this wrapper in `mise run` tasks, `mise exec -- cargo ...`, and shells with mise
+activation. Run `mise exec -- mbx doctor` to check the cache setup, or
+`mise exec -- which cargo` to verify that Cargo resolves to mise’s wrapper.
 
 ## Development Setup
 
