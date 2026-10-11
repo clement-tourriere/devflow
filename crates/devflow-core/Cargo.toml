@@ -1,118 +1,34 @@
 [package]
 name = "devflow-core"
 version = "0.8.0"
-edition = "2021"
-description = "Core library for devflow — services, config, hooks, VCS, and state management"
-authors = ["Clément Tourrière <clement.tourriere@gmail.com>"]
-license = "MIT"
-
-[features]
-default = ["service-local"]
-service-local = ["dep:bollard", "dep:rusqlite", "dep:rust-s3", "dep:tar", "dep:bytes", "dep:tempfile", "dep:url", "dep:libloading"]
-service-neon = ["dep:percent-encoding"]
-service-dblab = []
-service-xata = []
+edition.workspace = true
+rust-version.workspace = true
+description = "devflow core: worktrees, copy-on-write payloads, Postgres branches, setup hooks"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
-# Serialization
-serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
-serde_yaml_ng = { version = "0.10", default-features = false }
-serde_json = "1.0"
-toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
-
-# Async runtime
-tokio = { version = "1.46", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "macros", "process", "fs", "io-util", "signal"] }
-sysinfo = { version = "0.37.2", default-features = false, features = ["system"] }
-
-# Error handling
-anyhow = "1.0"
-
-# Async trait support
-async-trait = "0.1"
-
-# Git operations
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+toml = "0.9"
 git2 = { version = "0.21", default-features = false }
-jj-lib = { version = "=0.45.1", default-features = false, features = ["git"] }
-pollster = "1.0"
-
-# Text matching
-# Full default features: workspace matching patterns use \b/\s,
-# which require the unicode feature to compile.
-regex = "1.12"
-
-# Template engine for hooks
-minijinja = { version = "2", default-features = false, features = ["builtins", "serde"] }
-
-# File system
-dirs = { version = "6.0", default-features = false }
-cap-std = "4.0.3"
+postgres = { version = "0.19", features = ["with-uuid-1", "with-chrono-0_4"] }
+postgres-protocol = "0.6"
+dirs = "6.0"
 filetime = "0.2"
-libloading = { version = "0.8", optional = true }
-
-# Logging
-log = { version = "0.4", default-features = false }
-
-# Date/time handling
-chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-
-# SQLite for local backend state
-rusqlite = { version = "0.40", default-features = false, features = ["bundled"], optional = true }
-
-# UUID generation
-uuid = { version = "1.22", features = ["v4", "serde"] }
-
-# Stable collision-resistant workspace service keys
-sha2 = "0.10"
-
-# HTTP client for cloud backends
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
-
-# URL parsing
-percent-encoding = { version = "2.3", optional = true }
-url = { version = "2.5", optional = true }
-
-# S3 support for data seeding
-rust-s3 = { version = "0.37", default-features = false, features = ["tokio-rustls-tls"], optional = true }
-
-# Temp files
-tempfile = { version = "3.27", optional = true }
-
-# Docker Engine API client
-bollard = { version = "0.20", default-features = false, features = ["ssl", "pipe"], optional = true }
-bytes = { version = "1", optional = true }
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
-
-# Tar archive creation (for bollard upload_to_container)
-tar = { version = "0.4", default-features = false, optional = true }
-
-which = "8.0.0"
-
-# Terminal UI for interactive selection
-inquire = { version = "0.9", default-features = false, features = ["crossterm"] }
-
-# Ordered maps for deterministic hook execution
-indexmap = { version = "2", default-features = false, features = ["serde"] }
-
-
-# Cross-platform Copy-on-Write file copies (APFS clonefile, ioctl FICLONE, ReFS)
 reflink-copy = "0.1"
-
-# Work-stealing parallelism for directory copies
+rand = "0.9"
+sha2 = "0.10"
+humantime = "2.2"
+percent-encoding = "2.3"
 rayon = "1.12"
 
-# Process file watchers use glob patterns for watch sets
-glob = "0.3"
-
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["signal", "process", "user", "mount"] }
-
-# rust-s3's lib target is named `s3`, which cargo-machete cannot map back.
-[package.metadata.cargo-machete]
-ignored = ["rust-s3"]
+libc = "0.2"
 
 [dev-dependencies]
-tempfile = "3.27"
-
-[[example]]
-name = "benchmark_data"
-required-features = ["service-local"]
+tempfile.workspace = true

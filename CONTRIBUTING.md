@@ -1,125 +1,95 @@
 # Contributing to devflow
 
-Thank you for your interest in contributing to devflow! This document provides guidelines and information for contributors.
+Thanks for helping. devflow 1.0 is deliberately small: Git worktrees, copy-on-write payloads, PostgreSQL branches, trusted setup hooks, and a desktop app. Features that pitchfork (processes, proxy), mise (toolchains, dependencies, tasks) or Mr. Boxington (Rust build caches) already provide belong in those tools. Read [docs/plans/2026-10-10-devflow-1.0.md](docs/plans/2026-10-10-devflow-1.0.md) before proposing a new capability.
 
-## Getting Started
+## Getting started
 
-1. **Fork and clone** the repository
-2. **Install prerequisites**: the Rust version in `rust-toolchain.toml`, Docker, and [mise](https://mise.jdx.dev/) 2026.8.16 or newer
-3. **Install tools**: `mise install`
-4. **Build and test**: `mise run build` and `mise run test`
+1. Fork and clone the repository.
+2. Install the Rust version in `rust-toolchain.toml`, Git, Docker (for the database tests), and [mise](https://mise.jdx.dev/) 2026.8.16 or newer. Releases need [Commitizen](https://commitizen-tools.github.io/commitizen/) and a GPG key; `cargo audit`, shellcheck and pitchfork are needed only for the matching CI steps and ignored tests.
+3. `mise install`, then `hk install` for the Git hooks (`hk install --mise` if mise is not activated in your shell), then `mise run build` and `mise run test`.
 
-The project configures a mise Cargo wrapper for [Mr. Boxington](https://mr-boxington.jdx.dev/setup)
-(`mbx`) to share compilation results across checkouts. Cargo commands run through
-this wrapper in `mise run` tasks, `mise exec -- cargo ...`, and shells with mise
-activation. Run `mise exec -- mbx doctor` to check the cache setup, or
-`mise exec -- which cargo` to verify that Cargo resolves to mise’s wrapper.
+The project configures a mise Cargo wrapper for [Mr. Boxington](https://mr-boxington.jdx.dev/setup) (`mbx`) so checkouts share compilation results. Cargo commands run through it in `mise run` tasks, `mise exec -- cargo ...`, and shells with mise activation. Check it with `mise exec -- mbx doctor`.
 
-## Development Setup
-
-```bash
-git clone https://github.com/clement-tourriere/devflow.git
-cd devflow
-
-# Build all crates
-cargo build
-
-# Run all tests
-cargo test --workspace
-
-# Check formatting and lints
+```sh
+cargo build                                              # devflow + devflow-core
 cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-
-# Run the local release-candidate gate used before handoff
-./scripts/release-check.sh
+cargo clippy --locked --workspace --all-targets -- -D warnings   # Linux: add --exclude devflow-gui
+cargo test --locked -p devflow -p devflow-core
+cargo test -p devflow-core --test db_postgres -- --ignored --test-threads=1   # Docker required
+cargo build -p devflow-gui                               # desktop app (macOS)
+cargo test --locked -p devflow-gui                       # headless GUI tests (macOS)
 ```
 
-### Optional: Desktop GUI
+`mise run lint`, `check` and `ci` cover the whole workspace, GUI included; on Linux run the cargo commands with `--exclude devflow-gui`.
 
-```bash
-# Requires bun + Tauri CLI
-mise run gui        # Dev mode
-mise run gui:build  # Production bundle
+Multi-feature builds and many worktrees can fill the disk; `mbx clean` reclaims space.
+
+## Project structure
+
+| Path | Description |
+| --- | --- |
+| `Cargo.toml`, `src/` | The `devflow` CLI: argument parsing, prompts, JSON output |
+| `crates/devflow-core` | Config, connection strings, project, registry, worktree, CoW, receipt, setup, hooks, trust, Git hook, env file, redaction, typed errors, `db` (admin, meta, steps, ops, reconcile, managed), doctor, pitchfork adapter |
+| `crates/devflow-gui` | GPUI desktop app |
+| `tests/`, `crates/devflow-core/tests/` | End-to-end CLI tests; core workspace tests and the Docker database tests |
+| `docs/` | Architecture, migration guide, remote data hosts, design plans |
+| `examples/` | Sample configuration and an agent script |
+| `scripts/` | Installer, release version sync |
+| `mise.toml`, `hk.pkl`, `.cz.toml` | Tools and tasks, Git hooks, release configuration |
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the module map and `CLAUDE.md` for working rules.
+
+## Making changes
+
+- Branch from `main` with a descriptive name: `feature/`, `fix/`, `docs/`.
+- Core owns policy; the CLI and GUI render. Put lifecycle decisions in `devflow-core`, which keeps a blocking API (nothing async is public) and no UI types.
+- Record intent before external effects, and make operations safe to re-run.
+- Use `anyhow::Context` rather than `.unwrap()`, and `anyhow::bail!` rather than `panic!` in library code.
+- Document public items with `///` comments.
+
+### Commit messages
+
+[Conventional Commits](https://www.conventionalcommits.org/), checked in CI for pull requests:
+
+```
+feat(db): reset a branch to its recorded source
+fix(setup): resume after an interrupted payload phase
+docs: describe remote data hosts
+test(trust): cover changed hook sections
 ```
 
-## Project Structure
-
-| Crate | Description |
-|---|---|
-| `devflow` (root) | CLI binary + TUI dashboard |
-| `crates/devflow-core` | Shared library: config, services, VCS, hooks, state |
-| `crates/devflow-proxy` | Native HTTPS reverse proxy |
-| `crates/devflow-terminal` | PTY management for desktop GUI |
-| `src-tauri/` | Tauri 2 desktop app backend |
-| `ui/` | React frontend for desktop app |
-
-See `CLAUDE.md` for a detailed file-level map.
-
-## Making Changes
-
-### Branching
-
-- Create a branch from `main` for your work
-- Use descriptive branch names: `feature/`, `fix/`, `docs/`
-
-### Commit Messages
-
-We use [Conventional Commits](https://www.conventionalcommits.org/):
-
-```
-feat(proxy): add Firefox trust via enterprise policies
-fix(workspace): surface post-create hook failures
-docs: add CONTRIBUTING.md
-test(hooks): add executor approval tests
-refactor(config): split into submodules
-```
-
-Valid scopes include: `workspace`, `service`, `proxy`, `hooks`, `config`, `tui`, `gui`, `agent`, `skills`, `vcs`, `cli`.
-
-### Code Style
-
-- Run `cargo fmt` before committing
-- All `cargo clippy` warnings must be resolved
-- Use `anyhow::Context` for error context, not bare `.unwrap()`
-- Prefer `anyhow::bail!` over `panic!` in library code
-- Add `/// doc comments` to all public items
-- Use feature flags for optional functionality
+Scopes in use: `cli`, `core`, `config`, `worktree`, `cow`, `setup`, `hooks`, `trust`, `db`, `doctor`, `gui`, `ci`, `docs`, `deps`, `release`.
 
 ### Testing
 
-- Add unit tests for new logic in `#[cfg(test)] mod tests { ... }`
-- Use `#[tokio::test]` for async tests
-- Integration tests go in `scripts/integration-test.sh`
-- Run the full suite: `cargo test --workspace`
-- Before release handoff, run `./scripts/release-check.sh` (format, diff whitespace, generated guidance, Rust checks/tests/build, and UI build). In initialized projects, also use `devflow --json doctor --strict` / `devflow --json service doctor --strict` as health gates.
+- Unit tests live beside the code in `#[cfg(test)] mod tests`.
+- `tests/cli.rs` runs the `devflow` binary end to end; `crates/devflow-core/tests/workspace.rs` covers worktrees, setup and removal without Docker.
+- Database behavior is tested against real PostgreSQL 18 in Docker. Those tests are ignored by default (`-- --ignored --test-threads=1`) and use isolated containers and state: `--test db_postgres`, plus `--test workspace -- --ignored managed_postgres` for the managed server end to end. `--test workspace -- --ignored pitchfork` needs pitchfork on `PATH`.
+- The GUI has headless tests (`cargo test --locked -p devflow-gui`, macOS); native visual checks are manual.
+- Ext4 runners cannot share blocks, so CI cannot assert `verified` CoW. Verify CoW on OrbStack or a Linux btrfs/XFS host and report it separately from the mocked and unit checks. Set `DEVFLOW_EXPECT_COW=verified` to make the Docker tests assert it.
+- Use `DEVFLOW_CONFIG_DIR` and `DEVFLOW_DATA_DIR` to isolate tests from your real registry and managed servers.
+- The GUI needs macOS (GPUI on Linux requires system libraries and Vulkan). Linux rendering is not advertised until it has been checked.
 
-### Pull Requests
+### Pull requests
 
-1. Ensure CI passes (formatting, clippy, tests, audit)
-2. Update `docs/CLI.md` if you add/change CLI commands
-3. Update `CLAUDE.md` if you change project structure
-4. Add a changelog entry if the change is user-facing
+1. CI passes: Conventional Commits, formatting, clippy, tests, the Docker database tests, the GUI clippy, build and tests on macOS, shellcheck of the scripts, and `cargo audit`.
+2. Update `docs/` or `README.md` when behavior changes, and `CLAUDE.md` or `AGENTS.md` when layout or the automation contract changes.
+3. Add a `CHANGELOG.md` entry under `Unreleased` for user-facing changes.
 
-## Feature Flags
+## Releases
 
-When adding new functionality, consider whether it should be feature-gated:
+Releases are cut with Commitizen from `main`; the `pre_bump_hooks` run `scripts/sync-version.py`, which keeps the three crates and `Cargo.lock` on one version, and the tag is GPG-signed. `mise run release` always bumps the patch version. `cz bump` replaces the curated `## Unreleased` notes with a list generated from commit messages, so put them back:
 
-| Flag | Controls |
-|---|---|
-| `service-local` | Docker-based local providers |
-| `service-neon` | Neon cloud provider |
-| `service-dblab` | DBLab provider |
-| `service-xata` | Xata provider |
-| `proxy` | Optional proxy companion binary |
-| `tui` | Terminal UI dashboard |
+```sh
+cz bump --yes --increment MAJOR        # or MINOR / PATCH
+git show HEAD^:CHANGELOG.md | sed "s/^## Unreleased$/## v$(cz version -p) ($(date +%F))/" > CHANGELOG.md
+git commit --amend --no-edit CHANGELOG.md
+git tag -f -s "v$(cz version -p)" -m "v$(cz version -p)"
+```
 
-## Reporting Issues
+## Reporting issues
 
-Use the [bug report template](.github/ISSUE_TEMPLATE/bug_report.md) and include:
-- `devflow --version` output
-- `devflow doctor` output
-- Relevant `.devflow.yml` sections (redact credentials)
+Use the [bug report template](.github/ISSUE_TEMPLATE/bug_report.md) and include `devflow --version`, the output of `devflow --json doctor`, and the relevant `devflow.toml` sections with credentials removed. Security problems go through [SECURITY.md](SECURITY.md), not public issues.
 
 ## License
 

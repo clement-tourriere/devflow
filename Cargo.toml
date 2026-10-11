@@ -1,100 +1,55 @@
 [workspace]
-members = [".", "crates/devflow-core", "crates/devflow-proxy", "crates/devflow-terminal", "src-tauri"]
-resolver = "2"
+members = [".", "crates/devflow-core", "crates/devflow-gui"]
+# The GUI pulls in GPUI; build it explicitly with `cargo build -p devflow-gui`.
+default-members = [".", "crates/devflow-core"]
+resolver = "3"
 
-# rust-s3 0.37.2 and aws-creds 0.39.1 constrain quick-xml to the vulnerable
-# 0.38 line (RUSTSEC-2026-0194/0195). Pin the upstream two-line dependency
-# fix until rust-s3 publishes a release containing it, then remove this patch.
-# https://github.com/durch/rust-s3/pull/468
-[patch.crates-io]
-rust-s3 = { git = "https://github.com/durch/rust-s3", rev = "01b6ccb9babf858475163a4b9bcd7dea3d56fd00" }
-aws-creds = { git = "https://github.com/durch/rust-s3", rev = "01b6ccb9babf858475163a4b9bcd7dea3d56fd00" }
+[workspace.package]
+edition = "2024"
+rust-version = "1.92"
+authors = ["Clément Tourrière <clement.tourriere@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/clement-tourriere/devflow"
+
+[workspace.dependencies]
+devflow-core = { path = "crates/devflow-core" }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.22", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+tempfile = "3.27"
 
 [package]
 name = "devflow"
 version = "0.8.0"
-edition = "2021"
-description = "Universal development environment branching tool — worktrees, databases, and stateful services"
-authors = ["Clément Tourrière <clement.tourriere@gmail.com>"]
-license = "MIT"
-repository = "https://github.com/clement-tourriere/devflow"
+edition.workspace = true
+rust-version.workspace = true
+description = "Git worktrees with copy-on-write payloads, instant Postgres branches, and setup hooks"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "devflow"
 path = "src/main.rs"
 
-[[bin]]
-name = "devflow-proxy"
-path = "src/proxy_main.rs"
-required-features = ["proxy"]
-test = false
-bench = false
-
-[features]
-default = ["service-local", "tui"]
-proxy = ["dep:devflow-proxy"]
-tui = ["dep:ratatui", "dep:crossterm", "devflow-core/service-local"]
-service-local = ["devflow-core/service-local"]
-service-neon = ["devflow-core/service-neon"]
-service-dblab = ["devflow-core/service-dblab"]
-service-xata = ["devflow-core/service-xata"]
-
 [dependencies]
-# Core library
-devflow-core = { path = "crates/devflow-core", default-features = false }
-devflow-proxy = { path = "crates/devflow-proxy", optional = true }
-
-# CLI and argument parsing
-clap = { version = "4.5", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
+devflow-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+clap = { version = "4.5", features = ["derive", "env"] }
 clap_complete = "4.6"
-
-# Serialization
-serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
-serde_yaml_ng = { version = "0.10", default-features = false }
-serde_json = "1.0"
-
-# Async runtime
-tokio = { version = "1.46", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "macros", "process", "fs", "signal"] }
-
-# Error handling
-anyhow = "1.0"
-
-# Text matching
-# Full default features: workspace matching patterns use \b/\s,
-# which require the unicode feature to compile.
-regex = "1.12"
-
-# Logging
-log = { version = "0.4", default-features = false }
-env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
-
-# Terminal UI for interactive selection
 inquire = { version = "0.9", default-features = false, features = ["crossterm"] }
 
-# Date/time handling
-chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-
-# HTTP client for proxy status queries
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
-
-# Ordered maps for deterministic hook execution
-indexmap = { version = "2", default-features = false, features = ["serde"] }
-
-# Unix process signals (replace Command::new("kill"))
-[target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["signal"] }
-
-# TUI framework
-ratatui = { version = "0.30", default-features = false, features = ["crossterm"], optional = true }
-crossterm = { version = "0.29", default-features = false, features = ["events", "use-dev-tty"], optional = true }
-
 [dev-dependencies]
+tempfile.workspace = true
 git2 = { version = "0.21", default-features = false }
-tempfile = "3.20"
-serde_json = "1.0"
 
 [profile.release]
-# Day-to-day optimized builds (local `mise run install`, `cargo tauri build`).
+# Day-to-day optimized builds (local `mise run install`, `mise run gui:build`).
 # Thin LTO keeps rebuilds minutes faster than fat LTO for a few % binary size;
 # shipped binaries use the `dist` profile below.
 opt-level = "s"        # Optimize for size with better runtime performance than "z"
@@ -117,12 +72,3 @@ codegen-units = 1      # Reduce parallel code generation units
 opt-level = 0
 debug = true
 split-debuginfo = "unpacked"  # Skip dsymutil on macOS, saves 1-5s per incremental build
-
-# Optimize heavy C/crypto deps in dev — these run slowly at opt-level 0
-# and never need debugging. No impact on incremental build times.
-[profile.dev.package.libsqlite3-sys]
-opt-level = 1
-[profile.dev.package.ring]
-opt-level = 2
-[profile.dev.package.aws-lc-sys]
-opt-level = 2

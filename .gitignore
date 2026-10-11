@@ -23,8 +23,14 @@ Thumbs.db
 .claude/
 
 # devflow
-.devflow.yml
+# Machine-local overlay for devflow.toml (admin URL, declared CoW, ...). Never commit.
+devflow.local.toml
+# 0.x machine-local config (may hold provider API keys); kept ignored until migrated.
 .devflow.local.yml
+# Generated env and secrets. devflow writes a `.gitignore` containing `*` inside
+# `.devflow/`, so the directory ignores itself; this entry is a second guard for
+# this repository's own worktrees.
+.devflow/
 
 # Environment
 .env
@@ -36,7 +42,6 @@ Thumbs.db
 *.key
 *.crt
 *.csr
-.devflow/
 
 # Logs
 *.log
@@ -45,19 +50,5 @@ Thumbs.db
 .ruff_cache/
 __pycache__/
 
-# Frontend
-ui/node_modules/
-ui/dist/
-
-# Docs site
-docs-site/node_modules/
-docs-site/dist/
-docs-site/.astro/
-
 # OpenCode
 .opencode/
-
-# auto-merge-prs.sh runtime artifacts
-.auto-merge.pid
-auto-merge.out.log
-.devflow-automerge.jsonl

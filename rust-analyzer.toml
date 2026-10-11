@@ -1,3 +1,0 @@
-# Resolve the project Cargo wrapper and pinned toolchain through mise.
-[check]
-overrideCommand = ["mise", "exec", "--", "cargo", "check", "--workspace", "--all-targets", "--target-dir", "target/rust-analyzer", "--message-format=json"]

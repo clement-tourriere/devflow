@@ -1,28 +1,29 @@
+//! devflow core: Git worktrees with copy-on-write payloads, Postgres branches
+//! cloned with `file_copy_method = clone`, and trusted setup hooks.
+//!
+//! The API is synchronous. Frontends (CLI, GUI) call it directly or from their
+//! own background executors; no async runtime or UI type appears here.
+
 pub mod config;
-pub mod docker;
+pub mod conn;
+pub mod cow;
+pub mod db;
 pub mod doctor;
-pub mod files;
-pub mod fs_copy;
+pub mod env_file;
+pub mod error;
+pub mod githook;
 pub mod hooks;
 pub mod paths;
-pub mod process_identity;
-pub mod processes;
+pub mod pitchfork;
 pub mod project;
-pub mod services;
-pub mod state;
-pub mod vcs;
+pub mod receipt;
+pub mod redact;
+pub mod registry;
+pub mod setup;
+pub mod trust;
+pub mod worktree;
 
-pub mod agent;
-pub mod detach;
-pub mod workspace;
+mod fsutil;
 
-pub mod application;
-pub mod execution;
-
-pub mod baseline;
-
-pub mod companion;
-
-pub mod cache;
-
-pub mod controller;
+pub use config::Config;
+pub use project::Project;

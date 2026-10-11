@@ -11,12 +11,17 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Linux: everything except the GPUI desktop app, which needs a graphics stack
+  # (Wayland/X11, Vulkan, fontconfig, ...) and is built on macOS below.
   build-and-test:
-    name: Build & Test
+    name: Build & Test (Linux, without GUI)
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
@@ -48,10 +53,10 @@ jobs:
           python3 -m pip install commitizen
           cz check --rev-range "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
 
-      - name: Install system dependencies
+      - name: Install mold linker
         run: |
           sudo apt-get update
-          sudo apt-get install -y mold libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+          sudo apt-get install -y mold
 
       - name: Install pinned Rust toolchain
         run: |
@@ -60,46 +65,31 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: '1.2'
-
-      - name: Build frontend
-        working-directory: ui
-        run: |
-          bun install --frozen-lockfile
-          bun run build
-          bun test tests
-
-      - name: Build documentation
-        working-directory: docs-site
-        run: |
-          bun install --frozen-lockfile
-          bun run build
-
-      - name: Check generated LLM documentation
-        run: ./scripts/generate-llms-txt.sh --check
-
       - name: Check formatting
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --exclude devflow-gui --all-targets -- -D warnings
 
       - name: Build
-        run: cargo build --locked --workspace
+        run: cargo build --locked --workspace --exclude devflow-gui
 
       - name: Test
-        run: cargo test --locked --workspace
+        run: cargo test --locked -p devflow -p devflow-core
 
       - name: Security audit
         run: |
           cargo install cargo-audit --quiet --locked
           cargo audit
 
-  docker-integration-tests:
-    name: Docker Integration Tests
-    needs: build-and-test
+  # Real PostgreSQL 18 in Docker (the tests are #[ignore]d by default).
+  #
+  # GitHub's Linux runners use ext4, which cannot share blocks, so branches are
+  # created as full copies and devflow reports CoW as `copy`. These tests must
+  # not assert `verified` here. Do NOT set DEVFLOW_EXPECT_COW on this job: that
+  # variable is only for runs on OrbStack or a btrfs/XFS host.
+  docker-tests:
+    name: Docker PostgreSQL tests
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
@@ -107,7 +97,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install mold linker
-        run: sudo apt-get install -y mold
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
 
       - name: Install pinned Rust toolchain
         run: |
@@ -116,49 +108,39 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build devflow-core
-        run: cargo build --locked -p devflow-core
+      - name: Pull PostgreSQL image
+        run: docker pull postgres:18
 
-      - name: Run shared-provider integration tests (requires Docker)
-        run: cargo test --locked -p devflow-core --test shared_integration --test review_regressions -- --ignored --test-threads=1
+      - name: Run database integration tests (requires Docker)
+        run: cargo test --locked -p devflow-core --test db_postgres -- --ignored --test-threads=1
 
-  zfs-integration-tests:
-    name: ZFS replacement failure recovery
-    runs-on: ubuntu-24.04
+  # macOS runs the CLI and core tests (APFS clonefile paths) and is the only
+  # place the GPUI desktop app is built. GitHub's macOS runners have no Docker,
+  # so the database tests stay on Linux.
+  macos:
+    name: macOS (APFS, GUI)
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: Install ZFS
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y zfsutils-linux
-          sudo modprobe zfs
-      - name: Exercise a disposable pool
-        run: |
-          cargo test --locked -p devflow-core --lib --no-run --message-format=json > /tmp/devflow-zfs-build.jsonl
-          test_bin=$(python3 -c 'import json; print(next(x["executable"] for l in open("/tmp/devflow-zfs-build.jsonl") if (x := json.loads(l)).get("executable") and x.get("profile", {}).get("test")))')
-          pool="devflow_ci_${GITHUB_RUN_ID}"
-          disk=$(mktemp /tmp/devflow-zfs.XXXXXX)
-          truncate -s 2G "$disk"
-          trap 'sudo zpool destroy "$pool"; rm -f "$disk"' EXIT
-          sudo zpool create -o cachefile=none -O mountpoint=none "$pool" "$disk"
-          sudo env PATH=/nonexistent DEVFLOW_TEST_ZFS_POOL="$pool" "$test_bin" linux_zfs_failures_preserve_mounted_data --ignored --nocapture
 
-  feature-builds:
-    name: CLI feature builds
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        features: ["--no-default-features", "", "--all-features"]
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup toolchain install
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked -p devflow -p devflow-core ${{ matrix.features }}
-      - name: Check generated provider catalog
-        if: matrix.features == '--all-features'
-        run: cargo run -p devflow-core --example generate_provider_manifest -- --check
+
+      - name: Test CLI and core
+        run: cargo test --locked -p devflow -p devflow-core
+
+      - name: Clippy (GUI)
+        run: cargo clippy --locked -p devflow-gui --all-targets -- -D warnings
+
+      - name: Build GUI
+        run: cargo build --locked -p devflow-gui
+
+      - name: Test GUI
+        run: cargo test --locked -p devflow-gui
 
   coverage:
     name: Coverage
@@ -179,7 +161,7 @@ jobs:
         run: cargo install cargo-llvm-cov --locked
 
       - name: Generate coverage report
-        run: cargo llvm-cov --locked -p devflow -p devflow-core -p devflow-proxy --lcov --output-path lcov.info
+        run: cargo llvm-cov --locked -p devflow -p devflow-core --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -204,9 +186,6 @@ jobs:
         run: >-
           shellcheck
           scripts/install.sh
-          scripts/integration-test.sh
-          scripts/generate-llms-txt.sh
-          examples/agent-bootstrap.sh
           examples/agent-task.sh
 
       - name: Install latest release
@@ -222,219 +201,15 @@ jobs:
           DEVFLOW_VERSION=v0.5.0 DEVFLOW_INSTALL_DIR="$RUNNER_TEMP/devflow-bin" sh scripts/install.sh
           "$RUNNER_TEMP/devflow-bin/devflow" --version | grep -F "0.5.0"
 
-  # NOTE: macOS integration tests are disabled because GitHub Actions macOS
-  # runners do not ship with Docker. The Colima-based workaround is slow and
-  # flaky (~3-5 min startup, frequent timeouts). Re-enable when GitHub offers
-  # native Docker support on macOS runners, or when a faster alternative
-  # (e.g., OrbStack in CI) becomes viable.
-  #
-  # The APFS clone storage backend is still tested manually on macOS.
-  # The macOS release binary is built without integration tests (see release job).
-  integration-macos:
-    name: Integration (macOS / APFS)
-    needs: build-and-test
-    if: ${{ false }}
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install pinned Rust toolchain
-        run: |
-          rustup toolchain install
-          rustup show active-toolchain
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build
-        run: cargo build --locked
-
-      - name: Set up Docker
-        run: |
-          brew install docker colima
-          colima start
-          # Wait for Docker to be ready
-          for i in $(seq 1 30); do
-            if docker info &>/dev/null 2>&1; then
-              echo "Docker is ready"
-              break
-            fi
-            sleep 2
-          done
-          docker version
-
-      - name: Pull postgres image
-        run: docker pull postgres:17
-
-      - name: Run integration tests
-        env:
-          EXPECTED_STORAGE: apfs_clone
-          DEVFLOW_BIN: ${{ github.workspace }}/target/debug/devflow
-        run: ./scripts/integration-test.sh
-
-  integration-linux-zfs:
-    name: Integration (Linux / ZFS)
-    needs: build-and-test
-    runs-on: ubuntu-latest
-    env:
-      RUSTFLAGS: -C link-arg=-fuse-ld=mold
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install mold linker
-        run: sudo apt-get install -y mold
-
-      - name: Install pinned Rust toolchain
-        run: |
-          rustup toolchain install
-          rustup show active-toolchain
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build
-        run: cargo build --locked
-
-      - name: Install ZFS
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y zfsutils-linux
-          sudo modprobe zfs
-
-      - name: Set up ZFS pool
-        run: |
-          sudo mkdir -p /var/lib/devflow/data
-          sudo truncate -s 2G /var/lib/devflow/pgdata.img
-          sudo zpool create -m /var/lib/devflow/data devflow /var/lib/devflow/pgdata.img
-          sudo zfs set compression=lz4 recordsize=8k devflow
-          sudo chown "$(id -u):$(id -g)" /var/lib/devflow/data
-          sudo zfs allow "$(id -un)" create,destroy,snapshot,clone,mount,mountpoint,promote,rename,rollback devflow
-
-      - name: Redirect devflow data to ZFS
-        run: |
-          mkdir -p ~/.local/share
-          rm -rf ~/.local/share/devflow
-          ln -s /var/lib/devflow/data ~/.local/share/devflow
-
-      - name: Pull postgres image
-        run: docker pull postgres:17
-
-      - name: Run integration tests
-        env:
-          EXPECTED_STORAGE: zfs
-          DEVFLOW_ZFS_DATASET: devflow
-        run: |
-          RUNNER_HOME="$HOME"
-          sudo \
-            HOME="$RUNNER_HOME" \
-            XDG_DATA_HOME="$RUNNER_HOME/.local/share" \
-            EXPECTED_STORAGE="$EXPECTED_STORAGE" \
-            DEVFLOW_ZFS_DATASET="$DEVFLOW_ZFS_DATASET" \
-            DEVFLOW_BIN="$GITHUB_WORKSPACE/target/debug/devflow" \
-            bash ./scripts/integration-test.sh
-
-  integration-linux-xfs:
-    name: Integration (Linux / XFS reflink)
-    needs: build-and-test
-    runs-on: ubuntu-latest
-    env:
-      RUSTFLAGS: -C link-arg=-fuse-ld=mold
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install mold linker
-        run: sudo apt-get install -y mold
-
-      - name: Install pinned Rust toolchain
-        run: |
-          rustup toolchain install
-          rustup show active-toolchain
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build
-        run: cargo build --locked
-
-      - name: Set up XFS with reflink
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xfsprogs
-          sudo truncate -s 2G /tmp/xfs.img
-          sudo mkfs.xfs -m reflink=1 /tmp/xfs.img
-          sudo mkdir -p /mnt/devflow-xfs
-          sudo mount -o loop /tmp/xfs.img /mnt/devflow-xfs
-          sudo chown -R $(whoami):$(whoami) /mnt/devflow-xfs
-
-      - name: Redirect devflow data to XFS
-        run: |
-          mkdir -p ~/.local/share
-          ln -sf /mnt/devflow-xfs ~/.local/share/devflow
-
-      - name: Pull postgres image
-        run: docker pull postgres:17
-
-      - name: Run integration tests
-        env:
-          EXPECTED_STORAGE: reflink
-          DEVFLOW_BIN: ${{ github.workspace }}/target/debug/devflow
-        run: ./scripts/integration-test.sh
-
-  integration-linux-btrfs:
-    name: Integration (Linux / Btrfs reflink)
-    needs: build-and-test
-    runs-on: ubuntu-latest
-    env:
-      RUSTFLAGS: -C link-arg=-fuse-ld=mold
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install mold linker
-        run: sudo apt-get install -y mold
-
-      - name: Install pinned Rust toolchain
-        run: |
-          rustup toolchain install
-          rustup show active-toolchain
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build
-        run: cargo build --locked
-
-      - name: Set up Btrfs
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y btrfs-progs
-          sudo truncate -s 2G /tmp/btrfs.img
-          sudo mkfs.btrfs /tmp/btrfs.img
-          sudo mkdir -p /mnt/devflow-btrfs
-          sudo mount -o loop /tmp/btrfs.img /mnt/devflow-btrfs
-          sudo chown -R $(whoami):$(whoami) /mnt/devflow-btrfs
-
-      - name: Redirect devflow data to Btrfs
-        run: |
-          mkdir -p ~/.local/share
-          ln -sf /mnt/devflow-btrfs ~/.local/share/devflow
-
-      - name: Pull postgres image
-        run: docker pull postgres:17
-
-      - name: Run integration tests
-        env:
-          EXPECTED_STORAGE: reflink
-          DEVFLOW_BIN: ${{ github.workspace }}/target/debug/devflow
-        run: ./scripts/integration-test.sh
-
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     needs:
-      - docker-integration-tests
-      - feature-builds
-      - zfs-integration-tests
-      - integration-linux-zfs
-      - integration-linux-xfs
-      - integration-linux-btrfs
+      - build-and-test
+      - docker-tests
+      - macos
     runs-on: ${{ matrix.os }}
     env:
       COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
@@ -454,7 +229,9 @@ jobs:
 
       - name: Install mold linker (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y mold
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
 
       - name: Install pinned Rust toolchain
         run: |
@@ -463,25 +240,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install bun
-        if: runner.os != 'Linux' || matrix.artifact_name != 'devflow-linux-arm64'
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: '1.2'
-
-      - name: Build Tauri frontend
-        if: runner.os != 'Linux' || matrix.artifact_name != 'devflow-linux-arm64'
-        run: |
-          cd ui && bun install --frozen-lockfile && bun run build
-
-      - name: Create frontend stub (ARM64 Linux — bun unavailable)
-        if: runner.os == 'Linux' && matrix.artifact_name == 'devflow-linux-arm64'
-        run: mkdir -p ui/dist && touch ui/dist/index.html
-
+      # Only the `devflow` CLI is released as a binary. The desktop app
+      # (devflow-gui) is built from source.
       - name: Build release binary
-        run: |
-          cargo build --locked --profile dist --bin devflow
-          cargo build --locked --profile dist --no-default-features --features proxy --bin devflow-proxy
+        run: cargo build --locked --profile dist -p devflow --bin devflow
         env:
           RUSTFLAGS: ${{ runner.os == 'Linux' && '-C link-arg=-fuse-ld=mold' || '' }}
 
@@ -489,26 +251,20 @@ jobs:
         run: |
           ./target/dist/devflow --version
           ./target/dist/devflow --help > /dev/null
-          ./target/dist/devflow-proxy --version
-          ./target/dist/devflow-proxy proxy --help > /dev/null
 
       - name: Package binary
         run: |
           mkdir -p dist
           cp target/dist/devflow dist/${{ matrix.artifact_name }}
           chmod +x dist/${{ matrix.artifact_name }}
-          cp target/dist/devflow-proxy dist/${{ matrix.artifact_name }}-proxy
-          chmod +x dist/${{ matrix.artifact_name }}-proxy
 
       - name: Generate SHA256 checksums
         run: |
           cd dist
           if command -v sha256sum &>/dev/null; then
             sha256sum ${{ matrix.artifact_name }} > ${{ matrix.artifact_name }}.sha256
-            sha256sum ${{ matrix.artifact_name }}-proxy > ${{ matrix.artifact_name }}-proxy.sha256
           else
             shasum -a 256 ${{ matrix.artifact_name }} > ${{ matrix.artifact_name }}.sha256
-            shasum -a 256 ${{ matrix.artifact_name }}-proxy > ${{ matrix.artifact_name }}-proxy.sha256
           fi
           cat ${{ matrix.artifact_name }}.sha256
 
@@ -523,10 +279,20 @@ jobs:
             dist/${{ matrix.artifact_name }} \
             --output-signature dist/${{ matrix.artifact_name }}.sig \
             --output-certificate dist/${{ matrix.artifact_name }}.pem
-          cosign sign-blob --yes --key env://COSIGN_KEY \
-            dist/${{ matrix.artifact_name }}-proxy \
-            --output-signature dist/${{ matrix.artifact_name }}-proxy.sig \
-            --output-certificate dist/${{ matrix.artifact_name }}-proxy.pem
+
+      # Commitizen writes "## vX.Y.Z (date)" sections into CHANGELOG.md.
+      - name: Extract release notes
+        shell: bash
+        run: |
+          awk -v tag="${GITHUB_REF_NAME}" '
+            /^## / {
+              if (found) exit
+              if (index($0, "## " tag " ") == 1 || $0 == "## " tag) found = 1
+              next
+            }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md || echo "See CHANGELOG.md for the changes in ${GITHUB_REF_NAME}." > release-notes.md
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v3
@@ -536,11 +302,7 @@ jobs:
             dist/${{ matrix.artifact_name }}.sha256
             dist/${{ matrix.artifact_name }}.sig
             dist/${{ matrix.artifact_name }}.pem
-            dist/${{ matrix.artifact_name }}-proxy
-            dist/${{ matrix.artifact_name }}-proxy.sha256
-            dist/${{ matrix.artifact_name }}-proxy.sig
-            dist/${{ matrix.artifact_name }}-proxy.pem
-          body_path: docs/releases/${{ github.ref_name }}.md
+          body_path: release-notes.md
 
   verify-install:
     name: Verify install script
@@ -555,7 +317,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install just-released version
-        run: DEVFLOW_VERSION="${{ github.ref_name }}" DEVFLOW_INSTALL_PROXY=1 sh scripts/install.sh
+        run: DEVFLOW_VERSION="${{ github.ref_name }}" sh scripts/install.sh
 
       - name: Verify installed version matches tag
         run: |
@@ -567,6 +329,3 @@ jobs:
             exit 1
           fi
           devflow --version
-          proxy_installed="$(devflow-proxy --version | awk '{print $2}')"
-          test "$proxy_installed" = "$expected"
-          devflow-proxy proxy --help > /dev/null

@@ -27,17 +27,18 @@ What actually happened. Include full error output if available.
 - **devflow version**: (`devflow --version`)
 - **OS**: (e.g. macOS 14, Ubuntu 24.04)
 - **Docker version**: (`docker --version`)
-- **Provider type**: (local, postgres_template, neon, dblab, xata, plugin)
+- **Postgres mode**: (managed, external, none) and server version
+- **Filesystem / CoW**: (what `devflow doctor` reports; e.g. OrbStack, btrfs, ext4)
 - **Shell**: (bash, zsh, fish)
 
 ## Config (if relevant)
 
-```yaml
-# Paste relevant sections of .devflow.yml (redact credentials)
+```toml
+# Paste relevant sections of devflow.toml (redact credentials)
 ```
 
 ## Logs
 
 ```
-# Output of `devflow doctor` or container logs (`devflow service logs <workspace>`)
+# Output of `devflow doctor` and the workspace's setup log (<git dir>/devflow/logs/). Redact passwords.
 ```

@@ -3,14 +3,6 @@
 command = "mbx"
 env = { MBX_CARGO_SHIM_MODE = "1" }
 
-[env]
-# `cargo tauri build` exports MACOSX_DEPLOYMENT_TARGET=10.13 (its default
-# bundle.macOS.minimumSystemVersion) while plain cargo commands leave it unset.
-# The C-sys build scripts (ring, aws-lc-sys, libgit2-sys, ...) rerun whenever
-# this var changes, so alternating `install` and `gui:build` used to rebuild
-# the whole dependency tree every time. Pin it so every build agrees.
-MACOSX_DEPLOYMENT_TARGET = "10.13"
-
 [tools]
 # Pin Rust to the same channel as rust-toolchain.toml for reproducible
 # builds across contributors and CI. (rust-toolchain.toml still governs the
@@ -19,36 +11,28 @@ MACOSX_DEPLOYMENT_TARGET = "10.13"
 rust = "1.96.0"
 # Pin the shared Cargo cache tool independently of the Rust toolchain.
 "github:jdx/mr-boxington" = "1.11.0"
-hk = "latest"
-pkl = "latest"
-bun = "1.2"
-"cargo:tauri-cli" = "latest"
+hk = "2.5.0"
 
-[tasks.docs]
-description = "Serve the documentation site locally (Astro Starlight, hot-reload)"
-depends = ["docs:install"]
-run = "cd docs-site && bun run dev"
-
-[tasks."docs:build"]
-description = "Build the documentation site (docs-site/dist)"
-depends = ["docs:install"]
-run = "cd docs-site && bun run build"
-
-[tasks."docs:install"]
-description = "Install documentation site dependencies"
-run = "cd docs-site && bun install"
+# Note: the workspace default members are the CLI and devflow-core. The GPUI
+# desktop app (devflow-gui) is built explicitly: `mise run gui:build`. On Linux
+# it needs system libraries (see .github/workflows/ci.yml), so exclude it there
+# with `--exclude devflow-gui`.
 
 [tasks.build]
-description = "Build the project (debug)"
+description = "Build the CLI and core (debug)"
 run = "cargo build"
 
 [tasks."build:release"]
-description = "Build the project (release, optimized)"
+description = "Build the CLI and core (release, optimized)"
 run = "cargo build --release"
 
 [tasks.test]
-description = "Run all tests"
-run = "cargo test --workspace"
+description = "Run unit and integration tests for the CLI and core (Docker tests are ignored)"
+run = "cargo test --locked -p devflow -p devflow-core"
+
+[tasks."test:docker"]
+description = "Run the PostgreSQL integration tests that need Docker"
+run = "cargo test -p devflow-core --test db_postgres -- --ignored --test-threads=1"
 
 [tasks.check]
 description = "Run cargo check (fast compile check)"
@@ -56,7 +40,7 @@ run = "cargo check --workspace"
 
 [tasks.lint]
 description = "Run clippy lints"
-run = "cargo clippy --workspace --all-targets -- -D warnings"
+run = "cargo clippy --locked --workspace --all-targets -- -D warnings"
 
 [tasks.fmt]
 description = "Format code"
@@ -64,7 +48,7 @@ run = "cargo fmt"
 
 [tasks."fmt:check"]
 description = "Check code formatting without modifying"
-run = "cargo fmt -- --check"
+run = "cargo fmt --check"
 
 [tasks.dev]
 description = "Build and run devflow (debug)"
@@ -75,36 +59,21 @@ raw = true
 description = "Clean build artifacts"
 run = "cargo clean"
 
-[tasks."generate-llms"]
-description = "Generate llms.txt and llms-full.txt from source"
-depends = ["build"]
-run = "./scripts/generate-llms-txt.sh"
-
-[tasks."generate-llms:check"]
-description = "Verify llms.txt files are up to date"
-depends = ["build"]
-run = "./scripts/generate-llms-txt.sh --check"
-
-[tasks."gui"]
-description = "Run the desktop GUI in development mode (hot-reload)"
-depends = ["gui:install"]
-run = "cargo tauri dev"
+[tasks.gui]
+description = "Run the desktop app (GPUI, debug)"
+run = "cargo run -p devflow-gui"
+raw = true
 
 [tasks."gui:build"]
-description = "Build the desktop GUI for production (release binary + app bundle)"
-depends = ["gui:install"]
-run = "cargo tauri build"
-
-[tasks."gui:install"]
-description = "Install frontend dependencies for the desktop GUI"
-run = "cd ui && bun install --frozen-lockfile"
+description = "Build the desktop app (release binary: target/release/devflow-gui)"
+run = "cargo build --release -p devflow-gui"
 
 [tasks.ci]
-description = "Run full CI pipeline (fmt check + clippy + test)"
+description = "Run the CI checks locally (fmt check + clippy + tests)"
 run = """
-cargo fmt -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo fmt --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked -p devflow -p devflow-core
 """
 
 [tasks.install]

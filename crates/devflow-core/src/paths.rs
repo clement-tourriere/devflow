@@ -1,45 +1,24 @@
-//! Shared filesystem locations for devflow's user-level files.
-
+//! Machine-local directories. `DEVFLOW_CONFIG_DIR` and `DEVFLOW_DATA_DIR`
+//! override the platform defaults (tests use them for isolation).
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-/// The devflow user config directory (workspace registry, hook approvals,
-/// global config, daemon pid/status files).
-///
-/// Honors `DEVFLOW_CONFIG_DIR` so tests and sandboxed environments can
-/// redirect every user-level file at once; defaults to
-/// `<platform config dir>/devflow` (e.g. `~/.config/devflow`).
-pub fn devflow_config_dir() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var("DEVFLOW_CONFIG_DIR") {
-        if !dir.trim().is_empty() {
-            return Ok(PathBuf::from(dir));
-        }
+/// Projects registry and hook trust.
+pub fn config_dir() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("DEVFLOW_CONFIG_DIR") {
+        return Ok(PathBuf::from(dir));
     }
     Ok(dirs::config_dir()
-        .context("Failed to get user config directory")?
+        .context("no configuration directory for this platform")?
         .join("devflow"))
 }
 
-// Canonicalize the existing prefix without materializing the planned directory.
-pub(crate) fn resolve_expected_path(path: &Path) -> Result<PathBuf> {
-    for ancestor in path.ancestors() {
-        match ancestor.canonicalize() {
-            Ok(mut prefix) => {
-                for part in path.strip_prefix(ancestor)?.components() {
-                    match part {
-                        std::path::Component::ParentDir => {
-                            prefix.pop();
-                        }
-                        std::path::Component::Normal(name) => prefix.push(name),
-                        std::path::Component::CurDir => (),
-                        _ => anyhow::bail!("Invalid workspace path"),
-                    }
-                }
-                return Ok(prefix);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-            Err(error) => return Err(error.into()),
-        }
+/// Managed Postgres servers (compose files, admin credentials).
+pub fn data_dir() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("DEVFLOW_DATA_DIR") {
+        return Ok(PathBuf::from(dir));
     }
-    anyhow::bail!("Workspace path has no existing parent")
+    Ok(dirs::data_dir()
+        .context("no data directory for this platform")?
+        .join("devflow"))
 }

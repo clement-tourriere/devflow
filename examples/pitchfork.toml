@@ -1,0 +1,15 @@
+# pitchfork.toml: long-running processes. devflow does not supervise processes;
+# pitchfork discovers each worktree and namespaces its daemons, so the same file
+# works in every worktree and the daemons never collide.
+#
+# `mise exec --` loads .devflow/env (see mise.toml), so each daemon talks to the
+# database branch of the worktree it runs in.
+#
+# Ready checks, retries, schedules and the HTTPS proxy are pitchfork options;
+# see its documentation.
+
+[daemons.api]
+run = "mise exec -- bun run dev"
+
+[daemons.worker]
+run = "mise exec -- bun run worker"

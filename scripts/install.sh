@@ -6,9 +6,11 @@
 #   curl -fsSL https://raw.githubusercontent.com/clement-tourriere/devflow/main/scripts/install.sh | sh
 #
 # Options (environment variables, or a version as the first argument):
-#   DEVFLOW_VERSION      Release tag to install (e.g. v0.5.0). Default: latest
-#   DEVFLOW_INSTALL_PROXY  Set to 1 to install the optional proxy companion
+#   DEVFLOW_VERSION      Release tag to install (e.g. v1.0.0). Default: latest
 #   DEVFLOW_INSTALL_DIR  Install directory. Default: ~/.local/bin
+#
+# Installs the `devflow` CLI only. The desktop app (devflow-gui) is built from
+# source: cargo build --release -p devflow-gui
 #
 # Upgrade by rerunning this installer.
 
@@ -47,17 +49,17 @@ main() {
             case "$arch" in
                 x86_64 | amd64) asset="devflow-linux-amd64" ;;
                 aarch64 | arm64) asset="devflow-linux-arm64" ;;
-                *) err "unsupported Linux architecture: $arch (install from source: cargo install --git https://github.com/$REPO)" ;;
+                *) err "unsupported Linux architecture: $arch (install from source: cargo install --git https://github.com/$REPO devflow)" ;;
             esac
             ;;
         Darwin)
             case "$arch" in
                 arm64) asset="devflow-macos-arm64" ;;
-                *) err "unsupported macOS architecture: $arch — Apple Silicon only (install from source: cargo install --git https://github.com/$REPO)" ;;
+                *) err "unsupported macOS architecture: $arch — Apple Silicon only (install from source: cargo install --git https://github.com/$REPO devflow)" ;;
             esac
             ;;
         *)
-            err "unsupported operating system: $os (install from source: cargo install --git https://github.com/$REPO)"
+            err "unsupported operating system: $os (install from source: cargo install --git https://github.com/$REPO devflow)"
             ;;
     esac
 
@@ -105,25 +107,6 @@ main() {
 
     installed_version="$("$install_dir/devflow" --version)"
     say "Installed $installed_version to $install_dir/devflow"
-
-    if [ "${DEVFLOW_INSTALL_PROXY:-0}" = "1" ]; then
-        proxy_asset="$asset-proxy"
-        download "$base_url/$proxy_asset" "$tmp_dir/devflow-proxy"
-        download "$base_url/$proxy_asset.sha256" "$tmp_dir/devflow-proxy.sha256"
-        expected="$(awk '{print $1}' "$tmp_dir/devflow-proxy.sha256")"
-        if command -v sha256sum >/dev/null 2>&1; then
-            actual="$(sha256sum "$tmp_dir/devflow-proxy" | awk '{print $1}')"
-        else
-            actual="$(shasum -a 256 "$tmp_dir/devflow-proxy" | awk '{print $1}')"
-        fi
-        [ "$actual" = "$expected" ] || err "checksum mismatch for $proxy_asset"
-        chmod +x "$tmp_dir/devflow-proxy"
-        "$tmp_dir/devflow-proxy" --version >/dev/null 2>&1 || err "proxy companion failed to run"
-        staged="$install_dir/.devflow-proxy-install.$$"
-        cp "$tmp_dir/devflow-proxy" "$staged" || err "cannot write to $install_dir"
-        mv -f "$staged" "$install_dir/devflow-proxy"
-        say "Installed optional proxy to $install_dir/devflow-proxy"
-    fi
 
     case ":$PATH:" in
         *":$install_dir:"*) ;;

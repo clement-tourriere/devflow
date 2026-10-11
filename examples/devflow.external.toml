@@ -1,0 +1,50 @@
+# devflow.toml for a project that uses an existing PostgreSQL 18 server, for
+# example an always-on data host shared by laptops and sandboxes.
+# See docs/REMOTE.md for the server setup.
+
+[project]
+name = "shop"
+# Placeholder shared by the examples: replace it with the id `devflow init` writes
+# for your project. A copied id makes two projects share one registry entry and
+# one set of database records on the server.
+id = "0b3c9d2e-7f4a-4c1e-9a52-6d1f3b8e2a40"
+
+[worktree]
+dir = "../{project}.worktrees"
+copy = [".env"]
+
+[postgres]
+mode = "external"
+# Never commit credentials. The admin (provisioner) URL belongs in the
+# git-ignored devflow.local.toml, or in the DEVFLOW_PG_ADMIN_URL environment
+# variable, on trusted machines only.
+#
+# Host written into workspace URLs when it differs from the admin endpoint:
+app_host = "db.tailnet.example"
+# app_port = 5432                # port written into workspace URLs, if different from the admin endpoint
+database = "shop"
+# Cloning a database that has open sessions: external servers default to "fail".
+# on_busy_source = "disconnect"
+require_cow = true               # refuse branches unless the server's CoW is verified
+
+[hooks]
+setup = ["mise trust", "mise install", "bun install", "mise run db:migrate"]
+timeout = "15m"
+
+# --- devflow.local.toml (beside this file, git-ignored, per machine) ----------
+#
+# It holds the admin password, so git-ignore it (`devflow init` does not edit
+# .gitignore). It overlays every section, [hooks] included.
+#
+# [postgres]
+# admin_url = "postgres://prov:PASSWORD@db.internal:5432/postgres"
+# # The server needs file_copy_method = clone on a reflink filesystem (btrfs, XFS
+# # with reflink, ZFS 2.2+). devflow cannot measure an external server, so declare
+# # the result of your own check. `devflow doctor` shows it as declared.
+# cow = "verified"
+#
+# --- on the server, once ------------------------------------------------------
+#
+# ALTER SYSTEM SET file_copy_method = 'clone';
+# SELECT pg_reload_conf();
+# CREATE ROLE prov LOGIN PASSWORD '...' CREATEDB CREATEROLE;

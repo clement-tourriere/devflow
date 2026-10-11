@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+"""Synchronize the devflow version across Cargo manifests and Cargo.lock.
+
+Usage: scripts/sync-version.py <new-version>
+
+The workspace has three versioned packages, each with its own manifest:
+
+    Cargo.toml                       [package]  devflow       (root, CLI)
+    crates/devflow-core/Cargo.toml   [package]  devflow-core
+    crates/devflow-gui/Cargo.toml    [package]  devflow-gui
+
+The root manifest also contains `[workspace.package]`, which carries no version
+today (the script reads `[package]`). If the root ever moves its version into
+`[workspace.package]`, the script updates that table instead.
+
+Files are only rewritten when their content changes, so running the script
+with the current version is a no-op.
+"""
 
 import re
 import sys
@@ -7,11 +24,18 @@ from pathlib import Path
 
 TARGET_PACKAGES = {
     "devflow",
-    "devflow-app",
     "devflow-core",
-    "devflow-proxy",
-    "devflow-terminal",
+    "devflow-gui",
 }
+
+# Manifests that own a version, relative to the repository root.
+MANIFESTS = [
+    "Cargo.toml",
+    "crates/devflow-core/Cargo.toml",
+    "crates/devflow-gui/Cargo.toml",
+]
+
+VERSION_TABLES = {"[package]", "[workspace.package]"}
 
 
 def validate_version(version: str) -> None:
@@ -22,35 +46,37 @@ def validate_version(version: str) -> None:
 
 
 def update_package_version_toml(file_path: Path, new_version: str) -> bool:
+    """Set `version = "..."` in `[package]` (or `[workspace.package]`).
+
+    Returns True if the file changed. Raises if no version line is found.
+    """
     lines = file_path.read_text(encoding="utf-8").splitlines(keepends=True)
 
-    in_package = False
+    in_table = False
     found = False
     changed = False
 
     for index, line in enumerate(lines):
         stripped = line.strip()
 
-        if stripped == "[package]":
-            in_package = True
+        if stripped.startswith("["):
+            in_table = stripped in VERSION_TABLES
             continue
 
-        if in_package and stripped.startswith("["):
-            in_package = False
-
-        if in_package and stripped.startswith("version"):
-            match = re.match(r'^(\s*version\s*=\s*")([^"]+)("\s*)$', line)
+        if in_table and re.match(r"version\s*=", stripped):
+            match = re.match(r'^(\s*version\s*=\s*")([^"]+)("\s*)$', line.rstrip("\n"))
             if not match:
                 raise ValueError(f"Failed to parse version line in {file_path}")
 
             found = True
             if match.group(2) != new_version:
-                lines[index] = f"{match.group(1)}{new_version}{match.group(3)}"
+                newline = "\n" if line.endswith("\n") else ""
+                lines[index] = f"{match.group(1)}{new_version}{match.group(3)}{newline}"
                 changed = True
             break
 
     if not found:
-        raise ValueError(f"Could not find [package] version in {file_path}")
+        raise ValueError(f"Could not find a package version in {file_path}")
 
     if changed:
         file_path.write_text("".join(lines), encoding="utf-8")
@@ -58,53 +84,24 @@ def update_package_version_toml(file_path: Path, new_version: str) -> bool:
     return changed
 
 
-def update_json_version(file_path: Path, new_version: str) -> bool:
-    text = file_path.read_text(encoding="utf-8")
-    updated, count = re.subn(
-        r'("version"\s*:\s*")[^"]+(")',
-        rf"\g<1>{new_version}\2",
-        text,
-        count=1,
-    )
-    if count != 1:
-        raise ValueError(f"Could not update JSON version in {file_path}")
-    file_path.write_text(updated, encoding="utf-8")
-    return True
-
-
-def update_llms_version(file_path: Path, new_version: str) -> bool:
-    text = file_path.read_text(encoding="utf-8")
-    updated, count = re.subn(
-        r"(^> Version:\s+)([^\n]+)$",
-        rf"\g<1>{new_version}",
-        text,
-        count=1,
-        flags=re.MULTILINE,
-    )
-    if count != 1:
-        raise ValueError(f"Could not update llms version in {file_path}")
-    file_path.write_text(updated, encoding="utf-8")
-    return True
-
-
 def update_cargo_lock(file_path: Path, new_version: str) -> bool:
     text = file_path.read_text(encoding="utf-8")
 
+    names = "|".join(re.escape(name) for name in sorted(TARGET_PACKAGES))
     pattern = re.compile(
-        r'(?m)^(\[\[package\]\]\nname = "(?P<name>devflow|devflow-app|devflow-core|devflow-proxy|devflow-terminal)"\nversion = ")(?P<version>[^"]+)(")'
+        rf'(?m)^(\[\[package\]\]\nname = "(?P<name>{names})"\nversion = ")(?P<version>[^"]+)(")'
     )
 
-    def repl(match: re.Match[str]) -> str:
-        name = match.group("name")
-        if name not in TARGET_PACKAGES:
-            return match.group(0)
-        return f"{match.group(1)}{new_version}{match.group(4)}"
-
-    updated, count = pattern.subn(repl, text)
+    updated, count = pattern.subn(
+        lambda m: f"{m.group(1)}{new_version}{m.group(4)}", text
+    )
     if count != len(TARGET_PACKAGES):
         raise ValueError(
             f"Expected {len(TARGET_PACKAGES)} devflow package entries in {file_path}, found {count}"
         )
+
+    if updated == text:
+        return False
 
     file_path.write_text(updated, encoding="utf-8")
     return True
@@ -125,20 +122,9 @@ def main() -> int:
 
     root = Path(__file__).resolve().parent.parent
 
-    toml_files = [
-        root / "Cargo.toml",
-        root / "crates/devflow-core/Cargo.toml",
-        root / "crates/devflow-proxy/Cargo.toml",
-        root / "crates/devflow-terminal/Cargo.toml",
-        root / "src-tauri/Cargo.toml",
-    ]
+    for relative in MANIFESTS:
+        update_package_version_toml(root / relative, new_version)
 
-    for file_path in toml_files:
-        update_package_version_toml(file_path, new_version)
-
-    update_json_version(root / "src-tauri/tauri.conf.json", new_version)
-    update_json_version(root / "ui/package.json", new_version)
-    update_llms_version(root / "llms-full.txt", new_version)
     update_cargo_lock(root / "Cargo.lock", new_version)
 
     print(f"Synchronized project version to {new_version}")

@@ -4,306 +4,204 @@
 
 <h1 align="center">devflow</h1>
 
-<p align="center">Create, switch, inspect, and clean up isolated development workspaces with matching local services.</p>
+<p align="center">Git worktrees with their own database, created in seconds.</p>
 
 <p align="center">
-  <a href="https://clement-tourriere.github.io/devflow/">Documentation</a> ·
-  <a href="docs/CLI.md">CLI reference</a> ·
   <a href="AGENTS.md">Agent guide</a> ·
+  <a href="docs/MIGRATING.md">Migrating from 0.x</a> ·
+  <a href="docs/REMOTE.md">Remote data hosts</a> ·
+  <a href="docs/ARCHITECTURE.md">Architecture</a> ·
   <a href="CHANGELOG.md">Changelog</a>
 </p>
 
-## What is devflow?
+<p align="center">
+  <img src="docs/images/gui-workspaces.png" alt="The devflow desktop app listing the workspaces of a project: ready, not set up and needs-attention states, and the phases of a workspace that was just created from a snapshot" width="900" />
+</p>
 
-devflow is a workspace orchestrator for local development. Every workspace is a materialized directory — a Git worktree or Jujutsu workspace — with its own service containers, connection strings, generated env files, processes, and stable HTTPS URLs. The primary checkout is the default workspace; every additional Git workspace is a linked worktree.
+## What it does
 
-```bash
-devflow switch -c feature/auth
-# → VCS ref created, worktree at ../myapp.feature_auth_fc659bd73585
-# → postgres workspace cloned from main (Copy-on-Write, near-instant)
-# → hooks wrote .env.local with the new DATABASE_URL
-# → your shell is now inside the worktree
-```
+devflow prepares an isolated development environment for each branch of a Git repository. It does four things, plus a desktop app:
 
-Work on multiple features, reviews, migrations, or AI-agent tasks in parallel — without sharing a database or stashing state. Drive it from the CLI, a terminal dashboard (`devflow tui`), or a desktop GUI.
+1. **Worktrees.** Create, list and remove Git worktrees. Removal always refuses the default workspace and the one you are standing in. Dirty or locked worktrees need `--force`.
+2. **Copy-on-write payloads.** Clone the ignored paths you list (`node_modules`, `.env`, build output) from the source worktree with APFS `clonefile` or Linux `FICLONE`. If the filesystem cannot share blocks, devflow copies.
+3. **Postgres branches.** One PostgreSQL 18 server per project. Each workspace gets its own database, created with `CREATE DATABASE … TEMPLATE … STRATEGY FILE_COPY` and `file_copy_method = clone`, so on a reflink filesystem the new database shares blocks with its source.
+4. **Hooks.** Trusted shell commands with `DATABASE_URL` in the environment: `setup` runs once in a new worktree, `switch` on every `devflow switch` into an existing ready workspace (and once after `switch -c` reaches ready), `teardown` before removal.
 
-Default CLI builds include local services, the native process supervisor, and the TUI. Optional build features are `proxy`, `service-neon`, `service-xata`, and `service-dblab`; use `cargo build --all-features` for all integrations. Use Git and your preferred editor or agent for commits.
+`devflow-gui` is a native desktop app (GPUI) over the same core: projects, workspaces, database branches and snapshots, setup logs and config editing.
 
-For separate code/data origins, explicit adoption of existing resources, and interrupted-operation recovery, see [Data ownership and recovery](docs-site/src/content/docs/guides/ownership-and-recovery.md).
+## Why so little
 
-## How it works
+The [jdx](https://github.com/jdx) tools now cover the rest, so devflow no longer builds it:
 
-1. `devflow switch -c feature-x` creates a Git worktree or jj workspace from the selected parent. `devflow switch feature-x` reuses one that already exists.
-2. devflow creates or switches the matching service workspaces for every configured service.
-3. Lifecycle hooks fire inside the target directory — write `.env.local`, run migrations, open a tmux window.
-4. The shell wrapper `cd`s you into that directory.
-
-Every workspace's app is reachable at a predictable HTTPS URL, every workspace's database at its own connection string — and `devflow remove` cleans all of it up.
-
-## Highlights
-
-- **Git and jj workspaces** — embedded Git and Jujutsu libraries manage linked worktrees and native workspaces without CLI helpers, and manually created worktrees can be adopted without an in-place checkout mode
-- **Two isolation models, chosen per service** — physical (a Copy-on-Write Docker container per workspace) or logical (one shared global engine with a database, bucket, or DB index per workspace)
-- **Multi-service** — PostgreSQL, ClickHouse, MySQL, Redis, RustFS object storage, any Docker image, or custom plugin providers; cloud branching via Neon/DBLab/Xata (experimental)
-- **Project processes** — workspace-scoped web servers, workers, and schedulers with native start/stop/status/logs, ready checks, dependency ordering, port bumping, and service env interpolation
-- **Managed worktrees** — per-workspace directories from a path template, with configured payloads and caches whose inputs are checked before reuse; broad ignored-file and AI-directory copying is disabled by default
-- **Lifecycle hooks** — MiniJinja-templated commands and built-in actions at every phase, with conditions, an approval system, and recipes that detect your project's stack
-- **Optional HTTPS proxy** — discover Docker containers and host processes through `https://name.localhost` URLs; inspect CA setup instructions and configure trust with your system tools
-- **Controller daemon** — `devflow daemon start` keeps every registered project's shared engines and process desired state reconciled
-- **Seeding** — initialize databases from a PostgreSQL URL, a local dump file, or S3
-- **Built for AI agents** — `--json` and `--non-interactive` everywhere, literal-argument execution, saved operation recovery, and isolated workspace commands
-
-Cloud branching providers and plugin providers are newer and still maturing — check `devflow --help-all` and the changelog for what is available in your build.
-
-### v0.8.0 validation status
-
-| Area | Status |
+| Need | Use |
 | --- | --- |
-| macOS core workflows and local Docker fixtures | Tested: Rust, Docker, CLI, UI build and documentation checks passed |
-| Linux real-project use, including ZFS, XFS and Btrfs | **Untested**; automated Linux CI checks run separately |
-| Neon, DBLab and Xata live accounts | **Untested**; providers remain experimental and require optional build features |
-| Interactive desktop session | **Untested**; compilation, frontend build and result-handling tests passed |
+| Run dev servers, workers and schedulers; HTTPS names like `api.feature-x.shop.localhost` | [pitchfork](https://pitchfork.jdx.dev) daemons and its proxy |
+| Install toolchains and dependencies, run tasks | [mise](https://mise.jdx.dev): `mise install`, `mise deps`, `mise run` |
+| Share Rust build caches between checkouts | [Mr. Boxington](https://mr-boxington.jdx.dev) (`mbx`) |
 
-See the [v0.8.0 release notes](docs/releases/v0.8.0.md) for changes, migration notes and validation details.
+None of them creates a worktree, prepares it, or branches database data. devflow does that and writes `.devflow/env` so those tools can pick up the result.
 
 ## Install
 
-```bash
+devflow embeds libgit2, so the `git` binary is not required. Managed Postgres needs Docker (or a compatible engine such as OrbStack); external mode needs a PostgreSQL 18 server instead.
+
+```sh
+# CLI release binary (Linux x86_64/arm64, macOS Apple Silicon) -> ~/.local/bin
 curl -fsSL https://raw.githubusercontent.com/clement-tourriere/devflow/main/scripts/install.sh | sh
+
+# or from source
+git clone https://github.com/clement-tourriere/devflow.git && cd devflow
+cargo install --path .
+
+# desktop app (macOS 15+; not part of the release binaries)
+cargo build --release -p devflow-gui        # target/release/devflow-gui
 ```
 
-Installs the latest release binary to `~/.local/bin` (override with `DEVFLOW_INSTALL_DIR`; pin a release with `DEVFLOW_VERSION=v0.5.0`). Supported platforms: Linux (x86_64, arm64) and macOS (Apple Silicon) — see [Install from source](#install-from-source) for everything else.
+`devflow gui` starts the app; `devflow-gui` must be next to the `devflow` binary or on `PATH`. Linux needs Wayland or X11 with Vulkan for the GUI and is not yet advertised as supported. Set `DEVFLOW_INSTALL_DIR` or `DEVFLOW_VERSION` to change the installer's target or pin a release.
 
-Update at any time with:
+Optional shell integration, so `devflow switch` changes your directory:
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/clement-tourriere/devflow/main/scripts/install.sh | sh
+```sh
+eval "$(devflow shell-init zsh)"     # or bash, fish
 ```
 
 ## Quick start
 
-```bash
-# 1. Initialize a repository (prints guided next steps)
-cd ~/my-project
-devflow init
-
-# 2. Validate setup and generate agent guidance
-devflow doctor
-devflow agent skill --target all
-
-# 3. Create a workspace with isolated services
-devflow switch -c feature/auth
-
-# 4. Inspect the environment
-devflow status
-
-# 4. Print connection details for scripts or .env files
-devflow connection feature/auth --format env
-
-# 5. When the work is done, clean everything up in one step
-devflow remove feature/auth
+```sh
+cd ~/code/shop                        # any Git repository
+devflow init --postgres managed       # writes devflow.toml with a stable project id (--name sets the name)
+devflow db up                         # start the project's PostgreSQL 18 container
+devflow trust                         # review and approve the [hooks] commands
+devflow switch -c feature/x           # worktree + payload + database branch + .devflow/env + setup hooks
+devflow list                          # workspaces, status, database, path
+devflow remove feature/x              # teardown hooks, drop the branch's database, remove the worktree
 ```
 
-Install shell integration so `devflow switch` can move your shell into the selected workspace directory:
+<p align="center">
+  <img src="docs/images/cli-switch.png" alt="Output of devflow switch -c feature/billing: worktree created, payload cloned, database branch cloned from main, env written, setup and switch hooks run, then the shell changes into the new worktree" width="760" />
+</p>
 
-```bash
-eval "$(devflow shell-init)"
+`devflow switch -c` prints the new worktree path (`devflow path feature/x` prints it again). The directory is the sanitized workspace name (`feature/x` becomes `feature-x`), so use the printed path rather than building it. The generated `.devflow/env` holds `DATABASE_URL`, the `PG*` variables and `DEVFLOW_*` identifiers. The directory ignores itself, so it never shows up in `git status`.
+
+A minimal `devflow.toml` (see [`examples/`](examples) for complete ones):
+
+```toml
+[project]
+name = "shop"
+id = "0b3c9d2e-…"                # written by `devflow init`
+
+[worktree]
+dir = "../{project}.worktrees"   # relative to the main checkout; absolute and ~/ paths work too
+copy = [".env", "node_modules"]  # cloned from the source worktree; omit to copy nothing (init writes [".env"])
+
+[postgres]
+mode = "managed"                 # or "external"
+image = "postgres:18"
+
+[hooks]
+setup = ["mise trust", "mise install", "bun install"]
+teardown = []
 ```
 
-## Everyday commands
+Machine-local overrides (an admin URL, a declared `cow`) go in `devflow.local.toml` beside it. It overlays every section, `[hooks]` included (tables merge, lists are replaced), and hook approval covers the merged result. It can hold an admin password, so keep it out of Git: `devflow init` does not edit `.gitignore` (this repository's `.gitignore` lists it; add it to yours).
 
-```bash
-devflow switch                  # Pick a workspace interactively
-devflow switch -c feature/api    # Create and switch to a workspace
-devflow --json plan feature/api  # Preview code, data, paths, and setup requirements
-devflow list                    # Parent tree with paths, services, and process health
-devflow status                  # Show current workspace information
-devflow connection feature/api   # Show service connection info
-devflow remove feature/api       # Remove workspace resources
-devflow doctor                  # Diagnose Docker, VCS, and config issues
-devflow tui                     # Open the terminal dashboard
+### Database branches
+
+A new workspace's database is a clone of the database of the workspace its code comes from (`--from`, else the default workspace), unless you pass `--data-from WS|snapshot:NAME[@vN]|branch:ID|empty`. The default workspace's database is created empty the first time something needs it: `switch -c` (which warns about it) or `devflow setup` in the main checkout.
+
+Cloning needs the source database to have no open sessions. For a managed server bound to loopback, `on_busy_source` defaults to `disconnect`: creating a workspace from a live workspace terminates the open sessions of the source database. For external or non-loopback servers the default is `fail` and the clone is refused. Set `on_busy_source` under `[postgres]` to choose.
+
+### Commands
+
+| Command | Purpose |
+| --- | --- |
+| `init`, `trust`, `hook install\|uninstall` | Create the config (`--name` sets the project name, `--hook` also installs the Git hook), approve hooks (`-y` skips the question), install the post-checkout hook |
+| `switch [-c] NAME`, `list [--all]`, `path NAME` | Create, enter and inspect workspaces; `--all` lists every registered project |
+| `remove NAME` | Delete a workspace; `--keep-data` keeps its database branch, `--delete-branch` also deletes the Git branch, `--force` overrides dirty, locked and failing-teardown protections |
+| `setup` | Run the same pipeline in an existing worktree (adopt, resume, fork) |
+| `db status\|up\|down\|url\|psql\|reset\|reconcile` | Manage the server and a workspace's database |
+| `db snapshot create\|list\|delete`, `db branch list\|create\|delete` | Reusable seed data and explicit branch control |
+| `doctor`, `shell-init`, `completions SHELL`, `gui` | Diagnostics, shell integration, shell completions, desktop app |
+
+All inspection and mutation commands accept `--json`; `db psql`, `shell-init`, `completions` and `gui` do not. Run `devflow --help` for flags.
+
+## Desktop app
+
+`devflow gui` (or `devflow-gui --project PATH`) opens the same operations in a window: create, set up and remove workspaces, approve hooks, follow each phase, start and stop the managed server, manage snapshots, and edit `devflow.toml`.
+
+<p align="center">
+  <img src="docs/images/gui-new-workspace.png" alt="New workspace dialog: a name, the workspace the code comes from, and where the data comes from (same as the code, empty, another workspace or a snapshot)" width="760" />
+</p>
+
+Code and data origins are chosen separately, as with `--from` and `--data-from`.
+
+<p align="center">
+  <img src="docs/images/gui-database.png" alt="Database page: the managed PostgreSQL 18 server with file_copy_method clone and copy-on-write verified, four branches with their sources, and a snapshot" width="760" />
+</p>
+
+The Database page shows the server, whether clones share blocks (measured on this machine), every branch with its source, and the snapshots.
+
+## Copy-on-write, measured
+
+Branch creation speed and disk cost depend on the filesystem under the PostgreSQL data directory. devflow measures instead of assuming and reports `verified`, `copy` or `unknown`.
+
+Benchmark (OrbStack, btrfs volume, PostgreSQL 18): a 392 MB database cloned in **0.93 s** and used **+0.2 MB** on disk. The default `WAL_LOG` strategy used +370 MB on the same database. `FILE_COPY` forces a checkpoint, so latency also depends on server activity. Your numbers will differ.
+
+| PostgreSQL data directory on | Result |
+| --- | --- |
+| Managed server on OrbStack (named volume on btrfs) | `verified` |
+| Linux btrfs, XFS with reflink, or ZFS 2.2+ | `verified` |
+| ext4 | `copy`: a full copy per branch |
+| Docker Desktop, or a macOS bind mount (virtiofs) | `copy`: a full copy per branch |
+| External server | `unknown`, unless you declare `cow = "verified"` in `devflow.local.toml` |
+
+Worktree payloads are cloned with `clonefile` on APFS and `FICLONE` on btrfs, XFS with reflink and ZFS 2.2+; on other filesystems they are copied.
+
+`devflow doctor` reports the capability it found and whether it was measured or declared. Set `require_cow = true` under `[postgres]` to refuse branch creation when CoW is not verified. Without CoW, branches still work; they take longer and use the full database size.
+
+## Composing with pitchfork and mise
+
+devflow's job ends at `.devflow/env`. Let mise load it for every command in the worktree:
+
+```toml
+# mise.toml
+[tools]
+bun = "1.2"
+
+[env]
+_.file = ".devflow/env"
 ```
 
-Run `devflow --help-all` to see advanced service, hook, proxy, agent, and config commands.
+Declare daemons in a committed `pitchfork.toml`; pitchfork discovers each worktree and namespaces its daemons:
 
-`devflow --json list` has one stable document shape regardless of service count. It includes `schema_version`, project/VCS context, `context_workspace`, `default_workspace`, `roots`, workspace nodes, and `warnings`. Workspace names remain the raw VCS names users typed; a separate backend `service_key` is used for databases, containers, and generated paths. `identity_status` and `canonical_service_key` distinguish new canonical keys from safely retained or unresolved legacy identities. Parent relationships record immutable creation provenance, so children stay attached to their recorded parent even if that parent is later missing.
-
-`devflow --json plan agent/task --from main --data-from baseline:clean@2` previews an exact baseline selection before creating resources. Incomplete operations can be inspected and resumed with `devflow operation`; cancellation is limited to failures proven to have made no resource changes. The desktop exposes baseline selection and workspace recovery through the same core API. See [ownership and recovery](docs-site/src/content/docs/guides/ownership-and-recovery.md).
-
-## Services
-
-devflow can manage named services per workspace. Two models are available, per service:
-
-- `type: local` — one Copy-on-Write Docker container per workspace (Postgres, ClickHouse, MySQL, or any image). Strong isolation, instant clones via APFS, ZFS, Btrfs, or XFS.
-- `type: shared` — one global container per engine; each workspace gets a logical boundary created on the fly: a Postgres database (`CREATE DATABASE … TEMPLATE parent` keeps branch-from-parent semantics), a Redis DB index, a RustFS (S3-compatible) bucket, or a ClickHouse database.
-
-```bash
-devflow service add app-db --provider local --service-type postgres
-devflow service create feature/auth
-devflow service connection feature/auth
-devflow service seed main --from dump.sql   # or a postgres:// URL, or s3://
-devflow service logs feature/auth
-devflow service reset feature/auth
-
-devflow service up                 # ensure all shared global engines are running
-devflow daemon start               # keep engines/process watch+retry running in the background
+```toml
+# pitchfork.toml
+[daemons.api]
+run = "mise exec -- bun run dev"
 ```
 
-Connection information can be emitted as URI, env, or JSON output for scripts and tooling.
+The daemon sees `DATABASE_URL` through mise, in every worktree, with its own database. The GUI lists a workspace's pitchfork daemons and can start and stop them. Ready checks, retries and proxy settings are pitchfork options; see its documentation.
 
-## Processes
+## Agents and automation
 
-For complex projects, devflow can also manage workspace-scoped project processes — app servers, frontend dev servers, background workers, and schedulers — without Docker:
-
-```yaml
-processes:
-  auto_start: true
-  daemons:
-    api:
-      run: "npm run dev"
-      port: { expect: [3000], bump: 50 }
-      ready_http: "http://127.0.0.1:3000/health"
-      env:
-        DATABASE_URL: "{{ service['app-db'].url }}"
-    worker:
-      run: "npm run worker"
-      required: false
-      depends: [api]
+```sh
+devflow --json --non-interactive switch -c agent/fix-login   # read workspace.path from the output
 ```
 
-```bash
-devflow process start --all
-devflow process status
-devflow process logs api --tail 100 --follow
-devflow process stop --all
-```
+- `--json` prints one versioned document; `--non-interactive` disables prompts. Exit code 2 means the workspace is not `ready` (`needs_attention` or `in_progress`).
+- Untrusted `[hooks]` are skipped in non-interactive mode and the workspace is marked `needs_attention`. Run `devflow trust` once (`-y`/`--yes` approves without asking), or set `DEVFLOW_TRUST_HOOKS=1` for a single run in CI.
+- Worktrees created by other tools (T3 Code, Claude Code, plain `git worktree add`) are prepared by a `post-checkout` hook: `devflow hook install` once, or `devflow init --hook`. The hook does nothing unless `devflow` is on the `PATH` of the process running Git.
 
-When `processes.auto_start: true`, `devflow switch` starts configured processes after services and hooks are aligned. Auto-started commands use the same approval store as hooks, so agents can pre-approve with `devflow hook approvals add "npm run dev"` or set `DEVFLOW_APPROVE_HOOKS=1`. The desktop and CLI share native runtime records. Running processes with ports are also exposed through the devflow proxy as `https://<process>.<workspace>.<project>.<suffix>` (default suffix: `.localhost`). `devflow remove` preflights the worktree, runs removal hooks while the directory still exists, stops processes, deletes services, and only then removes the worktree and VCS ref. Run `devflow daemon start` to keep desired-state, `watch` restart-on-change, and `retry` reconciliation active in the background. See [Project processes](https://clement-tourriere.github.io/devflow/guides/processes/) and [Adding devflow to an existing project](https://clement-tourriere.github.io/devflow/getting-started/existing-project/) for Compose-to-devflow migration examples.
+See [AGENTS.md](AGENTS.md) for the full contract and [`examples/agent-task.sh`](examples/agent-task.sh) for a script.
 
-## Hooks and automation
+## Remote data hosts
 
-Hooks run during workspace lifecycle phases such as creation and switching. They can write env files, run migrations, or execute project-specific commands — templated with MiniJinja, gated by an approval system, and installable via recipes that detect your project's stack (`devflow hook setup`).
+Run PostgreSQL 18 on an always-on machine with a reflink filesystem and branch from laptops, VM forks or cloud sandboxes. A trusted machine holds the admin credentials and provisions branches; a sandbox receives only its branch URL. There is no TLS in 1.0, so use a private network. See [docs/REMOTE.md](docs/REMOTE.md).
 
-```bash
-devflow hook show
-devflow hook explain post-switch
-devflow hook vars
-devflow hook run post-create       # run a phase manually
-```
+## What changed in 1.0
 
-## Built for AI agents
-
-Every command supports `--json` and `--non-interactive`, and the worktree-per-task pattern gives each agent an isolated directory, database, and env file:
-
-```bash
-devflow --json --non-interactive switch -c agent/task-42   # isolated env for the task
-devflow agent context --format json                        # project + connection context for the agent
-devflow switch -c agent/fix-login -x claude -- 'Fix the login timeout bug'
-```
-
-AI tool configs (`.claude/`, `.cursor/`, `.opencode/`, `.agents/`) are copied into new worktrees automatically. In `--non-interactive` mode, unapproved hooks are skipped with a warning (set `DEVFLOW_APPROVE_HOOKS=1` to auto-approve in CI/agent runs). See `AGENTS.md` for the recommended coding-agent workflow.
-
-`devflow --json agent status` reports workspace counts and `agent_workdir` values. Generate project guides with `devflow agent skill --target all`, or a root guide with `devflow agent docs`.
-
-## Configuration
-
-`devflow init` creates a `.devflow.yml` (a lightweight `devflow.toml` is also read). A minimal example:
-
-```yaml
-services:
-  - name: app-db
-    type: local
-    service_type: postgres
-    default: true
-    local:
-      image: postgres:17
-
-worktree:
-  path_template: "../{repo}.{workspace}"
-
-hooks:
-  post-switch:
-    env:
-      action:
-        type: write-env
-        path: .env.local
-        vars:
-          DATABASE_URL: "{{ service['app-db'].url }}"
-
-processes:
-  auto_start: true
-  daemons:
-    api:
-      run: "npm run dev"
-      port: { expect: [3000], bump: 50 }
-      ready_http: "http://127.0.0.1:3000/health"
-      env:
-        DATABASE_URL: "{{ service['app-db'].url }}"
-```
-
-The `worktree` block controls paths and copy behavior; there is no enable/disable mode. Older `worktree.enabled` keys are ignored with a deprecation warning; they can no longer switch devflow back to an in-place checkout.
-
-A shared-engine service is one stanza — no per-workspace containers, ports, or volumes:
-
-```yaml
-services:
-  - name: cache
-    service_type: redis        # one global redis; a DB index per workspace
-  - name: storage
-    service_type: rustfs       # one global RustFS; a bucket per workspace
-```
-
-Config precedence:
-
-1. Environment variables
-2. `.devflow.local.yml`
-3. `.devflow.yml` (or `devflow.toml`)
-
-## Install from source
-
-```bash
-git clone https://github.com/clement-tourriere/devflow.git
-cd devflow
-cargo install --path .
-```
-
-Requirements:
-
-- Rust toolchain
-- Docker or a compatible container runtime for local services
-- Optional: `bun` and Tauri prerequisites for desktop GUI development
-
-Run `devflow --json doctor --strict` for a health check that exits non-zero when checks fail.
-
-## More examples
-
-- `examples/simple.devflow.yml`
-- `examples/multi-service.devflow.yml`
-- `examples/django.devflow.yml`
-- `examples/processes.devflow.yml`
-- `examples/migrate-existing-app.devflow.yml`
-- `docs/CLI.md`
-- `AGENTS.md`
-- `docs/ARCHITECTURE.md`
-- `CONTRIBUTING.md`
-- `SECURITY.md`
+1.0 is a deliberate simplification: process supervision, the proxy, the TUI, Jujutsu, non-Postgres services, cloud providers, baselines, hook templating and the Tauri app are gone. 1.0 reads `devflow.toml` (or `.devflow.toml`) plus `devflow.local.toml` and never adopts 0.x resources. [docs/MIGRATING.md](docs/MIGRATING.md) lists each replacement and how to move your data.
 
 ## License
 
 MIT
-
-## Repeatable data and recovery
-
-```sh
-devflow baseline prepare clean --service db --from ./fixtures/base.sql
-devflow --json --non-interactive switch -c agent/task --from main --data-from baseline:clean@v1
-devflow exec --workspace agent/task -- pytest -k 'login or signup'
-devflow service reset agent/task --service db
-devflow operation inspect OPERATION_ID
-devflow operation resume OPERATION_ID
-devflow --json retention plan --service db --max-count 10
-```
-
-Baselines are immutable local PostgreSQL generations. Workspace inventory exposes exact per-service origins, readiness, identities, and retention state. See [architecture and migrations](docs/architecture.md), [baselines](docs-site/src/content/docs/guides/baselines.md), and [retention and caches](docs-site/src/content/docs/guides/retention-and-caches.md).
-
-The desktop uses the optional proxy companion. Install it independently with `cargo install --path . --no-default-features --features proxy --bin devflow-proxy`. Workspace and database commands work without it.

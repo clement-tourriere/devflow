@@ -1,0 +1,20 @@
+# mise.toml: toolchains, tasks, and the environment devflow generates.
+
+[tools]
+node = "22"
+bun = "1.2"
+
+[env]
+# devflow writes DATABASE_URL, the PG* variables and DEVFLOW_* identifiers to
+# .devflow/env in every worktree. mise loads it for every command run through
+# mise (tasks, `mise exec`, activated shells) and for pitchfork daemons that
+# start with `mise exec --`.
+_.file = ".devflow/env"
+
+[tasks."db:migrate"]
+description = "Apply database migrations (used by devflow's setup hook)"
+run = "bun run db:migrate"
+
+[tasks.dev]
+description = "Run the web app against this worktree's database"
+run = "bun run dev"

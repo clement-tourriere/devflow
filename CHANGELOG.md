@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+devflow 1.0 is a breaking simplification. It keeps Git worktrees, copy-on-write payloads, PostgreSQL branches and trusted setup hooks, adds a GPUI desktop app, and delegates processes and the proxy to pitchfork and toolchains and dependencies to mise. There is no in-place upgrade: read [docs/MIGRATING.md](docs/MIGRATING.md). The design is in [docs/plans/2026-10-10-devflow-1.0.md](docs/plans/2026-10-10-devflow-1.0.md).
+
+### Added
+
+- **Postgres branches** — One PostgreSQL 18 server per project (managed container or external). Each workspace database is cloned with `CREATE DATABASE … TEMPLATE … STRATEGY FILE_COPY` and `file_copy_method = clone`, so on btrfs, XFS (reflink), ZFS 2.2+ and OrbStack volumes it shares blocks with its source. CoW is measured and reported as `verified`, `copy` or `unknown`; `require_cow` refuses branches otherwise.
+- **Snapshots** — Versioned, immutable `db snapshot` seeds selectable with `--data-from snapshot:NAME[@vN]`; `db reset`, `db reconcile` and explicit `db branch` management.
+- **Role isolation** — Branch logins connect to their own database only, behind a per-project owner role and a metadata database; a non-superuser `CREATEDB CREATEROLE` provisioner is enough.
+- **Receipts and resumable setup** — Each worktree records its phases (materialize, payload, database, env, hooks). `devflow switch` and `devflow setup` resume at the first incomplete phase; status is `ready`, `needs_attention` or `in_progress`, and exit code 2 means the workspace is not `ready`.
+- **Trusted hooks** — `[hooks]` `setup`, `switch` and `teardown` shell commands gated by `devflow trust` (SHA-256 of the section) or `DEVFLOW_TRUST_HOOKS=1`.
+- **Worktrees from other tools** — `devflow hook install` adds a `post-checkout` hook that runs `devflow setup --if-new` for `git worktree add`, T3 Code, Claude Code and fresh clones.
+- **Remote data hosts** — External mode, `app_host`, `DOCKER_CONTEXT` for a managed server on a remote engine, `setup --database-url`, and `setup --new-instance` for VM forks. See [docs/REMOTE.md](docs/REMOTE.md).
+- **`.devflow/env`** — Generated `DATABASE_URL`, `PG*` and `DEVFLOW_*` variables, loadable with mise `[env] _.file`.
+- **Desktop app** — `devflow-gui`, built on GPUI and `gpui-kit`, with projects, workspaces, database branches and snapshots, pitchfork daemons, a config editor and setup logs.
+- **`devflow doctor`** reports the CoW capability and whether it was measured or declared.
+- **Shell integration** — `devflow shell-init` (a `cd`-ing `switch`), `devflow completions SHELL`, and `devflow gui` to open the desktop app.
+- Examples for `devflow.toml`, external mode, mise, pitchfork and an agent task script.
+
+### Changed
+
+- **Configuration is TOML only** — `devflow.toml` (or `.devflow.toml`) plus a git-ignored `devflow.local.toml`. 0.x files stop with an error that links the migration guide.
+- **Data and code origins** — `--from` (code) and `--data-from` (workspace, `snapshot:NAME[@vN]`, `branch:ID` or `empty`) are independent and immutable once chosen.
+- **Removal** — `devflow remove` checks every protection before any effect, runs `teardown`, drops only branches this instance created, and deletes the Git branch only with `--delete-branch`.
+- **Output** — One versioned JSON document per command; passwords are redacted except in `db url` and `db branch create`.
+- **Native, synchronous core** — `devflow-core` has a blocking API (nothing async is public) and no GPUI types.
+- **Releases** — Binaries ship `devflow` only; the desktop app is built from source. CI builds the GUI on macOS and runs the Docker database tests on Linux.
+
+### Removed
+
+- Process supervisor, controller daemon, execution records and the operation journal: use pitchfork and `devflow setup` / `db reconcile`.
+- The HTTPS proxy crate, local CA and `devflow-proxy` binary: use pitchfork's proxy.
+- The terminal UI and the terminal crate; the Tauri + React desktop app.
+- Jujutsu support.
+- MySQL, ClickHouse, Redis, RustFS and generic Docker services, the shared PostgreSQL engine and ZFS driver, Neon/DBLab/Xata and plugin providers.
+- Baselines (replaced by snapshots), seeding from URLs, dumps and S3, retention, pins and expiry, artifact caches.
+- Hook phases, actions, recipes and MiniJinja templating, hook approvals, `devflow exec`, `switch -x`, the agent guide generator, `devflow gc`, `capabilities` and `plugin`.
+- Broad ignored-file and AI-configuration copying; list explicit paths in `worktree.copy`.
+- The documentation site, generated `llms.txt` files, integration shell scripts and the `DEVFLOW_INSTALL_PROXY` installer option.
+
+### Known limitations
+
+- **Platforms** — The desktop app is covered by headless tests on macOS 15+; native visual checks are manual. The Linux GUI is untested and unsupported. PostgreSQL 18 or later is required.
+- **No TLS** — devflow's own database connections do not use TLS. Remote data hosts need a private network or a tunnel.
+- **Copy-on-write depends on the filesystem** — Clones share blocks only on reflink-capable storage. External servers report `unknown` unless the operator declares the capability; sources in other tablespaces report `unknown`.
+- **Busy sources** — On a local managed server, cloning from a live workspace terminates the source database's sessions (open transactions are aborted). External and remote servers default to refusing instead.
+- **Cloning contract** — Privileges or RLS policies that name a branch login are rejected; use the project owner role. Replication machinery is not cloned. Some cleanup blockers (prepared transactions, replication slots) need operator action.
+- **Connections** — Multi-host URLs, `service=`, `sslpassword`, `ssl=`/`requiressl=` aliases and replication connections are refused.
+- **Hooks** — Hooks run at least once and must tolerate retries. Trust covers the configured commands, not the scripts they invoke.
+- **Redaction** — Credentials devflow knows are masked exactly in hook output and logs; other credentials are masked by pattern on a best-effort basis. Unencoded spaces in URL passwords, `.pgpass` lines, multi-line values and non-PostgreSQL credential formats are not covered (see SECURITY.md).
+- **Manual cleanup** — A failed worktree creation leaves its paths for you to inspect; an interrupted metadata bootstrap can leave an unmarked `devflow_bootstrap_*` database that devflow reports but never drops. Copied workspaces (VM forks) need `devflow setup --new-instance` or `DEVFLOW_INSTANCE_ID`.
+- **Scope** — Git only; processes and the proxy come from pitchfork; no embedded terminal or tray; migration from 0.x is manual.
+
 ## v0.8.0 (2026-09-14)
 
 ### Added

@@ -1,4 +1,4 @@
-# macOS: use the default linker but pass framework flags to speed up linking
+# macOS: use the default linker and drop unreferenced code (-dead_strip)
 [target.aarch64-apple-darwin]
 rustflags = ["-C", "link-arg=-Wl,-dead_strip"]
 

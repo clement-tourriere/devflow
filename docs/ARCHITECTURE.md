@@ -1,52 +1,113 @@
-# Architecture and compatibility
+# Architecture
 
-The core application layer owns lifecycle policy. CLI/TUI and desktop commands collect typed input and render outcomes. Provider adapters implement resource operations; they do not decide retention policy.
+devflow 1.0 creates Git worktrees, clones their payloads copy-on-write, branches PostgreSQL databases, and runs trusted setup hooks. Everything else (processes, the HTTPS proxy, toolchains, dependency installation) belongs to pitchfork and mise.
 
-- `application`: service operations, seed, retention plans/apply, and operation recovery.
-- `workspace`: VCS materialization, lifecycle hooks, processes, inventory, and durable operations.
-- `state`: stable project/workspace/service/resource identities, desired state, data bindings, pins, and baseline references. Provider SQLite/files contain backend observations and exact ownership records.
-- `baseline`: local PostgreSQL prepare, seal, version binding, and dependency-aware deletion.
-- `execution`: explicit program/argv or shell requests, separate durable execution records and verified runner ownership.
-- `controller`: one owner lease for foreground, detached and one-shot reconciliation.
-- `services::descriptor`: versioned supported-provider/build manifest; runtime operation capabilities are negotiated for plugins.
-- `companion`: optional proxy executable and loopback API. The desktop does not embed proxy networking.
+This page is the map. The design, schema and rationale are in [docs/plans/2026-10-10-devflow-1.0.md](plans/2026-10-10-devflow-1.0.md), the authoritative spec. Coming from 0.x? See [MIGRATING.md](MIGRATING.md).
 
-Existing service keys and resource namespaces are retained. `devflow project relocate OLD NEW` explicitly updates a registered path without renaming resources. The desktop project list comes from the core registry; hiding a project does not delete its data or ownership records.
+## Crates
 
-Operations persist intent before external effects, checkpoint typed steps and per-service outcomes, and keep the most recent 100 operation-history records per project. Unfinished active records are retained separately. `devflow operation inspect ID` shows the saved request and checkpoints; `resume ID` supports switch, remove, service creation/deletion/destruction, service lifecycle operations, and cleanup. `cancel ID` only discards failures proven to have made no resource changes. SQL imports and baseline preparation require inspecting partial effects and retrying their original explicit command or replacing the failed generation. Shell hooks must tolerate retries; devflow makes no exactly-once guarantee.
+```
+Cargo.toml              workspace + `devflow` CLI package (bin `devflow`)
+src/                    CLI: clap parsing, JSON output, shell integration, prompts
+crates/devflow-core/    all behavior; blocking API, nothing async public, no GPUI types
+crates/devflow-gui/     GPUI desktop app (bin `devflow-gui`), gpui-kit pinned to =0.7.1
+```
 
-Required hooks run to completion during lifecycle setup, including hooks previously marked `background: true`. `required: false` opts out of readiness gating. Optional background hooks write completion receipts under the config directory's `hook-runs` directory. A process killed before it can update a receipt may leave a running receipt; its PID and lifecycle receipt ID provide the recovery context.
+Dependencies point one way: `devflow` and `devflow-gui` depend on `devflow-core`; core depends on neither. Frontends build typed requests, call core, and render the result. The CLI calls core directly. The GUI calls it from `cx.background_spawn` and applies a result only if its request key (project and generation) still matches the selected project.
 
-## Retired surface
+The GUI is split into `state` (selected project, request keys), `jobs` (background calls, typed failure kinds, masking), `ops` (calls into core), `model` (view rows), `activity` (progress panel), `settings` (editor, terminal, theme in `gui.toml`) and `views/` (pages and dialogs).
 
-| Old interface | Replacement |
+## Core modules (`crates/devflow-core/src`)
+
+| Module | Responsibility |
 | --- | --- |
-| `agent.auto_context` | Explicit `agent context`; old settings are accepted with a migration warning and omitted on save. |
-| `worktree.respect_gitignore` / `--no-respect-gitignore` | `worktree.copy_ignored` / `--copy-ignored`; the old CLI spelling remains an alias. |
-| `template_from_time` | No advertised timestamp-clone capability; use an exact baseline version. |
-| `sync-ai-configs` and its hook action | Generated guides and explicit file allowlists. Old configured actions are removed with a warning. No permission arrays are merged. |
-| Commit settings and commit command | Use the VCS and preferred editor/agent directly; no embedded commit helper. |
-| Embedded Pitchfork and GUI web bridge | Native processes; a narrow adapter stops exact legacy external-daemon records. |
-| Duplicate structured config/recipe GUI | Source-format-preserving raw editor and hook inspection. |
-| Desktop-owned proxy | Optional `devflow-proxy` companion, shared with CLI clients. |
+| `config` | `devflow.toml` schema, merge with `devflow.local.toml`, raw-text editing with concurrent-edit detection, detection of 0.x files |
+| `conn` | libpq-compatible parsing of connection URLs and conninfo strings; the `PG*` variables for a connection and the ones to clear |
+| `error` | Typed errors frontends act on: `NotInitialized`, `Busy`, `Protected`, `ConfigChanged` |
+| `project` | Project discovery: the main checkout, its configuration and the Git common directory |
+| `registry` | Machine-local list of known projects for the GUI and `devflow list --all` (`projects.toml`); removing an entry never touches the project or its data |
+| `worktree` | Create, list, protect and remove Git worktrees (`git2`) |
+| `cow` | Clone files and directories: APFS `clonefile`, Linux `FICLONE`, copy fallback; payload staging and path validation |
+| `receipt` | Per-worktree receipt: instance id, data binding, phase states, receipt lock |
+| `setup` | The idempotent pipeline shared by `switch` and `setup`; status computation |
+| `hooks` | Run `setup`/`switch`/`teardown` commands with `sh -c`, env, timeout, process groups and masked logs |
+| `redact` | Credential masking for output and logs: exact match for known secrets, patterns for the rest |
+| `trust` | SHA-256 trust of the canonicalized `[hooks]` section (`trust.toml`) |
+| `githook` | Install and uninstall the `post-checkout` hook; `--if-new` detection |
+| `env_file` | Write and read `.devflow/env`; keeps `.devflow/` self-ignored |
+| `db::admin` | Admin connection, version check (>= 18), generated names, SQL quoting, session advisory lock |
+| `db::meta` | `devflow` metadata database: bootstrap, schema migration, projects, branches, snapshots, retired roles |
+| `db::steps` | Single DDL steps on the lock session: owner and login roles, closed creation and cloning, ACL normalization, grants, opening, busy-source sessions, drop and the reset swap |
+| `db::managed` | Managed server: `compose.yaml`, `docker compose` lifecycle, CoW probe, `admin.json` |
+| `db::ops` | Branch operations: create, clone, snapshot, reset, drop, credential rotation |
+| `db::reconcile` | Crash recovery: completes or rolls back interrupted creates, deletes and resets |
+| `doctor` | Checks: project config, Git, worktree-directory CoW, Docker/compose, server reachability and version, `file_copy_method`, CoW capability (measured or declared), hook trust, Git hook state, pitchfork and mise, workspaces needing attention |
+| `pitchfork` | Optional adapter over the `pitchfork` CLI (`list --json`, start, stop) |
+| `paths` | Config and data directories (`DEVFLOW_CONFIG_DIR`, `DEVFLOW_DATA_DIR` override) |
 
-Cloud providers remain optional/experimental; Jujutsu remains behind the existing VCS adapter. Breadth expansion is paused until platform/live-service contract coverage establishes the required behavior. Ownership migrations are deliberately retained.
+## Principles
 
-Provider types and the reference catalog are generated with `cargo run -p devflow-core --example generate_provider_manifest` directly from the core descriptors; CI checks them for drift. SQL baseline bundles and prepared-clone pools remain separate future extensions.
+- **Data lifetime is independent of code lifetime.** A database branch has its own identity; a worktree or VM attaches to it. Code origin (`--from`) and data origin (`--data-from`) are separate and immutable once chosen.
+- **Never infer ownership from names.** Branches, snapshots and roles are recorded in a metadata database on the server. Worktrees carry a receipt with their instance id. Generated database and role names are never derived from user input.
+- **Resumable, not transactional.** Every multi-step operation records intent before its external effect and can be re-run to completion.
+- **Report what actually happened.** CoW is `verified`, `copy` or `unknown`; it is never assumed.
+- **Synchronous core.** Blocking API, no async runtime, no UI types.
+- **No connection data on a command line.** `devflow db psql` parses the workspace URL like libpq does (`conn`), drops every connection variable inherited from the caller, and sets the workspace's `PG*` variables, password included, in psql's own environment (or the docker client's, forwarded into the container by name). argv is readable by every local user; a process's environment only by the same user and root, the audience of a 0600 file, and no temporary file has to be cleaned up. devflow then replaces itself with psql, so psql handles Ctrl-C and signals itself.
 
+## Where state lives
 
-PostgreSQL directory copying and CoW probing share `devflow_core::fs_copy`, backed by native `reflink-copy`, `filetime`, and filesystem calls. Data replacement stages a complete copy before publishing it; a failed local PostgreSQL copy cannot remove the live directory. Git fixtures and worktree management use `git2`, Docker fixtures use Bollard, and provider contracts are generated directly from the core catalog.
+| What | Where |
+| --- | --- |
+| Project config | `devflow.toml` (or `.devflow.toml`) in the repository, committed |
+| Machine-local config | `devflow.local.toml` beside it, git-ignored, merged on top |
+| Project registry (GUI, `list --all`) | `<config dir>/projects.toml` and `projects.lock`. Config dir: `$XDG_CONFIG_HOME/devflow` (macOS: `~/Library/Application Support/devflow`), or `DEVFLOW_CONFIG_DIR` |
+| GUI settings | `<config dir>/gui.toml` |
+| Hook trust | `<config dir>/trust.toml`: `{project_id, main checkout}` to the SHA-256 of the merged `[hooks]` section |
+| Workspace receipt | `<per-worktree git dir>/devflow/receipt.json` (0600) and its lock `setup.lock`; removed with the worktree |
+| Worktree creation lock | `<common git dir>/devflow/create.lock` |
+| Setup logs | `<per-worktree git dir>/devflow/logs/<timestamp>-<setup\|switch\|teardown>.log` (0600, masked) |
+| Generated env | `<worktree>/.devflow/env` (0600; the directory ignores itself) |
+| Managed server | `<data dir>/postgres/<project id>/`: `compose.yaml` and `admin.json` (both 0600; they hold the superuser password; `admin.json` also caches the CoW probe). Data dir: `$XDG_DATA_HOME/devflow` (macOS: `~/Library/Application Support/devflow`), or `DEVFLOW_DATA_DIR` |
+| Branch metadata | `devflow` database on the PostgreSQL server |
 
-The process boundary test permits only explicit user commands, hooks, managed processes, terminals, sessions, companion lifecycle, and configured executable providers. Git and jj workspace materialization and payload copying are tested with an empty executable PATH. `capabilities.process_boundaries` exposes these boundaries to automation.
+## The pipeline
 
-Jujutsu uses pinned `jj-lib` 0.45.1 for repository transactions, snapshots, bookmarks, and workspace registration. Its native adapter respects ignored files, snapshot tracking rules, immutable history, and colocated Git imports/exports. Devflow-created working-copy commits are unsigned and do not invoke configured signing or filesystem-monitor programs; use jj directly for signed commits. Inspection preserves Git staging and active merges/rebases. Explicit preparation recovers stale working copies through jj operation/tree merging, preserving local edits and conflicts. Git and jj directory cleanup keep identity-checked receipts until deletion and workspace deregistration complete.
+`switch -c`, `setup` and `switch` to an existing workspace run the same five phases. The receipt is written as soon as the worktree exists; every later phase is recorded before and after its effect, and a re-run resumes at the first incomplete phase.
 
-ZFS storage loads the system OpenZFS 2.x `libzfs` ABI at runtime on Linux. It requires an already loaded device, disables helper-backed mounting and requires unshared leaf datasets for both snapshot sources and replacement targets. No development headers or ZFS runtime are required for other storage drivers. A narrow binding owns native handles on blocking workers and the replacement journal operates on typed dataset mutations. Failed dataset destruction stops filesystem cleanup. Linux CI exercises real replacement failures with an empty executable PATH.
+1. **materialize**: create the Git branch (or reuse an existing local branch of that name) and the worktree; write the receipt with a fresh instance id.
+2. **payload**: clone each `worktree.copy` path from the source worktree. Paths stay inside both worktrees; entries are staged under a temporary name and renamed; existing destinations are left alone.
+3. **database**: create or reconcile the data branch from `--data-from` and record the binding.
+4. **env**: write `.devflow/env`.
+5. **hooks**: if trusted, run `setup` commands; otherwise prompt (interactive) or skip and mark `needs_attention`.
 
-Run PostgreSQL measurements with `cargo run -p devflow-core --example benchmark_data -- --sizes-mib 1,16,64 --concurrency 1,4 --output benchmark.json`. This uses disposable resources and measures core API calls, not CLI startup or per-invocation peak RSS. Allocated blocks are not physical bytes copied for CoW filesystems; TCP availability samples are not SQL latency.
+Status is derived from the phases: `ready` when every phase is done or skipped on request (`--no-db`, `--no-hooks`), `needs_attention` (a required phase was skipped or failed) or `in_progress` (another process holds the receipt lock, or a crash left a phase started). `list`, `switch` to a ready workspace and `remove --keep-data` do not contact the PostgreSQL server, so they work while it is unreachable; `db status` reports it unreachable. `remove` checks all protections before any effect, runs `teardown`, drops the data branch if this instance created it, then removes the worktree.
 
-`workspace::plan` resolves code revision, exact baseline references, worktree path and setup requirements before effects; switch stores and consumes that plan. Retries preserve the selected code/data origins and creation path while recording repaired setup configuration. Artifact reuse fingerprints the destination checkout and only publishes artifacts from a source with matching inputs. Missing or incompatible inputs produce a cache miss.
+Worktrees created by other tools are adopted through a `post-checkout` hook that runs `devflow setup --if-new --from-git-hook`: it skips a worktree whose receipt is `ready`, resumes any other, never prompts, and always exits 0.
 
-Workspace control separates stable logical identity from creation generation. Deleting code and data clears the binding and rotates the generation; retaining services retains their origin and baseline protection. Local PostgreSQL stores an immutable image ID per generation, inherits it through ordinary descendants, and validates existing container image, environment, ownership, mounts and ports before reuse.
+## Role model
 
-The desktop submits core service mutation requests, offers sealed baseline selection, and displays pending operation inspection/resume/cancellation. Its config editor uses source text with validation and concurrent-edit protection; the unused parsed-config IPC and TypeScript schema mirror are removed. The optional proxy has a standalone executable and checksum-verified release/install path.
+One PostgreSQL server per project. Verified on PostgreSQL 18.6 with a non-superuser provisioner.
+
+| Role | Attributes | Holds |
+| --- | --- | --- |
+| Admin (provisioner) | Superuser (managed) or `CREATEDB CREATEROLE` login (external) | Owns every devflow database and the metadata database. Never given to sandboxes. |
+| Project owner `dfo_<project8>` | `NOLOGIN` | Owns every object in every branch and snapshot database of the project; `CREATE, TEMPORARY` on each; no `CONNECT` |
+| Branch login `dfl_<id12>` | `LOGIN`, random password, member of the owner, default `role` set to the owner | `CONNECT` on its own database only |
+
+Because the objects of all branches share one owner, clones need no ownership translation, and the owner role is the supported identity for anything that must survive cloning (default privileges, RLS policies, grants). Objects a session creates after `SET ROLE NONE` belong to its login; cloning or snapshotting reassigns them to the owner, and privileges or policies that name the login are rejected rather than translated.
+
+Sessions run as the owner, which deliberately holds no `CONNECT`. Functions that check `CONNECT` on the current database, such as `pg_database_size(current_database())`, are therefore denied inside a branch; run them after `SET ROLE NONE`, or read sizes with `devflow db branch list`.
+
+Every new database is created closed (`ALLOW_CONNECTIONS false`) and opened only after its ACLs are normalized. The `devflow` metadata database is closed the same way, so branch logins cannot reach it; managed mode also revokes `PUBLIC` `CONNECT` on `postgres` and `template1`. On an external server devflow changes only databases it created. Snapshots are not templates; only the admin can clone them.
+
+## Recovery model
+
+- Every branch operation holds a session-level advisory lock on the project id and records each step on the branch row before performing it. If the lock connection dies, the operation stops and leaves the row.
+- The next mutation of the project, or `devflow db reconcile`, completes or rolls back rows in `creating` or `deleting` and resets with an `op`, by inspecting `pg_database` and `pg_roles`. A reset in `staging` drops its replacement; one in `cutover` whose rename did not commit reopens the original; one in `cleanup` drops the backup. Any other combination is left alone and reported.
+- A crash between creating a branch and saving the receipt is repaired by instance id: the retry finds the branch and sets a new password, since the old one was never delivered. Roles that cannot be dropped are made `NOLOGIN` and recorded in `retired_roles`; `reconcile` retries them. Prepared transactions and replication slots that block `DROP DATABASE … WITH (FORCE)` are reported, not forced.
+- Worktree setup is resumable from the receipt. Hooks run at least once: a crash after a command succeeds but before the receipt update reruns it, so hook commands must be idempotent.
+- A VM fork copies the receipt. `devflow setup --new-instance` gives it a fresh identity and a new branch. Only the instance that created a branch may reset or drop it; `--database-url` attachments are detach-only.
+
+## Release gates
+
+CoW verification on OrbStack and Linux btrfs/XFS, branch isolation, a privilege matrix with a non-superuser provisioner, crash recovery at every phase, fork and attach, remove protections, and GUI flows on macOS. The list is in the plan. Docker-backed tests are ignored by default; see [CONTRIBUTING.md](../CONTRIBUTING.md).

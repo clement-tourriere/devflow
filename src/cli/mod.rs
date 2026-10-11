@@ -1,1806 +1,471 @@
-mod agent;
-mod application;
-mod config;
-mod daemon;
-mod gc;
-mod git_hook;
-mod hook;
-mod init;
-mod plugin;
-mod process;
-#[cfg(feature = "proxy")]
-mod proxy;
-mod service;
-pub mod workspace;
-
-use std::path::PathBuf;
-
-use devflow_core::config::{Config, GlobalConfig, WorktreeConfig};
-use devflow_core::services::{self};
+//! Command definitions and dispatch. Handlers parse arguments, prompt and
+//! render; every lifecycle decision is made by `devflow-core`.
+mod db;
+mod output;
+mod shell;
+mod system;
+mod trust;
+mod workspace;
 
 use anyhow::{Context, Result};
-use clap::Subcommand;
-use devflow_core::state::LocalStateManager;
-use devflow_core::vcs;
+use clap::builder::BoolishValueParser;
+use clap::error::ErrorKind;
+use clap::{ArgAction, CommandFactory, Parser, Subcommand};
+use devflow_core::error::{NotInitialized, Protected};
+use devflow_core::{Project, redact};
+use serde::Serialize;
+use std::cell::RefCell;
+use std::ffi::OsString;
+use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
-// Re-export workspace types used by service.rs
-pub(crate) use workspace::{
-    ensure_default_workspace_registered, resolve_workspace_context, WorkspaceContextSource,
-};
+/// Exit status when the resulting workspace is not ready (`needs_attention`).
+const EXIT_ATTENTION: u8 = 2;
 
-/// Directory whose VCS checkout is the caller's live workspace context.
-///
-/// Linked Git worktrees may load an untracked `.devflow.yml` from the primary
-/// checkout.  The config path is therefore project identity/configuration,
-/// not evidence of which workspace invoked the command.  Prefer the process
-/// cwd for lifecycle safety and context-sensitive operations, falling back to
-/// the config directory only when the cwd is unavailable.
-pub(crate) fn operation_project_dir(config_path: &Option<PathBuf>) -> PathBuf {
-    std::env::current_dir()
-        .ok()
-        .or_else(|| {
-            config_path
-                .as_deref()
-                .and_then(std::path::Path::parent)
-                .map(std::path::Path::to_path_buf)
-        })
-        .unwrap_or_else(|| PathBuf::from("."))
+#[derive(Parser)]
+#[command(
+    name = "devflow",
+    version,
+    about = "Git worktrees with copy-on-write payloads, instant Postgres branches, and setup hooks",
+    arg_required_else_help = true
+)]
+pub struct Cli {
+    /// Print one JSON document instead of human-readable output (never prompts)
+    #[arg(long, global = true)]
+    json: bool,
+
+    /// Never prompt; untrusted hooks are skipped and reported as needs_attention
+    ///
+    /// The environment variable accepts 1/0, true/false, yes/no, on/off.
+    #[arg(
+        long,
+        global = true,
+        env = "DEVFLOW_NON_INTERACTIVE",
+        value_parser = BoolishValueParser::new()
+    )]
+    non_interactive: bool,
+
+    /// Run as if devflow was started in DIR
+    #[arg(short = 'C', global = true, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
+    dir: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Command,
 }
 
 #[derive(Subcommand)]
-pub enum Commands {
-    /// Resolve code, data, hooks and artifact inputs without changing resources.
-    Plan {
-        workspace: String,
-        #[arg(long = "from")]
-        from: Option<String>,
-        #[arg(long = "data-from")]
-        data_from: Option<String>,
-    },
-    #[command(hide = true)]
-    ExecutionRun { record: PathBuf },
-    /// Run a program in a ready workspace, preserving its argument vector.
-    Exec {
-        #[arg(long)]
-        workspace: Option<String>,
-        #[arg(long)]
-        shell: Option<String>,
-        #[arg(long)]
-        detach: bool,
-        #[arg(last = true)]
-        command: Vec<String>,
-    },
-    /// Manage immutable, versioned PostgreSQL data baselines.
-    Baseline {
-        #[command(subcommand)]
-        action: application::BaselineCommands,
-    },
-    /// Inspect saved lifecycle intent and resume interrupted operations.
-    Operation {
-        #[command(subcommand)]
-        action: application::OperationCommands,
-    },
-    /// Preview or apply retention policy, pins and expiry.
-    Retention {
-        #[command(subcommand)]
-        action: application::RetentionCommands,
-    },
-    /// Inspect the shared registry or explicitly relocate a project.
-    Project {
-        #[command(subcommand)]
-        action: application::ProjectCommands,
-    },
-    // ── Workspace Management ──
-    #[command(about = "List the workspace tree with service and process status")]
-    List,
-    #[command(
-        about = "Link an existing workspace into devflow",
-        long_about = "Link an existing workspace into devflow.
-
-This command records the workspace in the devflow registry and materializes
-service workspaces when auto-workspace services are configured.
-
-Examples:
-  devflow link feature/auth
-  devflow link feature/auth --from main",
-        hide = true
-    )]
-    Link {
-        #[arg(help = "Workspace name to link")]
-        workspace_name: String,
-        #[arg(
-            short = 'b',
-            long = "from",
-            visible_alias = "base",
-            help = "Parent workspace for lineage/service creation"
-        )]
-        from: Option<String>,
-    },
-    #[command(
-        about = "Select or create a materialized workspace",
-        long_about = "Select an existing Git worktree or jj workspace.\n\nWith no arguments, shows an interactive workspace picker with fuzzy search.\nAn existing Git branch without a worktree is materialized automatically.\nIf the VCS reference does not exist, use -c/--create to create it from the current context.\n\nExamples:\n  devflow switch                     # Interactive picker\n  devflow switch feature-auth        # Select/materialize existing workspace\n  devflow switch -c feature-new      # Create from current context\n  devflow switch -c feature-new --from release_1_0\n  devflow switch --template          # Select the default workspace\n  devflow switch feature-auth -x 'npm run migrate'"
-    )]
-    Switch {
-        #[arg(
-            help = "Workspace name to switch to (optional - if omitted, shows interactive selection)"
-        )]
-        workspace_name: Option<String>,
-        #[arg(short = 'c', long, help = "Create a new workspace before switching")]
-        create: bool,
-        #[arg(
-            short = 'b',
-            long = "from",
-            visible_alias = "base",
-            help = "Parent workspace for new workspace creation (defaults to current context workspace)"
-        )]
-        from: Option<String>,
-        #[arg(long, help = "Data source workspace (defaults to the code parent)")]
-        data_from: Option<String>,
-        #[arg(short = 'x', long, help = "Run a command after switching")]
-        execute: Option<String>,
-        #[arg(
-            long,
-            short = 'd',
-            help = "Run -x command in a detached multiplexer session"
-        )]
-        detach: bool,
-        #[arg(
-            long,
-            short = 'o',
-            help = "Open an interactive multiplexer session in the workspace"
-        )]
-        open: bool,
-        #[arg(last = true, help = "Arguments passed to the -x command")]
-        execute_args: Vec<String>,
-        #[arg(long, help = "Skip service provisioning (only VCS switch)")]
-        no_services: bool,
-        #[arg(long, help = "Skip process orchestration")]
-        no_processes: bool,
-        #[arg(long, help = "Skip hook execution")]
-        no_verify: bool,
-        #[arg(
-            long,
-            help = "Select the configured default workspace and its services"
-        )]
-        template: bool,
-        #[arg(long, help = "Simulate switching without actual operations")]
-        dry_run: bool,
-        #[arg(
-            long,
-            alias = "no-respect-gitignore",
-            help = "Include gitignored files in worktree (overrides config)"
-        )]
-        copy_ignored: bool,
-    },
-    #[command(
-        about = "Remove a workspace, its worktree, and associated service workspaces",
-        long_about = "Remove a workspace, its worktree, and associated service workspaces.\n\nThis is a comprehensive cleanup command that removes:\n  - The workspace\n  - The worktree directory (if any)\n  - All associated service workspaces (containers, cloud workspaces)\n\nUnlike 'devflow service delete' which only removes service workspaces, 'remove'\ncleans up everything related to the workspace.\n\nExamples:\n  devflow remove feature-auth\n  devflow remove feature-auth --force\n  devflow remove feature-auth --keep-services  # Only remove worktree + workspace"
-    )]
-    Remove {
-        #[arg(help = "Workspace name to remove")]
-        workspace_name: String,
-        #[arg(long, help = "Skip confirmation prompt")]
-        force: bool,
-        #[arg(long, help = "Keep service workspaces (only remove worktree)")]
-        keep_services: bool,
-    },
-    #[command(
-        about = "Clean up old service workspaces (alias for 'service cleanup')",
-        long_about = "Clean up old service workspaces.\n\nRemoves stale service workspaces that no longer have a corresponding workspace.\nOptionally limit the number of workspaces to retain.\n\nExamples:\n  devflow cleanup                  # Remove orphaned service workspaces\n  devflow cleanup --max-count 10   # Keep at most 10 service workspaces",
-        hide = true
-    )]
-    Cleanup {
-        #[arg(long, help = "Maximum number of workspaces to keep")]
-        max_count: Option<usize>,
-    },
-
-    // ── Services ──
-    #[command(
-        about = "Manage services (create, delete, start, stop, reset, ...)",
-        long_about = "Manage service providers and their workspaces.\n\nService commands operate on the configured service providers (local Docker,\nNeon, DBLab, etc.) to create, delete, and manage workspace-isolated environments.\n\nExamples:\n  devflow service add                       # Interactive wizard\n  devflow service add mydb --provider local # Add with explicit options\n  devflow service create feature-auth       # Create service workspace\n  devflow service delete feature-auth       # Delete service workspace\n  devflow service cleanup --max-count 10    # Cleanup old service workspaces\n  devflow service start feature-auth        # Start a stopped container\n  devflow service stop feature-auth         # Stop a running container\n  devflow service reset feature-auth        # Reset to parent state\n  devflow service connection feature-auth   # Show connection info\n  devflow service status                    # Show service status\n  devflow service list                      # List configured services\n  devflow service remove mydb               # Remove a service config\n  devflow service logs feature-auth         # Show container logs\n  devflow service seed main --from dump.sql # Seed from external source\n  devflow service discover                  # Discover running Docker containers\n  devflow service destroy                   # Destroy all data",
-        hide = true
-    )]
-    Service {
-        #[command(subcommand)]
-        action: ServiceCommands,
-    },
-
-    // ── Project processes ──
-    #[command(
-        about = "Manage workspace project processes (web servers, workers, schedulers)",
-        long_about = "Manage workspace-scoped project processes configured under the `processes:` section.\n\nExamples:\n  devflow process start --all\n  devflow process start api --force\n  devflow process status\n  devflow process logs api --tail 100\n  devflow process stop --all"
-    )]
-    Process {
-        #[command(subcommand)]
-        action: ProcessCommands,
-    },
-
-    // ── Top-level aliases ──
-    #[command(
-        about = "Show connection info for a service workspace (alias for 'service connection')",
-        long_about = "Show connection info for a service workspace.\n\nOutputs connection details in various formats for use in scripts and configuration.\nThis is an alias for 'devflow service connection'.\n\nExamples:\n  devflow connection feature-auth              # Connection URI\n  devflow connection feature-auth --format env  # Environment variables\n  devflow connection feature-auth --format json # JSON object"
-    )]
-    Connection {
-        #[arg(help = "Name of the workspace")]
-        workspace_name: String,
-        #[arg(long, help = "Output format: uri, env, or json")]
-        format: Option<String>,
-    },
-    #[command(
-        about = "Show current project and service status",
-        long_about = "Show current project and service status.\n\nDisplays the current workspace, configured services, their states,\nand connection info. Useful for quick orientation.\n\nExamples:\n  devflow status\n  devflow --json status"
-    )]
-    Status,
-
-    /// Retired: use your VCS and preferred commit tools directly.
-    #[command(hide = true)]
-    Commit {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    // ── Setup & Config ──
-    #[command(
-        about = "Initialize devflow configuration",
-        long_about = "Initialize devflow configuration.\n\nWith no arguments, initializes the current directory.\nWith a path argument, creates the directory and initializes it. JSON output includes\nnext_steps for humans and coding agents to finish setup.\n\nExamples:\n  devflow init                              # Initialize current directory\n  devflow --json --non-interactive init     # Initialize and print onboarding next_steps\n  devflow init myapp                        # Create ./myapp/ and initialize it\n  devflow init --name myapp                 # Initialize current dir with explicit name\n  devflow init myapp --force                # Overwrite existing config in ./myapp/"
-    )]
-    Init {
-        #[arg(help = "Directory to create and initialize (omit to use current directory)")]
-        path: Option<String>,
-        #[arg(long, help = "Project name (defaults to directory name)")]
-        name: Option<String>,
-        #[arg(long, help = "Force overwrite existing configuration")]
-        force: bool,
-    },
-    #[command(
-        about = "Tear down the entire devflow project",
-        long_about = "Tear down the entire devflow project.\n\nThis is the inverse of 'devflow init'. It permanently destroys:\n  - All service data (containers, databases, workspaces)\n  - Git worktrees created by devflow\n  - VCS hooks installed by devflow\n  - Workspace registry and local state\n  - Hook approvals\n  - Configuration files (.devflow.yml, .devflow.local.yml)\n\nThis is irreversible. Use --force to skip the confirmation prompt.\n\nExamples:\n  devflow destroy              # Interactive confirmation\n  devflow destroy --force      # Skip confirmation",
-        hide = true
-    )]
-    Destroy {
-        #[arg(long, help = "Skip confirmation prompt")]
-        force: bool,
-    },
-    #[command(
-        about = "Show current configuration",
-        long_about = "Show current configuration.\n\nDisplays the merged configuration from .devflow.yml, .devflow.local.yml,\nand environment variable overrides. Use -v for detailed precedence info.\n\nExamples:\n  devflow config              # Show merged config YAML\n  devflow config -v           # Show precedence details + env overrides",
-        hide = true
-    )]
-    Config {
-        #[arg(
-            short,
-            long,
-            help = "Show effective configuration with precedence details"
-        )]
-        verbose: bool,
-    },
-    #[command(
-        about = "Validate configuration file for errors and unknown fields",
-        long_about = "Validate configuration file for errors and unknown fields.\n\nChecks .devflow.yml for:\n  - YAML syntax errors\n  - Unknown top-level keys and service fields\n  - Missing required fields\n  - Invalid service type / provider combinations\n\nExits non-zero on any error.\n\nExamples:\n  devflow config-validate",
-        hide = true
-    )]
-    ConfigValidate,
-    #[command(
-        about = "Run diagnostics and check system health",
-        long_about = "Run diagnostics and check system health.\n\nVerifies project setup, generated agent guides, hooks, worktree metadata, storage,\nrequired tools (docker, git/jj), and service reachability. JSON output includes\naggregate summary and next_steps fields for automation. Use --strict in CI or\nagent workflows to exit non-zero when any check fails.\n\nExamples:\n  devflow doctor\n  devflow --json doctor\n  devflow --json doctor --strict"
-    )]
-    Doctor {
-        #[arg(long, help = "Exit non-zero when any doctor check fails")]
-        strict: bool,
-    },
-    /// Retired: update using your installer or package manager.
-    #[command(hide = true)]
-    Update {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    #[command(
-        about = "Install Git hooks",
-        long_about = "Install Git hooks.\n\nSets up post-checkout and pre-commit Git hooks so devflow can adopt\nmanually-created linked worktrees, run their lifecycle setup, and run\ncommit hooks. Ordinary in-place branch checkouts are ignored. Safe to re-run.\n\nExamples:\n  devflow install-hooks",
-        hide = true
-    )]
-    InstallHooks,
-    #[command(
-        about = "Uninstall Git hooks",
-        long_about = "Uninstall Git hooks.\n\nRemoves the devflow Git hooks (post-checkout, pre-commit).\nYour existing service workspaces and worktrees are not affected.\n\nExamples:\n  devflow uninstall-hooks",
-        hide = true
-    )]
-    UninstallHooks,
-    #[command(about = "Handle Git hook execution", hide = true)]
-    GitHook {
-        #[arg(long, hide = true)]
-        worktree: bool,
-        #[arg(long, hide = true)]
-        main_worktree_dir: Option<String>,
-    },
-    #[command(
-        name = "shell-init",
-        about = "Print shell integration script (eval \"$(devflow shell-init)\")",
-        long_about = "Print shell integration script.\n\nThe shell wrapper enables automatic 'cd' whenever devflow emits DEVFLOW_CD\n(for example: switch to worktrees, open from TUI, init into a new directory).\nWithout it, devflow cannot change your parent shell directory and you must\ncd manually.\n\nAdd to your shell profile:\n  eval \"$(devflow shell-init)\"        # auto-detects shell\n  eval \"$(devflow shell-init bash)\"   # ~/.bashrc\n  eval \"$(devflow shell-init zsh)\"    # ~/.zshrc\n  devflow shell-init fish | source    # ~/.config/fish/config.fish\n\nThis creates a 'devflow' shell wrapper function.",
-        hide = true
-    )]
-    ShellInit {
-        #[arg(help = "Shell type: bash, zsh, or fish (auto-detected from $SHELL if omitted)")]
-        shell: Option<String>,
-    },
-    #[command(
-        name = "worktree-setup",
-        about = "Set up devflow in a Git worktree (copy files, create DB workspace)",
-        long_about = "Set up devflow in a Git worktree.\n\nCopies configuration files and creates service workspaces for the current\nworktree. Normally called automatically by Git hooks, but can be run\nmanually if hooks are not installed.\n\nExamples:\n  devflow worktree-setup",
-        hide = true
-    )]
-    WorktreeSetup,
-    #[command(name = "setup-zfs", hide = true)]
-    SetupZfs {
-        #[arg(long, default_value = "devflow", help = "ZFS pool name")]
-        pool_name: Option<String>,
-        #[arg(long, default_value = "10G", help = "Pool image size (sparse file)")]
-        size: Option<String>,
-    },
-    #[command(
-        about = "Show automation capabilities",
-        long_about = "Show automation capabilities.
-
-Returns a machine-readable summary of devflow's automation contract, including
-JSON output behavior, non-interactive guarantees, and recommended command usage
-for AI agents and CI pipelines.
-
-Examples:
-  devflow capabilities
-  devflow --json capabilities",
-        hide = true
-    )]
-    Capabilities,
-
-    // ── Extensibility ──
-    #[command(
-        about = "Manage lifecycle hooks",
-        long_about = "Manage lifecycle hooks.\n\nHooks are MiniJinja-templated commands that run at specific lifecycle phases\n(post-create, post-switch, pre-commit, etc.). Configure them in .devflow.yml\nunder the 'hooks' section.\n\nExamples:\n  devflow hook show                  # List all configured hooks\n  devflow hook show post-create      # Show hooks for a specific phase\n  devflow hook run post-create       # Run a phase manually\n  devflow hook approvals             # List approved hooks\n  devflow hook approvals clear       # Clear all approvals",
-        hide = true
-    )]
+enum Command {
+    /// Create devflow.toml for the current repository
+    Init(workspace::InitArgs),
+    /// Switch to a workspace; with -c, create it first
+    Switch(workspace::SwitchArgs),
+    /// List the workspaces of this project (or of every registered project)
+    List(workspace::ListArgs),
+    /// Print the path of a workspace
+    Path(workspace::PathArgs),
+    /// Set up (or resume setting up) the current worktree
+    Setup(workspace::SetupArgs),
+    /// Remove a workspace, its database branch and (optionally) its Git branch
+    Remove(workspace::RemoveArgs),
+    /// Review and approve the project's hook commands
+    Trust(trust::TrustArgs),
+    /// Manage the post-checkout Git hook that sets up worktrees made by other tools
     Hook {
         #[command(subcommand)]
-        action: HookCommands,
+        action: workspace::HookAction,
     },
-    #[command(
-        about = "Manage plugin services",
-        long_about = "Manage plugin services.\n\nPlugins extend devflow with custom service providers via JSON-over-stdio protocol.\nAny executable that speaks the protocol can be a provider.\n\nExamples:\n  devflow plugin list                    # List configured plugin services\n  devflow plugin check my-plugin         # Verify a plugin works\n  devflow plugin init my-plugin --lang bash  # Print a plugin scaffold script",
-        hide = true
-    )]
-    Plugin {
+    /// Postgres server, branches and snapshots
+    Db {
         #[command(subcommand)]
-        action: PluginCommands,
+        command: db::DbCommand,
     },
-
-    // ── AI Agent ──
-    #[command(
-        about = "AI agent integration (status, context, skill, docs)",
-        long_about = "AI agent integration.\n\nGenerate context and guide files for coding agents that work in devflow workspaces.\nAgent status JSON includes workspace counts and agent_workdir values for automation.\n\nExamples:\n  devflow agent status\n  devflow --json agent status\n  devflow agent context\n  devflow agent skill --target claude\n  devflow agent docs",
-        hide = true
-    )]
-    Agent {
-        #[command(subcommand)]
-        action: AgentCommands,
-    },
-
-    // ── Proxy ──
-    #[command(
-        about = "Local reverse proxy (auto-HTTPS for containers and devflow processes)",
-        long_about = "Local reverse proxy for Docker containers and devflow-managed host processes.\n\nAuto-discovers Docker containers and process records, then provides HTTPS access via\n*.localhost domains (configurable with --domain-suffix). Uses a local CA\nfor certificate generation.\n\nExamples:\n  devflow proxy start                # Start the proxy\n  devflow proxy start --daemon       # Start in background\n  devflow proxy stop                 # Stop the proxy\n  devflow proxy status               # Show proxy status\n  devflow proxy list                 # List proxied targets\n  devflow proxy trust verify         # Check if CA is trusted\n  devflow proxy trust info           # Show trust instructions",
-        hide = true
-    )]
-    Proxy {
-        #[command(subcommand)]
-        action: ProxyCommands,
-    },
-
-    #[command(
-        about = "Controller daemon: keep shared global engines running",
-        long_about = "Run a background controller that keeps every registered project's shared global engines (type: shared, or service_type rustfs/redis) running, restarting any that go down.\n\nExamples:\n  devflow daemon start           # background, reconcile every 30s\n  devflow daemon start --once    # reconcile once and exit\n  devflow daemon status\n  devflow daemon stop"
-    )]
-    Daemon {
-        #[command(subcommand)]
-        action: DaemonCommands,
-    },
-
-    // ── Hidden ──
-    #[command(about = "Generate shell completions", hide = true)]
-    Completions {
-        #[arg(help = "Shell to generate completions for: bash, zsh, fish, elvish, powershell")]
-        shell: clap_complete::Shell,
-    },
-
-    // ── TUI ──
-    #[cfg(feature = "tui")]
-    #[command(about = "Launch the interactive terminal UI dashboard")]
-    Tui,
-
-    // ── AI Tool Config Sync ──
-    #[command(
-        about = "Sync AI tool configs from current worktree back to main",
-        hide = true,
-        name = "sync-ai-configs"
-    )]
-    SyncAiConfigs,
-
-    // ── Garbage Collection ──
-    #[command(
-        about = "Detect and clean up orphaned projects (missing directory, leftover state)",
-        long_about = "Detect and clean up orphaned projects.\n\nScans all state stores (SQLite, local state YAML, Docker containers) for projects\nwhose directories no longer exist on disk. Orphaned resources include stopped/running\nDocker containers, database state, data directories, and registry entries.\n\nBy default, lists orphans and lets you pick which to clean up interactively.\n\nExamples:\n  devflow gc                     # Interactive: list orphans, pick to clean\n  devflow gc --list               # Just list orphans (no cleanup)\n  devflow gc --all                # Clean all orphans (with confirmation)\n  devflow gc --all --force        # Clean all orphans (skip confirmation)\n  devflow --json gc               # Machine-readable orphan list",
-        hide = true
-    )]
-    Gc {
-        #[arg(long, help = "Only list orphans, do not clean up")]
-        list: bool,
-        #[arg(long, help = "Clean up all orphans (with confirmation unless --force)")]
-        all: bool,
-        #[arg(long, help = "Skip confirmation prompts")]
-        force: bool,
-    },
+    /// Check git, docker, the Postgres server and the project setup
+    Doctor,
+    /// Print the shell wrapper that lets `devflow switch` change directory
+    ShellInit(shell::ShellInitArgs),
+    /// Print shell completions
+    Completions(system::CompletionsArgs),
+    /// Open the desktop app
+    Gui,
 }
 
-/// Subcommands for `devflow process`.
-#[derive(Subcommand)]
-pub enum ProcessCommands {
-    #[command(about = "Start configured processes for a workspace")]
-    Start {
-        #[arg(help = "Process names to start (omit with --all for every process)")]
-        names: Vec<String>,
-        #[arg(
-            long,
-            help = "Start all configured processes",
-            conflicts_with = "names"
-        )]
-        all: bool,
-        #[arg(long, help = "Workspace name (defaults to current workspace)")]
-        workspace: Option<String>,
-        #[arg(short, long, help = "Restart if already running")]
-        force: bool,
-    },
-    #[command(about = "Stop configured or running processes for a workspace")]
-    Stop {
-        #[arg(help = "Process names to stop (omit with --all for every process)")]
-        names: Vec<String>,
-        #[arg(
-            long,
-            help = "Stop all configured/running processes",
-            conflicts_with = "names"
-        )]
-        all: bool,
-        #[arg(long, help = "Workspace name (defaults to current workspace)")]
-        workspace: Option<String>,
-    },
-    #[command(about = "Restart configured processes for a workspace")]
-    Restart {
-        #[arg(help = "Process names to restart (omit with --all for every process)")]
-        names: Vec<String>,
-        #[arg(
-            long,
-            help = "Restart all configured processes",
-            conflicts_with = "names"
-        )]
-        all: bool,
-        #[arg(long, help = "Workspace name (defaults to current workspace)")]
-        workspace: Option<String>,
-    },
-    #[command(about = "Show process status", visible_alias = "list")]
-    Status {
-        #[arg(long, help = "Filter by workspace")]
-        workspace: Option<String>,
-    },
-    #[command(about = "Show process logs")]
-    Logs {
-        #[arg(help = "Process name")]
-        name: String,
-        #[arg(long, help = "Workspace name (defaults to current workspace)")]
-        workspace: Option<String>,
-        #[arg(long, help = "Number of log lines to show")]
-        tail: Option<usize>,
-        #[arg(short = 'f', long, help = "Follow appended log output")]
-        follow: bool,
-    },
+impl Command {
+    /// Document name for `--json`; `None` for commands that cannot emit JSON.
+    fn json_name(&self) -> Option<&'static str> {
+        Some(match self {
+            Command::Init(_) => "init",
+            Command::Switch(_) => "switch",
+            Command::List(_) => "list",
+            Command::Path(_) => "path",
+            Command::Setup(_) => "setup",
+            Command::Remove(_) => "remove",
+            Command::Trust(_) => "trust",
+            Command::Hook { action } => action.json_name(),
+            Command::Db { command } => command.json_name()?,
+            Command::Doctor => "doctor",
+            Command::ShellInit(_) | Command::Completions(_) | Command::Gui => return None,
+        })
+    }
+
+    fn display_name(&self) -> &'static str {
+        match self {
+            Command::ShellInit(_) => "shell-init",
+            Command::Completions(_) => "completions",
+            Command::Gui => "gui",
+            Command::Db { .. } => "db psql",
+            _ => "devflow",
+        }
+    }
 }
 
-/// Subcommands for `devflow service`.
-#[derive(Subcommand)]
-pub enum ServiceCommands {
-    #[command(
-        about = "Create a new service workspace",
-        long_about = "Create a new service workspace.\n\nCreates Docker containers and/or cloud workspaces for the specified workspace name.\n\nExamples:\n  devflow service create feature-auth\n  devflow service create feature-auth --from develop"
-    )]
-    Create {
-        #[arg(help = "Name of the workspace to create")]
-        workspace_name: String,
-        #[arg(long, help = "Parent workspace to clone from")]
-        from: Option<String>,
-    },
-    #[command(
-        about = "Delete a service workspace (keeps workspace and worktree)",
-        long_about = "Delete a service workspace (keeps workspace and worktree).\n\nRemoves service workspaces (containers, cloud workspaces) but preserves the workspace\nand any worktree directory. Use 'devflow remove' to delete everything.\n\nExamples:\n  devflow service delete feature-auth"
-    )]
-    Delete {
-        #[arg(help = "Name of the workspace to delete")]
-        workspace_name: String,
-    },
-    #[command(about = "Clean up old workspaces for this service")]
-    Cleanup {
-        #[arg(long, help = "Maximum number of workspaces to keep")]
-        max_count: Option<usize>,
-    },
-    #[command(about = "List configured services")]
-    List,
-    #[command(about = "Show service status")]
-    Status,
-    #[command(
-        about = "Start all shared global engines",
-        long_about = "Ensure every configured shared global engine (type: shared, or service_type rustfs/redis) is running.\n\nStarts the single global container per engine if it isn't up yet — a pre-warm / reconcile step. Per-workspace (CoW) and cloud services are skipped.\n\nExamples:\n  devflow service up"
-    )]
-    Up,
-    #[command(
-        about = "Run service diagnostics",
-        long_about = "Run diagnostics for configured service providers.\n\nChecks Docker/cloud-provider reachability, storage configuration, state files,\nand provider-specific health. JSON output includes summary and next_steps fields.\nUse --strict in CI/agent workflows to exit non-zero when any service check fails.\n\nExamples:\n  devflow service doctor\n  devflow --json service doctor\n  devflow --json service doctor --strict"
-    )]
-    Doctor {
-        #[arg(long, help = "Exit non-zero when any service doctor check fails")]
-        strict: bool,
-    },
-    #[command(about = "Show service capabilities")]
-    Capabilities,
-    #[command(
-        about = "Add a new service provider",
-        long_about = "Add a new service provider to the project.\n\nConfigures a new service provider (local Docker, Neon, ClickHouse, etc.) and\nstores it in local state. When run without flags, an interactive wizard guides\nyou through service type, provider, and name selection.\n\nExamples:\n  devflow service add                              # Interactive wizard\n  devflow service add mydb                         # Interactive (name pre-filled)\n  devflow service add mydb --provider neon          # Add Neon cloud provider\n  devflow service add app-db --provider local --service-type postgres --storage copy\n  devflow service add analytics --provider local --service-type clickhouse"
-    )]
-    Add {
-        #[arg(help = "Service name (prompted if omitted)")]
-        name: Option<String>,
-        #[arg(long, help = "Provider type to scaffold (local or shared)")]
-        provider: Option<String>,
-        #[arg(
-            long,
-            help = "Service type (postgres, clickhouse, mysql, redis, rustfs)"
-        )]
-        service_type: Option<String>,
-        #[arg(long, help = "Force overwrite existing service with same name")]
-        force: bool,
-        #[arg(
-            long,
-            help = "Seed the default workspace from source (PostgreSQL URL, file path, or s3:// URL)"
-        )]
-        from: Option<String>,
-        #[arg(
-            long,
-            help = "Local PostgreSQL storage driver: auto, zfs, apfs_clone, reflink, or copy"
-        )]
-        storage: Option<String>,
-    },
-    #[command(
-        about = "Remove a service provider configuration",
-        long_about = "Remove a service provider from local state.\n\nThis removes the service configuration but does not destroy any data.\nUse 'devflow service destroy' to remove all data first.\n\nExamples:\n  devflow service remove mydb"
-    )]
-    Remove {
-        #[arg(help = "Service name to remove")]
-        name: String,
-    },
-    #[command(about = "Start a stopped workspace container (local provider)")]
-    Start {
-        #[arg(help = "Name of the workspace to start")]
-        workspace_name: String,
-    },
-    #[command(about = "Stop a running workspace container (local provider)")]
-    Stop {
-        #[arg(help = "Name of the workspace to stop")]
-        workspace_name: String,
-    },
-    #[command(about = "Reset a workspace to its parent state (local provider)")]
-    Reset {
-        #[arg(help = "Name of the workspace to reset")]
-        workspace_name: String,
-    },
-    #[command(about = "Destroy all workspaces and data for a service (local provider)")]
-    Destroy {
-        #[arg(long, help = "Skip confirmation prompt")]
-        force: bool,
-    },
-    #[command(
-        about = "Show connection info for a service workspace",
-        long_about = "Show connection info for a service workspace.\n\nOutputs connection details in various formats for use in scripts and configuration.\n\nExamples:\n  devflow service connection feature-auth              # Connection URI\n  devflow service connection feature-auth --format env  # Environment variables\n  devflow service connection feature-auth --format json # JSON object"
-    )]
-    Connection {
-        #[arg(help = "Name of the workspace")]
-        workspace_name: String,
-        #[arg(long, help = "Output format: uri, env, or json")]
-        format: Option<String>,
-    },
-    #[command(
-        about = "Show container logs for a workspace",
-        long_about = "Show container logs for a workspace.\n\nDisplays stdout/stderr from the Docker container backing a service workspace.\nUseful for debugging startup failures, query errors, or crash loops.\n\nExamples:\n  devflow service logs main                    # Last 100 lines from main\n  devflow service logs feature/auth --tail 50  # Last 50 lines\n  devflow service logs main -s analytics       # Logs from a specific service"
-    )]
-    Logs {
-        #[arg(help = "Name of the workspace to show logs for")]
-        workspace_name: String,
-        #[arg(long, help = "Number of lines to show (default: 100)")]
-        tail: Option<usize>,
-    },
-    #[command(
-        about = "Seed a workspace from an external source",
-        long_about = "Seed a workspace database from an external source.\n\nLoads data into an existing workspace from a PostgreSQL URL, local dump file,\nor S3 URL. The workspace must already exist.\n\nExamples:\n  devflow service seed main --from dump.sql                    # Seed from local file\n  devflow service seed feature/auth --from postgresql://...     # Seed from live database\n  devflow service seed main --from s3://bucket/path/dump.sql   # Seed from S3"
-    )]
-    Seed {
-        #[arg(help = "Name of the workspace to seed")]
-        workspace_name: String,
-        #[arg(
-            long,
-            help = "Source to seed from (PostgreSQL URL, file path, or s3:// URL)"
-        )]
-        from: String,
-    },
-
-    #[command(
-        about = "Discover running Docker containers matching known service types",
-        long_about = "Discover running Docker containers matching known service types.\n\nBy default, results are scoped to Docker Compose containers belonging to the\ncurrent devflow project (matched by compose working directory/config files).\nUse --global to discover across all projects. Always excludes devflow-managed\ncontainers.\n\nExamples:\n  devflow service discover                           # Current project containers only\n  devflow service discover --service-type postgres   # Current project PostgreSQL only\n  devflow service discover --global                  # All projects"
-    )]
-    Discover {
-        #[arg(
-            long,
-            help = "Filter by service type (postgres, clickhouse, mysql, generic)"
-        )]
-        service_type: Option<String>,
-        #[arg(
-            long,
-            help = "Discover across all projects (disable current-project scoping)"
-        )]
-        global: bool,
-    },
+/// Project identity as embedded in JSON documents.
+#[derive(Serialize)]
+pub struct ProjectInfo<'a> {
+    name: &'a str,
+    id: uuid::Uuid,
+    root: &'a Path,
 }
 
-#[derive(Subcommand)]
-pub enum HookCommands {
-    #[command(about = "Show configured hooks")]
-    Show {
-        #[arg(help = "Only show hooks for this phase (e.g. post-switch)")]
-        phase: Option<String>,
-    },
-    #[command(about = "Run hooks for a phase manually")]
-    Run {
-        #[arg(help = "Hook phase to run (e.g. post-switch, post-service-create)")]
-        phase: String,
-        #[arg(help = "Run only a specific named hook within the phase")]
-        name: Option<String>,
-        #[arg(long, help = "Workspace name context (defaults to current workspace)")]
-        workspace: Option<String>,
-    },
-    #[command(about = "Manage hook approvals")]
-    Approvals {
-        #[command(subcommand)]
-        action: ApprovalCommands,
-    },
-    #[command(
-        about = "Explain hook phases and template variables",
-        long_about = "Explain hook phases and template variables.\n\nWith no arguments, lists all hook phases with descriptions.\nWith a phase name, shows detailed info and an example.\n\nExamples:\n  devflow hook explain              # List all phases\n  devflow hook explain post-create  # Detailed info for post-create"
-    )]
-    Explain {
-        #[arg(help = "Phase name to explain (e.g. post-create, post-switch)")]
-        phase: Option<String>,
-    },
-    #[command(
-        about = "Show available template variables with current values",
-        long_about = "Show all template variables available in hook templates.\n\nDisplays the current workspace, repo, services, and all filters\nwith their actual resolved values.\n\nExamples:\n  devflow hook vars\n  devflow hook vars --workspace feature/auth"
-    )]
-    Vars {
-        #[arg(long, help = "Workspace name to use for context (defaults to current)")]
-        workspace: Option<String>,
-    },
-    #[command(
-        about = "Render a template string with current context",
-        long_about = "Render a MiniJinja template string using the current project context.\n\nUseful for testing templates before adding them to .devflow.yml.\n\nExamples:\n  devflow hook render '{{ service[\"db\"].url }}'\n  devflow hook render 'DATABASE_URL={{ service[\"db\"].url }}'\n  devflow hook render '{{ workspace | sanitize_db }}'"
-    )]
-    Render {
-        #[arg(help = "Template string to render")]
-        template: String,
-        #[arg(long, help = "Workspace name to use for context (defaults to current)")]
-        workspace: Option<String>,
-    },
-    #[command(
-        about = "Show VCS event → devflow phase trigger mapping",
-        long_about = "Display the mapping from VCS events (e.g. git post-checkout) to\ndevflow hook phases (e.g. post-switch).\n\nThis mapping is fixed and not configurable.\n\nExamples:\n  devflow hook triggers"
-    )]
-    Triggers,
-    #[command(
-        about = "List available built-in hook actions",
-        long_about = "Show all built-in action types that can be used in hooks.\n\nActions replace shell commands for common operations like writing env files,\nfind-and-replace in files, copying files, HTTP requests, and notifications.\n\nExamples:\n  devflow hook actions"
-    )]
-    Actions,
-    #[command(
-        about = "List hook recipes with per-project detection",
-        long_about = "Show the built-in hook recipes. Inside a project, each recipe is probed\nagainst the codebase (files present, tools actually installed) and shown\nwith its evidence, suggested parameter values, and install state.\n\nExamples:\n  devflow hook recipes\n  devflow --json hook recipes"
-    )]
-    Recipes,
-    #[command(
-        about = "Install a hook recipe into .devflow.yml",
-        long_about = "Install a recipe into your project configuration.\n\nDetection proposes parameter values (commands, file paths) matching this\nproject; adjust them interactively or via --param. The generated hooks are\nplain entries in .devflow.yml — edit them like any other hook.\n\nExamples:\n  devflow hook install env-file\n  devflow hook install db-migrate --param command='sqlx migrate run' --yes\n  devflow hook install install-deps --yes"
-    )]
-    Install {
-        #[arg(help = "Name of the recipe to install")]
-        recipe: String,
-        #[arg(
-            long = "param",
-            value_name = "KEY=VALUE",
-            help = "Set a recipe parameter (repeatable)"
-        )]
-        param: Vec<String>,
-        #[arg(long, help = "Accept detected values and defaults without prompting")]
-        yes: bool,
-    },
-    #[command(
-        about = "Detect applicable recipes and install them interactively",
-        long_about = "Probe the project for applicable recipes (services, lockfiles, migration\ntools, mise/direnv, ...), pick the ones to install, confirm their\nparameters, and write all generated hooks in one go.\n\nExamples:\n  devflow hook setup"
-    )]
-    Setup,
+impl<'a> ProjectInfo<'a> {
+    pub fn of(project: &'a Project) -> Self {
+        Self {
+            name: project.name(),
+            id: project.id(),
+            root: &project.root,
+        }
+    }
 }
 
-#[derive(Subcommand)]
-pub enum ApprovalCommands {
-    #[command(about = "List approved hooks for this project")]
-    List,
-    #[command(about = "Approve a specific hook command")]
-    Add {
-        #[arg(help = "The hook command to approve")]
-        command: String,
-    },
-    #[command(about = "Clear all approvals for this project")]
-    Clear,
-}
-
-#[derive(Subcommand)]
-pub enum PluginCommands {
-    #[command(about = "List registered plugins and their status")]
-    List,
-    #[command(about = "Check if a plugin is reachable and responds correctly")]
-    Check {
-        #[arg(help = "Plugin service name (as defined in services config)")]
-        name: String,
-    },
-    #[command(about = "Print a skeleton plugin script")]
-    Init {
-        #[arg(help = "Name for the new plugin")]
-        name: String,
-        #[arg(
-            long,
-            default_value = "bash",
-            help = "Language for the skeleton: bash or python"
-        )]
-        lang: String,
-    },
-}
-
-/// Subcommands for `devflow agent`.
-#[derive(Subcommand)]
-pub enum AgentCommands {
-    #[command(about = "Show execution status across all workspaces")]
-    Status,
-    #[command(
-        about = "Output project context for the current workspace",
-        long_about = "Output structured context for AI agents.\n\nIncludes workspace info, agent_workdir/cd_hint, service connections, and project config.\n\nExamples:\n  devflow agent context\n  devflow agent context --format json\n  devflow agent context --workspace feature/auth"
-    )]
-    Context {
-        #[arg(
-            long,
-            default_value = "markdown",
-            help = "Output format: json or markdown"
-        )]
-        format: String,
-        #[arg(long, help = "Workspace to generate context for")]
-        workspace: Option<String>,
-    },
-    #[command(
-        about = "Generate devflow guide files for AI tools",
-        long_about = "Generate project-specific devflow guide files for AI tools.\n\nThis replaces the old bundled-skills installer: no fixed skills are embedded in\ndevflow. The generated files are plain Markdown and can be installed for one\ntarget or all known targets.\n\nTargets: all, generic, claude, cursor, opencode.\n\nExamples:\n  devflow agent skill\n  devflow agent skill --target claude\n  devflow --json agent skill --target all"
-    )]
-    Skill {
-        #[arg(
-            long,
-            default_value = "all",
-            help = "Guide target: all, generic, claude, cursor, opencode"
-        )]
-        target: String,
-    },
-    #[command(
-        about = "Generate a root AGENTS.md guide",
-        long_about = "Generate a root AGENTS.md guide for harnesses that read repository instructions.\n\nBy default this refuses to overwrite an existing AGENTS.md. Use --force to replace it."
-    )]
-    Docs {
-        #[arg(long, help = "Replace AGENTS.md if it already exists")]
-        force: bool,
-    },
-}
-
-pub use crate::proxy_commands::ProxyCommands;
-#[cfg(feature = "proxy")]
-pub use crate::proxy_commands::TrustCommands;
-
-/// Subcommands for `devflow daemon`.
-#[derive(Subcommand)]
-pub enum DaemonCommands {
-    #[command(about = "Start the controller daemon")]
-    Start {
-        #[arg(long, help = "Seconds between reconcile passes [default: 30]")]
-        interval: Option<u64>,
-        #[arg(long, help = "Run in the foreground instead of detaching")]
-        foreground: bool,
-        #[arg(long, help = "Reconcile once and exit (no background process)")]
-        once: bool,
-    },
-    #[command(about = "Stop the controller daemon")]
-    Stop,
-    #[command(about = "Show controller daemon status")]
-    Status,
-}
-
-pub async fn handle_command(
-    cmd: Commands,
-    json_output: bool,
+/// What every handler needs to know about how it was invoked.
+pub struct Ctx {
+    pub json: bool,
     non_interactive: bool,
-    database_name: Option<&str>,
-) -> Result<()> {
-    let json_unsupported = matches!(
-        &cmd,
-        Commands::ShellInit { .. } | Commands::Completions { .. }
-    );
-    #[cfg(feature = "tui")]
-    let json_unsupported = json_unsupported || matches!(&cmd, Commands::Tui);
-    if json_output && json_unsupported {
+    /// Absolute directory the command runs "in" (`-C` or the process directory).
+    pub cwd: PathBuf,
+    warnings: RefCell<Vec<String>>,
+}
+
+impl Ctx {
+    /// Prompts are allowed only for a person at a terminal: `--json` and
+    /// `--non-interactive` never prompt.
+    pub fn interactive(&self) -> bool {
+        !self.json
+            && !self.non_interactive
+            && std::io::stdin().is_terminal()
+            && std::io::stderr().is_terminal()
+    }
+
+    pub fn project(&self) -> Result<Project> {
+        Project::discover(&self.cwd)
+    }
+
+    /// Add the project to the machine-local registry; failure only warns.
+    pub fn register(&self, project: &Project) {
+        if let Err(error) = devflow_core::registry::add(project) {
+            self.warn(format!("could not register the project: {error:#}"));
+        }
+    }
+
+    /// Human mode prints the warning to stderr; JSON mode adds it to `warnings`.
+    pub fn warn(&self, message: impl Into<String>) {
+        let message = message.into();
+        if self.json {
+            self.warnings.borrow_mut().push(message);
+        } else {
+            output::note(format!("warning: {}", redact::text(&message)));
+        }
+    }
+
+    pub(crate) fn take_warnings(&self) -> Vec<String> {
+        std::mem::take(&mut *self.warnings.borrow_mut())
+    }
+}
+
+pub fn main() -> ExitCode {
+    shell::take_handoff();
+    let args: Vec<OsString> = std::env::args_os().collect();
+    let cli = match Cli::try_parse_from(&args) {
+        Ok(cli) => cli,
+        Err(error) => return usage_error(&args, &error),
+    };
+    let json_name = cli.command.json_name();
+    let display = cli.command.display_name();
+    let json = cli.json;
+    let command = json_name.unwrap_or(display);
+    let ctx = match context(&cli) {
+        Ok(ctx) => ctx,
+        Err(error) => return fail(None, json, command, &error),
+    };
+    match run(&ctx, cli.command) {
+        Ok(code) => code,
+        Err(error) => fail(Some(&ctx), json, command, &error),
+    }
+}
+
+fn context(cli: &Cli) -> Result<Ctx> {
+    let cwd = match &cli.dir {
+        Some(dir) => dir
+            .canonicalize()
+            .with_context(|| format!("cannot use -C {}", dir.display()))?,
+        None => std::env::current_dir().context("cannot determine the current directory")?,
+    };
+    let cwd = cwd.canonicalize().unwrap_or(cwd);
+    Ok(Ctx {
+        json: cli.json,
+        non_interactive: cli.non_interactive,
+        cwd,
+        warnings: RefCell::new(Vec::new()),
+    })
+}
+
+/// Report a failure: one redacted JSON document on stdout when `--json` was
+/// asked for (whatever stage failed), and `error:` plus a hint on stderr.
+fn fail(ctx: Option<&Ctx>, json: bool, command: &str, error: &anyhow::Error) -> ExitCode {
+    let message = format!("{error:#}");
+    let hint = hint(error);
+    if json {
+        let warnings = ctx.map(Ctx::take_warnings).unwrap_or_default();
+        output::emit_error(warnings, command, &message, hint.as_deref());
+    }
+    output::note(format!("error: {}", redact::text(&message)));
+    if let Some(hint) = hint {
+        output::note(format!("hint: {}", redact::text(&hint)));
+    }
+    ExitCode::FAILURE
+}
+
+/// What the person can do about a failure, chosen from the error's type.
+fn hint(error: &anyhow::Error) -> Option<String> {
+    if let Some(missing) = error.downcast_ref::<NotInitialized>() {
+        return Some(format!(
+            "run `devflow init` in {} (add --postgres managed for database branches)",
+            missing.root.display()
+        ));
+    }
+    match error.downcast_ref::<Protected>() {
+        Some(protected) if protected.forceable => Some(format!(
+            "run `devflow remove {} --force` to override this protection",
+            protected.workspace
+        )),
+        _ => None,
+    }
+}
+
+/// An argument error (or `--help`/`--version`) from clap. Help and version
+/// keep clap's behavior; every failure honors `--json` and redaction, because
+/// arguments can carry credentials (`--database-url`) that clap echoes back.
+fn usage_error(args: &[OsString], error: &clap::Error) -> ExitCode {
+    if matches!(
+        error.kind(),
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+    ) {
+        let _ = error.print();
+        return ExitCode::SUCCESS;
+    }
+    let rendered = error.render();
+    let palette = output::Palette::stderr();
+    // Usage errors exit 1: status 2 is reserved for needs_attention.
+    if json_requested(args) {
+        let command = command_name(args);
+        let message = if error.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand {
+            let help = if command == "devflow" {
+                command.clone()
+            } else {
+                format!("devflow {command}")
+            };
+            format!("a command is required; see `{help} --help`")
+        } else {
+            summary(&rendered.to_string())
+        };
+        output::emit_error(Vec::new(), &command, &message, None);
+    }
+    let text = if palette.is_enabled() {
+        rendered.ansi().to_string()
+    } else {
+        rendered.to_string()
+    };
+    output::note(redact::text(text.trim_end()));
+    ExitCode::FAILURE
+}
+
+/// Whether the arguments ask for `--json` (before any `--`).
+fn json_requested(args: &[OsString]) -> bool {
+    args.iter()
+        .skip(1)
+        .take_while(|arg| *arg != "--")
+        .any(|arg| arg == "--json")
+}
+
+/// The command a failed invocation was aimed at, as a `--json` document name:
+/// the chain of subcommand names found in the arguments (`db snapshot create`).
+/// The values of options that take one (`-C DIR`, `--from WS`) are skipped, so
+/// a directory or workspace that happens to be called like a command is not
+/// mistaken for it; clap's own definition says which options those are.
+fn command_name(args: &[OsString]) -> String {
+    let root = Cli::command();
+    let globals: Vec<&clap::Arg> = root
+        .get_arguments()
+        .filter(|arg| arg.is_global_set())
+        .collect();
+    let takes_value =
+        |arg: &clap::Arg| matches!(arg.get_action(), ArgAction::Set | ArgAction::Append);
+    let mut command = root.clone();
+    let mut names: Vec<String> = Vec::new();
+    let mut rest = args.iter().skip(1);
+    while let Some(arg) = rest.next() {
+        let Some(arg) = arg.to_str() else { continue };
+        if arg == "--" {
+            break;
+        }
+        let known = |matches: &dyn Fn(&clap::Arg) -> bool| {
+            command
+                .get_arguments()
+                .chain(globals.iter().copied())
+                .find(|arg| matches(arg))
+                .is_some_and(takes_value)
+        };
+        if let Some(long) = arg.strip_prefix("--") {
+            // `--name=value` carries its value; `--name value` leaves it next.
+            if !long.contains('=') && known(&|arg| arg.get_long() == Some(long)) {
+                rest.next();
+            }
+        } else if let Some(shorts) = arg.strip_prefix('-').filter(|shorts| !shorts.is_empty()) {
+            // `-abC dir` / `-Cdir`: the first option that takes a value ends
+            // the cluster, and the value is the rest of it or the next argument.
+            let taking = shorts
+                .char_indices()
+                .find(|(_, short)| known(&|arg| arg.get_short() == Some(*short)));
+            if let Some((at, short)) = taking
+                && at + short.len_utf8() == shorts.len()
+            {
+                rest.next();
+            }
+        } else if let Some(next) = command.find_subcommand(arg) {
+            names.push(next.get_name().to_string());
+            command = next.clone();
+        }
+    }
+    if names.is_empty() {
+        "devflow".to_string()
+    } else {
+        names.join(" ")
+    }
+}
+
+/// The first paragraph of a clap diagnostic as one line, without `error: `.
+fn summary(rendered: &str) -> String {
+    let first = rendered.trim().split("\n\n").next().unwrap_or("");
+    let line = first.split_whitespace().collect::<Vec<_>>().join(" ");
+    line.strip_prefix("error: ").unwrap_or(&line).to_string()
+}
+
+fn run(ctx: &Ctx, command: Command) -> Result<ExitCode> {
+    if ctx.json && command.json_name().is_none() {
         anyhow::bail!(
-            "--json is not supported by shell-init, completions, or tui because their stdout is the generated/interactive interface"
+            "`devflow {}` does not support --json",
+            command.display_name()
+        );
+    }
+    match command {
+        Command::Init(args) => workspace::init(ctx, args),
+        Command::Switch(args) => workspace::switch(ctx, args),
+        Command::List(args) => workspace::list(ctx, args),
+        Command::Path(args) => workspace::path(ctx, args),
+        Command::Setup(args) => workspace::setup(ctx, args),
+        Command::Remove(args) => workspace::remove(ctx, args),
+        Command::Trust(args) => trust::command(ctx, args),
+        Command::Hook { action } => workspace::hook(ctx, action),
+        Command::Db { command } => db::run(ctx, command),
+        Command::Doctor => system::doctor(ctx),
+        Command::ShellInit(args) => shell::init(args),
+        Command::Completions(args) => system::completions::<Cli>(args),
+        Command::Gui => system::gui(ctx),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<OsString> {
+        std::iter::once("devflow")
+            .chain(list.iter().copied())
+            .map(OsString::from)
+            .collect()
+    }
+
+    #[test]
+    fn json_is_requested_only_before_the_terminator() {
+        assert!(json_requested(&args(&["--json", "list"])));
+        assert!(json_requested(&args(&["list", "--json"])));
+        assert!(!json_requested(&args(&["list"])));
+        assert!(!json_requested(&args(&["switch", "--", "--json"])));
+    }
+
+    #[test]
+    fn failed_invocations_are_named_after_their_subcommands() {
+        let name = |list: &[&str]| command_name(&args(list));
+        assert_eq!(name(&["--json"]), "devflow");
+        assert_eq!(name(&["--json", "bogus"]), "devflow");
+        assert_eq!(name(&["--json", "path"]), "path");
+        assert_eq!(name(&["-C", "/tmp/x", "--json", "list", "--all"]), "list");
+        // The value of an option is not a command, wherever the option sits.
+        assert_eq!(name(&["--json", "-C", "list", "path"]), "path");
+        assert_eq!(name(&["-C", "db", "--json", "path"]), "path");
+        assert_eq!(name(&["--json", "-Clist", "path"]), "path");
+        assert_eq!(name(&["--json", "-C=list", "path"]), "path");
+        assert_eq!(
+            name(&["db", "-C", "snapshot", "snapshot", "list"]),
+            "db snapshot list"
+        );
+        assert_eq!(name(&["--json", "-C", "list"]), "devflow");
+        assert_eq!(name(&["--json", "--non-interactive", "path"]), "path");
+        assert_eq!(name(&["--json", "-C", "x", "--", "list"]), "devflow");
+        assert_eq!(
+            name(&["db", "snapshot", "create", "seed"]),
+            "db snapshot create"
+        );
+        assert_eq!(
+            name(&["db", "branch", "delete", "list"]),
+            "db branch delete"
+        );
+        assert_eq!(name(&["hook", "install"]), "hook install");
+        // A workspace that happens to be called like a command is not one.
+        assert_eq!(name(&["switch", "-c", "db"]), "switch");
+    }
+
+    #[test]
+    fn clap_diagnostics_are_summarized_on_one_line() {
+        let error = Cli::try_parse_from(["devflow", "path"]).err().unwrap();
+        assert_eq!(
+            summary(&error.render().to_string()),
+            "the following required arguments were not provided: <NAME>"
         );
     }
 
-    // TUI command — launch immediately without loading service infrastructure
-    #[cfg(feature = "tui")]
-    if matches!(cmd, Commands::Tui) {
-        return super::tui::run().await;
-    }
+    #[test]
+    fn hints_follow_the_error_type() {
+        let missing = anyhow::Error::new(NotInitialized {
+            root: PathBuf::from("/repo"),
+        })
+        .context("while listing");
+        assert!(hint(&missing).unwrap().contains("devflow init"));
 
-    // Proxy commands — no config needed
-    if let Commands::Proxy { action } = cmd {
-        #[cfg(feature = "proxy")]
-        return proxy::handle_proxy_command(action, json_output).await;
-        #[cfg(not(feature = "proxy"))]
-        {
-            let args = action.companion_args();
-            let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-            if let Some(value) = devflow_core::companion::forward(&args, json_output).await? {
-                println!("{}", serde_json::to_string_pretty(&value)?);
-            }
-            return Ok(());
-        }
-    }
-
-    if let Commands::ExecutionRun { record } = cmd {
-        let code = devflow_core::execution::run_saved(&record).await?;
-        if code != 0 {
-            std::process::exit(code.max(1));
-        }
-        return Ok(());
-    }
-
-    // Daemon commands — operate on global state, no project config needed
-    if let Commands::Daemon { action } = cmd {
-        return daemon::handle_daemon_command(action, json_output).await;
-    }
-
-    // Gc command — no config needed, operates on global state
-    if let Commands::Gc { list, all, force } = cmd {
-        return gc::handle_gc_command(list, all, force, json_output, non_interactive).await;
-    }
-
-    if matches!(cmd, Commands::Update { .. }) {
-        anyhow::bail!("devflow update was retired; update through the installer or package manager used to install devflow");
-    }
-    if matches!(cmd, Commands::Commit { .. }) {
-        anyhow::bail!("devflow commit was retired; use git commit and your preferred editor or agent directly (preserving VCS hooks and signing)");
-    }
-    if matches!(cmd, Commands::SetupZfs { .. }) {
-        anyhow::bail!("Automatic ZFS setup was retired; provision and delegate a dataset externally, then configure local.data_root. See the storage guide; devflow never runs sudo");
-    }
-
-    // Commands that need service infrastructure (config loading, state injection)
-    let uses_service = matches!(
-        cmd,
-        Commands::Service { .. }
-            | Commands::Process { .. }
-            | Commands::List
-            | Commands::Link { .. }
-            | Commands::Connection { .. }
-            | Commands::Status
-            | Commands::Cleanup { .. }
-            | Commands::Switch { .. }
-            | Commands::GitHook { .. }
-            | Commands::WorktreeSetup
-            | Commands::Remove { .. }
-            | Commands::Doctor { .. }
-    );
-
-    // Check if command requires configuration file
-    let requires_config = uses_service;
-
-    // Load effective configuration (includes local config and environment overrides)
-    let (effective_config, config_path) = Config::load_effective_config_with_path_info()?;
-
-    // Early exit if devflow is disabled
-    if effective_config.should_exit_early()? {
-        if effective_config.is_disabled() {
-            log::debug!("devflow is globally disabled via configuration");
-        } else {
-            log::debug!("devflow is disabled for current workspace");
-        }
-        return Ok(());
-    }
-
-    // Check for required config file after checking if disabled
-    if requires_config && config_path.is_none() {
-        // Service commands allow no config (will use local provider defaults)
-        // This is fine — create_provider_default() handles auto-detection
-    }
-
-    // Get the merged configuration for normal operations
-    let mut config_merged = effective_config.get_merged_config();
-
-    // Overlay CLI-managed local-state services (merged by name with committed
-    // services — same semantics as the GUI, via the shared core helper).
-    if uses_service {
-        if let Some(ref path) = config_path {
-            config_merged.overlay_local_state_services(path);
-        }
-    }
-
-    if matches!(
-        cmd,
-        Commands::Exec { .. }
-            | Commands::Baseline { .. }
-            | Commands::Plan { .. }
-            | Commands::Operation { .. }
-            | Commands::Retention { .. }
-            | Commands::Project { .. }
-    ) {
-        if let Some(path) = &config_path {
-            config_merged.overlay_local_state_services(path);
-        }
-        if let Some(value) = application::handle(
-            &cmd,
-            &config_merged,
-            &operation_project_dir(&config_path),
-            json_output,
-        )
-        .await?
-        {
-            println!("{}", serde_json::to_string_pretty(&value)?);
-            if value
-                .get("exit_code")
-                .and_then(|v| v.as_i64())
-                .is_some_and(|code| code != 0)
-            {
-                anyhow::bail!("workspace command failed");
-            }
-            if value
-                .get("failures")
-                .and_then(|v| v.as_object())
-                .is_some_and(|f| !f.is_empty())
-            {
-                anyhow::bail!("retention cleanup has failures");
-            }
-            if value
-                .get("operation")
-                .and_then(|v| v.get("status"))
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| s != "ready")
-            {
-                anyhow::bail!("operation needs attention");
-            }
-            return Ok(());
-        }
-    }
-    // Handle service-based commands
-    if uses_service {
-        // For GitHook, check if hooks are disabled early
-        if matches!(cmd, Commands::GitHook { .. }) && effective_config.should_skip_hooks() {
-            log::debug!("Git hooks are disabled via configuration");
-            return Ok(());
-        }
-        return match cmd {
-            Commands::Connection {
-                workspace_name,
-                format,
-            } => {
-                // Top-level alias: delegate to service connection
-                let svc_cmd = ServiceCommands::Connection {
-                    workspace_name,
-                    format,
-                };
-                service::handle_service_provider_command(
-                    svc_cmd,
-                    &mut config_merged,
-                    json_output,
-                    non_interactive,
-                    database_name,
-                    &config_path,
-                )
-                .await
-            }
-            Commands::Status => {
-                // Top-level status: show both VCS and service info
-                service::handle_top_level_status(
-                    &mut config_merged,
-                    json_output,
-                    non_interactive,
-                    database_name,
-                    &config_path,
-                )
-                .await
-            }
-            Commands::Service { action } => {
-                service::handle_service_dispatch(
-                    action,
-                    &mut config_merged,
-                    &effective_config,
-                    json_output,
-                    non_interactive,
-                    database_name,
-                    &config_path,
-                )
-                .await
-            }
-            Commands::Process { action } => {
-                process::handle_process_command(action, &config_merged, &config_path, json_output)
-                    .await
-            }
-            // Workspace management commands that need service context
-            _ => {
-                workspace::handle_workspace_command(
-                    cmd,
-                    &mut config_merged,
-                    json_output,
-                    non_interactive,
-                    database_name,
-                    &config_path,
-                )
-                .await
-            }
+        let protected = |forceable| {
+            anyhow::Error::new(Protected {
+                workspace: "feature/a".into(),
+                reason: "has uncommitted changes".into(),
+                forceable,
+            })
         };
+        assert!(
+            hint(&protected(true))
+                .unwrap()
+                .contains("devflow remove feature/a --force")
+        );
+        assert_eq!(hint(&protected(false)), None);
+        // The wording of a message never decides.
+        assert_eq!(hint(&anyhow::anyhow!("run `devflow init` first")), None);
     }
-
-    match cmd {
-        Commands::Init { path, name, force } => {
-            let mut init_target_dir: Option<std::path::PathBuf> = None;
-
-            // If a path is given, create the directory and work inside it.
-            if let Some(ref dir) = path {
-                let target = std::path::PathBuf::from(dir);
-                if target.exists() {
-                    if !target.is_dir() {
-                        anyhow::bail!("'{}' exists and is not a directory", target.display());
-                    }
-                } else {
-                    std::fs::create_dir_all(&target).with_context(|| {
-                        format!("Failed to create directory '{}'", target.display())
-                    })?;
-                    if !json_output {
-                        println!("Created directory: {}", target.display());
-                    }
-                }
-                std::env::set_current_dir(&target).with_context(|| {
-                    format!("Failed to change into directory '{}'", target.display())
-                })?;
-                init_target_dir = Some(std::env::current_dir()?);
-            }
-
-            let init_config_path = std::env::current_dir()?.join(".devflow.yml");
-
-            if init_config_path.exists() && !force {
-                anyhow::bail!(
-                    "Configuration already exists at {}. Use --force to overwrite.",
-                    init_config_path.display()
-                );
-            }
-
-            // Resolve the name: explicit --name flag > directory basename from
-            // path arg > current directory basename.
-            let resolved_name = if let Some(n) = name {
-                n
-            } else if let Some(ref dir) = path {
-                std::path::Path::new(dir)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "default".to_string())
-            } else {
-                std::env::current_dir()?
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "default".to_string())
-            };
-
-            let mut init_config = Config {
-                name: Some(resolved_name.clone()),
-                ..Config::default()
-            };
-
-            // ── VCS auto-init ──────────────────────────────────────────
-            // If no VCS is present, initialize one automatically.
-            let vcs_initialized = if vcs::detect_vcs_kind(".").is_none() {
-                // Load global config for `default_vcs` preference.
-                let global_cfg = GlobalConfig::load()?.unwrap_or_default();
-                let preference = global_cfg.default_vcs;
-                let interactive = !json_output && !non_interactive;
-
-                match vcs::init_vcs_repository(".", preference, interactive) {
-                    Ok(kind) => {
-                        if !json_output {
-                            println!("No VCS detected — initialized {} repository", kind);
-                        }
-                        Some(kind)
-                    }
-                    Err(e) => {
-                        if !json_output {
-                            println!("Warning: could not auto-initialize VCS: {e}");
-                        }
-                        None
-                    }
-                }
-            } else {
-                // VCS already exists — ensure it has at least one commit so the
-                // default workspace is materialised and `list_workspaces` works.
-                if let Ok(vcs_provider) = vcs::detect_vcs_provider(".") {
-                    let _ = vcs_provider.ensure_initial_commit();
-                }
-                None
-            };
-
-            // Auto-detect main workspace from VCS
-            if let Ok(vcs_prov) = vcs::detect_vcs_provider(".") {
-                match vcs_prov.default_workspace() {
-                    Ok(Some(detected_main)) => {
-                        init_config.git.main_workspace = detected_main.clone();
-                        if !json_output {
-                            println!(
-                                "Auto-detected main workspace: {} ({})",
-                                detected_main,
-                                vcs_prov.provider_name()
-                            );
-                        }
-                        // Detection follows the current primary checkout, so
-                        // initializing from a feature branch would commit that
-                        // machine-local branch into the shared config — and
-                        // the primary/default invariant then blocks every
-                        // teammate whose primary sits on the real default.
-                        let conventional = ["main", "master", "develop", "development", "trunk"];
-                        if !conventional.contains(&detected_main.as_str()) {
-                            eprintln!(
-                                "Warning: '{}' is the branch currently checked out here, not a conventional default (main/master/…). If this is a feature branch, set git.main_workspace in .devflow.yml to your real default branch before committing it.",
-                                detected_main
-                            );
-                        }
-                    }
-                    Ok(None) if vcs_prov.provider_name() == "git" => {
-                        anyhow::bail!(
-                            "Cannot initialize devflow while the Git primary checkout has a detached HEAD. Check out a branch in the primary checkout and retry."
-                        );
-                    }
-                    Ok(None) => {
-                        if !json_output {
-                            println!("Could not auto-detect main workspace, using default: main");
-                        }
-                    }
-                    Err(error) => {
-                        return Err(error).context("Failed to detect the VCS default workspace");
-                    }
-                }
-            }
-
-            // Detect CoW filesystem capability (used for both display and JSON output)
-            let cow_cap = vcs::cow_worktree::detect_cow_capability(
-                &std::env::current_dir().unwrap_or_default(),
-            );
-            let cow_label = match cow_cap {
-                vcs::cow_worktree::CowCapability::Apfs => "apfs",
-                vcs::cow_worktree::CowCapability::Reflink => "reflink",
-                vcs::cow_worktree::CowCapability::None => "none",
-            };
-
-            init_config.worktree = WorktreeConfig::recommended_default();
-
-            if !json_output {
-                match cow_cap {
-                    vcs::cow_worktree::CowCapability::Apfs => {
-                        println!(
-                            "Filesystem: APFS detected — worktrees will use fast copy-on-write cloning"
-                        );
-                    }
-                    vcs::cow_worktree::CowCapability::Reflink => {
-                        println!(
-                            "Filesystem: reflink support detected — worktrees will use fast copy-on-write cloning"
-                        );
-                    }
-                    vcs::cow_worktree::CowCapability::None => {
-                        println!(
-                            "Filesystem: copy-on-write not available — worktrees will use standard file copy"
-                        );
-                    }
-                }
-            }
-
-            // Don't write services to committed config — use `devflow service add`
-            init_config.services = None;
-            init_config.save_to_file(&init_config_path)?;
-
-            // Register the VCS default workspace as devflow root.
-            if let Err(e) =
-                ensure_default_workspace_registered(&init_config, &Some(init_config_path.clone()))
-            {
-                log::warn!("Failed to register default workspace in local state: {}", e);
-            }
-
-            // Derive vcs_initialized label for JSON output
-            let vcs_init_label = vcs_initialized.map(|k| k.to_string());
-            let vcs_provider_label = vcs::detect_vcs_provider(".")
-                .ok()
-                .map(|provider| provider.provider_name().to_string());
-            let workspace_model = match vcs_provider_label.as_deref() {
-                Some("git") => "linked_worktree",
-                Some("jj") => "native_workspace",
-                _ => "materialized_workspace",
-            };
-
-            if json_output {
-                let next_steps = init::init_next_steps(true, false, false, false);
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "status": "ok",
-                        "action": "init",
-                        "name": resolved_name,
-                        "config_path": init_config_path.display().to_string(),
-                        "cd_path": init_target_dir.as_ref().map(|p| p.display().to_string()),
-                        "workspace_model": workspace_model,
-                        "vcs_provider": vcs_provider_label,
-                        "cow_capability": cow_label,
-                        "vcs_initialized": vcs_init_label,
-                        "next_steps": next_steps,
-                    }))?
-                );
-            } else {
-                println!(
-                    "Initialized devflow configuration at: {}",
-                    init_config_path.display()
-                );
-
-                let gitignore_path = std::env::current_dir()?.join(".gitignore");
-                if gitignore_path.exists() {
-                    let gitignore_content =
-                        std::fs::read_to_string(&gitignore_path).unwrap_or_default();
-                    if !gitignore_content.contains(".devflow.local.yml") {
-                        println!("\nSuggestion: Add '.devflow.local.yml' to your .gitignore file:");
-                        println!("   echo '.devflow.local.yml' >> .gitignore");
-                    }
-                }
-
-                println!("\nEach workspace gets its own working directory.");
-                println!("  Path template: ../{{repo}}.{{workspace}}");
-                println!("  Files copied:  .env, .env.local");
-
-                // ── Guided wizard steps (interactive only) ──────────────────
-
-                let interactive = !non_interactive;
-                let mut added_services: Vec<String> = Vec::new();
-                let mut imported_processes: Vec<String> = Vec::new();
-                let mut hooks_installed = false;
-                let mut shell_configured = false;
-
-                if interactive {
-                    // Step 1: Offer to add services
-                    println!();
-                    let add_service = inquire::Confirm::new(
-                        "Would you like to add a service?",
-                    )
-                    .with_default(true)
-                    .with_help_message("Configure a database or other service (e.g. PostgreSQL, ClickHouse, Redis)")
-                    .prompt()
-                    .unwrap_or(false);
-
-                    if add_service {
-                        loop {
-                            let result = service::run_add_service_wizard(
-                                &mut init_config,
-                                &init_config_path,
-                                non_interactive,
-                                json_output,
-                                None,
-                            )
-                            .await?;
-
-                            if let Some(cfg) = result {
-                                added_services.push(format!(
-                                    "{} ({}, {})",
-                                    cfg.name, cfg.service_type, cfg.provider_type
-                                ));
-                            }
-
-                            let add_another = inquire::Confirm::new("Add another service?")
-                                .with_default(false)
-                                .prompt()
-                                .unwrap_or(false);
-
-                            if !add_another {
-                                break;
-                            }
-                        }
-                    }
-
-                    // Step 1.5: Offer to import non-data Docker Compose services as processes.
-                    if init_config.processes.is_none() {
-                        match init::discover_compose_processes() {
-                            Ok(suggestions) if !suggestions.is_empty() => {
-                                println!();
-                                println!(
-                                    "Detected Docker Compose app processes: {}",
-                                    suggestions
-                                        .iter()
-                                        .map(|s| s.name.as_str())
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                );
-                                let import_processes = inquire::Confirm::new(
-                                    "Import these as devflow Pitchfork processes?",
-                                )
-                                .with_default(true)
-                                .with_help_message(
-                                    "Database/cache containers are skipped; app containers become editable processes.daemons entries.",
-                                )
-                                .prompt()
-                                .unwrap_or(false);
-
-                                if import_processes {
-                                    let names = suggestions
-                                        .iter()
-                                        .map(|s| s.name.clone())
-                                        .collect::<Vec<_>>();
-                                    match init::install_compose_processes(
-                                        &mut init_config,
-                                        &init_config_path,
-                                        suggestions,
-                                    ) {
-                                        Ok(count) => {
-                                            imported_processes =
-                                                names.into_iter().take(count).collect();
-                                            println!(
-                                                "Imported {} Pitchfork process{} into .devflow.yml",
-                                                count,
-                                                if count == 1 { "" } else { "es" }
-                                            );
-                                        }
-                                        Err(e) => eprintln!(
-                                            "Warning: could not import Compose processes: {}",
-                                            e
-                                        ),
-                                    }
-                                }
-                            }
-                            Ok(_) => {}
-                            Err(e) => eprintln!("Warning: could not inspect Docker Compose: {}", e),
-                        }
-                    }
-
-                    // Step 2: Offer Git hooks installation
-                    println!();
-                    let install_hooks = inquire::Confirm::new(
-                        "Install Git hooks? (adopt linked worktrees and run lifecycle hooks)",
-                    )
-                    .with_default(true)
-                    .with_help_message(
-                        "Installs lifecycle hooks and adopts manually-created linked worktrees.",
-                    )
-                    .prompt()
-                    .unwrap_or(false);
-
-                    if install_hooks {
-                        if let Ok(vcs_prov) = vcs::detect_vcs_provider(".") {
-                            match vcs_prov.install_hooks() {
-                                Ok(()) => {
-                                    hooks_installed = true;
-                                    println!("Installed {} hooks", vcs_prov.provider_name());
-                                }
-                                Err(e) => {
-                                    eprintln!("Warning: could not install hooks: {}", e);
-                                }
-                            }
-                        }
-                    }
-
-                    // Step 3: Offer shell integration
-                    println!();
-                    let setup_shell = inquire::Confirm::new(
-                            "Enable shell integration? (auto-cd into worktrees)",
-                        )
-                        .with_default(true)
-                        .with_help_message("Adds eval \"$(devflow shell-init)\" to your shell profile for automatic directory switching.")
-                        .prompt()
-                        .unwrap_or(false);
-
-                    if setup_shell {
-                        if let Ok(shell) = config::detect_shell_from_env() {
-                            let home = std::env::var("HOME").ok().map(PathBuf::from);
-                            let shell_config_path = match shell.as_str() {
-                                "zsh" => home.as_ref().map(|h| h.join(".zshrc")),
-                                "bash" => {
-                                    let bashrc = home.as_ref().map(|h| h.join(".bashrc"));
-                                    if bashrc.as_ref().is_some_and(|p| p.exists()) {
-                                        bashrc
-                                    } else {
-                                        home.as_ref().map(|h| h.join(".bash_profile"))
-                                    }
-                                }
-                                "fish" => home
-                                    .as_ref()
-                                    .map(|h| h.join(".config").join("fish").join("config.fish")),
-                                _ => None,
-                            };
-
-                            let eval_line = if shell == "fish" {
-                                "devflow shell-init fish | source"
-                            } else {
-                                "eval \"$(devflow shell-init)\""
-                            };
-
-                            if let Some(ref rc_path) = shell_config_path {
-                                let already_configured = rc_path.exists()
-                                    && std::fs::read_to_string(rc_path)
-                                        .unwrap_or_default()
-                                        .contains("devflow shell-init");
-
-                                if already_configured {
-                                    println!(
-                                        "Shell integration already configured in {}",
-                                        rc_path.display()
-                                    );
-                                    shell_configured = true;
-                                } else {
-                                    let append = inquire::Confirm::new(&format!(
-                                        "Append to {}?",
-                                        rc_path.display()
-                                    ))
-                                    .with_default(true)
-                                    .prompt()
-                                    .unwrap_or(false);
-
-                                    if append {
-                                        use std::io::Write;
-                                        if let Ok(mut file) = std::fs::OpenOptions::new()
-                                            .append(true)
-                                            .create(true)
-                                            .open(rc_path)
-                                        {
-                                            writeln!(file, "\n# devflow shell integration")?;
-                                            writeln!(file, "{}", eval_line)?;
-                                            println!("Added to {}", rc_path.display());
-                                            shell_configured = true;
-                                        } else {
-                                            println!(
-                                                "Could not write to {}. Add manually:",
-                                                rc_path.display()
-                                            );
-                                            println!("  {}", eval_line);
-                                        }
-                                    } else {
-                                        println!("Add this to your shell profile:");
-                                        println!("  {}", eval_line);
-                                    }
-                                }
-                            } else {
-                                println!("Add this to your shell profile:");
-                                println!("  {}", eval_line);
-                            }
-                        }
-                    }
-
-                    // Step 4: Print summary
-                    println!();
-                    println!("devflow initialized for '{}'", resolved_name);
-                    println!();
-                    println!("  Config:     {}", init_config_path.display());
-                    if !added_services.is_empty() {
-                        println!("  Services:   {}", added_services.join(", "));
-                    }
-                    if !imported_processes.is_empty() {
-                        println!("  Processes:  {}", imported_processes.join(", "));
-                    }
-                    println!(
-                        "  Hooks:      {}",
-                        if hooks_installed {
-                            "installed"
-                        } else {
-                            "not installed"
-                        }
-                    );
-                    println!(
-                        "  Shell:      {}",
-                        if shell_configured {
-                            "configured"
-                        } else {
-                            "not configured (run: eval \"$(devflow shell-init)\")"
-                        }
-                    );
-                    println!("  Workspace:  {workspace_model}");
-                    println!();
-                    let next_steps = init::init_next_steps(
-                        true,
-                        !added_services.is_empty() || !init_config.resolve_services().is_empty(),
-                        hooks_installed,
-                        shell_configured,
-                    );
-                    init::print_init_next_steps(&next_steps);
-                } else {
-                    let next_steps = init::init_next_steps(true, false, false, false);
-                    init::print_init_next_steps(&next_steps);
-                }
-
-                if let Some(target_dir) = init_target_dir.as_ref() {
-                    if config::shell_integration_enabled() {
-                        println!("DEVFLOW_CD={}", target_dir.display());
-                    } else if non_interactive {
-                        config::print_manual_cd_hint(target_dir);
-                    }
-                }
-            }
-        }
-        Commands::Destroy { force } => {
-            init::handle_destroy_project(force, json_output, non_interactive).await?;
-        }
-        Commands::Hook { action } => {
-            hook::handle_hook_command(action, &config_merged, json_output, non_interactive).await?;
-        }
-        Commands::Plugin { action } => {
-            plugin::handle_plugin_command(action, &config_merged, json_output).await?;
-        }
-        Commands::Agent { action } => {
-            agent::handle_agent_command(
-                action,
-                &config_merged,
-                json_output,
-                non_interactive,
-                &config_path,
-            )
-            .await?;
-        }
-        Commands::Config { verbose } => {
-            if json_output {
-                if verbose {
-                    let merged_config = effective_config.get_merged_config();
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({
-                            "disabled": effective_config.is_disabled(),
-                            "skip_hooks": effective_config.should_skip_hooks(),
-                            "current_workspace_disabled": effective_config.is_current_workspace_disabled(),
-                            "has_local_config": effective_config.local_config.is_some(),
-                            "config": serde_json::to_value(&merged_config)?,
-                        }))?
-                    );
-                } else {
-                    println!("{}", serde_json::to_string_pretty(&config_merged)?);
-                }
-            } else if verbose {
-                config::show_effective_config(&effective_config)?;
-            } else {
-                println!("Current configuration:");
-                println!("{}", serde_yaml_ng::to_string(&config_merged)?);
-            }
-        }
-        Commands::ConfigValidate => {
-            config::validate_config(&config_path, json_output)?;
-        }
-        Commands::Capabilities => {
-            let mut config_with_state = config_merged.clone();
-            if let Some(ref path) = config_path {
-                if let Ok(state) = LocalStateManager::new() {
-                    if let Some(state_services) = state.get_services(path) {
-                        config_with_state.services = Some(state_services);
-                    }
-                }
-            }
-
-            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let cow_capability = match vcs::cow_worktree::detect_cow_capability(&cwd) {
-                vcs::cow_worktree::CowCapability::Apfs => "apfs",
-                vcs::cow_worktree::CowCapability::Reflink => "reflink",
-                vcs::cow_worktree::CowCapability::None => "none",
-            };
-
-            let vcs_provider = vcs::detect_vcs_provider(".")
-                .ok()
-                .map(|v| v.provider_name().to_string());
-
-            let mut service_capabilities = serde_json::Map::new();
-            let mut service_capabilities_error: Option<String> = None;
-            match services::factory::create_all_providers(&config_with_state).await {
-                Ok(providers) => {
-                    for named in &providers {
-                        service_capabilities.insert(
-                            named.name.clone(),
-                            serde_json::json!({
-                                "provider": named.provider.provider_name(),
-                                "capabilities": named.provider.capabilities(),
-                            }),
-                        );
-                    }
-                }
-                Err(e) => {
-                    service_capabilities_error = Some(e.to_string());
-                }
-            }
-
-            let payload = serde_json::json!({
-                "schema_version": "1.0",
-                "build_features": {
-                    "service_local": cfg!(feature = "service-local"), "tui": cfg!(feature = "tui"),
-                    "proxy": cfg!(feature = "proxy"), "pitchfork": false,
-                    "llm_api": false, "external_commit_command": false,
-                    "native_directory_copy": true,
-                    "docker_exec_hooks": devflow_core::hooks::actions::docker_exec::AVAILABLE,
-                    "neon": cfg!(feature = "service-neon"), "xata": cfg!(feature = "service-xata"), "dblab": cfg!(feature = "service-dblab"),
-                },
-                "process_boundaries": {
-                    "native": ["git_worktrees", "jj_workspaces", "zfs_storage", "directory_copy", "cow_probe", "executable_lookup", "docker_api"],
-                    "external_adapters": [],
-                    "explicit_execution": ["commands", "shell_hooks", "processes", "terminals", "sessions", "proxy_companion", "executable_plugins"],
-                },
-                "json_mode": {
-                    "stdout_single_json_document": true,
-                    "diagnostics_on_stderr": true,
-                    "unsupported_commands": ["shell-init", "completions", "tui", "proxy start without --daemon"],
-                },
-                "non_interactive": {
-                    "prompts_disabled": true,
-                    "requires_force_for": ["destroy", "remove"],
-                    "hook_unapproved_behavior": "skip_with_warning",
-                    "hook_skips_reported_in_results": true,
-                },
-                "workspaces": {
-                    "model": "materialized_only",
-                    "independent_data_parent": true,
-                    "operation_journal": true,
-                    "resolved_plan_command": "plan",
-                    "resource_generations": true,
-                    "cancel_no_effect_operations": true,
-                    "native_jj_stale_recovery": true,
-                    "ready_field": "operation.status",
-                    "git": "linked_worktree",
-                    "jj": "native_workspace",
-                    "raw_identity_field": "name",
-                    "backend_identity_field": "service_key",
-                    "inventory_schema_version": devflow_core::workspace::inventory::INVENTORY_SCHEMA_VERSION,
-                },
-                "execution": { "per_execution_records": true, "verified_runner_identity": true, "detached_handoff": true },
-                "controller": { "exclusive_owner": true, "verified_process_identity": true },
-                "orchestration": {
-                    "partial_failure_exit_code": "non-zero",
-                    "partial_failure_reported_in_json": true,
-                },
-                "recommended_for_agents": {
-                    "global_flags": ["--json", "--non-interactive"],
-                    "task_pattern": [
-                        "switch -c <workspace>",
-                        "service connection <workspace>",
-                        "seed (optional)",
-                        "work",
-                        "service reset <workspace> (retry)",
-                        "remove <workspace> --force (from another workspace)"
-                    ],
-                },
-                "environment": {
-                    "vcs_provider": vcs_provider,
-                    "worktree_cow": cow_capability,
-                },
-                "sandbox": {
-                    "devflow_workspace_sandbox": "removed",
-                    "recommendation": "use the agent harness, containers, VMs, or a dedicated sandbox for hard isolation"
-                },
-                "service_capabilities": service_capabilities,
-                    "providers": services::descriptor::providers(),
-                "service_capabilities_error": service_capabilities_error,
-            });
-
-            if json_output {
-                println!("{}", serde_json::to_string_pretty(&payload)?);
-            } else {
-                println!("Automation capabilities:");
-                println!("- JSON mode: single JSON document on stdout (diagnostics on stderr)");
-                println!("  Unsupported output interfaces: shell-init, completions, tui");
-                println!("- Non-interactive: no prompts; --force required for destroy/remove");
-                println!("- Unapproved hooks: skipped with warnings and reported in results");
-                println!("- Workspace model: materialized only (Git worktrees / jj workspaces)");
-                println!("- Multi-service partial failures: command exits non-zero by default");
-                println!("- Recommended flags for agents: --json --non-interactive");
-                println!(
-                    "- Environment detection: vcs={}, worktree_cow={}",
-                    payload["environment"]["vcs_provider"]
-                        .as_str()
-                        .unwrap_or("none"),
-                    cow_capability
-                );
-                println!(
-                    "- Workspace sandbox: removed (use harness/container/VM isolation when needed)"
-                );
-                if !service_capabilities.is_empty() {
-                    println!("- Service capabilities:");
-                    for (name, details) in &service_capabilities {
-                        let caps = &details["capabilities"];
-                        println!(
-                            "  - {} ({}): lifecycle={} logs={} seed={} destroy={} cleanup={}",
-                            name,
-                            details["provider"].as_str().unwrap_or("unknown"),
-                            config::yes_no(caps["lifecycle"].as_bool()),
-                            config::yes_no(caps["logs"].as_bool()),
-                            config::yes_no(caps["seed_from_source"].as_bool()),
-                            config::yes_no(caps["destroy_project"].as_bool()),
-                            config::yes_no(caps["cleanup"].as_bool()),
-                        );
-                    }
-                }
-                if let Some(err) = service_capabilities_error {
-                    println!("- Service capability probe warning: {}", err);
-                }
-            }
-        }
-        Commands::ShellInit { shell } => {
-            let detected_shell = match shell {
-                Some(s) => s,
-                None => config::detect_shell_from_env()?,
-            };
-            config::print_shell_init(&detected_shell)?;
-        }
-        Commands::InstallHooks => {
-            let vcs_prov = vcs::detect_vcs_provider(".")?;
-            vcs_prov.install_hooks()?;
-            if json_output {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "status": "ok",
-                        "action": "install_hooks",
-                        "vcs_provider": vcs_prov.provider_name(),
-                    }))?
-                );
-            } else {
-                println!("Installed {} hooks", vcs_prov.provider_name());
-            }
-        }
-        Commands::UninstallHooks => {
-            let vcs_prov = vcs::detect_vcs_provider(".")?;
-            vcs_prov.uninstall_hooks()?;
-            if json_output {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "status": "ok",
-                        "action": "uninstall_hooks",
-                        "vcs_provider": vcs_prov.provider_name(),
-                    }))?
-                );
-            } else {
-                println!("Uninstalled {} hooks", vcs_prov.provider_name());
-            }
-        }
-        Commands::SyncAiConfigs => {
-            anyhow::bail!("sync-ai-configs was retired; use explicit worktree.copy_files entries instead of merging tool permissions");
-        }
-        Commands::Completions { shell } => {
-            use clap::CommandFactory;
-            let mut cmd = crate::Cli::command();
-            clap_complete::generate(shell, &mut cmd, "devflow", &mut std::io::stdout());
-        }
-        _ => {
-            anyhow::bail!("command is not handled here; it should be dispatched elsewhere");
-        }
-    }
-
-    Ok(())
 }
-pub(crate) mod output;

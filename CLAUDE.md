@@ -1,28 +1,46 @@
 # devflow
 
-Devflow creates isolated development environments containing code worktrees, reusable data, and application processes. Read [AGENTS.md](AGENTS.md) for the automation contract and [docs/architecture.md](docs/architecture.md) for dependency boundaries and migrations.
+devflow 1.0 creates Git worktrees, clones their payloads copy-on-write, branches PostgreSQL databases (one PostgreSQL 18 server per project, `CREATE DATABASE … TEMPLATE … STRATEGY FILE_COPY` with `file_copy_method = clone`), and runs trusted setup hooks. Processes and the proxy are pitchfork's job; toolchains and dependencies are mise's. Read [AGENTS.md](AGENTS.md) for the automation contract, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the module map, and [docs/plans/2026-10-10-devflow-1.0.md](docs/plans/2026-10-10-devflow-1.0.md) for the authoritative design.
 
-The Rust workspace contains the CLI/TUI package, `devflow-core`, the optional proxy library, the terminal adapter, and the Tauri desktop application. The React frontend is in `ui`; the documentation site is in `docs-site`.
+## Layout
 
-Core owns lifecycle policy and identity. Frontends submit typed requests and render results. Keep provider observation separate from mutation, preserve existing service keys, and use the operation journal before external effects. Never infer resource ownership from a display-name prefix.
+| Path | Contents |
+| --- | --- |
+| `Cargo.toml`, `src/` | `devflow` CLI package: clap commands in `src/cli/`, the JSON envelope in `src/cli/output.rs` (credential masking is `devflow_core::redact`) |
+| `crates/devflow-core/` | All behavior. Blocking API (the `postgres` crate runs its own hidden runtime; nothing async is public), no GPUI types. Modules: `config`, `conn`, `project`, `registry`, `worktree`, `cow`, `receipt`, `setup`, `hooks`, `trust`, `githook`, `env_file`, `redact`, `error`, `db/{admin,meta,steps,ops,reconcile,managed}`, `doctor`, `pitchfork`, `paths` |
+| `crates/devflow-gui/` | GPUI desktop app (`devflow-gui`), `gpui-kit` pinned to `=0.7.1` |
+| `docs/` | `ARCHITECTURE.md`, `MIGRATING.md`, `REMOTE.md`, `plans/` |
+| `examples/` | Sample `devflow.toml`, `devflow.external.toml`, `mise.toml`, `pitchfork.toml`, `agent-task.sh` |
+| `tests/cli.rs`, `crates/devflow-core/tests/` | End-to-end CLI tests; core `workspace.rs` and Docker-only `db_postgres.rs` |
+| `scripts/` | `install.sh`, `sync-version.py` (release) |
 
-Configuration accepts YAML and TOML. The desktop raw editor preserves the original format and checks for concurrent edits. Workspace file copying is explicit; broad ignored-file and AI configuration copying are off by default. Agent permission/config merging is retired.
+Core owns lifecycle policy and identity. The CLI and GUI build typed requests, call core, and render results; they make no lifecycle decisions.
 
-For a task, use `devflow --json --non-interactive switch -c agent/TASK`. Read the returned materialized path before executing commands. Required setup gates execution in every output mode; skipped approvals retain the worktree and report `needs_attention`. Use `devflow exec --workspace agent/TASK -- PROGRAM ARGS` for literal arguments, or `--shell SCRIPT` for deliberate shell syntax.
+## Design rules
 
-Named PostgreSQL baselines pin reusable data independently of code provenance. `baseline prepare` imports, validates, and seals a version; `switch --data-from baseline:NAME@vN` and `service reset` preserve its exact generation. Redis/cache allocation and artifact reuse have separate explicit policies.
+- Data lifetime is independent of code lifetime. `--from` (code) and `--data-from` (data) are separate and immutable once chosen.
+- Never infer ownership from names. Branches, snapshots and roles live in the `devflow` metadata database; worktrees carry a receipt with an instance id. Database and role names are generated.
+- Resumable, not transactional: record intent before every external effect, so a re-run converges. Hooks run at least once.
+- Report what happened: CoW is `verified`, `copy` or `unknown`, never assumed.
+- Credentials: passwords are redacted in all output except `db url` and `db branch create`; receipts, `admin.json`, the managed `compose.yaml` and `.devflow/env` are written 0600.
+- Configuration is TOML only (`devflow.toml` or `.devflow.toml`, merged with git-ignored `devflow.local.toml`). Without a 1.0 config, 0.x files produce an error that links `docs/MIGRATING.md`; never touch 0.x resources.
+- Hooks are plain `sh -c` commands gated by `devflow trust` (SHA-256 of the merged `[hooks]` section). No templating.
+- Exit code 2 means the workspace is not `ready` (`needs_attention` or `in_progress`); usage and other errors stay at 1.
 
-Useful checks:
+## Checks
 
 ```sh
 cargo fmt --check
-cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo test --locked --workspace
-cargo test --locked -p devflow --no-default-features
-cargo test --locked -p devflow-core --all-features
-cd ui && bun run build && bun test tests
+cargo clippy --locked --workspace --all-targets -- -D warnings   # Linux: add --exclude devflow-gui
+cargo test --locked -p devflow -p devflow-core
+cargo test --locked -p devflow-gui                               # macOS: headless GUI tests
+cargo test -p devflow-core --test db_postgres -- --ignored --test-threads=1   # needs Docker
+cargo test -p devflow-core --test workspace -- --ignored managed_postgres     # needs Docker
+cargo test -p devflow-core --test workspace -- --ignored pitchfork            # needs pitchfork on PATH
 ```
 
-Docker regressions are ignored by default and run explicitly with `cargo test -p devflow-core --test review_regressions -- --ignored --test-threads=1`. Their resources and state are isolated. Linux ZFS tests require a disposable pool. Live cloud/Jujutsu coverage and large-dataset performance must be reported separately from mocked/unit checks.
+`devflow-gui` is outside the default workspace members; it pulls in GPUI, which on Linux needs system libraries, so build and test it on macOS (CI does). On Linux use `--exclude devflow-gui`. The Docker tests are ignored by default and use isolated resources; they must not assert `verified` CoW unless `DEVFLOW_EXPECT_COW=verified` is set. Live remote-server checks and large-dataset performance must be reported separately from unit tests.
 
-Default CLI features include local services and the TUI. Optional integrations are `proxy`, `service-neon`, `service-xata`, and `service-dblab`. Commit message generation uses an external command. Processes use the native runtime; the proxy runs as an optional companion shared by CLI and desktop.
+Git hooks come from hk (`hk install`, config in `hk.pkl`): pre-commit runs rustfmt and clippy and stages their fixes.
+
+`mise run ci` runs the format, clippy and test checks; clippy covers the GUI, so run it on macOS. There is no commit helper; use Git directly. Releases are cut with Commitizen (see CONTRIBUTING.md, Releases): `cz bump` replaces `## Unreleased` with notes generated from commit messages, so restore the curated notes afterwards; `scripts/sync-version.py` keeps `devflow`, `devflow-core`, `devflow-gui` and `Cargo.lock` on one version.
