@@ -180,23 +180,30 @@ pub fn check_root(root: &Path, registered: Option<(Uuid, &str)>) -> Health {
         }
     }
 
-    match Config::load(root) {
-        Ok((config, _)) => match registered {
-            Some((id, _)) if !id.is_nil() && config.project.id != id => problem(
-                ProblemKind::WrongProject,
-                format!(
-                    "The folder {} now holds a different devflow project ('{}') than the one \
-                     listed here. Remove this entry; add the folder again to list the project it \
-                     holds.",
-                    root.display(),
-                    config.project.name
-                ),
-                vec![Remedy::Reveal {
-                    path: root.to_path_buf(),
-                }],
+    // Whose project is this? Asked before the configuration is judged: a
+    // folder that now holds another project is that project's to repair, not
+    // the registered one's, whatever state its files are in (an earlier
+    // build's `[postgres]` must not offer a migration under this entry).
+    if let Some((id, _)) = registered.filter(|(id, _)| !id.is_nil())
+        && let Ok((found, name)) = Config::read_identity(root)
+        && found != id
+    {
+        return problem(
+            ProblemKind::WrongProject,
+            format!(
+                "The folder {} now holds a different devflow project ('{name}') than the one \
+                 listed here. Remove this entry; add the folder again to list the project it \
+                 holds.",
+                root.display(),
             ),
-            _ => Health::Ok,
-        },
+            vec![Remedy::Reveal {
+                path: root.to_path_buf(),
+            }],
+        );
+    }
+
+    match Config::load(root) {
+        Ok(_) => Health::Ok,
         Err(error) => classify(root, &error, &problem),
     }
 }

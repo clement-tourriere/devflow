@@ -194,6 +194,56 @@ fn a_folder_holding_another_project_is_reported() {
 }
 
 #[test]
+fn another_project_with_an_old_configuration_gets_no_migration_under_this_entry() {
+    // The registered project's folder now holds a different project whose
+    // configuration still has `[postgres]`: loading it fails, but whose
+    // project it is is decided first.
+    let other = "0b3c9d2e-1111-4222-8333-444455556666";
+    for files in [
+        vec![(
+            "devflow.toml",
+            format!(
+                "[project]\nname = \"other\"\nid = \"{other}\"\n\n[postgres]\nmode = \"managed\"\n"
+            ),
+        )],
+        // The identity in the project file, the old table in the local one.
+        vec![
+            (
+                "devflow.toml",
+                format!("[project]\nname = \"other\"\nid = \"{other}\"\n"),
+            ),
+            ("devflow.local.toml", "[postgres]\nport = 1\n".to_string()),
+        ],
+        // The configuration is otherwise invalid.
+        vec![(
+            "devflow.toml",
+            format!("[project]\nname = \"other\"\nid = \"{other}\"\n\n[services.db]\nengine = 3\n"),
+        )],
+    ] {
+        let files: Vec<(&str, &str)> = files.iter().map(|(n, t)| (*n, t.as_str())).collect();
+        let dir = repo(&files);
+        let problem = problem(dir.path());
+        assert_eq!(problem.kind, ProblemKind::WrongProject, "{problem:?}");
+        assert_eq!(kinds(&problem), ["reveal", "forget"]);
+        assert!(problem.message.contains("'other'"), "{}", problem.message);
+    }
+}
+
+#[test]
+fn a_pre_release_table_with_malformed_toml_is_an_invalid_configuration() {
+    let dir = repo(&[(
+        "devflow.toml",
+        &format!(
+            "{}\n[postgres]\nmode = \"managed\"\nport = = 1\n",
+            current()
+        ),
+    )]);
+    let problem = problem(dir.path());
+    assert_eq!(problem.kind, ProblemKind::InvalidConfig);
+    assert!(!kinds(&problem).contains(&"migrate"));
+}
+
+#[test]
 fn explaining_a_failed_open_uses_the_disk_and_falls_back_to_retry() {
     let dir = repo(&[]);
     let error = crate::Project::open(dir.path()).unwrap_err();
