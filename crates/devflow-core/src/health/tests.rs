@@ -58,7 +58,7 @@ fn a_missing_folder_can_be_located_or_forgotten() {
     assert_eq!(problem.kind, ProblemKind::FolderMissing);
     assert_eq!(kinds(&problem), ["locate", "forget"]);
     assert!(
-        problem.message.contains("no longer exists"),
+        problem.message.contains("was not found"),
         "{}",
         problem.message
     );

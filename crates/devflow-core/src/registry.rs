@@ -109,22 +109,45 @@ pub fn find(selector: &str) -> Result<Entry> {
         })
 }
 
-/// Forget every project whose folder no longer exists (it is gone, not merely
-/// unreadable). Returns the entries removed.
-pub fn prune_missing() -> Result<Vec<Entry>> {
+/// Whether `root` is not found right now (`NotFound`; a folder that cannot
+/// be read for another reason, or that is not a folder, is not "missing").
+/// A folder that is not found may have been moved or deleted, or sit on a drive
+/// that is not connected: whoever asks should not say which.
+fn not_found(root: &Path) -> bool {
+    matches!(
+        std::fs::metadata(root),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
+/// The listed projects whose folder is not found right now, for showing
+/// before asking whether to forget them (see [`forget_unavailable`]).
+pub fn unavailable() -> Result<Vec<Entry>> {
+    Ok(read()?
+        .projects
+        .into_iter()
+        .filter(|e| not_found(&e.root))
+        .collect())
+}
+
+/// Forget the `confirmed` entries, and only those, whose folder is still not
+/// found. The list a person confirmed is the list that is acted on: an entry
+/// that was not in it is left alone even if its folder has become unavailable
+/// since (a drive unmounted meanwhile), and a confirmed entry whose folder is
+/// back (the drive was mounted again), or that was moved to another folder
+/// meanwhile, is kept too. An entry matches by id and folder. Returns the
+/// entries removed.
+pub fn forget_unavailable(confirmed: &[Entry]) -> Result<Vec<Entry>> {
     with_lock(|| {
         let mut file = read()?;
-        let (missing, kept): (Vec<Entry>, Vec<Entry>) = file.projects.into_iter().partition(|e| {
-            matches!(
-                std::fs::metadata(&e.root),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound
-            )
+        let (removed, kept): (Vec<Entry>, Vec<Entry>) = file.projects.into_iter().partition(|e| {
+            confirmed.iter().any(|c| c.id == e.id && c.root == e.root) && not_found(&e.root)
         });
-        if !missing.is_empty() {
+        if !removed.is_empty() {
             file.projects = kept;
             write(&file)?;
         }
-        Ok(missing)
+        Ok(removed)
     })
 }
 

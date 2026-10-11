@@ -1198,15 +1198,22 @@ impl Config {
         Ok((config, path))
     }
 
-    /// The `[project]` id and name of the project file in `root`, read without
-    /// judging the rest of the file: a project whose configuration is refused
-    /// (an earlier build's `[postgres]`, say) still has an identity. The error
-    /// is [`NotInitialized`] without a project file.
+    /// The `[project]` id and name the project in `root` has, read with the
+    /// layers [`Config::load`] merges (`devflow.local.toml` over the project
+    /// file, key by key) but without judging the rest: a project whose
+    /// configuration is refused (an earlier build's `[postgres]`, say) still
+    /// has an identity. The error is [`NotInitialized`] without a project file.
     pub fn read_identity(root: &Path) -> Result<(uuid::Uuid, String)> {
         let path = Self::find_file(root).ok_or_else(|| not_initialized(root))?;
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("cannot read {}", path.display()))?;
-        let table = parse_table(&text, &path)?;
+        let mut table = parse_table(&text, &path)?;
+        let local = root.join(LOCAL_CONFIG_FILE);
+        if local.is_file() {
+            let text = std::fs::read_to_string(&local)
+                .with_context(|| format!("cannot read {}", local.display()))?;
+            merge(&mut table, parse_table(&text, &local)?);
+        }
         let project = table.get("project").and_then(toml::Value::as_table);
         let id = project
             .and_then(|p| p.get("id"))

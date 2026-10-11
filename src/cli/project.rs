@@ -34,9 +34,13 @@ pub struct ForgetArgs {
     /// (default: the project containing the current directory)
     #[arg(value_name = "PROJECT", conflicts_with = "missing")]
     pub project: Option<String>,
-    /// Forget every listed project whose folder no longer exists
+    /// Forget every listed project whose folder was not found (moved, deleted,
+    /// or on a drive that is not connected); lists them first and asks
     #[arg(long)]
     pub missing: bool,
+    /// Do not ask before forgetting (with --missing)
+    #[arg(long, short = 'y', requires = "missing")]
+    pub yes: bool,
 }
 
 #[derive(Args)]
@@ -76,7 +80,26 @@ pub fn run(ctx: &Ctx, command: ProjectCommand) -> Result<ExitCode> {
 
 fn forget(ctx: &Ctx, name: &str, args: ForgetArgs) -> Result<ExitCode> {
     let removed: Vec<Entry> = if args.missing {
-        registry::prune_missing()?
+        let candidates = registry::unavailable()?;
+        if candidates.is_empty() {
+            Vec::new()
+        } else {
+            if !ctx.json {
+                output::say(
+                    "These listed projects have a folder that was not found (moved, deleted, or on a drive that is not connected):",
+                );
+                for entry in &candidates {
+                    output::say(format!("  {} ({})", entry.name, output::tilde(&entry.root)));
+                }
+            }
+            // A person at a terminal confirms; `--json` and scripts do not prompt.
+            if ctx.interactive() && !args.yes && !confirm("Remove them from the list?")? {
+                output::note("Nothing was removed.");
+                return Ok(ExitCode::SUCCESS);
+            }
+            // Only what was listed is removed, and only while it is still not found.
+            registry::forget_unavailable(&candidates)?
+        }
     } else {
         let entry = match &args.project {
             Some(selector) => registry::find(selector)?,
@@ -94,7 +117,7 @@ fn forget(ctx: &Ctx, name: &str, args: ForgetArgs) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
     if removed.is_empty() {
-        output::say("No listed project has a missing folder.");
+        output::say("No listed project has a folder that was not found.");
     }
     for entry in &removed {
         output::say(format!(
@@ -104,6 +127,16 @@ fn forget(ctx: &Ctx, name: &str, args: ForgetArgs) -> Result<ExitCode> {
         ));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn confirm(prompt: &str) -> Result<bool> {
+    match inquire::Confirm::new(prompt).with_default(false).prompt() {
+        Ok(answer) => Ok(answer),
+        Err(
+            inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
+        ) => anyhow::bail!("cancelled"),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn relocate(ctx: &Ctx, name: &str, args: RelocateArgs) -> Result<ExitCode> {

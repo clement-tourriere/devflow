@@ -19,7 +19,8 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProblemKind {
-    /// The folder is gone (moved, renamed or deleted), or is not a folder.
+    /// The folder was not found (moved, renamed, deleted, or on a drive that is
+    /// not connected), or is not a folder.
     FolderMissing,
     /// The folder is not a Git checkout (any more).
     NotGitCheckout,
@@ -45,7 +46,7 @@ impl ProblemKind {
     /// A short title for the problem, for a page or a list.
     pub fn title(self) -> &'static str {
         match self {
-            ProblemKind::FolderMissing => "This project's folder is gone",
+            ProblemKind::FolderMissing => "This project's folder was not found",
             ProblemKind::NotGitCheckout => "This folder is not a Git repository",
             ProblemKind::NotInitialized => "devflow is not set up here",
             ProblemKind::PreReleaseConfig => "This project's configuration needs updating",
@@ -132,7 +133,7 @@ pub fn check_root(root: &Path, registered: Option<(Uuid, &str)>) -> Health {
             return problem(
                 ProblemKind::FolderMissing,
                 format!(
-                    "The folder {} no longer exists. It was moved, renamed or deleted.",
+                    "The folder {} was not found. It may have been moved, renamed or deleted, or it is on a drive that is not connected.",
                     root.display()
                 ),
                 remedies,

@@ -4204,6 +4204,39 @@ fn config_migrate_shows_the_change_then_writes_it() {
 }
 
 #[test]
+fn config_migrate_previews_never_carry_local_credentials() {
+    let env = Env::new();
+    std::fs::write(
+        env.config_path(),
+        "[project]\nname = \"tt2\"\nid = \"3f2b1c7e-0b3c-4d2e-9a7a-8f6d5c4b3a21\"\n",
+    )
+    .unwrap();
+    let local = env.repo.join("devflow.local.toml");
+    std::fs::write(
+        &local,
+        "[env]\nDB_PASS = \"hunter2-local\"\nSESSION_KEY = \"session-secret-7\"\n[postgres]\nmode = \"managed\"\n", // kingfisher:ignore
+    )
+    .unwrap();
+    for args in [
+        &["--json", "config", "migrate", "--dry-run"][..],
+        &["config", "migrate", "--dry-run"][..],
+    ] {
+        let out = env.run(args);
+        ok(&out);
+        let text = describe(&out);
+        assert!(
+            !text.contains("hunter2-local") && !text.contains("session-secret-7"),
+            "{text}"
+        );
+        assert!(text.contains("SESSION_KEY"), "{text}");
+    }
+    // The written file keeps the real values.
+    ok(&env.run(&["--json", "config", "migrate"]));
+    let written = std::fs::read_to_string(&local).unwrap();
+    assert!(written.contains("session-secret-7") && written.contains("[services.db]")); // kingfisher:ignore
+}
+
+#[test]
 fn config_migrate_refuses_what_it_cannot_rewrite_and_says_why() {
     let env = Env::new();
     let text = format!("{PRE_RELEASE}\n[services.main]\nengine = \"postgres\"\n");
@@ -4295,4 +4328,42 @@ fn forgetting_missing_projects_leaves_the_others() {
     assert_eq!(doc["forgotten"][0]["name"], "gone");
     let listed = json(&env.run(&["--json", "list", "--all"]));
     assert_eq!(listed["projects"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn forgetting_missing_projects_lists_what_it_removes() {
+    let env = Env::new();
+    env.init();
+    ok(&env.run(&["list"]));
+    let gone = env.root.join("gone");
+    std::fs::create_dir_all(&gone).unwrap();
+    git2::Repository::init(&gone).unwrap();
+    ok(&env.run_in(&gone, &["init", "--yes", "--name", "gone"]));
+    std::fs::remove_dir_all(&gone).unwrap();
+
+    // Nothing is asked when there is no terminal, but the list is shown.
+    let out = env.run(&["project", "forget", "--missing"]);
+    ok(&out);
+    let text = stdout(&out);
+    assert!(
+        text.contains("was not found") && text.contains("not connected"),
+        "{}",
+        describe(&out)
+    );
+    assert!(
+        text.contains("  gone (") && text.contains("Removed 'gone'"),
+        "{}",
+        describe(&out)
+    );
+    let listed = json(&env.run(&["--json", "list", "--all"]));
+    assert_eq!(listed["projects"].as_array().unwrap().len(), 1);
+
+    // -y is accepted; with nothing missing nothing is removed.
+    let again = env.run(&["project", "forget", "--missing", "-y"]);
+    ok(&again);
+    assert!(
+        stdout(&again).contains("No listed project"),
+        "{}",
+        describe(&again)
+    );
 }

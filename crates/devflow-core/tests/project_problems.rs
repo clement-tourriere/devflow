@@ -184,7 +184,9 @@ fn the_project_list_can_be_mended_without_touching_the_projects() {
     );
     registry::add(&Project::open(&gone).unwrap()).unwrap();
     std::fs::remove_dir_all(&gone).unwrap();
-    let pruned = registry::prune_missing().unwrap();
+    let shown = registry::unavailable().unwrap();
+    assert_eq!(shown.iter().map(|e| e.id).collect::<Vec<_>>(), [gone_id]);
+    let pruned = registry::forget_unavailable(&shown).unwrap();
     assert_eq!(pruned.iter().map(|e| e.id).collect::<Vec<_>>(), [gone_id]);
     assert!(registry::list().unwrap().iter().any(|e| e.id == id));
 
@@ -209,5 +211,98 @@ fn locating_finds_a_project_whose_configuration_needs_migrating() {
     let located = registry::relocate(id, &root).unwrap();
     assert_eq!(located.root, root);
     assert_eq!(located.name, "needs");
+    registry::remove(&root).unwrap();
+}
+
+#[test]
+fn only_the_confirmed_entries_are_forgotten_when_more_become_unavailable() {
+    let (_lock, base) = scratch();
+    let make = |name: &str| {
+        let id = Uuid::new_v4();
+        let root = repo(
+            base,
+            name,
+            &format!("[project]\nname = \"{name}\"\nid = \"{id}\"\n"),
+        );
+        registry::add(&Project::open(&root).unwrap()).unwrap();
+        Entry {
+            id,
+            name: name.into(),
+            root,
+        }
+    };
+    let (a, b, c, d) = (
+        make("conf-a"),
+        make("conf-b"),
+        make("conf-c"),
+        make("conf-d"),
+    );
+    std::fs::remove_dir_all(&a.root).unwrap();
+    std::fs::remove_dir_all(&b.root).unwrap();
+
+    // The person is shown A and B and confirms.
+    let confirmed: Vec<Entry> = registry::unavailable()
+        .unwrap()
+        .into_iter()
+        .filter(|e| [a.id, b.id, c.id, d.id].contains(&e.id))
+        .collect();
+    assert_eq!(confirmed.len(), 2);
+
+    // Meanwhile C's volume is unmounted and B's comes back.
+    let held = base.join("c-held");
+    std::fs::rename(&c.root, &held).unwrap();
+    std::fs::create_dir_all(&b.root).unwrap();
+
+    let removed = registry::forget_unavailable(&confirmed).unwrap();
+    assert_eq!(removed.iter().map(|e| e.id).collect::<Vec<_>>(), [a.id]);
+    let listed: Vec<Uuid> = registry::list().unwrap().iter().map(|e| e.id).collect();
+    assert!(!listed.contains(&a.id));
+    assert!(listed.contains(&b.id), "its folder is back");
+    assert!(listed.contains(&c.id), "it was never confirmed");
+    assert!(listed.contains(&d.id));
+
+    // An entry that is not in the confirmed list is never touched, whatever its folder.
+    assert!(registry::forget_unavailable(&[]).unwrap().is_empty());
+    std::fs::remove_dir_all(&b.root).unwrap();
+    let mut moved = c.clone();
+    moved.root = base.join("elsewhere");
+    assert!(registry::forget_unavailable(&[moved]).unwrap().is_empty());
+    for entry in [&b, &c, &d] {
+        registry::remove(&entry.root).unwrap();
+    }
+}
+
+#[test]
+fn locating_reads_the_identity_the_way_loading_does() {
+    let (_lock, base) = scratch();
+    let id = Uuid::new_v4();
+    let root = repo(
+        base,
+        "layered",
+        &format!("[project]\nname = \"layered\"\nid = \"{id}\"\n"),
+    );
+    registry::add(&Project::open(&root).unwrap()).unwrap();
+
+    // devflow.local.toml's [project] wins over the project file, as it does
+    // when the project is opened: the folder now holds another project.
+    let other = Uuid::new_v4();
+    std::fs::write(
+        root.join("devflow.local.toml"),
+        format!("[project]\nid = \"{other}\"\n"),
+    )
+    .unwrap();
+    let refused = registry::relocate(id, &root).unwrap_err();
+    assert!(refused.downcast_ref::<Problem>().is_some(), "{refused:#}");
+    assert_eq!(Config::load(&root).unwrap().0.project.id, other);
+
+    // A local override of the name is the name the entry gets, and a
+    // pre-release [postgres] in either file does not stop the lookup.
+    std::fs::write(
+        root.join("devflow.local.toml"),
+        "[project]\nname = \"renamed\"\n\n[postgres]\nport = 5544\n",
+    )
+    .unwrap();
+    let located = registry::relocate(id, &root).unwrap();
+    assert_eq!(located.name, "renamed");
     registry::remove(&root).unwrap();
 }
