@@ -166,6 +166,9 @@ pub struct AppState {
     settings_path: Option<PathBuf>,
     /// Writes settings off the UI thread, one at a time, newest last.
     settings_writer: Arc<SettingsWriter>,
+    /// The window is hidden in the menu bar: the poll runs less often.
+    pub background: bool,
+    poll_ticks: u64,
     _poll: Task<()>,
 }
 
@@ -213,6 +216,8 @@ impl AppState {
             services: Arc::new(CoreServices),
             settings_path: None,
             settings_writer: Arc::default(),
+            background: false,
+            poll_ticks: 0,
             _poll: poll,
         };
         state.reload_entries(None, preselect, cx);
@@ -253,6 +258,8 @@ impl AppState {
                     .join("gui.toml"),
             ),
             settings_writer: Arc::default(),
+            background: false,
+            poll_ticks: 0,
             _poll: Task::ready(()),
         }
     }
@@ -605,6 +612,10 @@ impl AppState {
     // ---- refresh ------------------------------------------------------------
 
     fn poll(&mut self, cx: &mut Context<Self>) {
+        self.poll_ticks = self.poll_ticks.wrapping_add(1);
+        if !crate::tray::poll_due(self.background, self.poll_ticks) {
+            return;
+        }
         let mutating = self
             .selection
             .current()
@@ -947,6 +958,14 @@ impl AppState {
         choice.apply(Some(window), cx);
         self.settings.theme = choice;
         self.save_settings_in_background("Cannot save the theme", window, cx);
+        cx.notify();
+    }
+
+    /// Turn "keep running in the menu bar" on or off now and remember it. The
+    /// file is written in the background, as for the theme.
+    pub fn set_keep_in_menu_bar(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings.keep_in_menu_bar = on;
+        self.save_settings_in_background("Cannot save the setting", window, cx);
         cx.notify();
     }
 

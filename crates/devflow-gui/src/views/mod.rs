@@ -25,6 +25,8 @@ mod settings;
 mod setup_tests;
 mod sidebar;
 mod titlebar;
+#[cfg(test)]
+mod tray_tests;
 mod ui;
 #[cfg(test)]
 mod ui_tests;
@@ -136,6 +138,11 @@ impl Shell {
             self.state
                 .update(cx, |s, cx| s.set_page(Page::Settings, cx));
         }
+    }
+
+    /// ⌘W: hide the window to the menu bar, or close it (and quit).
+    pub fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        crate::tray::close_window(window, cx);
     }
 
     pub fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {

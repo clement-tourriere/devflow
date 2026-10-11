@@ -23,6 +23,12 @@ toml = "0.9"
 # Pinned exactly: GPUI snapshots move together and break source compatibility.
 gpui-kit = { version = "=0.7.1", features = ["tree-sitter-toml"] }
 
+# The menu-bar item (macOS only): an AppKit status item works under GPUI's own run loop.
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon = { version = "0.24", default-features = false }
+# Wakes the GPUI task that handles the menu's choices (already in the lock via GPUI).
+futures = "0.3"
+
 [dev-dependencies]
 tempfile.workspace = true
 # Headless window tests (`gpui_kit::test`) need GPUI's test platform.

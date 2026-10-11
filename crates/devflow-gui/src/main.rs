@@ -14,6 +14,7 @@ mod services;
 mod settings;
 mod state;
 mod theme;
+mod tray;
 mod views;
 
 use gpui_kit::{component::TitleBar, prelude::*, *};
@@ -43,34 +44,38 @@ fn main() {
         settings::Settings::default()
     });
 
-    gpui_kit::application()
-        .with_assets(assets::AppAssets)
-        .run(move |cx| {
-            gpui_kit::init(cx);
-            settings.theme.apply(None, cx);
+    let app = gpui_kit::application().with_assets(assets::AppAssets);
+    // A click on the Dock icon shows the window again.
+    app.on_reopen(tray::reopen);
+    app.run(move |cx| {
+        gpui_kit::init(cx);
+        settings.theme.apply(None, cx);
 
-            actions::init(cx);
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
+        actions::init(cx);
+        // The last window closing ends the app. With the setting on (macOS)
+        // the window is hidden instead, and never gets here (see `tray`).
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
 
-            // The window draws its own title bar (`views::Shell`).
-            let mut titlebar = TitleBar::title_bar_options();
-            titlebar.title = Some("devflow".into());
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::centered(size(px(1240.), px(800.)), cx)),
-                titlebar: Some(titlebar),
-                ..TitleBar::window_options()
-            };
-            gpui_kit::open_window(options, cx, move |window, cx| {
-                let state =
-                    cx.new(|cx| state::AppState::new(settings, preselect, launch_dir, window, cx));
-                cx.new(|cx| views::Shell::new(state, window, cx))
-            })
-            .expect("cannot open the window");
-            cx.activate(true);
-        });
+        // The window draws its own title bar (`views::Shell`).
+        let mut titlebar = TitleBar::title_bar_options();
+        titlebar.title = Some("devflow".into());
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::centered(size(px(1240.), px(800.)), cx)),
+            titlebar: Some(titlebar),
+            ..TitleBar::window_options()
+        };
+        gpui_kit::open_window(options, cx, move |window, cx| {
+            let state =
+                cx.new(|cx| state::AppState::new(settings, preselect, launch_dir, window, cx));
+            tray::install(window, &state, cx);
+            cx.new(|cx| views::Shell::new(state, window, cx))
+        })
+        .expect("cannot open the window");
+        cx.activate(true);
+    });
 }

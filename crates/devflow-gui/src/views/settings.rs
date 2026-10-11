@@ -14,6 +14,7 @@ use gpui_kit::{
         input::{Input, InputState},
         notification::Notification,
         select::{Select, SelectEvent, SelectState},
+        switch::Switch,
         v_flex,
     },
     prelude::*,
@@ -105,6 +106,8 @@ impl SettingsView {
             editor_command: self.editor.read(cx).value().trim().to_string(),
             terminal_command: self.terminal.read(cx).value().trim().to_string(),
             theme,
+            // Applied and saved as soon as it is switched; not part of the form.
+            ..self.state.read(cx).settings.clone()
         };
         let stored = self.state.update(cx, |s, cx| {
             let stored = s.store_settings(settings);
@@ -127,6 +130,7 @@ impl SettingsView {
 
 impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let keep_in_menu_bar = self.state.read(cx).settings.keep_in_menu_bar;
         let path = settings::path()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
@@ -158,6 +162,21 @@ impl Render for SettingsView {
                                     .description("Applied and saved when chosen. The title bar switches between light and dark; System follows the OS.")
                                     .child(Select::new(&self.theme).w_full()),
                             )
+                            .children(cfg!(target_os = "macos").then(|| {
+                                Field::new()
+                                    .label("Menu bar")
+                                    .description("Closing the window (or ⌘W) hides devflow to the menu bar instead of quitting, and the Dock icon goes with it. Quit from the menu bar item or with ⌘Q.")
+                                    .child(
+                                        Switch::new("keep-in-menu-bar")
+                                            .label("Keep devflow running in the menu bar when the window is closed")
+                                            .checked(keep_in_menu_bar)
+                                            .on_click(cx.listener(|this, value: &bool, window, cx| {
+                                                this.state.update(cx, |s, cx| {
+                                                    s.set_keep_in_menu_bar(*value, window, cx)
+                                                });
+                                            })),
+                                    )
+                            }))
                             .footer(
                                 Button::new("save-settings")
                                     .primary()

@@ -10,6 +10,7 @@ actions!(
     devflow,
     [
         Quit,
+        CloseWindow,
         OpenPalette,
         NewWorkspace,
         Refresh,
@@ -59,6 +60,7 @@ pub fn init(cx: &mut App) {
     // `secondary` is Command on macOS and Control elsewhere.
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("secondary-w", CloseWindow, None),
         KeyBinding::new("secondary-k", OpenPalette, None),
         KeyBinding::new("secondary-n", NewWorkspace, None),
         KeyBinding::new("secondary-r", Refresh, None),
@@ -73,6 +75,15 @@ pub fn init(cx: &mut App) {
     ]);
     crate::views::init_wizard(cx);
     cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &CloseWindow, cx| {
+        on_shell(cx, |shell, window, cx| shell.close_window(window, cx))
+    });
+    // The application menu (macOS): the shortcuts, and a Quit that really quits.
+    cx.set_menus([Menu::new("devflow").items([
+        MenuItem::action("Close Window", CloseWindow),
+        MenuItem::separator(),
+        MenuItem::action("Quit devflow", Quit),
+    ])]);
     cx.on_action(|_: &OpenPalette, cx| {
         on_shell(cx, |shell, window, cx| shell.open_palette(window, cx))
     });

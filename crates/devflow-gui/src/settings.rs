@@ -73,6 +73,10 @@ pub struct Settings {
     pub editor_command: String,
     pub terminal_command: String,
     pub theme: ThemeChoice,
+    /// Closing the window hides it to the menu bar and the app keeps running;
+    /// off, closing the window quits. Only macOS has the menu bar item, and
+    /// elsewhere closing always quits.
+    pub keep_in_menu_bar: bool,
 }
 
 impl Default for Settings {
@@ -85,6 +89,7 @@ impl Default for Settings {
                 "x-terminal-emulator --working-directory={path}".into()
             },
             theme: ThemeChoice::System,
+            keep_in_menu_bar: true,
         }
     }
 }
@@ -392,12 +397,25 @@ mod tests {
             editor_command: "zed".into(),
             terminal_command: "kitty".into(),
             theme: ThemeChoice::Dark,
+            keep_in_menu_bar: false,
         };
         let text = toml::to_string_pretty(&settings).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), settings);
         let partial: Settings = toml::from_str("theme = \"light\"").unwrap();
         assert_eq!(partial.editor_command, "code");
         assert_eq!(partial.theme, ThemeChoice::Light);
+    }
+
+    #[test]
+    fn keeping_the_app_in_the_menu_bar_is_on_unless_turned_off() {
+        assert!(Settings::default().keep_in_menu_bar);
+        // A file written before the setting existed keeps the default.
+        let old: Settings = toml::from_str("editor_command = \"zed\"").unwrap();
+        assert!(old.keep_in_menu_bar);
+        let off: Settings = toml::from_str("keep_in_menu_bar = false").unwrap();
+        assert!(!off.keep_in_menu_bar);
+        let text = toml::to_string_pretty(&off).unwrap();
+        assert!(text.contains("keep_in_menu_bar = false"), "{text}");
     }
 
     #[test]
