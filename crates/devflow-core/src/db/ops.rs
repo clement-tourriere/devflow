@@ -7,6 +7,7 @@ use super::admin::{
 };
 use super::meta::{self, BranchRow, FOREIGN_META_DB, META_DB, NewBranch, ResetIntent};
 use super::reconcile;
+use super::scratch;
 use super::steps::in_use;
 use super::*;
 use crate::config::CowCapability;
@@ -28,6 +29,7 @@ pub(super) fn status(server: &Server) -> ServerStatus {
         running: server.managed.is_none(),
         reachable: false,
         endpoint: None,
+        container_endpoint: None,
         server_version: None,
         file_copy_method: None,
         cow: CowCapability::Unknown,
@@ -56,6 +58,10 @@ fn fill_status(server: &Server, status: &mut ServerStatus) -> Result<()> {
             return Ok(());
         }
     }
+    status.container_endpoint = server
+        .managed
+        .as_ref()
+        .and_then(|managed| managed.container_endpoint());
     let target = Target::resolve(server)?;
     status.endpoint = Some(format!("{}:{}", target.host, target.port));
     let mut admin = target.connect("postgres")?;
@@ -147,20 +153,137 @@ pub(super) fn up(server: &Server) -> Result<ServerStatus> {
     Ok(status(server))
 }
 
+/// How long a freshly started container gets to accept connections.
+const READY_WITHIN: Duration = Duration::from_secs(60);
+/// How long one probe step (connect, write, read) may take.
+const PROBE_STEP: Duration = Duration::from_secs(3);
+
+/// How long one readiness attempt (probe, connect, authentication and
+/// `SELECT 1` all together) may take.
+const ATTEMPT_WITHIN: Duration = Duration::from_secs(10);
+/// How long the wait rests between two readiness attempts.
+const READY_PAUSE: Duration = Duration::from_millis(500);
+
 /// A freshly started container needs a moment before it accepts connections.
+/// Each attempt first checks that the endpoint speaks the PostgreSQL protocol,
+/// so a foreign process that accepts TCP and never answers cannot stall the
+/// wait: it fails the attempt, and the wait ends at the deadline. The whole
+/// attempt is bounded, not only its first steps: a listener that answers the
+/// probe and then stalls the startup or the authentication fails the attempt
+/// too. No attempt is given more time than the deadline leaves (and none
+/// starts once it has passed), so the wait never outlasts [`READY_WITHIN`].
 fn wait_ready(server: &Server) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    wait_ready_within(server, READY_WITHIN)
+}
+
+/// [`wait_ready`] with its own deadline. Finding the endpoint (a `docker
+/// compose port` for a managed server) is part of the wait, not a step before
+/// it: it gets what is left of `total`, and is killed and reaped when that runs out.
+fn wait_ready_within(server: &Server, total: Duration) -> Result<()> {
+    wait_until(&SystemClock, total, READY_PAUSE, &mut |remaining| {
+        let started = Instant::now();
+        // The lookup runs under what is left of the deadline: a Docker that
+        // stalls in it is killed and reaped when the deadline comes, not waited for.
+        let target = Target::resolve_within(server, remaining)?;
+        // Looking the endpoint up took its share of what was left.
+        let budget = ATTEMPT_WITHIN.min(remaining.saturating_sub(started.elapsed()));
+        anyhow::ensure!(
+            !budget.is_zero(),
+            "the readiness deadline passed while looking for the server's address"
+        );
+        attempt_ready(target, budget)
+    })
+    .context("the PostgreSQL container started but does not accept connections")
+}
+
+/// One readiness attempt, over within `budget` whatever the other end does.
+fn attempt_ready(target: Target, budget: Duration) -> Result<()> {
+    // A step never outlasts the attempt, so the thread `within` abandons
+    // ends with the attempt too.
+    let step = PROBE_STEP.min(budget);
+    within(budget, move || {
+        target.probe(step)?;
+        let mut client = target.connect("postgres")?;
+        client.simple_query("SELECT 1")?;
+        Ok(())
+    })
+}
+
+/// Run `work` and give up on it after `budget`. The blocking client has no
+/// read timeout once the TCP connection is up (startup, authentication and
+/// queries wait for the peer for as long as it takes), so the work runs on
+/// its own thread and the caller stops waiting. A thread stuck on a peer that
+/// never answers ends when that peer closes the connection, and holds nothing
+/// but its own socket until then.
+fn within<T: Send + 'static>(
+    budget: Duration,
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let (done, result) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(work());
+    });
+    match result.recv_timeout(budget) {
+        Ok(outcome) => outcome,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            bail!(
+                "the server did not answer within {} (it accepted the connection but never \
+                 finished starting a session)",
+                humantime::format_duration(Duration::from_millis(
+                    budget.as_millis().try_into().unwrap_or(u64::MAX)
+                ))
+            )
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            bail!("the connection attempt ended without a result")
+        }
+    }
+}
+
+/// Time as [`wait_until`] sees it, so a test can stand in for the real one.
+trait Clock {
+    fn now(&self) -> Instant;
+    fn sleep(&self, pause: Duration);
+}
+
+struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn sleep(&self, pause: Duration) {
+        std::thread::sleep(pause);
+    }
+}
+
+/// Run `attempt` until it succeeds or `total` has passed; the last error is
+/// returned.
+///
+/// The bound is `total`, not `total` plus an attempt: `attempt` is told how
+/// much time is left and must finish within it, no attempt starts when none
+/// is, and the pause between attempts is cut to what is left.
+fn wait_until(
+    clock: &dyn Clock,
+    total: Duration,
+    pause: Duration,
+    attempt: &mut dyn FnMut(Duration) -> Result<()>,
+) -> Result<()> {
+    let deadline = clock.now() + total;
+    let mut last = None;
     loop {
-        let attempt = Target::resolve(server)
-            .and_then(|t| t.connect("postgres"))
-            .and_then(|mut c| Ok(c.simple_query("SELECT 1").map(|_| ())?));
-        match attempt {
+        let remaining = deadline.saturating_duration_since(clock.now());
+        if remaining.is_zero() {
+            return Err(last.unwrap_or_else(|| anyhow::anyhow!("no time was left to try")));
+        }
+        match attempt(remaining) {
             Ok(()) => return Ok(()),
-            Err(e) if Instant::now() >= deadline => {
-                return Err(e)
-                    .context("the PostgreSQL container started but does not accept connections");
-            }
-            Err(_) => std::thread::sleep(Duration::from_millis(500)),
+            Err(error) => last = Some(error),
+        }
+        let remaining = deadline.saturating_duration_since(clock.now());
+        if !remaining.is_zero() {
+            clock.sleep(pause.min(remaining));
         }
     }
 }
@@ -344,6 +467,7 @@ fn abandon(s: &mut Session, id: Uuid, error: anyhow::Error) -> anyhow::Error {
 
 pub(super) fn create_branch(
     server: &Server,
+    id: Uuid,
     name: &str,
     source: ResolvedSource,
     instance_id: Option<Uuid>,
@@ -356,7 +480,6 @@ pub(super) fn create_branch(
 
         let cow = clone_capability(s, &src, "no branch was created")?;
 
-        let id = Uuid::new_v4();
         let db = db_name(project, id);
         let login = login_name(id);
         let owner = owner_name(project);
@@ -382,20 +505,26 @@ pub(super) fn create_branch(
         let row =
             meta::get_branch(&mut s.admin, project, id)?.context("the new branch row vanished")?;
         let (host, port) = s.target.app_endpoint(&server.settings);
+        let mut branch = row.info(None);
+        let extra_urls = attach_extras(s, &mut branch, &host, port, &login, &password)?;
         Ok(BranchCredentials {
-            branch: row.info(None),
+            branch,
             url: url(&host, port, &login, &password, &db),
             host,
             port,
             user: login,
             password,
             database: db,
+            extra_urls,
             warnings: std::mem::take(&mut s.warnings),
         })
     })
 }
 
-/// login → database (closed) → ACLs → open → normalize → `CONNECT` last → ready.
+/// login → database (closed) → ACLs → open → normalize → `CONNECT` last →
+/// the scratch databases, built the same way → ready. A branch is `ready`
+/// only with all of its configured scratch databases, so a creation that dies
+/// anywhere is rolled back whole.
 fn build_branch(
     s: &mut Session,
     id: Uuid,
@@ -410,7 +539,8 @@ fn build_branch(
     s.restrict_database(db, owner)?;
     s.set_connections(db, true)?;
     s.normalize(db, owner, src.login.as_deref())?;
-    s.grant_connect(db, login)?;
+    s.grant_connect(db, login, owner)?;
+    scratch::provision(s, id, login, 0)?;
     s.step()?;
     meta::set_branch_status(
         &mut s.admin,
@@ -426,6 +556,57 @@ fn create_database(s: &mut Session, src: &Source, db: &str) -> Result<()> {
         None => s.create_empty_database(db),
         Some(template) => s.clone_database(template, db),
     }
+}
+
+// ---- scratch databases ------------------------------------------------------
+
+/// The scratch databases recorded for `branch`, orphans marked against the
+/// configuration.
+fn extras_of(client: &mut Client, server: &Server, branch: Uuid) -> Result<Vec<ScratchInfo>> {
+    let configured = &server.settings.extra_databases;
+    Ok(meta::scratch_of_branch(client, server.project_id, branch)?
+        .iter()
+        .map(|row| row.info(configured))
+        .collect())
+}
+
+/// Put the branch's scratch databases on `info` and return the URL of each
+/// configured, `ready` one for the branch's login: the same credentials,
+/// another database.
+fn attach_extras(
+    s: &mut Session,
+    info: &mut BranchInfo,
+    host: &str,
+    port: u16,
+    login: &str,
+    password: &str,
+) -> Result<BTreeMap<String, String>> {
+    info.extras = extras_of(&mut s.admin, s.server, info.id)?;
+    Ok(info
+        .extras
+        .iter()
+        .filter(|extra| !extra.orphaned && extra.status == RecordStatus::Ready)
+        .map(|extra| {
+            (
+                extra.name.clone(),
+                url(host, port, login, password, &extra.db_name),
+            )
+        })
+        .collect())
+}
+
+pub(super) fn ensure_scratch(server: &Server, id: Uuid) -> Result<Vec<ScratchInfo>> {
+    let mut s = begin(server)?;
+    guarded(&mut s, |s| {
+        let row = ready_branch(s, id)?;
+        scratch::provision(s, id, &row.role_name, row.generation)?;
+        extras_of(&mut s.admin, server, id)
+    })
+}
+
+pub(super) fn drop_orphans(server: &Server) -> Result<Vec<String>> {
+    let mut s = begin(server)?;
+    guarded(&mut s, scratch::drop_orphans)
 }
 
 // ---- reset ----------------------------------------------------------------
@@ -449,6 +630,8 @@ pub(super) fn reset_branch(
         let owner = owner_name(project);
         let replacement = db_name(project, Uuid::new_v4());
         let backup = db_name(project, Uuid::new_v4());
+        // Journaled with the intent: recovery empties exactly these.
+        let scratch_ids = scratch::selected_for_reset(s, id)?;
         s.step()?;
         meta::begin_reset(
             &mut s.admin,
@@ -459,6 +642,7 @@ pub(super) fn reset_branch(
                 backup_db: &backup,
                 source_kind: src.kind,
                 source_id: src.id,
+                scratch: &scratch_ids,
             },
         )?;
         if let Err(error) = run_reset(s, &row, &src, cow, &owner, &replacement, &backup) {
@@ -483,6 +667,7 @@ pub(super) fn reset_branch(
         let row =
             meta::get_branch(&mut s.admin, project, id)?.context("the branch row vanished")?;
         let mut info = row.info(None);
+        info.extras = extras_of(&mut s.admin, server, id)?;
         info.warnings = std::mem::take(&mut s.warnings);
         Ok(info)
     })
@@ -587,17 +772,22 @@ pub(super) fn rotate_credentials(server: &Server, id: Uuid) -> Result<BranchCred
             row.name,
             row.status
         );
+        // One login for the branch's database and its scratch databases: the
+        // new password covers all of them.
         let password = random_password();
         s.set_password(&row.role_name, &password)?;
         let (host, port) = s.target.app_endpoint(&server.settings);
+        let mut branch = row.info(None);
+        let extra_urls = attach_extras(s, &mut branch, &host, port, &row.role_name, &password)?;
         Ok(BranchCredentials {
             url: url(&host, port, &row.role_name, &password, &row.db_name),
-            branch: row.info(None),
+            branch,
             host,
             port,
             user: row.role_name.clone(),
             password,
             database: row.db_name.clone(),
+            extra_urls,
             warnings: std::mem::take(&mut s.warnings),
         })
     })
@@ -628,20 +818,37 @@ fn sizes(client: &mut Client, names: &[&str]) -> HashMap<String, i64> {
         .unwrap_or_default()
 }
 
-fn infos(client: &mut Client, rows: Vec<BranchRow>) -> Vec<BranchInfo> {
+/// The branches as callers see them: sizes (best effort) and scratch
+/// databases (recorded, orphans marked against the configuration).
+fn infos(server: &Server, client: &mut Client, rows: Vec<BranchRow>) -> Result<Vec<BranchInfo>> {
     let names: Vec<&str> = rows.iter().map(|r| r.db_name.as_str()).collect();
     let sizes = sizes(client, &names);
-    rows.iter()
-        .map(|r| r.info(sizes.get(&r.db_name).copied()))
-        .collect()
+    let configured = &server.settings.extra_databases;
+    let mut extras: HashMap<Uuid, Vec<ScratchInfo>> = HashMap::new();
+    for row in meta::list_scratch(client, server.project_id)? {
+        extras
+            .entry(row.branch_id)
+            .or_default()
+            .push(row.info(configured));
+    }
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let mut info = r.info(sizes.get(&r.db_name).copied());
+            info.extras = extras.remove(&r.id).unwrap_or_default();
+            info
+        })
+        .collect())
 }
 
 pub(super) fn branch(server: &Server, id: Uuid) -> Result<Option<BranchInfo>> {
     let Some(mut client) = reader(server)? else {
         return Ok(None);
     };
-    let row = meta::get_branch(&mut client, server.project_id, id)?;
-    Ok(row.map(|r| infos(&mut client, vec![r]).remove(0)))
+    let Some(row) = meta::get_branch(&mut client, server.project_id, id)? else {
+        return Ok(None);
+    };
+    Ok(infos(server, &mut client, vec![row])?.pop())
 }
 
 pub(super) fn branch_for_instance(
@@ -651,8 +858,10 @@ pub(super) fn branch_for_instance(
     let Some(mut client) = reader(server)? else {
         return Ok(None);
     };
-    let row = meta::latest_for_instance(&mut client, server.project_id, instance_id)?;
-    Ok(row.map(|r| infos(&mut client, vec![r]).remove(0)))
+    let Some(row) = meta::latest_for_instance(&mut client, server.project_id, instance_id)? else {
+        return Ok(None);
+    };
+    Ok(infos(server, &mut client, vec![row])?.pop())
 }
 
 pub(super) fn list_branches(server: &Server) -> Result<Vec<BranchInfo>> {
@@ -660,7 +869,7 @@ pub(super) fn list_branches(server: &Server) -> Result<Vec<BranchInfo>> {
         return Ok(Vec::new());
     };
     let rows = meta::list_branches(&mut client, server.project_id)?;
-    Ok(infos(&mut client, rows))
+    infos(server, &mut client, rows)
 }
 
 // ---- snapshots ------------------------------------------------------------
@@ -790,6 +999,405 @@ pub(super) fn reconcile(server: &Server) -> Result<ReconcileReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_readiness_wait_is_bounded_even_against_a_listener_that_never_answers() {
+        use std::io::Read;
+        // Accepts every connection and holds it open without a word.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut sink = [0u8; 64];
+                    while stream.read(&mut sink).is_ok_and(|n| n > 0) {}
+                });
+            }
+        });
+        let started = Instant::now();
+        let mut attempts = 0;
+        let error = wait_until(
+            &SystemClock,
+            Duration::from_millis(700),
+            Duration::from_millis(50),
+            &mut |remaining| {
+                attempts += 1;
+                super::super::admin::speaks_postgres(
+                    "127.0.0.1",
+                    port,
+                    Duration::from_millis(200).min(remaining),
+                )
+            },
+        )
+        .unwrap_err();
+        assert!(attempts >= 2, "it kept trying: {attempts}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            format!("{error:#}").contains("does not answer"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_listener_that_answers_the_probe_and_then_stalls_cannot_hold_the_wait() {
+        use std::io::{Read, Write};
+        // Answers the SSL request with `N` like a server would, reads the
+        // startup message, and never says another word.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut request = [0u8; 8];
+                    let _ = stream.read_exact(&mut request);
+                    let _ = stream.write_all(b"N");
+                    let mut sink = [0u8; 256];
+                    while stream.read(&mut sink).is_ok_and(|n| n > 0) {}
+                });
+            }
+        });
+        let started = Instant::now();
+        let mut attempts = 0;
+        let error = wait_until(
+            &SystemClock,
+            Duration::from_millis(800),
+            Duration::from_millis(50),
+            &mut |remaining| {
+                attempts += 1;
+                attempt_ready(
+                    Target::for_endpoint("127.0.0.1", port, "postgres"),
+                    Duration::from_millis(300).min(remaining),
+                )
+            },
+        )
+        .unwrap_err();
+        assert!(attempts >= 2, "it kept trying: {attempts}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "bounded by the deadline plus one attempt: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            format!("{error:#}").contains("did not answer within"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn work_that_finishes_or_fails_in_time_reports_its_own_result() {
+        assert_eq!(within(Duration::from_secs(5), || Ok(7)).unwrap(), 7);
+        let error = within(Duration::from_secs(5), || -> Result<()> { bail!("boom") })
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "boom");
+        let error = within(Duration::from_secs(5), || -> Result<()> {
+            panic!("worker panicked")
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("ended without a result"), "{error}");
+    }
+
+    #[test]
+    fn the_readiness_wait_returns_as_soon_as_an_attempt_succeeds() {
+        let mut attempts = 0;
+        wait_until(
+            &SystemClock,
+            Duration::from_secs(30),
+            Duration::from_millis(1),
+            &mut |_| {
+                attempts += 1;
+                if attempts < 3 {
+                    anyhow::bail!("not yet")
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(attempts, 3);
+    }
+
+    /// Time that only moves when the test says so (or the wait sleeps).
+    struct FakeClock {
+        start: Instant,
+        elapsed: std::cell::Cell<Duration>,
+        sleeps: std::cell::RefCell<Vec<Duration>>,
+    }
+
+    impl FakeClock {
+        fn new() -> Self {
+            Self {
+                start: Instant::now(),
+                elapsed: std::cell::Cell::new(Duration::ZERO),
+                sleeps: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn advance(&self, by: Duration) {
+            self.elapsed.set(self.elapsed.get() + by);
+        }
+
+        fn elapsed(&self) -> Duration {
+            self.elapsed.get()
+        }
+    }
+
+    impl Clock for FakeClock {
+        fn now(&self) -> Instant {
+            self.start + self.elapsed.get()
+        }
+
+        fn sleep(&self, pause: Duration) {
+            self.sleeps.borrow_mut().push(pause);
+            self.advance(pause);
+        }
+    }
+
+    #[test]
+    fn the_readiness_budget_is_never_exceeded_and_attempts_get_only_what_is_left() {
+        let clock = FakeClock::new();
+        let total = Duration::from_secs(60);
+        let mut budgets = Vec::new();
+        // Every attempt takes all the time it is given, like `within` timing
+        // out on a stalled listener.
+        let error = wait_until(
+            &clock,
+            total,
+            Duration::from_millis(300),
+            &mut |remaining| {
+                let budget = ATTEMPT_WITHIN.min(remaining);
+                budgets.push(budget);
+                clock.advance(budget);
+                anyhow::bail!("not ready")
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "not ready");
+        assert!(
+            clock.elapsed() <= total,
+            "overran the budget: {:?}",
+            clock.elapsed()
+        );
+        assert_eq!(clock.elapsed(), total, "and used all of it");
+        assert!(
+            budgets.iter().all(|budget| !budget.is_zero()),
+            "{budgets:?}"
+        );
+        assert_eq!(budgets[0], ATTEMPT_WITHIN);
+        // Attempts start 10.3s apart, so the sixth starts at 51.5s: it is
+        // given the 8.5s that are left, not a full 10s.
+        assert!(*budgets.last().unwrap() < ATTEMPT_WITHIN, "{budgets:?}");
+    }
+
+    #[test]
+    fn an_attempt_starting_just_before_the_deadline_is_cut_short() {
+        let clock = FakeClock::new();
+        let mut seen = Vec::new();
+        let result = wait_until(
+            &clock,
+            Duration::from_secs(60),
+            Duration::from_millis(300),
+            &mut |remaining| {
+                seen.push(remaining);
+                if seen.len() == 1 {
+                    // The first attempt fails at 59.5s.
+                    clock.advance(Duration::from_millis(59_500));
+                    anyhow::bail!("not ready")
+                }
+                // The next one starts at 59.8s and takes all it is given.
+                clock.advance(remaining);
+                anyhow::bail!("still not ready")
+            },
+        );
+        assert_eq!(result.unwrap_err().to_string(), "still not ready");
+        assert_eq!(
+            seen,
+            vec![Duration::from_secs(60), Duration::from_millis(200)]
+        );
+        assert_eq!(*clock.sleeps.borrow(), vec![Duration::from_millis(300)]);
+        assert_eq!(clock.elapsed(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn no_attempt_starts_at_the_deadline_and_the_last_pause_is_cut() {
+        let clock = FakeClock::new();
+        let mut attempts = 0;
+        let error = wait_until(
+            &clock,
+            Duration::from_millis(1_000),
+            Duration::from_millis(450),
+            &mut |remaining| {
+                attempts += 1;
+                assert!(remaining > Duration::ZERO);
+                // Quick failures: 100ms each.
+                clock.advance(Duration::from_millis(100));
+                anyhow::bail!("refused")
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "refused");
+        // Attempt 0-100, pause to 550, attempt to 650, then the pause is cut
+        // to the 350ms left and the wait is over: no third attempt.
+        assert_eq!(attempts, 2);
+        assert_eq!(
+            *clock.sleeps.borrow(),
+            vec![Duration::from_millis(450), Duration::from_millis(350)]
+        );
+        assert_eq!(clock.elapsed(), Duration::from_millis(1_000));
+    }
+
+    #[test]
+    fn a_wait_without_time_makes_no_attempt() {
+        let clock = FakeClock::new();
+        let mut attempts = 0;
+        let error = wait_until(
+            &clock,
+            Duration::ZERO,
+            Duration::from_millis(10),
+            &mut |_| {
+                attempts += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(attempts, 0);
+        assert!(error.to_string().contains("no time"), "{error}");
+        assert!(clock.sleeps.borrow().is_empty());
+    }
+
+    #[test]
+    fn an_attempt_that_overruns_ends_the_wait_without_another_pause() {
+        // A caller that ignores the budget still gets no sleep past the deadline.
+        let clock = FakeClock::new();
+        let error = wait_until(
+            &clock,
+            Duration::from_secs(1),
+            Duration::from_millis(500),
+            &mut |_| {
+                clock.advance(Duration::from_secs(2));
+                anyhow::bail!("slow")
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "slow");
+        assert!(clock.sleeps.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_short_attempt_budget_is_reported_in_milliseconds() {
+        let error = within(Duration::from_millis(40), || {
+            std::thread::sleep(Duration::from_millis(500));
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("within 40ms"), "{error}");
+        let error = within(Duration::from_secs(1), || {
+            std::thread::sleep(Duration::from_secs(3));
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("within 1s "), "{error}");
+    }
+
+    /// A Docker client that stalls in every command: it records the sleeper it
+    /// started and waits for it.
+    #[cfg(unix)]
+    fn stalling_docker(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let pids = dir.join("pids");
+        let docker = dir.join("docker");
+        std::fs::write(
+            &docker,
+            format!(
+                "#!/bin/sh\nsleep 60 &\necho $! >> '{}'\nwait\n",
+                pids.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (docker, pids)
+    }
+
+    #[cfg(unix)]
+    fn server_with_docker(dir: &std::path::Path, docker: std::path::PathBuf) -> Server {
+        let managed = super::super::managed::ManagedServer::for_test(dir.join("server"), docker);
+        std::fs::create_dir_all(&managed.dir).unwrap();
+        std::fs::write(managed.compose_file(), "services: {}\n").unwrap();
+        Server {
+            project_id: uuid::Uuid::nil(),
+            project_name: "test".into(),
+            settings: crate::config::PostgresSection::default(),
+            managed: Some(managed),
+        }
+    }
+
+    #[cfg(unix)]
+    fn alive(pid: i32) -> bool {
+        // SAFETY: signal 0 delivers nothing; it only asks whether the process exists.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_docker_that_stalls_in_the_port_lookup_cannot_outlast_the_readiness_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let (docker, pids) = stalling_docker(dir.path());
+        let server = server_with_docker(dir.path(), docker);
+        let started = Instant::now();
+        let error = wait_ready_within(&server, Duration::from_secs(3)).unwrap_err();
+        // The deadline held (the stall lasts a minute), and the error says why.
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        let shown = format!("{error:#}");
+        assert!(
+            shown.contains("does not accept connections") && shown.contains("did not answer"),
+            "{shown}"
+        );
+        // What it started was killed and reaped, not left behind.
+        let recorded = std::fs::read_to_string(&pids).unwrap();
+        assert!(!recorded.trim().is_empty(), "the stand-in ran");
+        for pid in recorded
+            .lines()
+            .filter_map(|line| line.trim().parse::<i32>().ok())
+        {
+            let gone = (0..60).any(|_| {
+                let gone = !alive(pid);
+                if !gone {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                gone
+            });
+            assert!(gone, "process {pid} was left behind");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_endpoint_lookup_is_bounded_even_without_a_deadline_to_share() {
+        let dir = tempfile::tempdir().unwrap();
+        let (docker, _) = stalling_docker(dir.path());
+        let server = server_with_docker(dir.path(), docker);
+        let started = Instant::now();
+        let error = Target::resolve_within(&server, Duration::from_millis(400))
+            .err()
+            .expect("the lookup gave up");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            format!("{error:#}").contains("did not answer within"),
+            "{error:#}"
+        );
+    }
 
     #[test]
     fn snapshot_names_are_validated() {

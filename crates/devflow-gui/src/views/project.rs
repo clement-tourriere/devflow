@@ -1,20 +1,23 @@
 //! The selected project: header (name, path, badges, refresh), tabs, and the
 //! tab content. Also the not-initialized / failed / loading states.
 use super::{
-    config::ConfigView, daemons::DaemonsView, database::DatabaseView, dialogs, logs::LogsView, ui,
+    config::ConfigView, daemons::DaemonsView, data::DataView, dialogs,
+    hooks_editor::HooksEditorView, logs::LogsView, onboarding, palette::tab_icon, ui,
     workspaces::WorkspacesView,
 };
 use crate::{
     model::{LoadPhase, ProjectModel, ServerBadge, Tab, shorten_home},
+    redaction::shown,
     state::AppState,
 };
 use devflow_core::{config::CowCapability, db::CowSource, trust::TrustState};
 use gpui_kit::{
+    assets::IconName as Lucide,
     component::{
-        ActiveTheme as _, IconName, Sizable as _,
+        ActiveTheme as _, Icon, IconName, Sizable as _,
         button::{Button, ButtonVariants as _},
         h_flex,
-        select::{Select, SelectEvent, SelectState},
+        select::{Select, SelectEvent, SelectItem, SelectState},
         spinner::Spinner,
         tab::{Tab as TabItem, TabBar},
         v_flex,
@@ -24,14 +27,46 @@ use gpui_kit::{
 };
 use std::path::PathBuf;
 
+/// A workspace in the picker: drawn masked (a legal name can look like a
+/// credential), chosen by its recorded name.
+#[derive(Clone)]
+struct WorkspaceChoice {
+    name: String,
+    label: SharedString,
+}
+
+impl WorkspaceChoice {
+    fn of(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            label: shown(name).into(),
+        }
+    }
+}
+
+impl SelectItem for WorkspaceChoice {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &String {
+        &self.name
+    }
+}
+
 /// Owned copy of what the header shows, so no borrow of the state outlives it.
 struct HeaderInfo {
     name: String,
     root: PathBuf,
     badge: ServerBadge,
     cow: Option<(CowCapability, Option<CowSource>)>,
-    hooks_untrusted: bool,
-    refreshing: bool,
+    /// The selected workspace's own scope is not approved (judged per
+    /// workspace: a linked worktree has its own pitchfork files).
+    untrusted: bool,
+    /// The workspace that was judged, when one is selected.
+    judged: Option<String>,
 }
 
 impl HeaderInfo {
@@ -45,27 +80,28 @@ impl HeaderInfo {
                 .status
                 .as_ref()
                 .map(|s| (s.cow, s.cow_source)),
-            hooks_untrusted: matches!(model.trust, Some(TrustState::Untrusted { .. })),
-            refreshing: model.refreshing,
+            untrusted: matches!(model.trust, Some(TrustState::Untrusted { .. })),
+            judged: model.selected_workspace.clone(),
         }
     }
 }
 
 pub struct ProjectView {
     state: Entity<AppState>,
-    workspaces: Entity<WorkspacesView>,
-    database: Entity<DatabaseView>,
+    pub(super) workspaces: Entity<WorkspacesView>,
+    data: Entity<DataView>,
     daemons: Entity<DaemonsView>,
+    pub(super) setup: Entity<HooksEditorView>,
     pub(super) config: Entity<ConfigView>,
     pub(super) logs: Entity<LogsView>,
-    picker: Entity<SelectState<Vec<SharedString>>>,
+    picker: Entity<SelectState<Vec<WorkspaceChoice>>>,
     picker_items: Vec<String>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl ProjectView {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let picker = cx.new(|cx| SelectState::new(Vec::<SharedString>::new(), None, window, cx));
+        let picker = cx.new(|cx| SelectState::new(Vec::<WorkspaceChoice>::new(), None, window, cx));
         let subscriptions = vec![
             cx.observe_in(&state, window, |this, _, window, cx| {
                 this.sync_picker(window, cx);
@@ -73,19 +109,20 @@ impl ProjectView {
             }),
             cx.subscribe(
                 &picker,
-                |this, _, event: &SelectEvent<Vec<SharedString>>, cx| {
+                |this, _, event: &SelectEvent<Vec<WorkspaceChoice>>, cx| {
                     let SelectEvent::Confirm(Some(name)) = event else {
                         return;
                     };
-                    let name = name.to_string();
+                    let name = name.clone();
                     this.state.update(cx, |s, cx| s.select_workspace(name, cx));
                 },
             ),
         ];
         Self {
             workspaces: cx.new(|cx| WorkspacesView::new(state.clone(), window, cx)),
-            database: cx.new(|cx| DatabaseView::new(state.clone(), window, cx)),
+            data: cx.new(|cx| DataView::new(state.clone(), window, cx)),
             daemons: cx.new(|cx| DaemonsView::new(state.clone(), window, cx)),
+            setup: cx.new(|cx| HooksEditorView::new(state.clone(), window, cx)),
             config: cx.new(|cx| ConfigView::new(state.clone(), window, cx)),
             logs: cx.new(|cx| LogsView::new(state.clone(), window, cx)),
             state,
@@ -110,20 +147,20 @@ impl ProjectView {
             None => (Vec::new(), None),
         };
         let items_changed = names != self.picker_items;
-        let shown = self.picker.read(cx).selected_value().map(|v| v.to_string());
+        let shown = self.picker.read(cx).selected_value().cloned();
         if !items_changed && shown == selected {
             return;
         }
         if items_changed {
-            let items: Vec<SharedString> = names.iter().cloned().map(Into::into).collect();
+            let items: Vec<WorkspaceChoice> =
+                names.iter().map(|n| WorkspaceChoice::of(n)).collect();
             self.picker
                 .update(cx, |p, cx| p.set_items(items, window, cx));
             self.picker_items = names;
         }
         if let Some(name) = selected {
-            self.picker.update(cx, |p, cx| {
-                p.set_selected_value(&SharedString::from(name), window, cx)
-            });
+            self.picker
+                .update(cx, |p, cx| p.set_selected_value(&name, window, cx));
         }
     }
 
@@ -133,14 +170,22 @@ impl ProjectView {
         busy: Option<&str>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let refreshing = info.refreshing || busy.is_some();
         let mut badges = h_flex().gap_2().items_center();
         badges = badges.child(ui::server_tag(info.badge));
         if let Some((cow, source)) = info.cow {
             badges = badges.child(ui::cow_tag(cow, source));
         }
-        if info.hooks_untrusted {
-            badges = badges.child(ui::tag("hooks not trusted", ui::Tone::Warning));
+        if info.untrusted {
+            let label = match &info.judged {
+                Some(workspace) => format!("not trusted in {}", shown(workspace)),
+                None => "not trusted".to_string(),
+            };
+            badges = badges.child(ui::pill(
+                "trust-badge",
+                label,
+                ui::Tone::Warning,
+                "What this workspace asks to run (hooks, [env], pitchfork processes) is not approved. Review it in the Setup tab.",
+            ));
         }
         h_flex()
             .px_4()
@@ -173,32 +218,20 @@ impl ProjectView {
                             .child(shorten_home(&info.root)),
                     ),
             )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .when_some(busy.map(str::to_string), |row, title| {
-                        row.child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .text_sm()
-                                .text_color(ui::muted(cx))
-                                .child(Spinner::new().small())
-                                .child(title),
-                        )
-                    })
-                    .child(
-                        Button::new("refresh")
-                            .icon(IconName::RefreshCw)
-                            .label("Refresh")
-                            .small()
-                            .loading(refreshing && busy.is_none())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.state.update(cx, |s, cx| s.refresh(cx))
-                            })),
-                    ),
-            )
+            .child(h_flex().gap_2().items_center().when_some(
+                busy.map(str::to_string),
+                |row, title| {
+                    row.child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .text_sm()
+                            .text_color(ui::muted(cx))
+                            .child(Spinner::new().small())
+                            .child(title),
+                    )
+                },
+            ))
     }
 
     fn tabs(&self, active: Tab, cx: &mut Context<Self>) -> impl IntoElement {
@@ -223,7 +256,14 @@ impl ProjectView {
                         let tab = Tab::ALL[*ix];
                         this.state.update(cx, |s, cx| s.set_tab(tab, cx));
                     }))
-                    .children(Tab::ALL.iter().map(|t| TabItem::new().label(t.title()))),
+                    // A tab with `.icon()` renders the icon alone (the label
+                    // becomes its accessible name), so the icon goes in the
+                    // prefix and the label stays visible.
+                    .children(Tab::ALL.iter().map(|&t| {
+                        TabItem::new()
+                            .prefix(div().pl_2().child(Icon::new(tab_icon(t)).size_3p5()))
+                            .label(t.title())
+                    })),
             )
             .children(picker)
     }
@@ -244,36 +284,76 @@ impl Render for ProjectView {
             )
         };
         let (Some(info), Some(phase)) = (info, phase) else {
-            let message = entries_error.unwrap_or_else(|| {
-                "Add a Git repository with \"Add project…\" in the sidebar.".into()
-            });
-            return ui::note("No project selected", message, cx).into_any_element();
+            let state = self.state.clone();
+            return match entries_error {
+                Some(message) => ui::empty_state(
+                    Lucide::TriangleAlert,
+                    "Cannot read the project list",
+                    message,
+                    Some(
+                        Button::new("retry-projects")
+                            .primary()
+                            .label("Retry")
+                            .on_click(move |_, _, cx| {
+                                state.update(cx, |s, cx| s.reload_entries(None, None, cx))
+                            }),
+                    ),
+                ),
+                None => ui::empty_state(
+                    Lucide::Rocket,
+                    "Add your first project",
+                    "Give every task its own worktree, copy-on-write data and setup hooks. Start by adding a Git repository.",
+                    Some(
+                        Button::new("add-project")
+                            .primary()
+                            .icon(IconName::Plus)
+                            .label("Add project")
+                            .on_click(move |_, window, cx| {
+                                state.update(cx, |s, cx| s.add_project(window, cx))
+                            }),
+                    ),
+                ),
+            }
+            .into_any_element();
         };
         let root = info.root.clone();
         match phase {
             LoadPhase::Loading => ui::loading("Loading project…", cx).into_any_element(),
             LoadPhase::NotInitialized => {
                 let app = self.state.clone();
+                let text = format!(
+                    "{} has no devflow.toml. devflow will look at the repository, propose a setup (worktree files, a database, hooks, environment) and show you every line before it writes anything.",
+                    shorten_home(&root)
+                );
+                let wizard_root = root.clone();
+                let wizard_state = app.clone();
                 v_flex()
                     .size_full()
-                    .items_center()
-                    .justify_center()
-                    .gap_3()
-                    .child(ui::heading("Not initialized"))
-                    .child(
-                        div()
-                            .max_w(px(520.))
-                            .text_sm()
-                            .text_center()
-                            .text_color(ui::muted(cx))
-                            .child(format!(
-                                "{} has no devflow.toml. Initialize it to create worktrees with copy-on-write data and setup hooks.",
-                                shorten_home(&root)
-                            )),
-                    )
-                    .child(Button::new("initialize").primary().label("Initialize…").on_click(
-                        move |_, window, cx| dialogs::open_initialize(&app, root.clone(), window, cx),
+                    .child(ui::empty_state(
+                        Lucide::WandSparkles,
+                        "Set up devflow for this project",
+                        text,
+                        Some(
+                            Button::new("setup-wizard")
+                                .primary()
+                                .icon(Lucide::WandSparkles)
+                                .label("Set up devflow…")
+                                .on_click(move |_, window, cx| {
+                                    onboarding::open(&wizard_state, wizard_root.clone(), window, cx)
+                                }),
+                        ),
                     ))
+                    .child(
+                        h_flex().pb_6().justify_center().child(
+                            Button::new("initialize")
+                                .ghost()
+                                .small()
+                                .label("Or start from a minimal devflow.toml")
+                                .on_click(move |_, window, cx| {
+                                    dialogs::open_initialize(&app, root.clone(), window, cx)
+                                }),
+                        ),
+                    )
                     .into_any_element()
             }
             LoadPhase::Failed(message) => v_flex()
@@ -290,8 +370,9 @@ impl Render for ProjectView {
                 let header = self.header(info, busy.as_deref(), cx);
                 let content = match tab {
                     Tab::Workspaces => self.workspaces.clone().into_any_element(),
-                    Tab::Database => self.database.clone().into_any_element(),
+                    Tab::Data => self.data.clone().into_any_element(),
                     Tab::Daemons => self.daemons.clone().into_any_element(),
+                    Tab::Setup => self.setup.clone().into_any_element(),
                     Tab::Config => self.config.clone().into_any_element(),
                     Tab::Logs => self.logs.clone().into_any_element(),
                 };

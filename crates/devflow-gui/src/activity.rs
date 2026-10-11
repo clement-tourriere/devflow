@@ -91,6 +91,8 @@ pub struct Activity {
     pub log: LogBuffer,
     /// `None` while running. The text is already credential-free.
     pub outcome: Option<Section<Done>>,
+    /// When the outcome arrived.
+    pub finished_at: Option<chrono::DateTime<chrono::Local>>,
 }
 
 impl Activity {
@@ -104,6 +106,7 @@ impl Activity {
                 .collect(),
             log: LogBuffer::new(MAX_LINES),
             outcome: None,
+            finished_at: None,
         }
     }
 
@@ -184,13 +187,13 @@ mod tests {
         let mut a = activity();
         a.apply([
             Event::Phase {
-                phase: Phase::Database,
+                phase: Phase::Services,
                 state: PhaseState::Started,
                 detail: None,
             },
             Event::Line("npm install".into()),
             Event::Phase {
-                phase: Phase::Database,
+                phase: Phase::Services,
                 state: PhaseState::Failed,
                 detail: Some("server down".into()),
             },
@@ -198,15 +201,15 @@ mod tests {
         let db = a
             .phases
             .iter()
-            .find(|(p, ..)| *p == Phase::Database)
+            .find(|(p, ..)| *p == Phase::Services)
             .unwrap();
         assert_eq!(db.1, PhaseState::Failed);
         assert_eq!(db.2.as_deref(), Some("server down"));
         let text = a.log.text();
         let lines: Vec<_> = text.lines().collect();
-        assert_eq!(lines[0], "[database] started");
+        assert_eq!(lines[0], "[services] started");
         assert_eq!(lines[1], "npm install");
-        assert_eq!(lines[2], "[database] failed: server down");
+        assert_eq!(lines[2], "[services] failed: server down");
         assert!(a.outcome.is_none());
     }
 

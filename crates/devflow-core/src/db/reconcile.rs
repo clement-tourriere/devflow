@@ -2,8 +2,9 @@
 //! effect; this module finishes or rolls back whatever a dead process left, by
 //! inspecting `pg_database` and `pg_roles`. A failed operation runs the same
 //! code on its own row.
-use super::admin::{Session, bootstrap_leftovers, lock_lost};
+use super::admin::{Session, bootstrap_leftovers, lock_lost, owner_name};
 use super::meta::{self, BranchRow};
+use super::scratch;
 use super::{ReconcileReport, RecordStatus, SnapshotInfo};
 use anyhow::{Context, Result, bail};
 use uuid::Uuid;
@@ -13,6 +14,32 @@ use uuid::Uuid;
 pub(super) fn run(s: &mut Session) -> Result<ReconcileReport> {
     let mut report = ReconcileReport::default();
     let project = s.project_id();
+
+    // Before anything is built or opened: a login must not inherit the owner
+    // by the time the owner holds `CONNECT` on a sibling's database. This is
+    // a security invariant, so a failure stops the operation.
+    let inheriting = stop_inheriting(s).context("cannot isolate the branch logins")?;
+    if inheriting > 0 {
+        report.actions.push(format!(
+            "branch logins no longer inherit the project owner ({inheriting})"
+        ));
+    }
+    match grant_owner_connect(s) {
+        Ok(0) => {}
+        Ok(granted) => report.actions.push(format!(
+            "the project owner can connect to the {} of branches that lacked it",
+            crate::text::counted(granted as u64, "database")
+        )),
+        Err(e) => {
+            let e = s.lock_failure(e);
+            if lock_lost(&e) {
+                return Err(e);
+            }
+            report
+                .problems
+                .push(format!("owner access to branch databases: {e:#}"));
+        }
+    }
 
     for row in meta::list_branches(&mut s.admin, project)? {
         let id = row.id;
@@ -44,6 +71,21 @@ pub(super) fn run(s: &mut Session) -> Result<ReconcileReport> {
         }
     }
 
+    // Scratch databases: finish what dead runs left, then say which ones the
+    // configuration stopped listing. (Before the retired roles: a dropped
+    // database may be what kept a role from being dropped.)
+    scratch::recover(s, &mut report)?;
+    match scratch::report_orphans(s, &mut report) {
+        Ok(()) => {}
+        Err(e) => {
+            let e = s.lock_failure(e);
+            if lock_lost(&e) {
+                return Err(e);
+            }
+            report.problems.push(format!("scratch databases: {e:#}"));
+        }
+    }
+
     for role in meta::retired_roles(&mut s.admin, project)? {
         match retry_retired_role(s, &role) {
             Ok(Some(action)) => report.actions.push(action),
@@ -71,6 +113,74 @@ pub(super) fn run(s: &mut Session) -> Result<ReconcileReport> {
         }
     }
     Ok(report)
+}
+
+/// Branch logins made by an earlier build inherited the project owner. The
+/// owner now holds `CONNECT` on the branch databases (so that
+/// `pg_database_size(current_database())` works for a session that acts as
+/// the owner), which a login that still inherited it would use to reach its
+/// siblings. Returns how many logins were changed.
+fn stop_inheriting(s: &mut Session) -> Result<usize> {
+    let project = s.project_id();
+    let owner = owner_name(project);
+    let logins: Vec<String> = meta::list_branches(&mut s.admin, project)?
+        .into_iter()
+        .map(|row| row.role_name)
+        .collect();
+    s.step()?;
+    let inheriting: Vec<String> = s
+        .admin
+        .query(
+            "SELECT r.rolname::text FROM pg_auth_members m \
+             JOIN pg_roles r ON r.oid = m.member \
+             WHERE m.roleid = to_regrole($1) AND m.inherit_option AND r.rolname::text = ANY($2)",
+            &[&owner, &logins],
+        )?
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    for login in &inheriting {
+        s.stop_inheriting(login, &owner)?;
+    }
+    Ok(inheriting.len())
+}
+
+/// Give the project owner `CONNECT` on the databases of the branches and
+/// scratch databases that are ready and not being reset, where an earlier
+/// build did not. Run after [`stop_inheriting`]. Returns how many databases
+/// were changed; in-flight resets and builds get theirs when they finish.
+fn grant_owner_connect(s: &mut Session) -> Result<usize> {
+    let project = s.project_id();
+    let owner = owner_name(project);
+    let mut databases: Vec<String> = meta::list_branches(&mut s.admin, project)?
+        .into_iter()
+        .filter(|row| row.status == RecordStatus::Ready && row.op.is_none())
+        .map(|row| row.db_name)
+        .collect();
+    databases.extend(
+        meta::list_scratch(&mut s.admin, project)?
+            .into_iter()
+            .filter(|row| row.status == RecordStatus::Ready)
+            .map(|row| row.db_name),
+    );
+    if databases.is_empty() {
+        return Ok(0);
+    }
+    s.step()?;
+    let lacking: Vec<String> = s
+        .admin
+        .query(
+            "SELECT d.datname::text FROM pg_database d \
+             WHERE d.datname::text = ANY($1) AND NOT has_database_privilege($2::name, d.oid, 'CONNECT')",
+            &[&databases, &owner],
+        )?
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    for database in &lacking {
+        s.grant_owner_connect(database, &owner)?;
+    }
+    Ok(lacking.len())
 }
 
 /// Recover one branch by id (after a failed operation). `None` if it is gone.
@@ -110,10 +220,13 @@ fn recover_row(s: &mut Session, row: BranchRow) -> Result<Option<String>> {
     }
 }
 
-/// Drop the database (`WITH (FORCE)`, which also ends a normalization
-/// connection a dead operation left in it), then the login (retiring it if
-/// other databases still reference it), then the row. Idempotent.
+/// Drop the scratch databases, then the database (`WITH (FORCE)`, which also
+/// ends a normalization connection a dead operation left in it), then the
+/// login (retiring it if other databases still reference it), then the row.
+/// The scratch databases go first: the login holds `CONNECT` on them, and a
+/// row cannot outlive the branch row it points at. Idempotent.
 pub(super) fn finish_drop(s: &mut Session, row: &BranchRow) -> Result<()> {
+    scratch::drop_all(s, row.id)?;
     s.drop_database(&row.db_name)?;
     s.drop_login(&row.role_name, &format!("branch {} removed", row.id))?;
     s.step()?;
@@ -194,9 +307,12 @@ fn inconsistent(row: &BranchRow, detail: &str) -> Result<Option<String>> {
     )
 }
 
-/// After the renames: open the (new) original to its login, drop the old data,
-/// clear the operation. Shared by the normal path and recovery. `generation` is
-/// the branch's, after the renames bumped it.
+/// After the renames: open the (new) original to its login, empty the scratch
+/// databases again, drop the old data, clear the operation. Shared by the
+/// normal path and recovery. `generation` is the branch's, after the renames
+/// bumped it; the scratch databases record the generation they were emptied
+/// for, so a repeat after a crash empties only the ones not done yet and
+/// never what the user wrote after the reset.
 pub(super) fn finish_reset(
     s: &mut Session,
     id: Uuid,
@@ -206,7 +322,9 @@ pub(super) fn finish_reset(
     backup: &str,
 ) -> Result<()> {
     s.set_connections(db, true)?;
-    s.grant_connect(db, login)?;
+    let owner = owner_name(s.project_id());
+    s.grant_connect(db, login, &owner)?;
+    scratch::reset(s, id, login, generation)?;
     s.drop_database(backup)?;
     s.step()?;
     meta::clear_op(&mut s.admin, id, generation, "cleanup").context("cannot clear the reset record")

@@ -266,6 +266,78 @@ fn copy_symlink(source: &Path, target: &Path) -> io::Result<()> {
     }
 }
 
+/// What a path holds, as the file system reports it.
+///
+/// Neither number is "the disk this path costs": a file that was cloned
+/// shares blocks with its source, and a file system does not say which. So
+/// the sizes are an upper bound for a cloned path (what it would take if
+/// every block were its own), and callers must say so; the cost of a cloned
+/// tree is never zero, since whatever is changed in it is written anew.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct Measure {
+    /// The sum of the files' lengths: what a plain copy would hold.
+    pub apparent_bytes: u64,
+    /// The blocks the files occupy as the file system reports them
+    /// (`st_blocks`), shared blocks counted in full. `None` where the
+    /// platform does not report it.
+    pub allocated_bytes: Option<u64>,
+    /// Files, links and directories visited.
+    pub entries: u64,
+    /// Some entries could not be read; the numbers are lower than the truth.
+    pub partial: bool,
+}
+
+/// Measure `path` (a file or a tree) without following symbolic links.
+pub fn measure(path: &Path) -> Result<Measure> {
+    let mut total = Measure::default();
+    let mut allocated: Option<u64> = Some(0);
+    let mut pending = vec![path.to_path_buf()];
+    let root =
+        fs::symlink_metadata(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let mut first = Some(root);
+    while let Some(next) = pending.pop() {
+        let metadata = match first.take() {
+            Some(metadata) => metadata,
+            None => match fs::symlink_metadata(&next) {
+                Ok(metadata) => metadata,
+                Err(_) => {
+                    total.partial = true;
+                    continue;
+                }
+            },
+        };
+        total.entries += 1;
+        if metadata.is_dir() {
+            match fs::read_dir(&next) {
+                Ok(children) => {
+                    for child in children {
+                        match child {
+                            Ok(child) => pending.push(child.path()),
+                            Err(_) => total.partial = true,
+                        }
+                    }
+                }
+                Err(_) => total.partial = true,
+            }
+            continue;
+        }
+        total.apparent_bytes += metadata.len();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            if let Some(sum) = allocated.as_mut() {
+                *sum += metadata.blocks() * 512;
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            allocated = None;
+        }
+    }
+    total.allocated_bytes = allocated;
+    Ok(total)
+}
+
 /// Whether files in `dir` can be block-cloned (probe file created and removed).
 pub fn probe(dir: &Path) -> bool {
     let name = format!(".devflow-cow-probe-{}", uuid::Uuid::new_v4());
@@ -333,6 +405,26 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(".devflow-stage")
         }));
+    }
+
+    #[test]
+    fn measure_adds_up_a_tree_without_following_links() {
+        let root = tempfile::tempdir().unwrap();
+        let tree = root.path().join("tree");
+        fs::create_dir_all(tree.join("a/b")).unwrap();
+        fs::write(tree.join("a/one"), vec![0u8; 1000]).unwrap();
+        fs::write(tree.join("a/b/two"), vec![1u8; 24]).unwrap();
+        // A link back up the tree would loop forever if it were followed.
+        symlink(&tree, tree.join("a/loop")).unwrap();
+        let measured = measure(&tree).unwrap();
+        assert!(measured.apparent_bytes >= 1024, "{measured:?}");
+        assert_eq!(measured.entries, 6, "tree, a, b, one, two, loop");
+        assert!(!measured.partial);
+        assert!(measured.allocated_bytes.is_some_and(|b| b >= 1000));
+        // A single file, and a path that is not there.
+        let one = measure(&tree.join("a/one")).unwrap();
+        assert_eq!((one.apparent_bytes, one.entries), (1000, 1));
+        assert!(measure(&tree.join("nope")).is_err());
     }
 
     #[test]

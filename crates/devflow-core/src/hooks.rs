@@ -42,8 +42,31 @@ impl HookPhase {
     }
 }
 
+/// A command ready to run: the hook entry with its effective timeout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookCommand {
+    /// Shown beside the command in output and logs.
+    pub name: Option<String>,
+    pub run: String,
+    pub timeout: Duration,
+}
+
+impl HookCommand {
+    /// An unnamed command.
+    pub fn new(run: impl Into<String>, timeout: Duration) -> Self {
+        Self {
+            name: None,
+            run: run.into(),
+            timeout,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HookRun {
+    /// The entry's `name`, if it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub command: String,
     /// `None` when the command was killed by a signal or never started.
     pub exit_code: Option<i32>,
@@ -83,27 +106,32 @@ impl HookReport {
             .as_ref()
             .map(|p| format!(" (log: {})", p.display()))
             .unwrap_or_default();
-        Some(format!(
-            "{} hook `{}` {how}{log}",
-            self.phase.as_str(),
-            crate::redact::text(&run.command)
-        ))
+        let command = crate::redact::text(&run.command);
+        let which = match &run.name {
+            Some(name) => format!("'{name}' (`{command}`)"),
+            None => format!("`{command}`"),
+        };
+        Some(format!("{} hook {which} {how}{log}", self.phase.as_str()))
     }
 }
 
 /// Run `commands` in order with `sh -c` in `cwd`, with `env` added to the
 /// inherited environment and `DEVFLOW_SETUP_ACTIVE=1`. Stops at the first
 /// failure. Each command gets its own process group and is killed (TERM, then
-/// KILL) when it exceeds `timeout`. Output lines go to `output` and to
-/// `<log_dir>/<timestamp>-<phase>.log`; credentials (secret-named variables and
-/// URL passwords in `env`) are masked in both, and in the echoed command,
-/// before anything is written.
+/// KILL) when it exceeds its own `timeout`. Output lines go to `output` and to
+/// `<log_dir>/<timestamp>-<phase>.log`; a named command is announced with its
+/// name. Credentials are masked in both, and in the echoed command, before
+/// anything is written: secret-named variables and URL passwords in `env`, and
+/// every value in `known_secrets` (values devflow derived from credentials,
+/// such as an `[env]` recipe built on the database password). Output is masked
+/// a line at a time, so each line of a secret that spans several lines is
+/// masked on its own too when it has at least four characters.
 pub fn run(
     phase: HookPhase,
-    commands: &[String],
+    commands: &[HookCommand],
     cwd: &Path,
     env: &[(String, String)],
-    timeout: Duration,
+    known_secrets: &[String],
     log_dir: &Path,
     output: &mut dyn FnMut(&str),
 ) -> Result<HookReport> {
@@ -123,12 +151,14 @@ pub fn run(
         phase.as_str()
     ));
     let mut log = open_log(&log_path)?;
-    let secrets = secrets(env);
+    let mut secrets = secrets(env);
+    secrets.extend(known_secrets.iter().filter(|s| !s.is_empty()).cloned());
+    let mut secrets = with_line_fragments(secrets);
+    secrets.sort();
+    secrets.dedup();
     let mut runs = Vec::new();
     for command in commands {
-        let run = run_one(
-            phase, command, cwd, env, &secrets, timeout, &mut log, output,
-        )?;
+        let run = run_one(phase, command, cwd, env, &secrets, &mut log, output)?;
         let ok = run.succeeded();
         runs.push(run);
         if !ok {
@@ -158,33 +188,67 @@ fn open_log(path: &Path) -> Result<std::fs::File> {
         .with_context(|| format!("cannot open {}", path.display()))
 }
 
+/// The shortest line of a multi-line secret that is masked by itself.
+const MIN_FRAGMENT: usize = 4;
+
+/// Output is masked one line at a time, so a secret that contains a line
+/// break (a password decoded from `%0A`, a recipe built on one) is never seen
+/// whole: the lines it is printed as are. Each line of such a secret is
+/// therefore a secret too, as long as it has [`MIN_FRAGMENT`] characters or
+/// more; shorter pieces would mask ordinary text, and are not masked on their
+/// own. Secrets without a line break are returned as they are.
+fn with_line_fragments(secrets: Vec<String>) -> Vec<String> {
+    let mut all = secrets.clone();
+    for secret in &secrets {
+        if secret.contains(['\n', '\r']) {
+            all.extend(
+                secret
+                    .split(['\n', '\r'])
+                    .filter(|line| line.chars().count() >= MIN_FRAGMENT)
+                    .map(str::to_string),
+            );
+        }
+    }
+    all
+}
+
 /// The values that must never reach a log or a screen: secret-named
 /// variables (`PGPASSWORD`, …) and the passwords inside URL values
 /// (`DATABASE_URL`), both as written in the URL and percent-decoded. Every one
 /// is masked, however short; [`crate::redact::text_with`] takes care of ones
 /// that contain each other.
-fn secrets(env: &[(String, String)]) -> Vec<String> {
-    let mut found = Vec::new();
-    for (key, value) in env {
-        if crate::redact::is_secret_key(key) {
-            found.push(value.clone());
-        }
-        if let Some((encoded, decoded)) = url_password(value) {
-            found.push(encoded);
-            found.push(decoded);
-        }
-        // A password given as a query parameter (`?password=…`, possibly with
-        // an encoded name) is the connection's password all the same.
-        if let Some(password) = crate::conn::Params::parse(value)
-            .ok()
-            .filter(|_| value.contains("://"))
-            .and_then(|p| p.password().map(str::to_string))
-        {
-            found.push(password);
-        }
-    }
+pub(crate) fn secrets(env: &[(String, String)]) -> Vec<String> {
+    let mut found: Vec<String> = env
+        .iter()
+        .flat_map(|(key, value)| secret_values(key, value))
+        .collect();
     found.sort();
     found.dedup();
+    found.retain(|secret| !secret.is_empty());
+    found
+}
+
+/// The credentials variable `key` carries in `value`: the value itself when
+/// the name says secret, and the password of a URL value, as written and
+/// decoded. Empty when the variable holds none.
+pub(crate) fn secret_values(key: &str, value: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    if crate::redact::is_secret_key(key) {
+        found.push(value.to_string());
+    }
+    if let Some((encoded, decoded)) = url_password(value) {
+        found.push(encoded);
+        found.push(decoded);
+    }
+    // A password given as a query parameter (`?password=…`, possibly with an
+    // encoded name) is the connection's password all the same.
+    if let Some(password) = crate::conn::Params::parse(value)
+        .ok()
+        .filter(|_| value.contains("://"))
+        .and_then(|p| p.password().map(str::to_string))
+    {
+        found.push(password);
+    }
     found.retain(|secret| !secret.is_empty());
     found
 }
@@ -220,7 +284,7 @@ fn emit(log: &mut std::fs::File, output: &mut dyn FnMut(&str), secrets: &[String
 /// connection ([`crate::conn::libpq_env_vars`]) first: the generated set only
 /// names what the URL specifies, and an inherited `PGPORT`, `PGSERVICE` or
 /// `PGSSLROOTCERT` would otherwise silently redirect a hook's `psql`.
-fn apply_env(cmd: &mut Command, phase: HookPhase, env: &[(String, String)]) {
+pub(crate) fn apply_env(cmd: &mut Command, phase: HookPhase, env: &[(String, String)]) {
     for var in GIT_CONTEXT {
         cmd.env_remove(var);
     }
@@ -232,22 +296,48 @@ fn apply_env(cmd: &mut Command, phase: HookPhase, env: &[(String, String)]) {
     cmd.envs(env.iter().map(|(k, v)| (k, v)))
         .env("DEVFLOW_SETUP_ACTIVE", "1")
         .env("DEVFLOW_PHASE", phase.as_str());
+    if let Some(path) = crate::paths::devflow_program().ok().and_then(|program| {
+        path_with_devflow(&program, &std::env::var_os("PATH").unwrap_or_default())
+    }) {
+        cmd.env("PATH", path);
+    }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// `current` (a `PATH`) with the directory of the `devflow` executable in
+/// front, so hooks, and the `devflow exec -- …` commands devflow proposes,
+/// find devflow even when it runs inside an app started with a minimal
+/// `PATH`. `None` when that directory is already on it, or when `program` is
+/// not named `devflow` (a `DEVFLOW_BIN` under another name).
+fn path_with_devflow(program: &Path, current: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
+    if program.file_name()? != "devflow" {
+        return None;
+    }
+    let dir = program.parent()?;
+    if std::env::split_paths(current).any(|entry| entry == dir) {
+        return None;
+    }
+    std::env::join_paths(std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(current)))
+        .ok()
+}
+
 fn run_one(
     phase: HookPhase,
-    command: &str,
+    entry: &HookCommand,
     cwd: &Path,
     env: &[(String, String)],
     secrets: &[String],
-    timeout: Duration,
     log: &mut std::fs::File,
     output: &mut dyn FnMut(&str),
 ) -> Result<HookRun> {
+    let (command, timeout) = (entry.run.as_str(), entry.timeout);
     let started = Instant::now();
-    emit(log, output, secrets, &format!("$ {command}"));
+    let header = match &entry.name {
+        Some(name) => format!("[{name}] $ {command}"),
+        None => format!("$ {command}"),
+    };
+    emit(log, output, secrets, &header);
     let failed = |duration: Duration| HookRun {
+        name: entry.name.clone(),
         command: command.to_string(),
         exit_code: None,
         timed_out: false,
@@ -334,6 +424,7 @@ fn run_one(
         }
     }
     let run = HookRun {
+        name: entry.name.clone(),
         command: command.to_string(),
         exit_code: status.code(),
         timed_out,
@@ -352,6 +443,11 @@ fn run_one(
         emit(log, output, secrets, "terminated by a signal");
     }
     Ok(run)
+}
+
+/// End a command that was started in its own process group (see [`terminate`]).
+pub(crate) fn terminate_group(child: &mut std::process::Child) -> Result<std::process::ExitStatus> {
+    terminate(child)
 }
 
 /// SIGTERM the command's process group, give it [`KILL_GRACE`] to leave, then
@@ -402,18 +498,31 @@ mod tests {
     }
 
     fn run_in(dir: &Path, commands: &[&str], env: &[(&str, &str)], timeout: Duration) -> Run {
-        let commands: Vec<String> = commands.iter().map(|s| s.to_string()).collect();
+        let commands: Vec<HookCommand> = commands
+            .iter()
+            .map(|command| HookCommand::new(*command, timeout))
+            .collect();
+        run_commands(dir, &commands, env, &[])
+    }
+
+    fn run_commands(
+        dir: &Path,
+        commands: &[HookCommand],
+        env: &[(&str, &str)],
+        known_secrets: &[&str],
+    ) -> Run {
         let env: Vec<(String, String)> = env
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
+        let known: Vec<String> = known_secrets.iter().map(|s| s.to_string()).collect();
         let mut lines = Vec::new();
         let report = run(
             HookPhase::Setup,
-            &commands,
+            commands,
             dir,
             &env,
-            timeout,
+            &known,
             &dir.join("logs"),
             &mut |l| lines.push(l.to_string()),
         )
@@ -465,6 +574,79 @@ mod tests {
         }
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(log.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn named_commands_are_announced_by_name_and_keep_their_own_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let commands = [
+            HookCommand {
+                name: Some("migrate".into()),
+                run: "echo migrating".into(),
+                timeout: Duration::from_secs(30),
+            },
+            HookCommand::new("echo plain", Duration::from_secs(30)),
+            // The section's timeout is generous; this entry's is not.
+            HookCommand {
+                name: Some("seed".into()),
+                run: "sleep 600".into(),
+                timeout: Duration::from_millis(300),
+            },
+            HookCommand::new("touch never", Duration::from_secs(30)),
+        ];
+        let started = Instant::now();
+        let r = run_commands(dir.path(), &commands, &[], &[]);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(
+            &r.lines[..4],
+            [
+                "[migrate] $ echo migrating",
+                "migrating",
+                "$ echo plain",
+                "plain"
+            ]
+        );
+        assert!(!r.report.ok);
+        assert_eq!(r.report.runs.len(), 3, "the timed out entry stops the rest");
+        assert_eq!(r.report.runs[0].name.as_deref(), Some("migrate"));
+        assert_eq!(r.report.runs[1].name, None);
+        assert!(r.report.runs[2].timed_out);
+        assert!(!dir.path().join("never").exists());
+        let failure = r.report.failure().unwrap();
+        assert!(
+            failure.starts_with("setup hook 'seed' (`sleep 600`) timed out"),
+            "{failure}"
+        );
+        // The log carries the names too, and the JSON only the ones that exist.
+        let log = std::fs::read_to_string(r.report.log.as_ref().unwrap()).unwrap();
+        assert!(log.contains("[seed] $ sleep 600"), "{log}");
+        let json = serde_json::to_value(&r.report.runs).unwrap();
+        assert_eq!(json[0]["name"], "migrate");
+        assert!(json[1].get("name").is_none(), "{json}");
+    }
+
+    #[test]
+    fn values_devflow_derived_from_credentials_are_masked_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        // `AUTH` is not secret by name or by shape: only the caller knows it
+        // was built from a password.
+        let env = [("AUTH", "app:s3cr3t-value"), ("PGUSER", "app")];
+        let commands = [HookCommand::new(
+            "echo \"$AUTH\"; echo \"user=$PGUSER\"",
+            Duration::from_secs(30),
+        )];
+        let leaky = run_commands(dir.path(), &commands, &env, &[]);
+        assert!(leaky.lines.contains(&"app:s3cr3t-value".to_string()));
+        let other = tempfile::tempdir().unwrap();
+        let masked = run_commands(other.path(), &commands, &env, &["app:s3cr3t-value"]);
+        assert!(
+            masked.lines.contains(&"***".to_string()),
+            "{:?}",
+            masked.lines
+        );
+        assert!(masked.lines.contains(&"user=app".to_string()));
+        let log = std::fs::read_to_string(masked.report.log.as_ref().unwrap()).unwrap();
+        assert!(!log.contains("s3cr3t-value"), "{log}");
     }
 
     #[test]
@@ -587,10 +769,10 @@ mod tests {
         let mut lines = Vec::new();
         let report = run(
             HookPhase::Teardown,
-            &["true".to_string()],
+            &[HookCommand::new("true", Duration::from_secs(1))],
             &dir.path().join("missing"),
             &[],
-            Duration::from_secs(1),
+            &[],
             &dir.path().join("logs"),
             &mut |l| lines.push(l.to_string()),
         )
@@ -654,6 +836,28 @@ mod tests {
     }
 
     #[test]
+    fn hooks_find_the_devflow_that_runs_them_first_on_path() {
+        let path = |program: &str, current: &str| {
+            path_with_devflow(Path::new(program), std::ffi::OsStr::new(current))
+                .map(|p| p.to_string_lossy().into_owned())
+        };
+        assert_eq!(
+            path("/opt/devflow/bin/devflow", "/usr/bin:/bin").as_deref(),
+            Some("/opt/devflow/bin:/usr/bin:/bin")
+        );
+        assert_eq!(
+            path("/usr/bin/devflow", "/usr/bin:/bin"),
+            None,
+            "already there"
+        );
+        assert_eq!(
+            path("/tmp/x/devflow-copy", "/usr/bin"),
+            None,
+            "not named devflow"
+        );
+    }
+
+    #[test]
     fn a_workspace_with_a_database_clears_inherited_libpq_variables() {
         let env_of = |env: &[(&str, &str)]| {
             let env: Vec<(String, String)> = env
@@ -688,6 +892,55 @@ mod tests {
         let without_db = env_of(&[("DEVFLOW_WORKSPACE", "w")]);
         assert!(!without_db.contains_key("PGPORT"));
         assert!(without_db.contains_key("GIT_DIR"));
+    }
+
+    #[test]
+    fn a_secret_spanning_lines_is_masked_in_each_line_it_is_printed_as() {
+        let dir = tempfile::tempdir().unwrap();
+        // A password with an encoded line break, and the recipe built on it:
+        // what a hook prints is two lines, neither equal to the whole secret.
+        let url = "postgres://dfl_x:REVIEWFIRST%0AREVIEWSECOND@db.internal:5432/df_x"; // kingfisher:ignore
+        let auth = "dfl_x:REVIEWFIRST\nREVIEWSECOND";
+        let crlf = "CRLFHEAD\r\nCRLFTAIL";
+        let commands = [HookCommand::new(
+            "echo \"$AUTH\"; echo \"$DATABASE_URL\" >&2; printf '%s\\n' \"$CRLF\"; echo \"$AUTH\" | tr '\\n' ' '",
+            Duration::from_secs(30),
+        )];
+        let r = run_commands(
+            dir.path(),
+            &commands,
+            &[("DATABASE_URL", url), ("AUTH", auth), ("CRLF", crlf)],
+            &[auth, crlf],
+        );
+        assert!(r.report.ok, "{:?}", r.lines);
+        let log = std::fs::read_to_string(r.report.log.as_ref().unwrap()).unwrap();
+        let shown = r.lines.join("\n");
+        for fragment in [
+            "REVIEWFIRST",
+            "REVIEWSECOND",
+            "CRLFHEAD",
+            "CRLFTAIL",
+            "dfl_x:REVIEW",
+        ] {
+            assert!(!shown.contains(fragment), "{fragment} in {shown}");
+            assert!(!log.contains(fragment), "{fragment} in the log:\n{log}");
+        }
+        assert!(shown.contains("***"), "{shown}");
+    }
+
+    #[test]
+    fn fragments_of_a_multi_line_secret_need_four_characters() {
+        assert_eq!(
+            with_line_fragments(vec!["plain".into()]),
+            ["plain"],
+            "no line break, no fragments"
+        );
+        let mut all = with_line_fragments(vec!["abc\nlonger line\n\nxy".into()]);
+        all.sort();
+        assert_eq!(all, ["abc\nlonger line\n\nxy", "longer line"]);
+        let mut all = with_line_fragments(vec!["head\r\ntail".into()]);
+        all.sort();
+        assert_eq!(all, ["head", "head\r\ntail", "tail"]);
     }
 
     #[test]

@@ -29,7 +29,7 @@ Multi-feature builds and many worktrees can fill the disk; `mbx clean` reclaims 
 | Path | Description |
 | --- | --- |
 | `Cargo.toml`, `src/` | The `devflow` CLI: argument parsing, prompts, JSON output |
-| `crates/devflow-core` | Config, connection strings, project, registry, worktree, CoW, receipt, setup, hooks, trust, Git hook, env file, redaction, typed errors, `db` (admin, meta, steps, ops, reconcile, managed), doctor, pitchfork adapter |
+| `crates/devflow-core` | Config, connection strings, project, registry, worktree, CoW, receipt, setup, hooks, trust, Git hook, env file, redaction, typed errors, `db` (admin, meta, steps, ops, reconcile, managed), doctor, pitchfork adapter and process gating (`pitchfork`, `processes`) |
 | `crates/devflow-gui` | GPUI desktop app |
 | `tests/`, `crates/devflow-core/tests/` | End-to-end CLI tests; core workspace tests and the Docker database tests |
 | `docs/` | Architecture, migration guide, remote data hosts, design plans |
@@ -65,6 +65,7 @@ Scopes in use: `cli`, `core`, `config`, `worktree`, `cow`, `setup`, `hooks`, `tr
 - Unit tests live beside the code in `#[cfg(test)] mod tests`.
 - `tests/cli.rs` runs the `devflow` binary end to end; `crates/devflow-core/tests/workspace.rs` covers worktrees, setup and removal without Docker.
 - Database behavior is tested against real PostgreSQL 18 in Docker. Those tests are ignored by default (`-- --ignored --test-threads=1`) and use isolated containers and state: `--test db_postgres`, plus `--test workspace -- --ignored managed_postgres` for the managed server end to end. `--test workspace -- --ignored pitchfork` needs pitchfork on `PATH`.
+- Valkey/Redis branches have their own Docker tests: `cargo test -p devflow --test services_docker -- --ignored --test-threads=1` (needs `valkey/valkey:8-alpine` and `debian:stable-slim`; `redis:8-alpine` for one test). Each test uses its own project id and data directory, and puts `DEVFLOW_TEST_LABEL` on every container, volume and helper devflow creates (`dev.devflow.test=<run>`), and a guard removes everything carrying the label even after a panic. Interrupted runs can be cleaned with `docker ps -aq --filter label=dev.devflow.test | xargs docker rm -f` and the same filter for `docker volume`. `DEVFLOW_TEST_COPY_DELAY_SECS`, `DEVFLOW_TEST_COPY_TIMEOUT_SECS` and `DEVFLOW_TEST_NO_REFLINK` make the copy slow, short or reflink-less for the kill, deadline and `require_cow` tests.
 - The GUI has headless tests (`cargo test --locked -p devflow-gui`, macOS); native visual checks are manual.
 - Ext4 runners cannot share blocks, so CI cannot assert `verified` CoW. Verify CoW on OrbStack or a Linux btrfs/XFS host and report it separately from the mocked and unit checks. Set `DEVFLOW_EXPECT_COW=verified` to make the Docker tests assert it.
 - Use `DEVFLOW_CONFIG_DIR` and `DEVFLOW_DATA_DIR` to isolate tests from your real registry and managed servers.

@@ -3,7 +3,8 @@
 use crate::{
     model::{DataOption, RequestKey, WorkspaceRef, data_options, shorten_home},
     ops::{Approval, RemoveChoice, TrustChoice, approve_reviewed},
-    state::{AppState, TrustPrompt},
+    redaction::shown,
+    state::{AppState, TrustPrompt, TrustPurpose},
 };
 use devflow_core::{redact, trust::Scope, worktree::Workspace};
 use gpui_kit::{
@@ -108,55 +109,82 @@ impl Render for InitializeDialog {
 
 // ---- trust -------------------------------------------------------------------------
 
+/// One block of the review of what an approval covers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewSection {
+    /// Suffix of the block's element id (`trust-<key>`).
+    pub key: String,
+    pub title: String,
+    /// Credentials masked.
+    pub lines: Vec<String>,
+    /// Starts something without devflow, or could not be read: shown as a warning.
+    pub warning: bool,
+}
+
 /// Everything one approval covers, as shown to the user: the commands of
-/// every hook phase that has any (credentials masked), then the timeout.
-pub fn scope_sections(scope: &Scope) -> Vec<(&'static str, Vec<String>)> {
-    let masked = |commands: &[String]| commands.iter().map(|c| redact::text(c)).collect::<Vec<_>>();
-    let mut sections = Vec::new();
-    for (title, commands) in [
-        ("Setup", &scope.setup),
-        ("Switch", &scope.switch),
-        ("Teardown", &scope.teardown),
-    ] {
-        if !commands.is_empty() {
-            sections.push((title, masked(commands)));
-        }
-    }
-    sections.push(("Timeout per command", vec![scope.timeout.clone()]));
-    sections
+/// every hook phase that has any, the timeout, the `[env]` recipes and
+/// presets, each pitchfork file's daemons and the daemons that start without
+/// devflow (flagged). Credentials are masked.
+pub fn scope_sections(scope: &Scope) -> Vec<ReviewSection> {
+    let mut processes = 0;
+    scope
+        .sections()
+        .into_iter()
+        .filter(|section| {
+            !matches!(section.id, "setup" | "switch" | "teardown") || !section.lines.is_empty()
+        })
+        .map(|section| {
+            let key = match section.id {
+                "timeout" => "timeout-per-command".to_string(),
+                "processes" => {
+                    processes += 1;
+                    format!("processes-{processes}")
+                }
+                other => other.to_string(),
+            };
+            ReviewSection {
+                key,
+                title: section.title,
+                lines: section.lines.iter().map(|l| redact::text(l)).collect(),
+                warning: section.warning,
+            }
+        })
+        .collect()
 }
 
 /// Run `run` now when no review is needed; otherwise ask first. The user
-/// reviews the project's whole `[hooks]` section, because that is what an
-/// approval covers.
+/// reviews everything an approval covers (hooks, `[env]` and pitchfork
+/// processes) as the workspace at `target` has it: the one the operation acts
+/// on, or for a new workspace the one it is made from.
 pub fn with_trust(
     state: &Entity<AppState>,
-    teardown: bool,
+    target: &std::path::Path,
+    purpose: TrustPurpose,
     window: &mut Window,
     cx: &mut App,
     run: impl Fn(TrustChoice, &mut Window, &mut App) + 'static,
 ) {
-    match state.read(cx).trust_prompt(teardown) {
+    match state.read(cx).trust_prompt(target, purpose) {
         None => run(TrustChoice::NotNeeded, window, cx),
         Some(prompt) => {
             let view = cx.new(|_| TrustDialog {
                 state: state.clone(),
                 prompt,
-                teardown,
+                purpose,
                 run: Rc::new(run),
                 error: None,
                 working: false,
             });
-            host(window, cx, "Trust project hooks?", 600., view);
+            host(window, cx, "Trust what this project runs?", 600., view);
         }
     }
 }
 
 struct TrustDialog {
     state: Entity<AppState>,
-    /// The project and exact hooks being reviewed.
+    /// The project, the workspace and the exact content being reviewed.
     prompt: TrustPrompt,
-    teardown: bool,
+    purpose: TrustPurpose,
     run: TrustRun,
     /// Why the last approval failed (the hooks may have changed).
     error: Option<String>,
@@ -182,7 +210,7 @@ impl TrustDialog {
 
     fn run_once(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let scope = self.prompt.scope.clone();
-        self.answer(TrustChoice::Reviewed(scope), window, cx);
+        self.answer(TrustChoice::Reviewed(Box::new(scope)), window, cx);
     }
 
     /// Store the approval of exactly the content shown. If the hooks changed
@@ -194,10 +222,14 @@ impl TrustDialog {
         self.working = true;
         self.error = None;
         cx.notify();
-        let (project, scope) = (self.prompt.project.clone(), self.prompt.scope.clone());
+        let (project, target, scope) = (
+            self.prompt.project.clone(),
+            self.prompt.target.clone(),
+            self.prompt.scope.clone(),
+        );
         cx.spawn_in(window, async move |this, cx| {
             let approval = cx
-                .background_spawn(async move { approve_reviewed(&project, &scope) })
+                .background_spawn(async move { approve_reviewed(&project, &target, &scope) })
                 .await;
             this.update_in(cx, |this, window, cx| this.approved(approval, window, cx))
                 .ok();
@@ -218,7 +250,8 @@ impl TrustDialog {
                 self.prompt = TrustPrompt {
                     key,
                     project: project.clone(),
-                    scope,
+                    target: self.prompt.target.clone(),
+                    scope: *scope,
                 };
                 self.error = Some(message);
                 self.state
@@ -239,8 +272,9 @@ impl Render for TrustDialog {
         v_flex()
             .gap_3()
             .child(div().text_sm().child(
-                "This project's [hooks] changed or were never approved. Trusting approves \
-                 everything below; the commands run with your permissions.",
+                "What this project asks to run changed or was never approved. Trusting approves \
+                 everything below: the hooks run with your permissions, [env] sets variables for \
+                 every process that loads .devflow/env, and pitchfork processes run as listed.",
             ))
             .children(self.error.clone().map(|e| {
                 div()
@@ -259,29 +293,37 @@ impl Render for TrustDialog {
                     .id("trust-commands")
                     .max_h(px(300.))
                     .overflow_y_scroll()
-                    .children(sections.into_iter().map(|(title, lines)| {
+                    .children(sections.into_iter().map(|section| {
+                        let tone = if section.warning {
+                            cx.theme().danger
+                        } else {
+                            cx.theme().muted_foreground
+                        };
                         v_flex()
-                            .id(SharedString::from(format!("trust-{}", title.to_lowercase().replace(' ', "-"))))
+                            .id(SharedString::from(format!("trust-{}", section.key)))
                             .gap_1()
                             .child(
                                 div()
                                     .text_xs()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(title),
+                                    .text_color(tone)
+                                    .child(section.title.clone()),
                             )
-                            .children(lines.iter().map(|line| code_line(line, cx)))
+                            .children(section.lines.iter().map(|line| code_line(line, cx)))
                             .test_support()
                     })),
             )
-            .child(div().text_sm().text_color(cx.theme().muted_foreground).child(if self.teardown {
-                "Without approval the workspace is not removed."
-            } else {
-                "Skip leaves the workspace in \"needs attention\" so you can run setup again later."
+            .child(div().text_sm().text_color(cx.theme().muted_foreground).child(match self.purpose {
+                TrustPurpose::Teardown => "Without approval the workspace is not removed.",
+                TrustPurpose::Processes => "Without approval no daemon is started.",
+                TrustPurpose::Setup => {
+                    "Skip leaves the workspace in \"needs attention\" so you can run setup again later."
+                }
             }))
             .child(footer([
-                if self.teardown {
-                    // Removal cannot proceed without teardown hooks unless forced.
+                if self.purpose != TrustPurpose::Setup {
+                    // Removal cannot proceed without teardown hooks unless forced, and
+                    // daemons are not started without an answer.
                     cancel_button()
                 } else {
                     Button::new("skip")
@@ -359,7 +401,8 @@ impl NewWorkspaceDialog {
         let state = state.clone();
         Some(cx.new(|cx| {
             let name = cx.new(|cx| InputState::new(window, cx).placeholder("feature/my-task"));
-            let items: Vec<SharedString> = from_names.iter().cloned().map(Into::into).collect();
+            // Drawn masked; the choice is read by index, from `from_names`.
+            let items: Vec<SharedString> = from_names.iter().map(|n| shown(n).into()).collect();
             let from =
                 cx.new(|cx| SelectState::new(items, Some(IndexPath::new(default_ix)), window, cx));
             let data = data_options.as_ref().map(|options| {
@@ -416,9 +459,12 @@ impl NewWorkspaceDialog {
         });
         window.close_dialog(cx);
         let state = self.state.clone();
+        // The review is of the workspace the new one is made from.
+        let source = state.read(cx).trust_target(from.as_deref());
         with_trust(
             &self.state.clone(),
-            false,
+            &source,
+            TrustPurpose::Setup,
             window,
             cx,
             move |trust, window, cx| {
@@ -531,7 +577,7 @@ fn open_remove_with(
         let database = status
             .receipt
             .as_ref()
-            .and_then(|r| r.data.as_ref())
+            .and_then(|r| r.first_postgres())
             .map(|d| (d.database.clone(), d.owned && d.branch_id.is_some()));
         RemovePlan {
             path: shorten_home(&status.workspace.path),
@@ -540,7 +586,14 @@ fn open_remove_with(
             teardown: model
                 .project
                 .as_ref()
-                .map(|p| p.config.hooks.teardown.clone())
+                .map(|p| {
+                    p.config
+                        .hooks
+                        .teardown
+                        .iter()
+                        .map(devflow_core::config::HookEntry::label)
+                        .collect()
+                })
                 .unwrap_or_default(),
         }
     };
@@ -593,8 +646,8 @@ impl RemoveDialog {
         });
         lines.push(format!("Delete the worktree directory {}", self.plan.path));
         lines.push(match (&self.plan.branch, self.choice.delete_branch) {
-            (Some(b), true) => format!("Delete Git branch {b}"),
-            (Some(b), false) => format!("Keep Git branch {b}"),
+            (Some(b), true) => format!("Delete Git branch {}", shown(b)),
+            (Some(b), false) => format!("Keep Git branch {}", shown(b)),
             (None, _) => "The worktree has no branch".into(),
         });
         lines
@@ -606,7 +659,7 @@ impl Render for RemoveDialog {
         let owned_db = matches!(self.plan.database, Some((_, true)));
         v_flex()
             .gap_3()
-            .child(div().text_sm().child(format!("Remove workspace {}? This will:", self.target.name)))
+            .child(div().text_sm().child(format!("Remove workspace {}? This will:", redact::text(&self.target.name))))
             .child(v_flex().gap_1().pl_2().children(
                 self.effects().into_iter().map(|line| div().text_sm().child(format!("• {line}"))),
             ))
@@ -644,7 +697,8 @@ impl Render for RemoveDialog {
                         window.close_dialog(cx);
                         let (state, target, choice) = (this.state.clone(), this.target.clone(), this.choice.clone());
                         let for_trust = state.clone();
-                        with_trust(&for_trust, true, window, cx, move |trust, window, cx| {
+                        let path = target.path.clone();
+                        with_trust(&for_trust, &path, TrustPurpose::Teardown, window, cx, move |trust, window, cx| {
                             let (target, choice) = (target.clone(), choice.clone());
                             state.update(cx, |s, cx| s.remove_workspace(target, choice, trust, window, cx));
                         });
@@ -700,38 +754,128 @@ impl Render for ConfirmDialog {
 #[cfg(test)]
 mod tests {
     use super::{Scope, scope_sections};
+    use devflow_core::Config;
+
+    const HEAD: &str =
+        "[project]\nname = \"shop\"\nid = \"0b3c9d2e-1111-4222-8333-444455556666\"\n";
+
+    fn scope(dir: &std::path::Path, extra: &str) -> Scope {
+        Scope::build(&Config::parse(&format!("{HEAD}{extra}")).unwrap(), dir)
+    }
 
     #[test]
     fn the_review_lists_every_hook_phase_with_credentials_masked() {
-        let scope = Scope {
-            setup: vec![
-                "bun install".into(),
-                "psql postgres://u:hunter2@h/db -c 'select 1'".into(), // kingfisher:ignore
-            ],
-            switch: vec!["echo switched".into()],
-            teardown: Vec::new(),
-            timeout: "5m".into(),
-            digest: "d".into(),
-        };
-        let sections = scope_sections(&scope);
-        let titles: Vec<_> = sections.iter().map(|(title, _)| *title).collect();
-        assert_eq!(titles, ["Setup", "Switch", "Timeout per command"]);
-        assert_eq!(sections[0].1[0], "bun install");
-        assert!(!sections[0].1[1].contains("hunter2"), "{:?}", sections[0].1);
-        assert!(sections[0].1[1].contains("u:***@h"));
-        assert_eq!(sections[2].1, ["5m"]);
+        let dir = tempfile::tempdir().unwrap();
+        let hooked = scope(
+            dir.path(),
+            "[hooks]\ntimeout = \"5m\"\nsetup = [\"bun install\", \"psql postgres://u:hunter2@h/db -c 'select 1'\"]\n\
+             switch = [\"echo switched\"]\n", // kingfisher:ignore
+        );
+        let sections = scope_sections(&hooked);
+        let keys: Vec<_> = sections.iter().map(|s| s.key.as_str()).collect();
+        assert_eq!(keys, ["setup", "switch", "timeout-per-command"]);
+        assert_eq!(sections[0].lines[0], "$ bun install");
+        assert!(
+            !sections[0].lines[1].contains("hunter2"),
+            "{:?}",
+            sections[0].lines
+        );
+        assert!(sections[0].lines[1].contains("u:***@h"));
+        assert_eq!(sections[2].lines, ["5m"]);
+        assert!(sections.iter().all(|s| !s.warning));
 
         // Teardown is listed too, even when setup has nothing to show.
-        let teardown_only = Scope {
-            setup: Vec::new(),
-            switch: Vec::new(),
-            teardown: vec!["make clean".into()],
-            ..scope
-        };
+        let teardown_only = scope(dir.path(), "[hooks]\nteardown = [\"make clean\"]\n");
         let titles: Vec<_> = scope_sections(&teardown_only)
             .iter()
-            .map(|(title, _)| *title)
+            .map(|s| s.title.clone())
             .collect();
         assert_eq!(titles, ["Teardown", "Timeout per command"]);
+    }
+
+    #[test]
+    fn names_env_and_processes_are_reviewed_and_autonomous_ones_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pitchfork.toml"),
+            "[daemons.api]\nrun = \"bun run dev\"\nenv = { TOKEN = \"abc\" }\ncron = \"0 * * * *\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("pitchfork.local.toml"),
+            "[daemons.api]\nrun = \"echo mine\"\n",
+        )
+        .unwrap();
+        let full = scope(
+            dir.path(),
+            "[hooks]\nsetup = [{ name = \"migrate\", run = \"bun run db\", timeout = \"5m\" }]\n\
+             [env]\npresets = [\"prisma\"]\nAUTH = \"${PGUSER}:${PGPASSWORD}\"\n",
+        );
+        let sections = scope_sections(&full);
+        let keys: Vec<_> = sections.iter().map(|s| s.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "setup",
+                "timeout-per-command",
+                "env",
+                "processes-1",
+                "processes-2",
+                "autonomous"
+            ]
+        );
+        assert_eq!(sections[0].lines, ["[migrate] $ bun run db  (timeout 5m)"]);
+        assert_eq!(
+            sections[2].lines,
+            ["presets: prisma", "AUTH = ${PGUSER}:${PGPASSWORD}"]
+        );
+        assert!(
+            sections[3].title.contains("pitchfork.toml")
+                && sections[4].title.contains("pitchfork.local.toml")
+        );
+        assert!(
+            sections[3]
+                .lines
+                .contains(&"  run: bun run dev".to_string())
+        );
+        let flagged: Vec<_> = sections.iter().filter(|s| s.warning).collect();
+        assert_eq!(flagged.len(), 1, "{flagged:?}");
+        assert_eq!(flagged[0].lines, ["api in pitchfork.toml: cron"]);
+    }
+
+    #[test]
+    fn variables_that_hold_credentials_are_masked_by_name_in_the_review() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pitchfork.toml"),
+            "[daemons.api]\nrun = \"bun run dev\"\nenv = { DB_PASS = \"lit-pitchfork\", PORT = \"3000\" }\n", // kingfisher:ignore
+        )
+        .unwrap();
+        let scope = scope(
+            dir.path(),
+            "[env]\nDB_PASS = \"lit-1\"\nSESSION_KEY = \"lit-2\"\nMY_CREDENTIAL = \"lit-3\"\n\
+             CACHE_PASS = \"${PGPASSWORD}\"\nAPP_LABEL = \"app-${DEVFLOW_PROJECT}\"\n", // kingfisher:ignore
+        );
+        let sections = scope_sections(&scope);
+        let env = sections.iter().find(|s| s.key == "env").unwrap();
+        assert_eq!(
+            env.lines,
+            [
+                "APP_LABEL = app-${DEVFLOW_PROJECT}",
+                "CACHE_PASS = ${PGPASSWORD}",
+                "DB_PASS = ***",
+                "MY_CREDENTIAL = ***",
+                "SESSION_KEY = ***",
+            ]
+        );
+        let all: String = sections
+            .iter()
+            .flat_map(|s| s.lines.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!all.contains("lit-"), "{all}");
+        assert!(all.contains("PORT"), "{all}");
+        // What is approved is still the real scope.
+        assert_eq!(scope.env.vars["DB_PASS"], "lit-1");
     }
 }

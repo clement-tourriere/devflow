@@ -73,7 +73,7 @@ pub fn doctor(ctx: &Ctx) -> Result<ExitCode> {
             None
         }
     };
-    checks.extend(doctor::run(project.as_ref()));
+    checks.extend(doctor::run_in(project.as_ref(), &ctx.cwd));
     let failed = checks.iter().any(|check| check.status == CheckStatus::Fail);
     if ctx.json {
         let body = json!({

@@ -34,6 +34,13 @@ pub(super) fn db_name(project: Uuid, id: Uuid) -> String {
     format!("df_{}_{}", hex(project, 8), hex(id, 12))
 }
 
+/// `df_<project8>_<branch12>_<seq>`: the `seq`-th scratch database of a
+/// branch. Generated like every name (`seq` is allocated per branch and
+/// recorded with the row); the configured label never reaches a name.
+pub(super) fn scratch_db_name(project: Uuid, branch: Uuid, seq: i32) -> String {
+    format!("{}_{seq}", db_name(project, branch))
+}
+
 /// `dfl_<id12>`: a branch's login role.
 pub(super) fn login_name(id: Uuid) -> String {
     format!("dfl_{}", hex(id, 12))
@@ -150,13 +157,20 @@ impl Target {
     /// Managed: the published container port with the generated superuser
     /// password. External: `DEVFLOW_PG_ADMIN_URL`, else `admin_url`.
     pub(super) fn resolve(server: &Server) -> Result<Target> {
+        Self::resolve_within(server, super::managed::QUERY_WITHIN)
+    }
+
+    /// [`Target::resolve`] with the lookup of a managed server's published
+    /// port bounded by `budget` (the time a caller waiting on a deadline has
+    /// left): Docker that stalls is killed, not waited for.
+    pub(super) fn resolve_within(server: &Server, budget: Duration) -> Result<Target> {
         let settings = &server.settings;
         match (&server.managed, settings.mode) {
             (Some(managed), PostgresMode::Managed) => {
                 let port = if settings.port != 0 {
                     settings.port
                 } else {
-                    managed.published_port()?
+                    managed.published_port_within(budget)?
                 };
                 let host = connect_host(&settings.bind);
                 let mut config = Config::new();
@@ -180,9 +194,7 @@ impl Target {
                     .context(
                         "external mode needs an admin URL: set DEVFLOW_PG_ADMIN_URL or postgres.admin_url",
                     )?;
-                let config: Config = url
-                    .parse()
-                    .context("the admin URL is not a valid PostgreSQL connection string")?;
+                let config = parse_admin_url(&url)?;
                 let host = match config.get_hosts().first() {
                     Some(Host::Tcp(host)) => host.clone(),
                     _ => bail!("the admin URL must name a TCP host"),
@@ -202,6 +214,19 @@ impl Target {
         }
     }
 
+    /// A target for tests: a plain endpoint with a user and no password.
+    #[cfg(test)]
+    pub(super) fn for_endpoint(host: &str, port: u16, user: &str) -> Target {
+        let mut config = Config::new();
+        config.host(host).port(port).user(user);
+        Target {
+            config,
+            host: host.to_string(),
+            port,
+            user: user.to_string(),
+        }
+    }
+
     pub(super) fn connect(&self, dbname: &str) -> Result<Client> {
         let mut config = self.config.clone();
         config
@@ -216,6 +241,16 @@ impl Target {
         })
     }
 
+    /// Whether something on this endpoint answers like a PostgreSQL server,
+    /// within `timeout` for each step. A server replies to an `SSLRequest`
+    /// with one byte (`S` or `N`) before any authentication, so this tells a
+    /// server from a process that accepts TCP connections and never speaks
+    /// (a stale proxy, a foreign listener), which a regular connection would
+    /// wait on without end.
+    pub(super) fn probe(&self, timeout: Duration) -> Result<()> {
+        speaks_postgres(&self.host, self.port, timeout)
+    }
+
     /// Host and port for workspace URLs.
     pub(super) fn app_endpoint(&self, settings: &crate::config::PostgresSection) -> (String, u16) {
         (
@@ -226,6 +261,41 @@ impl Target {
             settings.app_port.unwrap_or(self.port),
         )
     }
+}
+
+/// Read the admin URL. The parser's error names the option it did not
+/// understand, which in a mistyped URL can be part of the password, so it is
+/// not shown.
+fn parse_admin_url(url: &str) -> Result<Config> {
+    url.parse()
+        .map_err(|_| anyhow::anyhow!("the admin URL is not a valid PostgreSQL connection string"))
+}
+
+/// [`Target::probe`] for `host:port`.
+pub(super) fn speaks_postgres(host: &str, port: u16, timeout: Duration) -> Result<()> {
+    use std::io::{Read, Write};
+    use std::net::{TcpStream, ToSocketAddrs};
+    // Protocol 1234.5679: the SSL negotiation request, eight bytes.
+    const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 4, 0xd2, 0x16, 0x2f];
+    let address = (host, port)
+        .to_socket_addrs()
+        .with_context(|| format!("cannot resolve {host}"))?
+        .next()
+        .with_context(|| format!("{host} resolves to no address"))?;
+    let mut stream = TcpStream::connect_timeout(&address, timeout)
+        .with_context(|| format!("nothing accepts connections at {host}:{port}"))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    stream.write_all(&SSL_REQUEST)?;
+    let mut answer = [0u8; 1];
+    stream.read_exact(&mut answer).with_context(|| {
+        format!("{host}:{port} accepts connections but does not answer like PostgreSQL")
+    })?;
+    anyhow::ensure!(
+        matches!(answer[0], b'S' | b'N'),
+        "{host}:{port} answers, but not like PostgreSQL"
+    );
+    Ok(())
 }
 
 // ---- server facts ---------------------------------------------------------
@@ -612,6 +682,94 @@ fn acquire_lock(target: &Target, project: Uuid) -> Result<Client> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::Instant;
+
+    #[test]
+    fn a_bad_admin_url_is_refused_without_its_text() {
+        for url in [
+            "postgres://u@h/db?REVIEWSECRET=1",
+            "REVIEWSECRET=abc",
+            "host=h port=REVIEWSECRET",
+            "REVIEWSECRET",
+        ] {
+            let error = parse_admin_url(url).unwrap_err();
+            let shown = format!("{error} | {error:#} | {error:?}");
+            assert!(shown.contains("the admin URL is not a valid"), "{shown}");
+            assert!(!shown.contains("REVIEWSECRET"), "{url}\n{shown}");
+        }
+        assert!(parse_admin_url("postgres://admin@db.internal/postgres").is_ok());
+    }
+
+    /// A listener on a free loopback port that runs `behave` for each
+    /// connection on its own thread.
+    fn listener(behave: fn(std::net::TcpStream)) -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || behave(stream));
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn a_listener_that_accepts_and_never_answers_fails_the_probe_within_its_timeout() {
+        // Holds the connection open and says nothing, like a stale proxy.
+        let silent = listener(|mut stream| {
+            let mut sink = [0u8; 64];
+            while stream.read(&mut sink).is_ok_and(|n| n > 0) {}
+        });
+        let started = Instant::now();
+        let error = speaks_postgres("127.0.0.1", silent, Duration::from_millis(300)).unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            format!("{error:#}").contains("does not answer like PostgreSQL"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn the_probe_accepts_what_answers_the_ssl_request_and_refuses_the_rest() {
+        for answer in [b'S', b'N'] {
+            let port = listener(if answer == b'S' {
+                |mut s| {
+                    let mut request = [0u8; 8];
+                    let _ = s.read_exact(&mut request);
+                    let _ = s.write_all(b"S");
+                }
+            } else {
+                |mut s| {
+                    let mut request = [0u8; 8];
+                    let _ = s.read_exact(&mut request);
+                    let _ = s.write_all(b"N");
+                }
+            });
+            speaks_postgres("127.0.0.1", port, Duration::from_secs(2)).unwrap();
+        }
+        let http = listener(|mut s| {
+            let mut request = [0u8; 8];
+            let _ = s.read_exact(&mut request);
+            let _ = s.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
+        });
+        let error = speaks_postgres("127.0.0.1", http, Duration::from_secs(2)).unwrap_err();
+        assert!(
+            error.to_string().contains("not like PostgreSQL"),
+            "{error:#}"
+        );
+        // Nothing listening at all.
+        let closed = {
+            let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            probe.local_addr().unwrap().port()
+        };
+        assert!(speaks_postgres("127.0.0.1", closed, Duration::from_secs(1)).is_err());
+    }
 
     #[test]
     fn generated_names_follow_the_scheme() {
@@ -620,7 +778,16 @@ mod tests {
         assert_eq!(db_name(project, id), "df_0b3c9d2e_a1b2c3d4e5f6");
         assert_eq!(login_name(id), "dfl_a1b2c3d4e5f6");
         assert_eq!(owner_name(project), "dfo_0b3c9d2e");
-        for name in [db_name(project, id), login_name(id), owner_name(project)] {
+        assert_eq!(
+            scratch_db_name(project, id, 2),
+            "df_0b3c9d2e_a1b2c3d4e5f6_2"
+        );
+        for name in [
+            db_name(project, id),
+            login_name(id),
+            owner_name(project),
+            scratch_db_name(project, id, 12),
+        ] {
             assert!(name.len() < 63);
             assert!(
                 name.chars()

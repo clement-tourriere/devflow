@@ -6,10 +6,12 @@ use crate::githook::{self, InstallState};
 use crate::project::Project;
 use crate::receipt::Status;
 use crate::trust::{self, TrustState};
-use crate::{cow, pitchfork, setup, worktree};
+use crate::{cow, pitchfork, processes, setup, worktree};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+mod mise;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -58,29 +60,39 @@ impl Check {
 
 /// git, docker/compose (managed mode), server reachability and version,
 /// file_copy_method, CoW capability, worktree-directory CoW, hook trust,
-/// Git hook state, pitchfork/mise presence, workspaces needing attention.
-/// Without a project only the environment checks run.
+/// Git hook state, pitchfork/mise presence, workspaces needing attention, and
+/// whether mise hands the current workspace its own `.devflow/env` variables.
+/// Without a project only the environment checks run. Trust is judged for the
+/// main checkout; see [`run_in`] for the workspace a command was started in.
 pub fn run(project: Option<&Project>) -> Vec<Check> {
+    run_in(
+        project,
+        project.map_or(Path::new("."), |p| p.root.as_path()),
+    )
+}
+
+/// [`run`] for a command started in `cwd`: the trust check judges the
+/// workspace containing `cwd` (the main checkout when there is none), with the
+/// per-workspace functions, since a worktree has its own pitchfork files, and
+/// says which directory it judged.
+pub fn run_in(project: Option<&Project>, cwd: &Path) -> Vec<Check> {
     let mut checks = git();
     let managed = project
-        .and_then(|p| p.config.postgres.as_ref())
-        .is_some_and(|pg| pg.mode == PostgresMode::Managed);
+        .and_then(|p| p.config.postgres())
+        .is_some_and(|(_, pg)| pg.mode == PostgresMode::Managed)
+        || project.is_some_and(|p| p.config.containers().next().is_some());
     checks.extend(docker(managed));
     if let Some(project) = project {
         checks.extend(project_config(project));
         checks.extend(worktree_dir(project));
-        if project.config.postgres.is_some() {
+        if project.config.postgres().is_some() {
             checks.extend(postgres(project));
         }
-        checks.extend(hook_trust(project));
+        checks.extend(container_services(project));
+        checks.extend(hook_trust(project, cwd));
         checks.extend(git_hook(project));
     }
-    checks.extend(tool(
-        "pitchfork",
-        pitchfork::binary(),
-        "mise use -g pitchfork",
-        "daemons and the local HTTPS proxy",
-    ));
+    checks.extend(pitchfork_checks(project, cwd));
     checks.extend(tool(
         "mise",
         find_on_path("mise"),
@@ -89,6 +101,7 @@ pub fn run(project: Option<&Project>) -> Vec<Check> {
     ));
     if let Some(project) = project {
         checks.extend(workspaces(project));
+        checks.extend(mise::checks(project));
     }
     checks
 }
@@ -131,13 +144,13 @@ fn docker(needed: bool) -> Vec<Check> {
             vec![if needed {
                 Check::fail(
                     "docker",
-                    format!("{detail}; the managed PostgreSQL server needs it"),
+                    format!("{detail}; managed PostgreSQL and the container services need it"),
                     hint,
                 )
             } else {
                 Check::warn(
                     "docker",
-                    format!("{detail} (only needed for managed PostgreSQL)"),
+                    format!("{detail} (only needed for managed PostgreSQL and container services)"),
                     hint,
                 )
             }]
@@ -146,7 +159,7 @@ fn docker(needed: bool) -> Vec<Check> {
 }
 
 fn project_config(project: &Project) -> Vec<Check> {
-    vec![match project.config.validate() {
+    let mut checks = vec![match project.config.validate() {
         Ok(()) => Check::ok(
             "project",
             format!(
@@ -161,7 +174,15 @@ fn project_config(project: &Project) -> Vec<Check> {
             format!("{} is invalid: {e:#}", project.config_path.display()),
             "fix the file or run `devflow init`",
         ),
-    }]
+    }];
+    for hint in project.config.env.hints() {
+        checks.push(Check::warn(
+            "env-presets",
+            hint,
+            "write the preset under `presets = [...]` and remove the variable",
+        ));
+    }
+    checks
 }
 
 fn worktree_dir(project: &Project) -> Vec<Check> {
@@ -233,7 +254,7 @@ fn postgres(project: &Project) -> Vec<Check> {
             return vec![Check::fail(
                 "postgres",
                 format!("{e:#}"),
-                "check the [postgres] section of devflow.toml",
+                "check the postgres service under [services] in devflow.toml",
             )];
         }
     };
@@ -247,7 +268,7 @@ fn postgres(project: &Project) -> Vec<Check> {
         let hint = match server.mode() {
             PostgresMode::Managed => "start it with `devflow db up`",
             PostgresMode::External => {
-                "check `postgres.admin_url` / DEVFLOW_PG_ADMIN_URL and the network"
+                "check `admin_url` of the postgres service / DEVFLOW_PG_ADMIN_URL and the network"
             }
         };
         let detail = status
@@ -301,7 +322,205 @@ fn postgres(project: &Project) -> Vec<Check> {
             "for an external server, declare `cow = \"verified\"` in devflow.local.toml after checking its filesystem",
         ),
     });
+    checks.extend(scratch_databases(&server));
     checks
+}
+
+/// The container services (Valkey, Redis): the Docker daemon the catalog is
+/// bound to, whether its volumes share blocks (the cached probe, measured on
+/// first use), and unfinished operations or recorded data nothing uses.
+fn container_services(project: &Project) -> Vec<Check> {
+    use crate::services::{Service, workspace};
+    let configured: Vec<(String, bool)> = project
+        .config
+        .containers()
+        .map(|(key, _, section)| (key.to_string(), section.require_cow))
+        .collect();
+    if configured.is_empty() {
+        return Vec::new();
+    }
+    let mut checks = Vec::new();
+    let first = match Service::open(project, &configured[0].0) {
+        Ok(svc) => svc,
+        Err(e) => {
+            return vec![Check::fail(
+                "services-docker",
+                format!("{e:#}"),
+                "start Docker (or OrbStack) and check `docker info`; the container services run in it",
+            )];
+        }
+    };
+    let status = match first.status(false) {
+        Ok(status) => status,
+        Err(e) => {
+            return vec![Check::fail(
+                "services",
+                format!("{e:#}"),
+                "the catalog is bound to the Docker daemon it was created on; see the message",
+            )];
+        }
+    };
+    let engine = if status.orbstack {
+        "OrbStack"
+    } else {
+        "Docker"
+    };
+    checks.push(Check::ok(
+        "services-docker",
+        format!(
+            "{engine} daemon {} holds the container services",
+            status.docker.chars().take(12).collect::<String>()
+        ),
+    ));
+    let require = configured.iter().any(|(_, require)| *require);
+    let measured = status.cow_measured_at.map_or(String::new(), |t| {
+        format!(", measured {}", t.format("%Y-%m-%d"))
+    });
+    checks.push(match status.cow {
+        CowCapability::Verified => Check::ok(
+            "services-cow",
+            format!("container branches share blocks with their source (verified{measured})"),
+        ),
+        CowCapability::Copy if require => Check::fail(
+            "services-cow",
+            format!("container volumes cannot share blocks (copy{measured}) and require_cow is set"),
+            "use a Docker engine whose volumes are on btrfs or XFS with reflink (OrbStack), or unset require_cow",
+        ),
+        CowCapability::Copy => Check::warn(
+            "services-cow",
+            format!("container branches are full copies (copy{measured})"),
+            "use a Docker engine whose volumes are on btrfs or XFS with reflink (OrbStack)",
+        ),
+        CowCapability::Unknown if require => Check::fail(
+            "services-cow",
+            format!(
+                "copy-on-write could not be verified{measured} and require_cow is set{}",
+                status.cow_note.map_or(String::new(), |n| format!(": {n}"))
+            ),
+            "`devflow service status --probe` measures it again",
+        ),
+        CowCapability::Unknown => Check::warn(
+            "services-cow",
+            format!(
+                "copy-on-write could not be verified{measured}{}",
+                status.cow_note.map_or(String::new(), |n| format!(": {n}"))
+            ),
+            "`devflow service status --probe` measures it again",
+        ),
+    });
+    for (key, _) in &configured {
+        let Ok(svc) = Service::open(project, key) else {
+            continue;
+        };
+        match svc.records() {
+            Ok(records) => {
+                let unfinished = records.unfinished().len();
+                if unfinished > 0 {
+                    checks.push(Check::warn(
+                        &format!("service-{key}"),
+                        format!(
+                            "{unfinished} clone, snapshot or reset operation(s) did not finish"
+                        ),
+                        format!("`devflow service {key} reconcile` completes or rolls them back"),
+                    ));
+                } else {
+                    // The engine, and what the last clone cost the source.
+                    let ready = records
+                        .branches
+                        .iter()
+                        .filter(|b| b.state == crate::services::catalog::RecordState::Ready)
+                        .count();
+                    let last = svc.last_clone().map_or(String::new(), |last| {
+                        let method = last.method.map_or("no copy".to_string(), |m| m.to_string());
+                        match last.source_downtime_ms {
+                            Some(ms) => format!(
+                                "; last {} {method}, source stopped {:.1} s",
+                                last.operation,
+                                ms as f64 / 1000.0
+                            ),
+                            None => {
+                                format!("; last {} {method}, no source stopped", last.operation)
+                            }
+                        }
+                    });
+                    checks.push(Check::ok(
+                        &format!("service-{key}"),
+                        format!("{}: {ready} branch(es){last}", svc.engine),
+                    ));
+                }
+            }
+            Err(e) => checks.push(Check::fail(
+                &format!("service-{key}"),
+                format!("{e:#}"),
+                "see the message",
+            )),
+        }
+    }
+    let orphans = workspace::orphans(project).ok();
+    if let Some(orphans) = &orphans {
+        checks.extend(receipts_check(orphans));
+    }
+    if let Some(orphans) = &orphans
+        && (!orphans.services.is_empty() || !orphans.branches.is_empty())
+    {
+        checks.push(Check::warn(
+            "services-orphans",
+            format!(
+                "{} service(s) no longer configured and {} branch(es) without a workspace are kept",
+                orphans.services.len(),
+                orphans.branches.len()
+            ),
+            "`devflow service list --orphans` shows them; `devflow service NAME forget` or `drop` removes them",
+        ));
+    }
+    checks
+}
+
+/// Scratch databases (`extra_databases`) that need a decision: names the
+/// configuration no longer lists (kept, never dropped implicitly) and ones
+/// that are not ready. Silent when there is nothing to say.
+fn scratch_databases(server: &crate::db::Server) -> Option<Check> {
+    use crate::db::RecordStatus;
+    // The server is checked above; an unreadable listing is not this check's news.
+    let branches = server.list_branches().ok()?;
+    let mut orphans = Vec::new();
+    let mut unfinished = Vec::new();
+    for branch in &branches {
+        for extra in &branch.extras {
+            let label = format!(
+                "'{}' ({}) of branch '{}'",
+                extra.name, extra.db_name, branch.name
+            );
+            if extra.orphaned {
+                orphans.push(label);
+            } else if extra.status != RecordStatus::Ready {
+                unfinished.push(label);
+            }
+        }
+    }
+    if !orphans.is_empty() {
+        return Some(Check::warn(
+            "postgres-scratch",
+            format!(
+                "{} scratch database(s) are no longer listed in extra_databases and are kept: {}",
+                orphans.len(),
+                orphans.join(", ")
+            ),
+            "`devflow db reconcile --drop-orphans` drops them; adding the name back keeps them in use",
+        ));
+    }
+    if !unfinished.is_empty() {
+        return Some(Check::warn(
+            "postgres-scratch",
+            format!(
+                "{} scratch database(s) are not ready: {}",
+                unfinished.len(),
+                unfinished.join(", ")
+            ),
+            "`devflow db reconcile` finishes interrupted work",
+        ));
+    }
+    None
 }
 
 fn major_version(version: &str) -> Option<u32> {
@@ -313,20 +532,44 @@ fn major_version(version: &str) -> Option<u32> {
         .ok()
 }
 
-fn hook_trust(project: &Project) -> Vec<Check> {
-    vec![match trust::state(project) {
-        Ok(TrustState::NoHooks) => Check::ok("hook-trust", "no hooks configured"),
-        Ok(TrustState::Trusted) => Check::ok("hook-trust", "hooks are approved"),
+/// The directory whose scope a command started in `cwd` is about: the
+/// workspace containing it, else the main checkout.
+fn judged_dir(project: &Project, cwd: &Path) -> PathBuf {
+    worktree::containing(project, cwd)
+        .ok()
+        .flatten()
+        .map_or_else(|| project.root.clone(), |workspace| workspace.path)
+}
+
+fn hook_trust(project: &Project, cwd: &Path) -> Vec<Check> {
+    let dir = judged_dir(project, cwd);
+    let at = format!("judged at {}", dir.display());
+    vec![match trust::state_at(project, &dir) {
+        Ok(TrustState::NothingToApprove) => Check::ok(
+            "hook-trust",
+            format!("nothing to approve: no hooks, [env] or pitchfork processes configured ({at})"),
+        ),
+        Ok(TrustState::Trusted) => Check::ok(
+            "hook-trust",
+            format!("the hooks, [env] and pitchfork processes are approved ({at})"),
+        ),
         Ok(TrustState::Untrusted {
-            previously_trusted, ..
+            previously_trusted,
+            format_changed,
+            ..
         }) => Check::warn(
             "hook-trust",
-            if previously_trusted {
-                "the [hooks] section changed since it was approved"
-            } else {
-                "the [hooks] section has not been approved"
-            },
-            "review and approve it with `devflow trust`; until then setup skips hooks",
+            format!(
+                "{} ({at})",
+                if format_changed {
+                    "the approval was made under an older format that covered less (hooks only); review again"
+                } else if previously_trusted {
+                    "the hooks, [env] or pitchfork processes changed since they were approved"
+                } else {
+                    "the hooks, [env] and pitchfork processes have not been approved"
+                }
+            ),
+            "review and approve them with `devflow trust` in that workspace; until then setup skips hooks and [env] recipes",
         ),
         Err(e) => Check::fail(
             "hook-trust",
@@ -367,6 +610,108 @@ fn git_hook(project: &Project) -> Vec<Check> {
     }]
 }
 
+/// Install state of pitchfork, and, for a project that uses it, the checks of
+/// its namespace, its environment delivery and the proxy. The commands that
+/// would fix a problem are offered in the hint; none is run.
+fn pitchfork_checks(project: Option<&Project>, cwd: &Path) -> Vec<Check> {
+    let detection = pitchfork::detect();
+    const INSTALL: &str =
+        "run `devflow pitchfork install` (it asks first), or `mise use -g pitchfork@latest`";
+    let mut checks = vec![if detection.path.is_none() {
+        Check::warn(
+            "pitchfork",
+            "`pitchfork` was not found on PATH (optional: daemons and the local HTTPS proxy)",
+            INSTALL,
+        )
+    } else if !detection.installed {
+        Check::warn("pitchfork", detection.summary(), INSTALL)
+    } else if !detection.missing_features.is_empty() {
+        Check::warn(
+            "pitchfork",
+            detection.summary(),
+            "upgrade it: `mise use -g pitchfork@latest`",
+        )
+    } else {
+        Check::ok("pitchfork", detection.summary())
+    }];
+    let Some(project) = project else {
+        return checks;
+    };
+    let dir = judged_dir(project, cwd);
+    if !processes::uses_pitchfork(&dir) {
+        return checks;
+    }
+    checks.push(match processes::namespace_problem(&dir) {
+        Some(problem) => Check::warn(
+            "pitchfork-namespace",
+            problem,
+            "daemon ids of this worktree collide with others until each worktree has its own namespace",
+        ),
+        None => {
+            let namespace = processes::namespace_of(&dir);
+            match namespace.source {
+                processes::NamespaceSource::Default => Check::warn(
+                    "pitchfork-namespace",
+                    format!(
+                        "{} is pitchfork's default (the directory name) here, shared with any \
+                         other repository checked out under that name ({})",
+                        namespace.value,
+                        dir.display()
+                    ),
+                    "`devflow setup` in this workspace writes its own namespace",
+                ),
+                _ => Check::ok(
+                    "pitchfork-namespace",
+                    format!("{} ({})", namespace.value, dir.display()),
+                ),
+            }
+        }
+    });
+    let wiring = processes::env_wiring(project, &dir);
+    if !wiring.is_empty() {
+        checks.push(Check::warn(
+            "pitchfork-env",
+            wiring.join("; "),
+            "devflow delivers .devflow/env to daemons through mise only, never through pitchfork files",
+        ));
+    }
+    if detection.usable() && processes::has_ports(&dir) {
+        checks.push(
+            match pitchfork::Pitchfork::locate().map(|p| p.proxy_status(&dir)) {
+                Some(Ok(proxy)) if proxy.enabled && proxy.trusted == Some(false) => Check::warn(
+                    "pitchfork-proxy",
+                    format!(
+                        "the {} proxy is on but its certificate is not trusted",
+                        proxy.scheme.as_deref().unwrap_or("https")
+                    ),
+                    format!(
+                        "devflow does not run these; to trust it: {}",
+                        pitchfork::PROXY_COMMANDS[2]
+                    ),
+                ),
+                Some(Ok(proxy)) if proxy.enabled => Check::ok(
+                    "pitchfork-proxy",
+                    format!(
+                        "{}://*.{}",
+                        proxy.scheme.as_deref().unwrap_or("https"),
+                        proxy.tld.as_deref().unwrap_or("localhost")
+                    ),
+                ),
+                Some(Ok(_)) => Check::warn(
+                    "pitchfork-proxy",
+                    "the pitchfork proxy is off, so daemons with a port have no URL",
+                    format!(
+                        "optional; devflow does not run these (one needs sudo): {}",
+                        pitchfork::PROXY_COMMANDS.join("; ")
+                    ),
+                ),
+                _ => return checks,
+            },
+        );
+    }
+    checks
+}
+
 fn tool(name: &str, found: Option<PathBuf>, install: &str, purpose: &str) -> Vec<Check> {
     vec![match found {
         Some(path) => Check::ok(name, path.display().to_string()),
@@ -404,7 +749,22 @@ fn workspaces(project: &Project) -> Vec<Check> {
         .filter(|w| w.workspace.missing)
         .map(|w| w.workspace.name.clone())
         .collect();
+    let unmapped: Vec<String> = list
+        .iter()
+        .filter(|w| w.receipt.as_ref().is_some_and(|r| r.unmapped.is_some()))
+        .map(|w| w.workspace.name.clone())
+        .collect();
     let mut checks = Vec::new();
+    if !unmapped.is_empty() {
+        checks.push(Check::warn(
+            "workspaces",
+            format!(
+                "database binding from an older devflow is not mapped to a service in: {}",
+                unmapped.join(", ")
+            ),
+            "add `[services.NAME]` with `engine = \"postgres\"` to devflow.toml; the binding is kept, not exported",
+        ));
+    }
     if !attention.is_empty() {
         checks.push(Check::warn(
             "workspaces",
@@ -435,10 +795,70 @@ fn workspaces(project: &Project) -> Vec<Check> {
     checks
 }
 
+/// The warning for workspaces whose receipt could not be read, so that who
+/// owns which branch is unknown. It names each workspace with why (the reason
+/// carries a position, never the receipt's content), masked like the orphan
+/// listing and reconcile do.
+fn receipts_check(orphans: &crate::services::workspace::Orphans) -> Option<Check> {
+    if orphans.is_complete() {
+        return None;
+    }
+    let problems = orphans
+        .incomplete
+        .iter()
+        .map(|p| crate::redact::text(&format!("{}: {}", p.workspace, p.reason)))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(Check::warn(
+        "services-receipts",
+        format!(
+            "{} workspace receipt(s) cannot be read, so which branches belong to a workspace is unknown ({problems})",
+            orphans.incomplete.len(),
+        ),
+        "repair or remove `devflow/receipt.json` in that worktree's Git directory; no branch is listed or dropped as an orphan until then",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::worktree::testutil;
+
+    #[test]
+    fn unreadable_receipts_are_listed_with_their_masked_reasons() {
+        use crate::error::UnreadReceipt;
+        let mut orphans = crate::services::workspace::Orphans::default();
+        assert!(receipts_check(&orphans).is_none());
+        orphans.incomplete = vec![
+            UnreadReceipt {
+                workspace: "feature-a".into(),
+                reason: "invalid receipt: expected value at line 3 column 7".into(),
+            },
+            UnreadReceipt {
+                workspace: "password=hunter2".into(),
+                // kingfisher:ignore
+                reason: "cannot read postgres://u:review-password@localhost/db".into(),
+            },
+        ];
+        let check = receipts_check(&orphans).unwrap();
+        assert_eq!(check.name, "services-receipts");
+        assert!(matches!(check.status, CheckStatus::Warn), "{check:?}");
+        assert!(
+            check
+                .detail
+                .contains("feature-a: invalid receipt: expected value at line 3 column 7"),
+            "{}",
+            check.detail
+        );
+        assert!(check.detail.starts_with("2 workspace receipt(s)"));
+        // The reasons are masked, the workspace named like a credential too.
+        assert!(
+            !check.detail.contains("review-password"),
+            "{}",
+            check.detail
+        );
+        assert!(!check.detail.contains("hunter2"), "{}", check.detail);
+    }
 
     fn find<'a>(checks: &'a [Check], name: &str) -> Vec<&'a Check> {
         checks.iter().filter(|c| c.name == name).collect()
@@ -463,12 +883,15 @@ mod tests {
         assert_eq!(find(&checks, "worktree-dir")[0].status, CheckStatus::Ok);
         // CoW depends on the filesystem running the tests: either answer is fine.
         assert_eq!(find(&checks, "worktree-cow").len(), 1);
-        assert_eq!(find(&checks, "hook-trust")[0].detail, "no hooks configured");
-        assert_eq!(find(&checks, "git-hook")[0].status, CheckStatus::Warn);
         assert!(
-            find(&checks, "postgres").is_empty(),
-            "no [postgres] section"
+            find(&checks, "hook-trust")[0]
+                .detail
+                .starts_with("nothing to approve"),
+            "{:?}",
+            find(&checks, "hook-trust")[0]
         );
+        assert_eq!(find(&checks, "git-hook")[0].status, CheckStatus::Warn);
+        assert!(find(&checks, "postgres").is_empty(), "no postgres service");
         assert_eq!(find(&checks, "workspaces")[0].status, CheckStatus::Ok);
     }
 
@@ -485,6 +908,41 @@ mod tests {
         githook::install(&project).unwrap();
         let checks = run(Some(&project));
         assert_eq!(find(&checks, "git-hook")[0].status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn trust_is_judged_for_the_worktree_the_command_runs_in() {
+        let t = testutil::repo(None);
+        let ws = worktree::create(&t.project, "feature", None).unwrap();
+        std::fs::write(
+            ws.path.join("pitchfork.toml"),
+            "[daemons.api]\nrun = \"bun run dev\"\n",
+        )
+        .unwrap();
+        let trust_of = |cwd: &Path| {
+            let checks = run_in(Some(&t.project), cwd);
+            find(&checks, "hook-trust")[0].clone()
+        };
+        let main = trust_of(&t.root);
+        assert_eq!(main.status, CheckStatus::Ok, "{main:?}");
+        assert!(main.detail.starts_with("nothing to approve"), "{main:?}");
+        assert!(
+            main.detail
+                .contains(&format!("judged at {}", t.root.display())),
+            "{main:?}"
+        );
+        // The worktree has a daemon the main checkout lacks: it is judged on
+        // its own, from any directory inside it, and names that directory.
+        let nested = ws.path.join("src");
+        std::fs::create_dir_all(&nested).unwrap();
+        let linked = trust_of(&nested);
+        assert_eq!(linked.status, CheckStatus::Warn, "{linked:?}");
+        assert!(
+            linked
+                .detail
+                .contains(&format!("judged at {}", ws.path.display())),
+            "{linked:?}"
+        );
     }
 
     #[test]
@@ -532,18 +990,21 @@ mod tests {
     fn an_unreachable_postgres_server_is_a_warning_not_a_panic() {
         let t = testutil::repo(None);
         let mut project = t.project.clone();
-        project.config.postgres = Some(crate::config::PostgresSection {
-            mode: PostgresMode::External,
-            admin_url: Some("postgres://nobody@127.0.0.1:1/postgres".into()),
-            ..Default::default()
-        });
+        project.config.set_postgres(
+            "db",
+            crate::config::PostgresSection {
+                mode: PostgresMode::External,
+                admin_url: Some("postgres://nobody@127.0.0.1:1/postgres".into()),
+                ..Default::default()
+            },
+        );
         let checks = run(Some(&project));
         let pg = find(&checks, "postgres");
         assert_eq!(pg.len(), 1, "{pg:?}");
         assert_eq!(pg[0].status, CheckStatus::Warn, "{pg:?}");
         assert!(pg[0].hint.is_some());
         // A managed server that was never started is reported the same way.
-        project.config.postgres = Some(Default::default());
+        project.config.set_postgres("db", Default::default());
         let checks = run(Some(&project));
         assert_ne!(
             find(&checks, "postgres")[0].status,

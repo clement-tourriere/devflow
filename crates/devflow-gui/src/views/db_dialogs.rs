@@ -22,7 +22,11 @@ fn workspace_select<T: 'static>(
     window: &mut Window,
     cx: &mut Context<T>,
 ) -> Entity<SelectState<Vec<SharedString>>> {
-    let items: Vec<SharedString> = workspaces.iter().map(|w| w.name.clone().into()).collect();
+    // Drawn text only: a choice is the position in the list.
+    let items: Vec<SharedString> = workspaces
+        .iter()
+        .map(|w| devflow_core::redact::text(&w.name).into())
+        .collect();
     cx.new(|cx| SelectState::new(items, Some(IndexPath::new(0)), window, cx))
 }
 

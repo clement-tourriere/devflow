@@ -23,6 +23,56 @@ pub fn is_secret_key(key: &str) -> bool {
         .any(|word| key.contains(word))
 }
 
+/// Whether an environment variable called `name` is meant to hold a
+/// credential, judging by the name alone.
+///
+/// Broader than [`is_secret_key`], which also classifies the keys of
+/// arbitrary JSON and so cannot afford a word as common as `key`. For a
+/// variable name that is affordable, and the cost of a false positive is only
+/// that a value is shown as [`MASK`]. Besides `is_secret_key`'s words: a
+/// passphrase, a credential, a private key, and any word of the name (split
+/// at `_`, `.`, `-` and between a lower-case and an upper-case letter) that
+/// ends in `pass`, `pwd`, `key` or `dsn` (`DB_PASS`, `SESSION_KEY`,
+/// `stripeKey`, `SENTRY_DSN`). Compare with the value-based detectors of
+/// [`text`], which catch credentials whatever the name.
+pub fn is_secret_variable(name: &str) -> bool {
+    if is_secret_key(name) {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    if ["passphrase", "credential", "private_key", "privatekey"]
+        .iter()
+        .any(|word| lower.contains(word))
+    {
+        return true;
+    }
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut previous_lower = false;
+    for c in name.chars() {
+        if !c.is_ascii_alphanumeric() {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            previous_lower = false;
+            continue;
+        }
+        if c.is_ascii_uppercase() && previous_lower && !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+        }
+        current.push(c.to_ascii_lowercase());
+        previous_lower = c.is_ascii_lowercase();
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words.iter().any(|word| {
+        ["pass", "pwd", "key", "dsn"]
+            .iter()
+            .any(|s| word.ends_with(s))
+    })
+}
+
 /// Mask credentials in free text: URL userinfo passwords, secret URL query
 /// parameters (their names may be percent-encoded: `%70assword=`), and
 /// `password` / `sslpassword` / `PGPASSWORD` assignments as written in conninfo
@@ -48,42 +98,123 @@ pub fn text_with(input: &str, secrets: &[&str]) -> String {
     render(input, spans)
 }
 
-/// Mask secrets in a JSON value: secret-like keys, `[KEY, value]` pairs whose
-/// KEY is an environment variable name, and credentials inside strings.
+/// JSON fields whose object value is a map keyed by names the user chose (a
+/// service key, a scratch database, a snapshot, a file): `receipt.services`,
+/// `service_sources`, `service_source_ids`, `extras`, `snapshot_versions`,
+/// `phases`, `input_hashes`, `workspaces`, `projects` and `services` itself.
+/// A key there is an identity, not a field name, so `tokens` or
+/// `password_store` as a service key says nothing about its value. The keys
+/// are still scanned as text (a URL in a key must not leak).
+const IDENTITY_MAPS: &[&str] = &[
+    "services",
+    "service_sources",
+    "service_source_ids",
+    "extras",
+    "snapshot_versions",
+    "phases",
+    "input_hashes",
+    "workspaces",
+    "projects",
+];
+
+/// Mask secrets in a JSON value: secret-like field names, `[KEY, value]` pairs
+/// whose KEY is an environment variable name, and credentials inside strings.
+///
+/// The structure of a document is never changed. A scalar under a secret-like
+/// key becomes [`MASK`] (and so does a list of plain values under one); an
+/// object under one keeps its shape, because a map keyed by a user-chosen name
+/// (`[env]` variable names, service keys) is not a credential for being called
+/// `tokens`: its own fields are judged one by one. The maps of
+/// [`IDENTITY_MAPS`] are not judged by key at all.
 pub fn json(value: &mut Value) {
+    walk(value, false);
+}
+
+fn walk(value: &mut Value, secret_context: bool) {
     match value {
         Value::String(s) => {
+            if secret_context {
+                *s = MASK.to_string();
+                return;
+            }
             let masked = text(s);
             if masked != *s {
                 *s = masked;
             }
         }
+        Value::Number(_) | Value::Bool(_) if secret_context => {
+            *value = Value::String(MASK.to_string());
+        }
         Value::Array(items) => {
             // Only a real variable name makes an array a pair: a two-command
             // list such as ["echo password", "echo SECOND"] is not one.
-            if let [Value::String(key), Value::String(secret)] = items.as_mut_slice()
+            if !secret_context
+                && let [Value::String(key), Value::String(secret)] = items.as_mut_slice()
                 && is_env_name(key)
-                && is_secret_key(key)
+                && is_secret_variable(key)
             {
                 *secret = MASK.to_string();
                 return;
             }
-            items.iter_mut().for_each(json);
+            items.iter_mut().for_each(|item| match item {
+                // Objects keep their shape, their fields are judged on their own.
+                Value::Object(_) => walk(item, false),
+                _ => walk(item, secret_context),
+            });
         }
         Value::Object(map) => {
             // Keys are text too: a map keyed by connection URL must not leak.
+            // An object keeps its shape under a secret-like key; its own
+            // fields are judged one by one.
             for (key, mut entry) in std::mem::take(map) {
-                // Numbers, lists or objects under a secret key are secrets too.
-                if is_secret_key(&key) && !entry.is_null() {
-                    entry = Value::String(MASK.to_string());
-                } else {
-                    json(&mut entry);
+                match entry {
+                    Value::Object(ref mut children) if IDENTITY_MAPS.contains(&key.as_str()) => {
+                        for (name, mut child) in std::mem::take(children) {
+                            walk(&mut child, false);
+                            children.insert(text(&name), child);
+                        }
+                    }
+                    _ => {
+                        let secret = is_secret_field(&key)
+                            && !entry.is_null()
+                            && !is_reference(&key, &entry);
+                        // A list of plain values under a secret-like name is
+                        // one secret (`"token": ["a"]`); a list of objects
+                        // keeps its shape.
+                        let plain_list = matches!(&entry, Value::Array(items)
+                            if items.iter().all(|i| !i.is_object() && !i.is_array()));
+                        if secret && plain_list {
+                            entry = Value::String(MASK.to_string());
+                        } else {
+                            walk(&mut entry, secret);
+                        }
+                    }
                 }
                 map.insert(text(&key), entry);
             }
         }
         _ => {}
     }
+}
+
+/// Whether the JSON field `key` holds a credential. A key shaped like an
+/// environment variable name (`^[A-Z_][A-Z0-9_]*$`: a map of variables, as in
+/// `scope.env.vars`) is judged as a variable is, by [`is_secret_variable`], so
+/// `DB_PASS` and `SESSION_KEY` are caught there as they are in `env list`. Any
+/// other key only by [`is_secret_key`]: field names are ordinary words, and
+/// `key` (a service key, a recipe's variable name) is one of them.
+fn is_secret_field(key: &str) -> bool {
+    is_secret_key(key) || (is_env_name(key) && is_secret_variable(key))
+}
+
+/// A variable's value that is made of `${NAME}` references only (the
+/// template of an `[env]` recipe): it names other variables and holds no
+/// credential, whatever the variable is called. Only for keys shaped like
+/// variable names; in any other field `${x}` is just text.
+fn is_reference(key: &str, value: &Value) -> bool {
+    is_env_name(key)
+        && matches!(value, Value::String(text)
+            if text.contains("${") && !crate::config_edit::has_literal_text(text))
 }
 
 /// `^[A-Z_][A-Z0-9_]*$`
@@ -664,6 +795,54 @@ mod tests {
     }
 
     #[test]
+    fn user_chosen_keys_keep_their_structure() {
+        // A service called `tokens` or `password_store` is still a binding.
+        let mut value = serde_json::json!({
+            "receipt": {
+                "services": {
+                    "tokens": {"engine": "valkey", "branch_id": "b1", "url": "redis://u:pw@h/0"}, // kingfisher:ignore
+                    "password_store": {"engine": "postgres", "extras": {"secret_test": {"database": "d"}}},
+                },
+                "service_sources": {"tokens": "workspace:main", "password_store": "empty"},
+                "service_source_ids": {"tokens": "branch:1"},
+            },
+            "catalog": {"snapshot_versions": {"token": 3}},
+            "env": {"API_TOKEN": {"template": "${X}", "masked": true}, "PGPASSWORD": "pw"},
+            "password": {"nested": "pw"},
+            "secrets": ["a", 1],
+            "tokens": [{"engine": "x"}, "y"],
+        });
+        json(&mut value);
+        let services = &value["receipt"]["services"];
+        assert_eq!(services["tokens"]["engine"], "valkey");
+        assert_eq!(services["tokens"]["branch_id"], "b1");
+        assert_eq!(services["tokens"]["url"], "redis://u:***@h/0");
+        assert_eq!(services["password_store"]["engine"], "postgres");
+        assert_eq!(
+            services["password_store"]["extras"]["secret_test"]["database"],
+            "d"
+        );
+        assert_eq!(
+            value["receipt"]["service_sources"]["tokens"],
+            "workspace:main"
+        );
+        assert_eq!(
+            value["receipt"]["service_sources"]["password_store"],
+            "empty"
+        );
+        assert_eq!(value["receipt"]["service_source_ids"]["tokens"], "branch:1");
+        assert_eq!(value["catalog"]["snapshot_versions"]["token"], 3);
+        // An object under a secret-like name keeps its shape; its scalars
+        // under secret-like names are still masked.
+        assert_eq!(value["env"]["API_TOKEN"]["template"], "${X}");
+        assert_eq!(value["env"]["PGPASSWORD"], "***");
+        // A list of plain values under a secret-like name is one secret.
+        assert_eq!(value["secrets"], "***");
+        assert_eq!(value["tokens"][0]["engine"], "x");
+        assert_eq!(value["tokens"][1], "***");
+    }
+
+    #[test]
     fn only_environment_variable_names_make_a_pair() {
         // Two commands, the first of which mentions a password: not a pair.
         let mut value = serde_json::json!({
@@ -693,5 +872,94 @@ mod tests {
         json(&mut value);
         assert_eq!(value[0], "password");
         assert_eq!(value[1], "PGPASSWORD=***");
+    }
+
+    #[test]
+    fn variable_names_that_hold_credentials_are_recognised_by_their_words() {
+        for secret in [
+            "APP_PASSWORD",
+            "DB_PASS",
+            "DBPASS",
+            "PGPASSWORD",
+            "DB_PWD",
+            "SESSION_SECRET",
+            "GITHUB_TOKEN",
+            "API_KEY",
+            "STRIPE_KEY",
+            "SECRET_KEY_BASE",
+            "SIGNINGKEY",
+            "stripeKey",
+            "SENTRY_DSN",
+            "SSH_PASSPHRASE",
+            "AWS_CREDENTIALS",
+            "GOOGLE_APPLICATION_CREDENTIAL",
+            "PRIVATE_KEY",
+            "db.password",
+        ] {
+            assert!(is_secret_variable(secret), "{secret}");
+        }
+        for plain in [
+            "DATABASE_URL",
+            "DIRECT_URL",
+            "APP_URL",
+            "PORT",
+            "NODE_ENV",
+            "KEYCLOAK_REALM",
+            "PASSENGER_APP_ENV",
+            "FEATURE_FLAG",
+            "HOSTNAME",
+            "",
+        ] {
+            assert!(!is_secret_variable(plain), "{plain}");
+        }
+        // The narrow predicate stays narrow: JSON keys named `key` are common.
+        assert!(!is_secret_key("key") && !is_secret_key("STRIPE_KEY"));
+    }
+
+    #[test]
+    fn variable_shaped_keys_are_judged_as_variables_but_ordinary_fields_are_not() {
+        // A map of variables (`scope.env.vars`): the names `is_secret_key`
+        // misses are caught by the variable classifier.
+        let mut value = serde_json::json!({
+            "env": {"vars": {
+                "DB_PASS": "literal", // kingfisher:ignore
+                "SESSION_KEY": "literal2", // kingfisher:ignore
+                "MY_CREDENTIAL": "literal3", // kingfisher:ignore
+                "CACHE_PASS": "${REDIS_PASSWORD}",
+                "APP_URL": "https://example.test",
+                "FEATURE_FLAG": "on",
+            }},
+        });
+        json(&mut value);
+        let vars = &value["env"]["vars"];
+        for masked in ["DB_PASS", "SESSION_KEY", "MY_CREDENTIAL"] {
+            assert_eq!(vars[masked], "***", "{masked}");
+        }
+        // A reference holds no credential: it is the template, as `env list` shows it.
+        assert_eq!(vars["CACHE_PASS"], "${REDIS_PASSWORD}");
+        assert_eq!(vars["APP_URL"], "https://example.test");
+        assert_eq!(vars["FEATURE_FLAG"], "on");
+
+        // Ordinary field names are not variables: `key` is a service key, a
+        // recipe's variable name, a snapshot name.
+        let mut fields = serde_json::json!({
+            "key": "cache", "id": "a", "pass": "x", "session_key": "y",
+            "recipes": [{"key": "DB_PASS", "template": "${X}", "masked": false}],
+            "pair": ["DB_PASS", "literal"], // kingfisher:ignore
+        });
+        json(&mut fields);
+        assert_eq!(fields["key"], "cache");
+        assert_eq!(fields["pass"], "x");
+        assert_eq!(fields["session_key"], "y");
+        assert_eq!(fields["recipes"][0]["key"], "DB_PASS");
+        assert_eq!(fields["recipes"][0]["template"], "${X}");
+        // A [NAME, value] pair uses the variable classifier too.
+        assert_eq!(fields["pair"][1], "***");
+
+        // An object under such a key keeps its structure (a1c6efe4).
+        let mut nested = serde_json::json!({"DB_PASS": {"template": "${X}", "source": "local"}});
+        json(&mut nested);
+        assert_eq!(nested["DB_PASS"]["template"], "${X}");
+        assert_eq!(nested["DB_PASS"]["source"], "local");
     }
 }

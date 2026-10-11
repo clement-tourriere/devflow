@@ -1,11 +1,12 @@
 //! Database tab: server status and control, branches, snapshots.
 use super::{db_dialogs, dialogs, ui};
 use crate::{
-    model::{BranchRow, DatabaseModel, ServerBadge, SnapshotRow, branch_rows, snapshot_rows},
+    model::{BranchRow, DatabaseModel, ServerBadge, SnapshotRow, Tab, branch_rows, snapshot_rows},
     state::AppState,
 };
 use devflow_core::config::PostgresMode;
 use gpui_kit::{
+    assets::IconName as Lucide,
     component::{
         ActiveTheme as _, Disableable as _, IconName, Sizable as _,
         button::{Button, ButtonVariants as _},
@@ -18,6 +19,7 @@ use gpui_kit::{
 };
 
 struct BranchTable {
+    state: Entity<AppState>,
     rows: Vec<BranchRow>,
     columns: Vec<Column>,
 }
@@ -48,7 +50,12 @@ impl TableDelegate for BranchTable {
                 .gap_2()
                 .child(div().truncate().child(row.name.clone()))
                 .when(row.unattached, |r| {
-                    r.child(ui::tag("unattached locally", ui::Tone::Warning))
+                    r.child(ui::pill(
+                        "unattached-branch",
+                        "unattached locally",
+                        ui::Tone::Warning,
+                        "No workspace of this project on this machine is bound to this branch.",
+                    ))
                 })
                 .into_any_element(),
             "database" => div()
@@ -71,7 +78,18 @@ impl TableDelegate for BranchTable {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        empty("No branches", cx)
+        let state = self.state.clone();
+        ui::empty_inline(
+            "No branches yet: every workspace gets one of its own.",
+            Some(
+                Button::new("branches-new-workspace")
+                    .primary()
+                    .small()
+                    .label("New workspace")
+                    .on_click(move |_, window, cx| dialogs::open_new_workspace(&state, window, cx)),
+            ),
+            cx,
+        )
     }
 }
 
@@ -132,7 +150,7 @@ impl TableDelegate for SnapshotTable {
                             "Delete",
                             move |window, cx| {
                                 let name = name.clone();
-                                state.update(cx, |s, cx| s.delete_snapshot(name, version, window, cx));
+                                state.update(cx, |s, cx| s.delete_snapshot(name.as_str().to_string(), version, window, cx));
                             },
                         );
                     })
@@ -146,18 +164,19 @@ impl TableDelegate for SnapshotTable {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        empty("No snapshots", cx)
+        let state = self.state.clone();
+        ui::empty_inline(
+            "No snapshots yet: a snapshot is a sealed copy new workspaces can start from.",
+            Some(
+                Button::new("snapshots-create")
+                    .primary()
+                    .small()
+                    .label("Create snapshot…")
+                    .on_click(move |_, window, cx| db_dialogs::open_snapshot(&state, window, cx)),
+            ),
+            cx,
+        )
     }
-}
-
-fn empty(text: &'static str, cx: &App) -> Div {
-    div()
-        .size_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_color(ui::muted(cx))
-        .child(text)
 }
 
 pub struct DatabaseView {
@@ -171,6 +190,7 @@ impl DatabaseView {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let branches = cx.new(|cx| {
             let delegate = BranchTable {
+                state: state.clone(),
                 rows: Vec::new(),
                 columns: vec![
                     Column::new("name", "Name").width(260.),
@@ -335,10 +355,19 @@ impl Render for DatabaseView {
             (model.database.clone(), state.busy().is_some())
         };
         if !db.configured {
-            return ui::note(
+            let state = self.state.clone();
+            return ui::empty_state(
+                Lucide::Database,
                 "PostgreSQL branching is not configured",
-                "Add a [postgres] section to devflow.toml (see the Config tab) to give every workspace its own copy-on-write database.",
-                cx,
+                "Add a postgres service ([services.db], engine = \"postgres\") to devflow.toml to give every workspace its own copy-on-write database.",
+                Some(
+                    Button::new("open-config")
+                        .primary()
+                        .label("Open the config")
+                        .on_click(move |_, _, cx| {
+                            state.update(cx, |s, cx| s.go_to_tab(Tab::Config, cx))
+                        }),
+                ),
             )
             .into_any_element();
         }

@@ -1,6 +1,6 @@
 //! The `devflow` metadata database: schema, migrations, row access. Row
 //! identities here, never name prefixes, decide what devflow may touch.
-use super::{BranchInfo, RecordStatus, SnapshotInfo};
+use super::{BranchInfo, RecordStatus, ScratchInfo, SnapshotInfo};
 use crate::config::CowCapability;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -17,7 +17,7 @@ choose another server or drop/rename it";
 /// database with this prefix is never adopted or dropped on the strength of its
 /// name; only the mark decides, and leftovers are reported.
 pub(super) const BOOTSTRAP_PREFIX: &str = "devflow_bootstrap_";
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 3;
 /// Serializes schema migrations across processes ("devflow" + 1).
 const MIGRATION_LOCK_KEY: i64 = 0x6465_7666_6c6f_7701;
 
@@ -77,6 +77,41 @@ CREATE TABLE retired_roles (
 );
 ";
 
+/// Version 2: scratch databases (`extra_databases`). One row per database a
+/// branch owns besides its own: `name` is the configured label, `db_name` the
+/// generated name (`seq` is taken from the branch's `scratch_seq` counter and
+/// never reused), `generation` the branch generation the database was last
+/// emptied for. The foreign key keeps a branch row from being deleted while a
+/// scratch database is still recorded under it.
+const SCHEMA_V2: &str = "
+ALTER TABLE branches ADD COLUMN IF NOT EXISTS scratch_seq int NOT NULL DEFAULT 0;
+CREATE TABLE scratch_databases (
+    id          uuid PRIMARY KEY,
+    project_id  uuid NOT NULL REFERENCES projects(id),
+    branch_id   uuid NOT NULL REFERENCES branches(id),
+    name        text NOT NULL,
+    seq         int NOT NULL,
+    db_name     text NOT NULL UNIQUE,
+    status      text NOT NULL CHECK (status IN ('creating','ready','deleting')),
+    generation  int NOT NULL DEFAULT 0,
+    error       text,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (branch_id, name),
+    UNIQUE (branch_id, seq)
+);
+CREATE INDEX scratch_databases_project ON scratch_databases(project_id);
+";
+
+/// Version 3: a reset records which scratch databases it empties
+/// (`op_scratch`, the ids of their rows) with the rest of its journal, so
+/// that finishing an interrupted reset empties exactly those, whatever
+/// `extra_databases` says by then. Null outside a reset, and in a reset
+/// journaled before this column existed.
+const SCHEMA_V3: &str = "
+ALTER TABLE branches ADD COLUMN IF NOT EXISTS op_scratch uuid[];
+";
+
 /// Create or upgrade the schema under an advisory lock. Refuses to touch a
 /// schema written by a newer devflow.
 pub(super) fn migrate(client: &mut Client) -> Result<()> {
@@ -99,6 +134,14 @@ pub(super) fn migrate(client: &mut Client) -> Result<()> {
     }
     if current < 1 {
         tx.batch_execute(SCHEMA_V1)?;
+    }
+    if current < 2 {
+        tx.batch_execute(SCHEMA_V2)?;
+    }
+    if current < 3 {
+        tx.batch_execute(SCHEMA_V3)?;
+    }
+    if current < SCHEMA_VERSION {
         tx.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', $1) \
              ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
@@ -226,6 +269,7 @@ impl BranchRow {
             created_at: self.created_at,
             size_bytes,
             generation: self.generation,
+            extras: Vec::new(),
             warnings: Vec::new(),
         }
     }
@@ -358,6 +402,8 @@ pub(super) struct ResetIntent<'a> {
     pub backup_db: &'a str,
     pub source_kind: &'a str,
     pub source_id: Option<Uuid>,
+    /// The scratch databases this reset empties (their row ids).
+    pub scratch: &'a [Uuid],
 }
 
 /// Open the reset journal of a `ready` branch at `generation` with no operation.
@@ -369,8 +415,8 @@ pub(super) fn begin_reset(
 ) -> Result<()> {
     let updated = client.execute(
         "UPDATE branches SET op = 'reset', op_phase = 'staging', replacement_db = $3, \
-                backup_db = $4, op_source_kind = $5, op_source_id = $6, error = NULL, \
-                updated_at = now() \
+                backup_db = $4, op_source_kind = $5, op_source_id = $6, op_scratch = $7, \
+                error = NULL, updated_at = now() \
          WHERE id = $1 AND generation = $2 AND status = 'ready' AND op IS NULL",
         &[
             &id,
@@ -379,9 +425,18 @@ pub(super) fn begin_reset(
             &intent.backup_db,
             &intent.source_kind,
             &intent.source_id,
+            &intent.scratch,
         ],
     )?;
     expect_one(updated, "the reset record")
+}
+
+/// The scratch databases the reset in flight on `id` recorded it would empty;
+/// `None` for a reset journaled before they were recorded (or none in flight).
+pub(super) fn reset_scratch_ids(client: &mut Client, id: Uuid) -> Result<Option<Vec<Uuid>>> {
+    Ok(client
+        .query_opt("SELECT op_scratch FROM branches WHERE id = $1", &[&id])?
+        .and_then(|row| row.get(0)))
 }
 
 /// Advance the journal `from` → `to`, only if it is still where this reset left it.
@@ -405,11 +460,188 @@ pub(super) fn set_op_phase(
 pub(super) fn clear_op(client: &mut Client, id: Uuid, generation: i32, phase: &str) -> Result<()> {
     let updated = client.execute(
         "UPDATE branches SET op = NULL, op_phase = NULL, replacement_db = NULL, backup_db = NULL, \
-                op_source_kind = NULL, op_source_id = NULL, updated_at = now() \
+                op_source_kind = NULL, op_source_id = NULL, op_scratch = NULL, updated_at = now() \
          WHERE id = $1 AND op = 'reset' AND op_phase = $3 AND generation = $2",
         &[&id, &generation, &phase],
     )?;
     expect_one(updated, "the reset record")
+}
+
+// ---- scratch databases ----------------------------------------------------
+
+const SCRATCH_COLUMNS: &str = "id, branch_id, name, db_name, status, generation, error";
+
+pub(super) struct ScratchRow {
+    pub id: Uuid,
+    pub branch_id: Uuid,
+    /// The configured label (`test`, `shadow`).
+    pub name: String,
+    pub db_name: String,
+    pub status: RecordStatus,
+    /// The branch generation this database was last emptied for.
+    pub generation: i32,
+    pub error: Option<String>,
+}
+
+impl ScratchRow {
+    fn from_row(row: &Row) -> Result<ScratchRow> {
+        Ok(ScratchRow {
+            id: row.get("id"),
+            branch_id: row.get("branch_id"),
+            name: row.get("name"),
+            db_name: row.get("db_name"),
+            status: parse_status(row.get("status"))?,
+            generation: row.get("generation"),
+            error: row.get("error"),
+        })
+    }
+
+    pub(super) fn info(&self, configured: &[String]) -> ScratchInfo {
+        ScratchInfo {
+            id: self.id,
+            name: self.name.clone(),
+            db_name: self.db_name.clone(),
+            status: self.status,
+            orphaned: !configured.contains(&self.name),
+            error: self.error.clone(),
+        }
+    }
+}
+
+/// A database that has been through the migration may still be read by a
+/// devflow that has not run it (readers never migrate): no table, no rows.
+fn scratch_table_present(client: &mut Client) -> Result<bool> {
+    Ok(client
+        .query_one(
+            "SELECT to_regclass('public.scratch_databases') IS NOT NULL",
+            &[],
+        )?
+        .get(0))
+}
+
+pub(super) fn list_scratch(client: &mut Client, project: Uuid) -> Result<Vec<ScratchRow>> {
+    if !scratch_table_present(client)? {
+        return Ok(Vec::new());
+    }
+    client
+        .query(
+            &format!(
+                "SELECT {SCRATCH_COLUMNS} FROM scratch_databases WHERE project_id = $1 \
+                 ORDER BY branch_id, seq"
+            ),
+            &[&project],
+        )?
+        .iter()
+        .map(ScratchRow::from_row)
+        .collect()
+}
+
+pub(super) fn scratch_of_branch(
+    client: &mut Client,
+    project: Uuid,
+    branch: Uuid,
+) -> Result<Vec<ScratchRow>> {
+    if !scratch_table_present(client)? {
+        return Ok(Vec::new());
+    }
+    client
+        .query(
+            &format!(
+                "SELECT {SCRATCH_COLUMNS} FROM scratch_databases \
+                 WHERE project_id = $1 AND branch_id = $2 ORDER BY seq"
+            ),
+            &[&project, &branch],
+        )?
+        .iter()
+        .map(ScratchRow::from_row)
+        .collect()
+}
+
+/// Take the next sequence number of a branch's scratch databases. The counter
+/// lives on the branch row and only goes up, so a number is never reused, not
+/// even after the database that had it is dropped: an old URL can never name
+/// another database. A number taken by a run that then died is simply lost.
+pub(super) fn next_scratch_seq(client: &mut Client, branch: Uuid) -> Result<i32> {
+    client
+        .query_opt(
+            "UPDATE branches SET scratch_seq = scratch_seq + 1 WHERE id = $1 \
+             RETURNING scratch_seq",
+            &[&branch],
+        )?
+        .map(|row| row.get(0))
+        .ok_or_else(|| lost_race("the branch record"))
+}
+
+pub(super) struct NewScratch<'a> {
+    pub id: Uuid,
+    pub branch_id: Uuid,
+    pub name: &'a str,
+    pub seq: i32,
+    pub db_name: &'a str,
+    pub generation: i32,
+}
+
+/// Record the intent to create a scratch database, before it exists.
+pub(super) fn insert_scratch(client: &mut Client, project: Uuid, new: &NewScratch) -> Result<()> {
+    client.execute(
+        "INSERT INTO scratch_databases (id, project_id, branch_id, name, seq, db_name, status, \
+                                        generation) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'creating', $7)",
+        &[
+            &new.id,
+            &project,
+            &new.branch_id,
+            &new.name,
+            &new.seq,
+            &new.db_name,
+            &new.generation,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Record the intent to (re)build a scratch database empty for branch
+/// `generation`, whatever state it was in (but not while it is being deleted).
+pub(super) fn begin_scratch_build(client: &mut Client, id: Uuid, generation: i32) -> Result<()> {
+    let updated = client.execute(
+        "UPDATE scratch_databases SET status = 'creating', generation = $2, error = NULL, \
+                updated_at = now() \
+         WHERE id = $1 AND status <> 'deleting'",
+        &[&id, &generation],
+    )?;
+    expect_one(updated, "the scratch database record")
+}
+
+/// The build finished: `creating` → `ready`.
+pub(super) fn finish_scratch_build(client: &mut Client, id: Uuid) -> Result<()> {
+    let updated = client.execute(
+        "UPDATE scratch_databases SET status = 'ready', error = NULL, updated_at = now() \
+         WHERE id = $1 AND status = 'creating'",
+        &[&id],
+    )?;
+    expect_one(updated, "the scratch database record")
+}
+
+pub(super) fn set_scratch_error(client: &mut Client, id: Uuid, error: &str) -> Result<()> {
+    client.execute(
+        "UPDATE scratch_databases SET error = $2, updated_at = now() WHERE id = $1",
+        &[&id, &error],
+    )?;
+    Ok(())
+}
+
+/// Record the intent to drop a scratch database, in any state.
+pub(super) fn begin_scratch_delete(client: &mut Client, id: Uuid) -> Result<()> {
+    let updated = client.execute(
+        "UPDATE scratch_databases SET status = 'deleting', updated_at = now() WHERE id = $1",
+        &[&id],
+    )?;
+    expect_one(updated, "the scratch database record")
+}
+
+pub(super) fn delete_scratch(client: &mut Client, id: Uuid) -> Result<()> {
+    client.execute("DELETE FROM scratch_databases WHERE id = $1", &[&id])?;
+    Ok(())
 }
 
 // ---- snapshots ------------------------------------------------------------

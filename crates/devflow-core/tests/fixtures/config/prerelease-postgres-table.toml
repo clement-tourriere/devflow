@@ -1,0 +1,7 @@
+[project]
+name = "shop"
+id = "0b3c9d2e-7f4a-4c1e-9a52-6d1f3b8e2a40"
+
+[postgres]
+mode = "managed"
+image = "postgres:18"

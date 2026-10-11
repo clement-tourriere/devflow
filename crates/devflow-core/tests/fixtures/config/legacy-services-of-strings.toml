@@ -1,0 +1,5 @@
+[services]
+app-db = "postgres"
+
+[hooks.post-switch]
+reload = "touch tmp/restart"

@@ -75,17 +75,23 @@ pub struct InitOptions {
     pub postgres: Option<PostgresMode>,
 }
 
-/// Write `devflow.toml` in the main checkout containing `start` and register
-/// the project. Refuses to overwrite an existing configuration.
-pub fn init(start: &Path, options: InitOptions) -> Result<Project> {
+/// The main checkout of the repository containing `start` (any worktree or
+/// subdirectory), whether or not it has a `devflow.toml`.
+pub fn main_checkout(start: &Path) -> Result<PathBuf> {
     let repo = git2::Repository::discover(start)
         .with_context(|| format!("{} is not inside a Git repository", start.display()))?;
     anyhow::ensure!(!repo.is_bare(), "bare repositories are not supported");
     let main = git2::Repository::open(repo.commondir())?;
-    let root = canonical(
+    canonical(
         main.workdir()
             .context("the main repository has no checkout")?,
-    )?;
+    )
+}
+
+/// Write `devflow.toml` in the main checkout containing `start` and register
+/// the project. Refuses to overwrite an existing configuration.
+pub fn init(start: &Path, options: InitOptions) -> Result<Project> {
+    let root = main_checkout(start)?;
     if let Some(existing) = Config::find_file(&root) {
         bail!("{} already exists", existing.display());
     }

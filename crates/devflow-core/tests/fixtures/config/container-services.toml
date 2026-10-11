@@ -1,0 +1,15 @@
+[project]
+name = "shop"
+id = "0b3c9d2e-7f4a-4c1e-9a52-6d1f3b8e2a40"
+
+[services.db]
+engine = "postgres"
+
+[services.cache]
+engine = "valkey"
+
+[services.queue]
+engine = "redis"
+image = "redis:8-alpine"
+env = "QUEUE_URL"
+require_cow = true

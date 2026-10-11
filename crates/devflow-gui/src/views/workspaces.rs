@@ -1,25 +1,22 @@
 //! Workspaces tab: the table with row actions, "New workspace", and the
 //! output of the running (or last) operation.
-use super::{dialogs, ui};
+use super::{
+    activity_panel::ActivityPanel, dialogs, overview::OverviewView, ui,
+    workspace_detail::WorkspaceDetailView,
+};
 use crate::{
-    activity::{Activity, state_label},
-    jobs::Done,
-    model::{Section, WorkspaceRow, workspace_rows},
-    state::AppState,
+    model::{WorkspaceRow, workspace_rows},
+    state::{AppState, TrustPurpose},
 };
-use devflow_core::{
-    receipt::{Phase, PhaseState},
-    worktree::Workspace,
-};
+use devflow_core::worktree::Workspace;
 use gpui_kit::{
+    assets::IconName as Lucide,
     component::{
-        ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _,
+        Disableable as _, IconName, Sizable as _, WindowExt as _,
         button::{Button, ButtonVariants as _},
         h_flex,
-        input::{Editor, EditorState},
         menu::{PopupMenu, PopupMenuItem},
         notification::Notification,
-        spinner::Spinner,
         table::{Column, DataTable, TableDelegate, TableEvent, TableState},
         v_flex,
     },
@@ -52,16 +49,24 @@ fn perform(
         }
         RowAction::Setup => {
             let (app, ws) = (state.clone(), ws.clone());
-            dialogs::with_trust(state, false, window, cx, move |trust, window, cx| {
-                let ws = ws.clone();
-                app.update(cx, |s, cx| s.rerun_setup(ws, trust, window, cx));
-            });
+            let path = ws.path.clone();
+            dialogs::with_trust(
+                state,
+                &path,
+                TrustPurpose::Setup,
+                window,
+                cx,
+                move |trust, window, cx| {
+                    let ws = ws.clone();
+                    app.update(cx, |s, cx| s.rerun_setup(ws, trust, window, cx));
+                },
+            );
         }
         RowAction::Remove => dialogs::open_remove(state, ws, window, cx),
     }
 }
 
-struct WorkspaceTable {
+pub(super) struct WorkspaceTable {
     state: Entity<AppState>,
     rows: Vec<WorkspaceRow>,
     columns: Vec<Column>,
@@ -169,9 +174,14 @@ impl TableDelegate for WorkspaceTable {
         match self.columns[col_ix].key.as_ref() {
             "name" => h_flex()
                 .gap_2()
-                .child(div().truncate().child(row.workspace.name.clone()))
+                .child(div().truncate().child(row.label()))
                 .when(row.workspace.is_default, |r| {
-                    r.child(ui::tag("default", ui::Tone::Neutral))
+                    r.child(ui::pill(
+                        "default-workspace",
+                        "default",
+                        ui::Tone::Neutral,
+                        "The main checkout. It cannot be removed.",
+                    ))
                 })
                 .into_any_element(),
             "branch" => div()
@@ -244,44 +254,34 @@ impl TableDelegate for WorkspaceTable {
     fn render_empty(
         &mut self,
         _: &mut Window,
-        cx: &mut Context<TableState<Self>>,
+        _: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_color(ui::muted(cx))
-            .child("No workspaces")
-    }
-}
-
-/// Owned copy of the activity for rendering (no borrow of the state held).
-struct ActivityView {
-    title: String,
-    phases: Vec<(Phase, PhaseState, Option<String>)>,
-    outcome: Option<Section<Done>>,
-}
-
-impl ActivityView {
-    fn of(activity: &Activity) -> Self {
-        Self {
-            title: activity.title.clone(),
-            phases: activity.phases.clone(),
-            outcome: activity.outcome.clone(),
-        }
-    }
-
-    fn running(&self) -> bool {
-        self.outcome.is_none()
+        let state = self.state.clone();
+        ui::empty_state(
+            Lucide::GitBranch,
+            "No workspaces",
+            "A workspace is a worktree with its own branch and data. Create one to work on a task in isolation.",
+            Some(
+                Button::new("empty-new-workspace")
+                    .primary()
+                    .icon(IconName::Plus)
+                    .label("New workspace")
+                    .disabled(self.busy)
+                    .on_click(move |_, window, cx| dialogs::open_new_workspace(&state, window, cx)),
+            ),
+        )
     }
 }
 
 pub struct WorkspacesView {
     state: Entity<AppState>,
-    table: Entity<TableState<WorkspaceTable>>,
-    output: Entity<EditorState>,
-    shown_revision: Option<u64>,
+    pub(super) table: Entity<TableState<WorkspaceTable>>,
+    /// The project at a glance, with the one primary action.
+    overview: Entity<OverviewView>,
+    /// The output of the running (or last) operation.
+    activity: Entity<ActivityPanel>,
+    /// The selected workspace in detail, below the table.
+    detail: Entity<WorkspaceDetailView>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -292,12 +292,6 @@ impl WorkspacesView {
                 .sortable(false)
                 .col_movable(false)
         });
-        let output = cx.new(|cx| {
-            EditorState::new(window, cx)
-                .line_number(false)
-                .soft_wrap(true)
-        });
-        output.update(cx, |editor, cx| editor.set_readonly(true, cx));
         let subscriptions = vec![
             cx.observe_in(&state, window, |this, _, window, cx| {
                 this.sync(window, cx);
@@ -318,186 +312,80 @@ impl WorkspacesView {
                 }
             }),
         ];
+        let detail = cx.new(|cx| WorkspaceDetailView::new(state.clone(), window, cx));
+        let activity = cx.new(|cx| ActivityPanel::new(state.clone(), window, cx));
+        let overview = cx.new(|cx| OverviewView::new(state.clone(), window, cx));
         let mut this = Self {
             state,
             table,
-            output,
-            shown_revision: None,
+            overview,
+            activity,
+            detail,
             _subscriptions: subscriptions,
         };
         this.sync(window, cx);
         this
     }
 
-    /// Push model changes into the table and the output editor.
-    fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (rows, busy, revision, text) = {
+    /// Push model changes into the table.
+    fn sync(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        let (rows, selected, busy) = {
             let state = self.state.read(cx);
             let Some(model) = state.selection.current() else {
                 return;
             };
-            let activity = state
-                .activity
+            let rows = workspace_rows(&model.workspaces);
+            // The row of the workspace the other tabs show (also when it was
+            // chosen elsewhere, such as in the sidebar).
+            let selected = model
+                .selected_workspace
                 .as_ref()
-                .filter(|a| a.key.project == model.key.project);
-            let revision = activity.map(|a| a.log.revision());
-            (
-                workspace_rows(&model.workspaces),
-                state.busy().is_some(),
-                revision,
-                // The output can be megabytes: build it only when it changed.
-                activity
-                    .filter(|_| revision != self.shown_revision)
-                    .map(|a| a.log.text()),
-            )
+                .and_then(|name| rows.iter().position(|r| &r.workspace.name == name));
+            (rows, selected, state.busy().is_some())
         };
         self.table.update(cx, |table, cx| {
             let delegate = table.delegate_mut();
             delegate.rows = rows;
             delegate.busy = busy;
             table.refresh(cx);
+            if let Some(ix) = selected
+                && table.selected_row() != Some(ix)
+            {
+                table.set_selected_row(ix, cx);
+            }
         });
-        if revision != self.shown_revision {
-            self.shown_revision = revision;
-            let text = text.unwrap_or_default();
-            self.output.update(cx, |editor, cx| {
-                editor.set_value(text.clone(), window, cx);
-                // Follow the output: the cursor at the end scrolls it into view.
-                editor.set_selected_range(text.len()..text.len(), cx);
-            });
-        }
-    }
-
-    fn activity_panel(&self, activity: ActivityView, cx: &mut Context<Self>) -> impl IntoElement {
-        let running = activity.running();
-        let phases = activity
-            .phases
-            .iter()
-            .filter(|(_, state, _)| *state != PhaseState::Pending);
-        let outcome = match &activity.outcome {
-            Some(Ok(done)) => Some(ui::tag(
-                if done.needs_attention {
-                    "needs attention"
-                } else {
-                    "finished"
-                },
-                if done.needs_attention {
-                    ui::Tone::Warning
-                } else {
-                    ui::Tone::Success
-                },
-            )),
-            Some(Err(_)) => Some(ui::tag("failed", ui::Tone::Danger)),
-            None => None,
-        };
-        v_flex()
-            .gap_2()
-            .p_3()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .child(
-                h_flex()
-                    .gap_3()
-                    .items_center()
-                    .child(ui::heading(activity.title.clone()))
-                    .when(running, |row| row.child(Spinner::new().small()))
-                    .children(phases.map(|(phase, state, detail)| {
-                        let tone = match state {
-                            PhaseState::Done => ui::Tone::Success,
-                            PhaseState::Failed => ui::Tone::Danger,
-                            PhaseState::Skipped => ui::Tone::Warning,
-                            _ => ui::Tone::Info,
-                        };
-                        let text = match detail {
-                            Some(d) if *state == PhaseState::Failed => {
-                                format!("{} {}: {d}", phase.as_str(), state_label(*state))
-                            }
-                            _ => format!("{} {}", phase.as_str(), state_label(*state)),
-                        };
-                        ui::tag(text, tone)
-                    }))
-                    .children(outcome)
-                    .child(div().flex_1())
-                    .when(!running, |row| {
-                        row.child(
-                            Button::new("dismiss-output")
-                                .icon(IconName::Close)
-                                .ghost()
-                                .xsmall()
-                                .tooltip("Dismiss")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.state.update(cx, |s, cx| {
-                                        s.activity = None;
-                                        cx.notify();
-                                    })
-                                })),
-                        )
-                    }),
-            )
-            .when_some(
-                activity.outcome.as_ref().and_then(|o| o.as_ref().err()),
-                |col, error| col.child(ui::error_banner(error.clone(), cx)),
-            )
-            .child(
-                div()
-                    .h(px(180.))
-                    .child(Editor::new(&self.output).bordered(true).h_full()),
-            )
     }
 }
 
 impl Render for WorkspacesView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (busy, error, activity) = {
+        let (error, has_detail) = {
             let state = self.state.read(cx);
             let model = state.selection.current();
-            let project = model.map(|m| m.key.project);
             (
-                state.busy().is_some(),
                 model.and_then(|m| m.workspaces_error.clone()),
-                state
-                    .activity
-                    .as_ref()
-                    .filter(|a| Some(a.key.project) == project)
-                    .map(ActivityView::of),
+                model.is_some_and(|m| {
+                    m.selected_workspace
+                        .as_ref()
+                        .is_some_and(|name| m.workspace(name).is_some())
+                }),
             )
         };
         v_flex()
             .size_full()
-            .child(
-                h_flex()
-                    .px_4()
-                    .py_2()
-                    .gap_2()
-                    .justify_between()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(ui::muted(cx))
-                            .child("Right-click a row for more actions."),
-                    )
-                    .child(
-                        Button::new("new-workspace")
-                            .primary()
-                            .icon(IconName::Plus)
-                            .label("New workspace")
-                            .small()
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                dialogs::open_new_workspace(&this.state, window, cx)
-                            })),
-                    ),
-            )
+            .child(div().px_4().pt_3().pb_2().child(self.overview.clone()))
             .children(error.map(|e| div().px_4().pb_2().child(ui::error_banner(e, cx))))
             .child(
                 div()
-                    .flex_1()
-                    .min_h_0()
+                    .when(has_detail, |table| table.flex_none().h(px(228.)))
+                    .when(!has_detail, |table| table.flex_1().min_h_0())
                     .px_4()
                     .pb_2()
                     .child(DataTable::new(&self.table).stripe(true)),
             )
-            .children(activity.map(|a| self.activity_panel(a, cx)))
+            .child(self.activity.clone())
+            .when(has_detail, |page| {
+                page.child(div().flex_1().min_h_0().child(self.detail.clone()))
+            })
     }
 }

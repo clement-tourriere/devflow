@@ -1,10 +1,15 @@
 //! Plain data the views render, plus the pure logic around it (labels, rows,
 //! stale-result filtering). Nothing here touches GPUI or blocks.
+use crate::{
+    redaction::{RawName, RefusalView, shown},
+    services::ServicesModel,
+};
 use chrono::{DateTime, Local, Utc};
 use devflow_core::{
     config::{ConfigDocument, CowCapability, PostgresMode},
     db::{BranchInfo, CowSource, DataSource, RecordStatus, ServerStatus, SnapshotInfo},
-    pitchfork::Daemon,
+    pitchfork::{Detection, InstallPlan, ProxyStatus},
+    processes::{DaemonState, ProcessStatus},
     project::Project,
     receipt::Status,
     registry::Entry,
@@ -13,7 +18,7 @@ use devflow_core::{
     worktree::Workspace,
 };
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     hash::{Hash as _, Hasher as _},
     path::{Path, PathBuf},
     sync::{
@@ -37,17 +42,20 @@ pub enum Page {
 pub enum Tab {
     #[default]
     Workspaces,
-    Database,
+    /// The data services: PostgreSQL and the container engines.
+    Data,
     Daemons,
+    Setup,
     Config,
     Logs,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [
+    pub const ALL: [Tab; 6] = [
         Tab::Workspaces,
-        Tab::Database,
+        Tab::Data,
         Tab::Daemons,
+        Tab::Setup,
         Tab::Config,
         Tab::Logs,
     ];
@@ -55,8 +63,9 @@ impl Tab {
     pub fn title(self) -> &'static str {
         match self {
             Tab::Workspaces => "Workspaces",
-            Tab::Database => "Database",
+            Tab::Data => "Data",
             Tab::Daemons => "Daemons",
+            Tab::Setup => "Setup",
             Tab::Config => "Config",
             Tab::Logs => "Logs",
         }
@@ -69,6 +78,12 @@ impl Tab {
     /// Tabs whose data is tied to one workspace (shows the workspace picker).
     pub fn needs_workspace(self) -> bool {
         matches!(self, Tab::Daemons | Tab::Logs)
+    }
+
+    /// Tabs that read more than the project's basics, so showing them reads
+    /// again at once instead of at the next poll.
+    pub fn reads_on_open(self) -> bool {
+        matches!(self, Tab::Workspaces | Tab::Data | Tab::Daemons | Tab::Logs)
     }
 }
 
@@ -176,9 +191,44 @@ pub struct DatabaseModel {
 pub struct PitchforkModel {
     /// Pitchfork was queried at least once (distinguishes "not installed" from "not asked yet").
     pub loaded: bool,
-    pub available: bool,
-    pub daemons: Vec<Daemon>,
+    /// What running `pitchfork --version` and its features found.
+    pub detection: Option<Detection>,
+    /// How to get a usable pitchfork, when this one is missing or too old.
+    pub install: Option<InstallPlan>,
+    /// The selected workspace's processes, as core reports them.
+    pub status: Option<ProcessStatus>,
+    /// Every workspace's processes (the overview counts them).
+    pub all: Vec<ProcessStatus>,
     pub error: Option<String>,
+}
+
+/// What the wizard and the Daemons tab offer about pitchfork itself: what was
+/// found, how to get it, and what its proxy says.
+#[derive(Clone, Debug, Default)]
+pub struct PitchforkOffer {
+    pub detection: Option<Detection>,
+    pub install: Option<InstallPlan>,
+    pub proxy: Option<ProxyStatus>,
+}
+
+impl PitchforkModel {
+    /// The offer the Daemons tab draws.
+    pub fn offer(&self) -> PitchforkOffer {
+        PitchforkOffer {
+            detection: self.detection.clone(),
+            install: self.install.clone(),
+            proxy: self.status.as_ref().and_then(|s| s.proxy.clone()),
+        }
+    }
+
+    /// A pitchfork that runs was found.
+    pub fn installed(&self) -> bool {
+        self.detection.as_ref().is_some_and(|d| d.installed)
+    }
+
+    pub fn daemons(&self) -> &[DaemonState] {
+        self.status.as_ref().map_or(&[], |s| s.daemons.as_slice())
+    }
 }
 
 /// Which loaded document an editor holds. The generation comes from one
@@ -282,6 +332,45 @@ impl WorkspaceRef {
     }
 }
 
+/// The workspace a start, stop or restart of processes was drawn for: the
+/// project, the checkout and the instance the status showed. A button, a review
+/// dialog and a palette entry capture it when they are drawn and the job runs
+/// against exactly this, never against whatever is selected by then. Core
+/// checks the instance again before it touches pitchfork.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessTarget {
+    pub project: ProjectRef,
+    /// The checkout (its identity; a name is only a label).
+    pub path: PathBuf,
+    /// The receipt's instance id the status was judged for.
+    pub instance: Option<Uuid>,
+}
+
+impl ProcessTarget {
+    /// The target of `status`, which is what the buttons were drawn from. The
+    /// workspace list's receipt names the instance when the status could not.
+    pub fn of(model: &ProjectModel, status: &ProcessStatus) -> Self {
+        let listed = model
+            .workspaces
+            .iter()
+            .find(|w| w.workspace.path == status.path)
+            .and_then(instance_id);
+        Self {
+            project: model.project_ref(),
+            path: status.path.clone(),
+            instance: status.instance.or(listed),
+        }
+    }
+}
+
+/// A project by identity and place, for actions that outlive the selection
+/// they were made in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectRef {
+    pub id: Uuid,
+    pub root: PathBuf,
+}
+
 pub struct ProjectModel {
     pub key: RequestKey,
     pub entry: Entry,
@@ -290,11 +379,18 @@ pub struct ProjectModel {
     pub workspaces: Vec<WorkspaceStatus>,
     pub workspaces_error: Option<String>,
     pub database: DatabaseModel,
+    /// The container services (Valkey, Redis, MySQL): counts always, detail on
+    /// the Data tab.
+    pub services: ServicesModel,
     pub trust: Option<TrustState>,
     pub pitchfork: PitchforkModel,
     pub config: Option<ConfigModel>,
     pub config_error: Option<String>,
     pub logs: LogsModel,
+    /// Starts core refused after its gates allowed them (the mise delivery
+    /// check runs when a start is asked for), by workspace directory, until
+    /// the next start works or the person dismisses them.
+    pub refusals: HashMap<PathBuf, RefusalView>,
     pub selected_workspace: Option<String>,
     pub refreshing: bool,
     /// A refresh was requested while one was running.
@@ -314,11 +410,13 @@ impl ProjectModel {
             workspaces: Vec::new(),
             workspaces_error: None,
             database: DatabaseModel::default(),
+            services: ServicesModel::default(),
             trust: None,
             pitchfork: PitchforkModel::default(),
             config: None,
             config_error: None,
             logs: LogsModel::default(),
+            refusals: HashMap::new(),
             selected_workspace: None,
             refreshing: false,
             refresh_again: false,
@@ -332,6 +430,26 @@ impl ProjectModel {
             path: ws.path.clone(),
             git_dir: ws.git_dir.clone(),
         })
+    }
+
+    /// The directory whose trust scope an operation on workspace `name` is
+    /// about: that workspace's own checkout (a linked worktree has its own
+    /// pitchfork files). `None` stands for the default workspace; a name the
+    /// list does not have falls back to the main checkout.
+    pub fn trust_dir(&self, name: Option<&str>) -> PathBuf {
+        let found = self
+            .workspaces
+            .iter()
+            .map(|w| &w.workspace)
+            .find(|w| match name {
+                Some(name) => w.name == name,
+                None => w.is_default,
+            });
+        match (found, &self.project) {
+            (Some(workspace), _) => workspace.path.clone(),
+            (None, Some(project)) => project.root.clone(),
+            (None, None) => self.entry.root.clone(),
+        }
     }
 
     fn selected_workspace_entry(&self) -> Option<&Workspace> {
@@ -371,6 +489,13 @@ impl ProjectModel {
         stamp.key == self.key
             && stamp.generation == self.refresh_generation
             && stamp.workspace == self.selected_workspace_id()
+    }
+
+    pub fn project_ref(&self) -> ProjectRef {
+        ProjectRef {
+            id: self.entry.id,
+            root: self.entry.root.clone(),
+        }
     }
 
     pub fn workspace_ref(&self, name: &str) -> Option<WorkspaceRef> {
@@ -458,6 +583,20 @@ impl WorkspaceState {
         }
     }
 
+    /// What the state means, for the pill's tooltip.
+    pub fn help(self) -> &'static str {
+        match self {
+            Self::Ready => "Every setup phase is done (or was skipped on request).",
+            Self::NeedsAttention => {
+                "A required setup phase was skipped or failed, or the configuration changed since. The detail below says which."
+            }
+            Self::InProgress => "Setup is running, or an interrupted run left a phase started.",
+            Self::NotSetUp => "A checkout devflow has not set up: it has no receipt.",
+            Self::Busy => "Another operation holds this workspace right now.",
+            Self::Missing => "The worktree's directory is gone.",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Ready => "ready",
@@ -470,6 +609,97 @@ impl WorkspaceState {
     }
 }
 
+/// One workspace as the sidebar tree shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceSummary {
+    pub name: String,
+    pub state: WorkspaceState,
+    pub is_default: bool,
+}
+
+impl WorkspaceSummary {
+    pub fn of(ws: &WorkspaceStatus) -> Self {
+        Self {
+            name: ws.workspace.name.clone(),
+            state: WorkspaceState::of(ws),
+            is_default: ws.workspace.is_default,
+        }
+    }
+}
+
+pub fn workspace_summaries(list: &[WorkspaceStatus]) -> Vec<WorkspaceSummary> {
+    list.iter().map(WorkspaceSummary::of).collect()
+}
+
+/// What the sidebar knows about one project's workspaces. It is a cache next
+/// to the selected project's model: the selected project's refreshes write it,
+/// and any other expanded project gets a light background read of its own.
+///
+/// `generation` is what a read must carry to be applied. Every value comes
+/// from one process-wide counter and moves on every write and on every event
+/// that makes an in-flight read stale (a mutation started or ended), so an
+/// identity is never reused: not by a later read, and not by the entry that
+/// replaces this one when the project is removed and added again.
+#[derive(Clone, Debug, Default)]
+pub struct ProjectSummary {
+    pub workspaces: Vec<WorkspaceSummary>,
+    /// A read finished at least once (an empty list is then a real answer).
+    pub loaded: bool,
+    pub error: Option<String>,
+    /// The read in flight, by the generation it was started with. It is
+    /// cleared only when that very read ends, so a late result of a read
+    /// from before the project was removed cannot hide a newer one.
+    pub reading: Option<u64>,
+    pub generation: u64,
+}
+
+static NEXT_SUMMARY_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// A generation no summary, of this project or another, has had before.
+fn next_summary_generation() -> u64 {
+    NEXT_SUMMARY_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
+
+impl ProjectSummary {
+    /// A read is in flight.
+    pub fn is_reading(&self) -> bool {
+        self.reading.is_some()
+    }
+
+    /// Reads in flight, if any, now describe an older state.
+    pub fn invalidate(&mut self) {
+        self.generation = next_summary_generation();
+    }
+
+    /// Start a read: the one that carries the returned generation is the
+    /// only one that may be applied, and the only one that ends `reading`.
+    pub fn begin_read(&mut self) -> u64 {
+        self.invalidate();
+        self.reading = Some(self.generation);
+        self.generation
+    }
+
+    /// A read ended. Only the one in flight clears `reading`.
+    pub fn end_read(&mut self, generation: u64) {
+        if self.reading == Some(generation) {
+            self.reading = None;
+        }
+    }
+
+    /// Does a read started with `generation` still describe the project?
+    pub fn accepts(&self, generation: u64) -> bool {
+        self.generation == generation
+    }
+}
+
+/// What a background summary read was started for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SummaryStamp {
+    pub project: Uuid,
+    pub root: PathBuf,
+    pub generation: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct WorkspaceRow {
     pub workspace: Workspace,
@@ -479,14 +709,24 @@ pub struct WorkspaceRow {
     pub path: String,
 }
 
+impl WorkspaceRow {
+    /// The workspace's name as the table draws it; `workspace.name` stays the
+    /// identity (selecting a row, requests).
+    pub fn label(&self) -> String {
+        shown(&self.workspace.name)
+    }
+}
+
 pub fn workspace_rows(list: &[WorkspaceStatus]) -> Vec<WorkspaceRow> {
     list.iter()
         .map(|ws| WorkspaceRow {
             state: WorkspaceState::of(ws),
+            // Drawn only: the Git branch can look like a credential too.
             branch: ws
                 .workspace
                 .branch
-                .clone()
+                .as_deref()
+                .map(shown)
                 .unwrap_or_else(|| "(detached)".into()),
             database: database_label(ws),
             path: shorten_home(&ws.workspace.path),
@@ -496,7 +736,7 @@ pub fn workspace_rows(list: &[WorkspaceStatus]) -> Vec<WorkspaceRow> {
 }
 
 fn database_label(ws: &WorkspaceStatus) -> String {
-    match ws.receipt.as_ref().and_then(|r| r.data.as_ref()) {
+    match ws.receipt.as_ref().and_then(|r| r.first_postgres()) {
         Some(data) if data.branch_id.is_none() => format!("{} (url)", data.database),
         Some(data) => data.database.clone(),
         None => "none".into(),
@@ -516,7 +756,7 @@ pub fn shorten_home(path: &Path) -> String {
 pub fn attached_branch_ids(workspaces: &[WorkspaceStatus]) -> HashSet<Uuid> {
     workspaces
         .iter()
-        .filter_map(|w| w.receipt.as_ref()?.data.as_ref()?.branch_id)
+        .filter_map(|w| w.receipt.as_ref()?.first_postgres()?.branch_id)
         .collect()
 }
 
@@ -537,6 +777,16 @@ impl ServerBadge {
             Self::Stopped => "stopped",
             Self::Unreachable => "unreachable",
             Self::NotConfigured => "not configured",
+        }
+    }
+
+    /// What the state means, for the pill's tooltip.
+    pub fn help(self) -> &'static str {
+        match self {
+            Self::Running => "The PostgreSQL server answers.",
+            Self::Stopped => "The managed server's container is stopped; its data is kept.",
+            Self::Unreachable => "The server does not answer. The banner says why.",
+            Self::NotConfigured => "No postgres service in devflow.toml.",
         }
     }
 }
@@ -561,6 +811,21 @@ pub fn cow_text(cow: CowCapability, source: Option<CowSource>) -> String {
     }
 }
 
+/// What a copy-on-write result means for PostgreSQL branches, for a tooltip.
+pub fn cow_meaning(cow: CowCapability) -> &'static str {
+    match cow {
+        CowCapability::Verified => {
+            "Cloning a database copies almost no data: the file system shares blocks between a branch and its source. Checked, not assumed."
+        }
+        CowCapability::Copy => {
+            "The file system does not share blocks: a branch is a full copy and takes as much space as its source."
+        }
+        CowCapability::Unknown => {
+            "devflow could not tell whether clones share blocks, and assumes neither."
+        }
+    }
+}
+
 pub fn cow_label(cow: CowCapability) -> &'static str {
     match cow {
         CowCapability::Verified => "verified",
@@ -575,6 +840,18 @@ fn record_status_label(status: RecordStatus) -> &'static str {
         RecordStatus::Ready => "ready",
         RecordStatus::Deleting => "deleting",
         RecordStatus::Failed => "failed",
+    }
+}
+
+/// Milliseconds as people read them: `340 ms`, `1.2 s`, `2m 05s`.
+pub fn format_millis(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{ms} ms")
+    } else if ms < 60_000 {
+        format!("{:.1} s", ms as f64 / 1000.0)
+    } else {
+        let secs = ms / 1000;
+        format!("{}m {:02}s", secs / 60, secs % 60)
     }
 }
 
@@ -624,11 +901,11 @@ pub struct BranchRow {
 fn describe_source(kind: &str, id: Option<Uuid>, db: &DatabaseModel) -> String {
     match (kind, id) {
         ("branch", Some(id)) => match db.branches.iter().find(|b| b.id == id) {
-            Some(b) => format!("branch {}", b.name),
+            Some(b) => format!("branch {}", shown(&b.name)),
             None => "branch (deleted)".into(),
         },
         ("snapshot", Some(id)) => match db.snapshots.iter().find(|s| s.id == id) {
-            Some(s) => format!("snapshot {}@v{}", s.name, s.version),
+            Some(s) => format!("snapshot {}@v{}", shown(&s.name), s.version),
             None => "snapshot (deleted)".into(),
         },
         (kind, _) => kind.to_string(),
@@ -641,7 +918,7 @@ pub fn branch_rows(db: &DatabaseModel, workspaces: &[WorkspaceStatus]) -> Vec<Br
         .iter()
         .map(|b| BranchRow {
             id: b.id,
-            name: b.name.clone(),
+            name: shown(&b.name),
             database: b.db_name.clone(),
             source: describe_source(&b.source_kind, b.source_id, db),
             status: record_status_label(b.status).into(),
@@ -654,7 +931,8 @@ pub fn branch_rows(db: &DatabaseModel, workspaces: &[WorkspaceStatus]) -> Vec<Br
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SnapshotRow {
-    pub name: String,
+    /// As recorded: the identity of requests, drawn only through `label`.
+    pub name: RawName,
     pub version: i32,
     pub source: String,
     pub created: String,
@@ -662,7 +940,7 @@ pub struct SnapshotRow {
 
 impl SnapshotRow {
     pub fn label(&self) -> String {
-        format!("{}@v{}", self.name, self.version)
+        format!("{}@v{}", self.name.shown(), self.version)
     }
 }
 
@@ -670,7 +948,7 @@ pub fn snapshot_rows(db: &DatabaseModel) -> Vec<SnapshotRow> {
     db.snapshots
         .iter()
         .map(|s| SnapshotRow {
-            name: s.name.clone(),
+            name: RawName::from(s.name.clone()),
             version: s.version,
             source: describe_source("branch", s.source_branch_id, db),
             created: format_when(s.created_at),
@@ -702,9 +980,13 @@ pub fn data_options(
         },
     ];
     for ws in workspaces {
-        if ws.receipt.as_ref().is_some_and(|r| r.data.is_some()) {
+        if ws
+            .receipt
+            .as_ref()
+            .is_some_and(|r| r.first_postgres().is_some())
+        {
             options.push(DataOption {
-                label: format!("Workspace {}", ws.workspace.name),
+                label: shown(&format!("Workspace {}", ws.workspace.name)),
                 source: Some(DataSource::Workspace {
                     name: ws.workspace.name.clone(),
                 }),
@@ -713,7 +995,7 @@ pub fn data_options(
     }
     for snap in snapshots.iter().filter(|s| s.status == RecordStatus::Ready) {
         options.push(DataOption {
-            label: format!("Snapshot {}@v{}", snap.name, snap.version),
+            label: format!("Snapshot {}@v{}", shown(&snap.name), snap.version),
             source: Some(DataSource::Snapshot {
                 name: snap.name.clone(),
                 version: Some(snap.version),
@@ -727,7 +1009,11 @@ pub fn data_options(
 pub fn data_workspaces(workspaces: &[WorkspaceStatus]) -> Vec<Workspace> {
     workspaces
         .iter()
-        .filter(|w| w.receipt.as_ref().is_some_and(|r| r.data.is_some()))
+        .filter(|w| {
+            w.receipt
+                .as_ref()
+                .is_some_and(|r| r.first_postgres().is_some())
+        })
         .map(|w| w.workspace.clone())
         .collect()
 }
@@ -735,7 +1021,7 @@ pub fn data_workspaces(workspaces: &[WorkspaceStatus]) -> Vec<Workspace> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use devflow_core::receipt::{DataBinding, Receipt};
+    use devflow_core::receipt::{DataBinding, Receipt, ServiceBinding};
 
     fn workspace(name: &str, is_default: bool) -> Workspace {
         Workspace {
@@ -833,6 +1119,7 @@ mod tests {
             running,
             reachable,
             endpoint: None,
+            container_endpoint: None,
             server_version: None,
             file_copy_method: None,
             cow: CowCapability::Unknown,
@@ -859,14 +1146,20 @@ mod tests {
     fn branches_are_unattached_without_a_local_receipt() {
         let attached_id = Uuid::new_v4();
         let mut receipt = Receipt::new(Uuid::new_v4(), "w", None);
-        receipt.data = Some(DataBinding {
-            branch_id: Some(attached_id),
-            database: "df_x".into(),
-            role: "dfl_x".into(),
-            url: "postgres://".into(),
-            source: "empty".into(),
-            owned: true,
-        });
+        receipt.services.insert(
+            "db".into(),
+            ServiceBinding::postgres(
+                DataBinding {
+                    branch_id: Some(attached_id),
+                    database: "df_x".into(),
+                    role: "dfl_x".into(),
+                    url: "postgres://".into(),
+                    source: "empty".into(),
+                    owned: true,
+                },
+                None,
+            ),
+        );
         let workspaces = vec![status("w", Some(receipt), Some(Status::Ready), false)];
         let branch = |id: Uuid| BranchInfo {
             id,
@@ -882,6 +1175,7 @@ mod tests {
             created_at: Utc::now(),
             size_bytes: Some(3 * 1024 * 1024),
             generation: 0,
+            extras: Vec::new(),
             warnings: Vec::new(),
         };
         let db = DatabaseModel {
@@ -1015,6 +1309,37 @@ mod tests {
         );
         assert_eq!(second.identity.project, b.id);
         assert_eq!(second.identity.root, b.root);
+    }
+
+    #[test]
+    fn summary_reads_keep_their_identity_when_the_cache_entry_is_replaced() {
+        // A read of a project is in flight when the project is removed ...
+        let mut first = ProjectSummary::default();
+        let old = first.begin_read();
+        assert!(first.is_reading() && first.accepts(old));
+
+        // ... and added again: the new entry starts its own read.
+        let mut second = ProjectSummary::default();
+        let new = second.begin_read();
+        assert_ne!(old, new, "a generation is never issued twice");
+        assert!(
+            !second.accepts(old),
+            "the old read cannot pass for the new entry"
+        );
+
+        // The old read ending does not end the new one.
+        second.end_read(old);
+        assert!(second.is_reading(), "only the matching read clears it");
+        second.end_read(new);
+        assert!(!second.is_reading());
+
+        // An invalidation also leaves the read in flight to end by itself.
+        let third = second.begin_read();
+        second.invalidate();
+        assert!(!second.accepts(third));
+        assert!(second.is_reading());
+        second.end_read(third);
+        assert!(!second.is_reading());
     }
 
     #[test]

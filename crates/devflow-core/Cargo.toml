@@ -15,7 +15,17 @@ serde_json.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 toml = "0.9"
+# Names the key path of a configuration value the deserializer rejects, so an error can say where without quoting what.
+serde_path_to_error = "0.1"
+# Format-preserving edits of devflow.toml, pitchfork.toml and mise.toml (init proposals).
+toml_edit = "0.25"
+# Parses untrusted compose and workspace YAML; panic-free with alias/event budgets.
+serde-saphyr = { version = "1.3", default-features = false, features = ["deserialize"] }
 git2 = { version = "0.21", default-features = false }
+# Directory-relative, symlink-confined file access for the repository scan (openat per component).
+cap-std = "4.0"
+# Gitignore pattern matching over lines the scan reads itself (only `gitignore`, never its walker).
+ignore = "0.4"
 postgres = { version = "0.19", features = ["with-uuid-1", "with-chrono-0_4"] }
 postgres-protocol = "0.6"
 dirs = "6.0"
@@ -23,6 +33,8 @@ filetime = "0.2"
 reflink-copy = "0.1"
 rand = "0.9"
 sha2 = "0.10"
+# SHA-1 only to verify the checksum trailer of a Git index, which tells SHA-1 repositories from SHA-256 ones; no dependencies, already in the lockfile.
+sha1_smol = "1.0"
 humantime = "2.2"
 percent-encoding = "2.3"
 rayon = "1.12"

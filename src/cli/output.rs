@@ -249,7 +249,7 @@ impl Progress for Printer {
         }
         let symbol = match state {
             PhaseState::Pending => return,
-            PhaseState::Started if phase == Phase::Database && self.announce_database => {
+            PhaseState::Started if phase == Phase::Services && self.announce_database => {
                 self.palette.dim("…")
             }
             PhaseState::Started => return,

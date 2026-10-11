@@ -1,4 +1,6 @@
-//! Settings page: editor and terminal commands, theme. Saved to gui.toml.
+//! Settings page: editor and terminal commands, theme. Saved to gui.toml. The
+//! theme applies and is saved as soon as it is chosen, as with the title bar's
+//! switch; the page follows when the switch changes it.
 use super::ui;
 use crate::{
     settings::{self, Settings, ThemeChoice},
@@ -22,8 +24,8 @@ pub struct SettingsView {
     state: Entity<AppState>,
     editor: Entity<InputState>,
     terminal: Entity<InputState>,
-    theme: Entity<SelectState<Vec<SharedString>>>,
-    _subscription: Subscription,
+    pub(super) theme: Entity<SelectState<Vec<SharedString>>>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl SettingsView {
@@ -46,26 +48,49 @@ impl SettingsView {
             .unwrap_or(0);
         let theme =
             cx.new(|cx| SelectState::new(themes, Some(IndexPath::new(selected)), window, cx));
-        // Preview the theme as soon as it is chosen; Save persists it.
-        let subscription = cx.subscribe_in(
-            &theme,
-            window,
-            |_, _, event: &SelectEvent<Vec<SharedString>>, window, cx| {
-                if let SelectEvent::Confirm(Some(label)) = event
-                    && let Some(choice) = ThemeChoice::ALL
-                        .iter()
-                        .find(|t| t.label() == label.as_ref())
-                {
-                    choice.apply(Some(window), cx);
-                }
-            },
-        );
+        let subscriptions = vec![
+            // Applied and saved as soon as it is chosen.
+            cx.subscribe_in(
+                &theme,
+                window,
+                |this, _, event: &SelectEvent<Vec<SharedString>>, window, cx| {
+                    if let SelectEvent::Confirm(Some(label)) = event
+                        && let Some(&choice) = ThemeChoice::ALL
+                            .iter()
+                            .find(|t| t.label() == label.as_ref())
+                    {
+                        this.state
+                            .update(cx, |s, cx| s.set_theme(choice, window, cx));
+                    }
+                },
+            ),
+            // The title bar's switch (or the palette) changed it.
+            cx.observe_in(&state, window, |this, _, window, cx| {
+                this.show_stored_theme(window, cx)
+            }),
+        ];
         Self {
             state,
             editor,
             terminal,
             theme,
-            _subscription: subscription,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    fn show_stored_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let stored = self.state.read(cx).settings.theme;
+        let shown = self
+            .theme
+            .read(cx)
+            .selected_index(cx)
+            .and_then(|ix| ThemeChoice::ALL.get(ix.row).copied());
+        if shown != Some(stored)
+            && let Some(row) = ThemeChoice::ALL.iter().position(|t| *t == stored)
+        {
+            self.theme.update(cx, |t, cx| {
+                t.set_selected_index(Some(IndexPath::new(row)), window, cx)
+            });
         }
     }
 
@@ -81,12 +106,13 @@ impl SettingsView {
             terminal_command: self.terminal.read(cx).value().trim().to_string(),
             theme,
         };
-        match settings::save(&settings) {
+        let stored = self.state.update(cx, |s, cx| {
+            let stored = s.store_settings(settings);
+            cx.notify();
+            stored
+        });
+        match stored {
             Ok(()) => {
-                self.state.update(cx, |s, cx| {
-                    s.settings = settings;
-                    cx.notify();
-                });
                 window.push_notification(Notification::success("Settings saved."), cx);
             }
             Err(e) => window.push_notification(
@@ -126,7 +152,12 @@ impl Render for SettingsView {
                                     .description("Started in the workspace directory. Apps launched from the Dock have a short PATH; use a full path if a command is not found.")
                                     .child(Input::new(&self.terminal)),
                             )
-                            .child(Field::new().label("Theme").child(Select::new(&self.theme).w_full()))
+                            .child(
+                                Field::new()
+                                    .label("Theme")
+                                    .description("Applied and saved when chosen. The title bar switches between light and dark; System follows the OS.")
+                                    .child(Select::new(&self.theme).w_full()),
+                            )
                             .footer(
                                 Button::new("save-settings")
                                     .primary()

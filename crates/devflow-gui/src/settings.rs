@@ -2,7 +2,7 @@
 //! user's editor and terminal.
 use anyhow::{Context as _, Result, bail};
 use gpui_kit::{
-    App, Window,
+    App, Window, WindowAppearance,
     component::{Theme, ThemeMode},
 };
 use serde::{Deserialize, Serialize};
@@ -33,12 +33,35 @@ impl ThemeChoice {
         }
     }
 
+    /// Apply the choice now. `System` follows the OS appearance at this moment;
+    /// the window keeps following it afterwards (see `Shell`).
+    ///
+    /// The app's native appearance (window edges, system menus) follows an
+    /// explicit Light or Dark. It is released for `System`, because while one
+    /// is forced the window no longer reports changes of the OS appearance.
     pub fn apply(self, window: Option<&mut Window>, cx: &mut App) {
         match self {
-            Self::Light => Theme::change(ThemeMode::Light, window, cx),
-            Self::Dark => Theme::change(ThemeMode::Dark, window, cx),
-            Self::System => Theme::sync_system_appearance(window, cx),
+            Self::Light => {
+                cx.set_window_appearance(Some(WindowAppearance::Light));
+                Theme::change(ThemeMode::Light, window, cx);
+            }
+            Self::Dark => {
+                cx.set_window_appearance(Some(WindowAppearance::Dark));
+                Theme::change(ThemeMode::Dark, window, cx);
+            }
+            Self::System => {
+                cx.set_window_appearance(None);
+                Theme::sync_system_appearance(window, cx);
+            }
         }
+        // A theme change loads the library's colors afresh.
+        crate::theme::apply_accent(cx);
+    }
+
+    /// What the quick toggle switches to when the UI is showing `dark` now:
+    /// always an explicit Light or Dark, whatever the setting was.
+    pub fn toggled(dark: bool) -> Self {
+        if dark { Self::Light } else { Self::Dark }
     }
 }
 
@@ -80,14 +103,88 @@ pub fn load() -> Result<Settings> {
     }
 }
 
-pub fn save(settings: &Settings) -> Result<()> {
-    let path = path()?;
+pub fn save_to(path: &Path, settings: &Settings) -> Result<()> {
     let dir = path.parent().context("settings path has no parent")?;
     std::fs::create_dir_all(dir)?;
     // Write beside the target and rename, so a crash never leaves a torn file.
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, toml::to_string_pretty(settings)?)?;
-    std::fs::rename(&tmp, &path).with_context(|| format!("cannot write {}", path.display()))
+    std::fs::rename(&tmp, path).with_context(|| format!("cannot write {}", path.display()))
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Saves settings without blocking the UI thread, newest value last.
+///
+/// `submit` (UI thread, never waits for the disk) records the value to write
+/// and says whether a `drain` has to be started. `drain` runs on a background
+/// thread and writes the newest recorded value until nothing newer is left,
+/// one file write at a time: a value superseded before it was written is never
+/// written, so a quick series of changes cannot land out of order.
+/// `write_now` is the synchronous path (the Settings form's Save); it takes
+/// its turn between the background writes and supersedes what is waiting.
+#[derive(Default)]
+pub struct SettingsWriter {
+    state: Mutex<WriterState>,
+    /// Held while a file is written. `state` never is, so `submit` is quick.
+    io: Mutex<()>,
+}
+
+#[derive(Default)]
+struct WriterState {
+    pending: Option<Settings>,
+    draining: bool,
+}
+
+impl SettingsWriter {
+    /// Record `settings` as the newest value. `true` means no `drain` is
+    /// running and the caller must start one; otherwise the running one
+    /// picks the value up.
+    #[must_use]
+    pub fn submit(&self, settings: Settings) -> bool {
+        let mut state = lock(&self.state);
+        state.pending = Some(settings);
+        !std::mem::replace(&mut state.draining, true)
+    }
+
+    /// Write recorded values to `path` until none is left (blocking: run it
+    /// off the UI thread). The error is that of the last write, if it failed:
+    /// a failure followed by a write that went through left the file right.
+    pub fn drain(&self, path: &Path) -> Option<anyhow::Error> {
+        self.drain_with(|settings| save_to(path, settings))
+    }
+
+    fn drain_with(&self, mut write: impl FnMut(&Settings) -> Result<()>) -> Option<anyhow::Error> {
+        let mut last = None;
+        loop {
+            // Taking the value and writing it is one step as far as
+            // `write_now` is concerned.
+            let _turn = lock(&self.io);
+            let next = {
+                let mut state = lock(&self.state);
+                let next = state.pending.take();
+                if next.is_none() {
+                    state.draining = false;
+                }
+                next
+            };
+            let Some(settings) = next else {
+                return last;
+            };
+            last = write(&settings).err();
+        }
+    }
+
+    /// Write `settings` now, after a background write in progress. Whatever
+    /// was waiting is older and is dropped, once this write went through.
+    pub fn write_now(&self, path: &Path, settings: &Settings) -> Result<()> {
+        let _turn = lock(&self.io);
+        save_to(path, settings)?;
+        lock(&self.state).pending = None;
+        Ok(())
+    }
 }
 
 /// Split a command line on whitespace, honouring single and double quotes.
@@ -301,6 +398,170 @@ mod tests {
         let partial: Settings = toml::from_str("theme = \"light\"").unwrap();
         assert_eq!(partial.editor_command, "code");
         assert_eq!(partial.theme, ThemeChoice::Light);
+    }
+
+    #[test]
+    fn the_quick_switch_always_leads_to_an_explicit_light_or_dark() {
+        assert_eq!(ThemeChoice::toggled(true), ThemeChoice::Light);
+        assert_eq!(ThemeChoice::toggled(false), ThemeChoice::Dark);
+    }
+
+    #[test]
+    fn saving_creates_the_directory_and_replaces_the_file_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("nested").join("gui.toml");
+        let mut settings = Settings {
+            theme: ThemeChoice::Dark,
+            ..Settings::default()
+        };
+        save_to(&file, &settings).unwrap();
+        settings.theme = ThemeChoice::Light;
+        save_to(&file, &settings).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(toml::from_str::<Settings>(&text).unwrap(), settings);
+        assert!(
+            !file.with_extension("toml.tmp").exists(),
+            "no torn leftover"
+        );
+    }
+
+    fn named(editor: &str) -> Settings {
+        Settings {
+            editor_command: editor.into(),
+            ..Settings::default()
+        }
+    }
+
+    fn editor_in(file: &Path) -> String {
+        let text = std::fs::read_to_string(file).unwrap();
+        toml::from_str::<Settings>(&text).unwrap().editor_command
+    }
+
+    #[test]
+    fn a_series_of_submitted_values_writes_only_the_newest() {
+        let writer = SettingsWriter::default();
+        assert!(writer.submit(named("one")), "the first starts a writer");
+        assert!(!writer.submit(named("two")), "a writer is already due");
+        assert!(!writer.submit(named("three")));
+        let mut written = Vec::new();
+        let failed = writer.drain_with(|s| {
+            written.push(s.editor_command.clone());
+            Ok(())
+        });
+        assert!(failed.is_none());
+        assert_eq!(written, ["three"], "superseded values are never written");
+        assert!(
+            writer.submit(named("four")),
+            "after a drain a new one is due"
+        );
+    }
+
+    #[test]
+    fn a_value_submitted_during_a_write_neither_waits_for_it_nor_is_lost() {
+        let writer = Arc::new(SettingsWriter::default());
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        assert!(writer.submit(named("first")));
+        let background = {
+            let writer = writer.clone();
+            std::thread::spawn(move || {
+                let mut written = Vec::new();
+                let mut blocked = false;
+                let failed = writer.drain_with(|s| {
+                    written.push(s.editor_command.clone());
+                    if !blocked {
+                        blocked = true;
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                    }
+                    Ok(())
+                });
+                (written, failed.is_none())
+            })
+        };
+        started_rx.recv().unwrap();
+        // The first write is on the disk right now; the UI thread is not held.
+        assert!(!writer.submit(named("second")), "the writer picks it up");
+        assert!(!writer.submit(named("third")));
+        release_tx.send(()).unwrap();
+        let (written, ok) = background.join().unwrap();
+        assert!(ok);
+        assert_eq!(written, ["first", "third"], "in order, newest last");
+    }
+
+    #[test]
+    fn only_the_last_write_decides_whether_a_failure_is_reported() {
+        let writer = SettingsWriter::default();
+        let _ = writer.submit(named("one"));
+        let mut calls = 0;
+        let failed = writer.drain_with(|_| {
+            calls += 1;
+            bail!("disk full")
+        });
+        assert_eq!(calls, 1);
+        assert!(format!("{:#}", failed.unwrap()).contains("disk full"));
+
+        // A failure followed by a write that went through left the file right.
+        let writer = Arc::new(SettingsWriter::default());
+        let _ = writer.submit(named("one"));
+        let mut first = true;
+        let again = writer.clone();
+        let failed = writer.drain_with(|_| {
+            if std::mem::take(&mut first) {
+                let _ = again.submit(named("two"));
+                bail!("busy")
+            }
+            Ok(())
+        });
+        assert!(failed.is_none());
+    }
+
+    #[test]
+    fn a_synchronous_save_supersedes_what_is_waiting_and_is_not_overwritten_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("gui.toml");
+        let writer = SettingsWriter::default();
+        // A theme change is waiting for its background write ...
+        assert!(writer.submit(named("older")));
+        // ... when the Settings form saves.
+        writer.write_now(&file, &named("form")).unwrap();
+        let mut written = 0;
+        let failed = writer.drain_with(|_| {
+            written += 1;
+            Ok(())
+        });
+        assert!(failed.is_none());
+        assert_eq!(written, 0, "the older value is not written after it");
+        assert_eq!(editor_in(&file), "form");
+
+        // A failed save leaves what was waiting to be written.
+        let blocked = dir.path().join("a-file");
+        std::fs::write(&blocked, "x").unwrap();
+        assert!(writer.submit(named("waiting")));
+        assert!(
+            writer
+                .write_now(&blocked.join("gui.toml"), &named("lost"))
+                .is_err()
+        );
+        assert!(writer.drain(&file).is_none());
+        assert_eq!(editor_in(&file), "waiting");
+    }
+
+    #[test]
+    fn draining_writes_the_file_and_reports_a_path_that_cannot_be_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("deep").join("gui.toml");
+        let writer = SettingsWriter::default();
+        assert!(writer.submit(named("saved")));
+        assert!(writer.drain(&file).is_none());
+        assert_eq!(editor_in(&file), "saved");
+
+        // The parent is a regular file: nothing can be created under it.
+        let blocked = dir.path().join("a-file");
+        std::fs::write(&blocked, "x").unwrap();
+        assert!(writer.submit(named("unsaved")));
+        assert!(writer.drain(&blocked.join("gui.toml")).is_some());
+        assert!(writer.submit(named("again")), "a failure frees the writer");
     }
 
     /// Wait for a launched program's verdict (it is reported from a thread).

@@ -1,7 +1,13 @@
 //! Command definitions and dispatch. Handlers parse arguments, prompt and
 //! render; every lifecycle decision is made by `devflow-core`.
 mod db;
+mod env;
+mod exec;
+mod hooks;
+mod init;
 mod output;
+mod processes;
+mod service;
 mod shell;
 mod system;
 mod trust;
@@ -56,20 +62,32 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create devflow.toml for the current repository
-    Init(workspace::InitArgs),
+    /// Propose a setup from what the repository contains, review it and write it
+    Init(init::InitArgs),
     /// Switch to a workspace; with -c, create it first
     Switch(workspace::SwitchArgs),
     /// List the workspaces of this project (or of every registered project)
     List(workspace::ListArgs),
     /// Print the path of a workspace
     Path(workspace::PathArgs),
+    /// Run a command with the workspace's variables (`.devflow/env`) applied last
+    Exec(exec::ExecArgs),
     /// Set up (or resume setting up) the current worktree
     Setup(workspace::SetupArgs),
     /// Remove a workspace, its database branch and (optionally) its Git branch
     Remove(workspace::RemoveArgs),
     /// Review and approve the project's hook commands
     Trust(trust::TrustArgs),
+    /// List and edit the setup, switch and teardown commands (`hook` is the Git hook)
+    Hooks {
+        #[command(subcommand)]
+        command: hooks::HooksCommand,
+    },
+    /// List and edit the [env] recipes and framework presets
+    Env {
+        #[command(subcommand)]
+        command: env::EnvCommand,
+    },
     /// Manage the post-checkout Git hook that sets up worktrees made by other tools
     Hook {
         #[command(subcommand)]
@@ -80,6 +98,22 @@ enum Command {
         #[command(subcommand)]
         command: db::DbCommand,
     },
+    /// Start the workspace's pitchfork daemons (approved, ready workspaces only)
+    Up(processes::UpArgs),
+    /// Stop the workspace's pitchfork daemons
+    Down(processes::DownArgs),
+    /// Show the workspace's daemons: state, port and URL
+    Ps(processes::PsArgs),
+    /// Is pitchfork installed and is its proxy on; install it (asks first)
+    Pitchfork {
+        #[command(subcommand)]
+        action: processes::PitchforkAction,
+    },
+    /// Valkey, Redis and MySQL (preview) services: copy-on-write branches, snapshots and reset
+    Service(service::ServiceArgs),
+    /// Run one journaled clone, snapshot or reset (started by devflow itself)
+    #[command(name = "__clone", hide = true)]
+    Coordinate(service::CoordinateArgs),
     /// Check git, docker, the Postgres server and the project setup
     Doctor,
     /// Print the shell wrapper that lets `devflow switch` change directory
@@ -101,15 +135,28 @@ impl Command {
             Command::Setup(_) => "setup",
             Command::Remove(_) => "remove",
             Command::Trust(_) => "trust",
+            Command::Hooks { command } => command.json_name(),
+            Command::Env { command } => command.json_name(),
             Command::Hook { action } => action.json_name(),
             Command::Db { command } => command.json_name()?,
+            Command::Up(_) => "up",
+            Command::Down(_) => "down",
+            Command::Ps(_) => "ps",
+            Command::Pitchfork { action } => action.json_name(),
+            Command::Service(args) => args.command.json_name(),
             Command::Doctor => "doctor",
-            Command::ShellInit(_) | Command::Completions(_) | Command::Gui => return None,
+            Command::ShellInit(_)
+            | Command::Completions(_)
+            | Command::Gui
+            | Command::Exec(_)
+            | Command::Coordinate(_) => return None,
         })
     }
 
     fn display_name(&self) -> &'static str {
         match self {
+            Command::Coordinate(_) => "__clone",
+            Command::Exec(_) => "exec",
             Command::ShellInit(_) => "shell-init",
             Command::Completions(_) => "completions",
             Command::Gui => "gui",
@@ -143,6 +190,8 @@ pub struct Ctx {
     non_interactive: bool,
     /// Absolute directory the command runs "in" (`-C` or the process directory).
     pub cwd: PathBuf,
+    /// `-C` was given: a command devflow starts runs in `cwd`.
+    pub chdir: bool,
     warnings: RefCell<Vec<String>>,
 }
 
@@ -215,6 +264,7 @@ fn context(cli: &Cli) -> Result<Ctx> {
         json: cli.json,
         non_interactive: cli.non_interactive,
         cwd,
+        chdir: cli.dir.is_some(),
         warnings: RefCell::new(Vec::new()),
     })
 }
@@ -239,9 +289,12 @@ fn fail(ctx: Option<&Ctx>, json: bool, command: &str, error: &anyhow::Error) -> 
 fn hint(error: &anyhow::Error) -> Option<String> {
     if let Some(missing) = error.downcast_ref::<NotInitialized>() {
         return Some(format!(
-            "run `devflow init` in {} (add --postgres managed for database branches)",
+            "run `devflow init` in {} (`devflow init --plan` shows the proposed setup first)",
             missing.root.display()
         ));
+    }
+    if let Some(refusal) = error.downcast_ref::<devflow_core::processes::Refusal>() {
+        return refusal.hint();
     }
     match error.downcast_ref::<Protected>() {
         Some(protected) if protected.forceable => Some(format!(
@@ -368,15 +421,24 @@ fn run(ctx: &Ctx, command: Command) -> Result<ExitCode> {
         );
     }
     match command {
-        Command::Init(args) => workspace::init(ctx, args),
+        Command::Init(args) => init::run(ctx, args),
         Command::Switch(args) => workspace::switch(ctx, args),
         Command::List(args) => workspace::list(ctx, args),
         Command::Path(args) => workspace::path(ctx, args),
+        Command::Exec(args) => exec::run(ctx, args),
         Command::Setup(args) => workspace::setup(ctx, args),
         Command::Remove(args) => workspace::remove(ctx, args),
         Command::Trust(args) => trust::command(ctx, args),
+        Command::Hooks { command } => hooks::run(ctx, command),
+        Command::Env { command } => env::run(ctx, command),
         Command::Hook { action } => workspace::hook(ctx, action),
         Command::Db { command } => db::run(ctx, command),
+        Command::Up(args) => processes::up(ctx, args),
+        Command::Down(args) => processes::down(ctx, args),
+        Command::Ps(args) => processes::ps(ctx, args),
+        Command::Pitchfork { action } => processes::pitchfork_command(ctx, action),
+        Command::Service(args) => service::run(ctx, args),
+        Command::Coordinate(args) => service::coordinate(args),
         Command::Doctor => system::doctor(ctx),
         Command::ShellInit(args) => shell::init(args),
         Command::Completions(args) => system::completions::<Cli>(args),

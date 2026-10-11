@@ -1,16 +1,23 @@
 //! devflow desktop app: GPUI + gpui-kit over the synchronous `devflow-core`.
+// The setup views' tests build JSON-heavy fixtures.
+#![cfg_attr(test, recursion_limit = "256")]
+mod actions;
 mod activity;
+mod assets;
 mod jobs;
 mod model;
 mod ops;
+mod ops_pitchfork;
+mod ops_services;
+mod redaction;
+mod services;
 mod settings;
 mod state;
+mod theme;
 mod views;
 
-use gpui_kit::{prelude::*, *};
+use gpui_kit::{component::TitleBar, prelude::*, *};
 use std::path::PathBuf;
-
-actions!(devflow, [Quit]);
 
 /// `--project <root>` selects (and registers, if it is one) a project at startup.
 fn parse_args() -> Option<PathBuf> {
@@ -37,13 +44,12 @@ fn main() {
     });
 
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(assets::AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
             settings.theme.apply(None, cx);
 
-            cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
-            cx.on_action(|_: &Quit, cx| cx.quit());
+            actions::init(cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -51,13 +57,13 @@ fn main() {
             })
             .detach();
 
+            // The window draws its own title bar (`views::Shell`).
+            let mut titlebar = TitleBar::title_bar_options();
+            titlebar.title = Some("devflow".into());
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1240.), px(800.)), cx)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("devflow".into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
+                titlebar: Some(titlebar),
+                ..TitleBar::window_options()
             };
             gpui_kit::open_window(options, cx, move |window, cx| {
                 let state =

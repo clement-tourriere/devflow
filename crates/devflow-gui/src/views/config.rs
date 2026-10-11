@@ -139,7 +139,14 @@ impl Render for ConfigView {
                             .gap_2()
                             .items_center()
                             .child(ui::heading(file))
-                            .when(dirty, |row| row.child(ui::tag("unsaved changes", ui::Tone::Warning)))
+                            .when(dirty, |row| {
+                                row.child(ui::pill(
+                                    "config-unsaved",
+                                    "unsaved changes",
+                                    ui::Tone::Warning,
+                                    "The editor holds changes that are not saved to the file yet.",
+                                ))
+                            })
                             .child(
                                 div()
                                     .text_sm()

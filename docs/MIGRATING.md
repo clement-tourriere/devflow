@@ -1,8 +1,31 @@
 # Migrating from devflow 0.x
 
-devflow 1.0 is a clean break. It reads TOML only, stops with an error that links to this page when it finds 0.x configuration (a `.devflow.yml` or `.devflow.yaml` and no `devflow.toml`, or a TOML file with 0.x keys), and **never adopts or deletes 0.x containers, volumes or data directories**. Its own resources use new names (`devflow-<name>-<id8>` compose projects, label `dev.devflow.project=<id>`, `df_` databases and `dfl_`/`dfo_` roles), so the two generations cannot collide.
+devflow 1.0 is a clean break. It reads TOML only, stops with an error that links to this page when it finds 0.x configuration (a `.devflow.yml` or `.devflow.yaml` and no `devflow.toml`, or a TOML file with 0.x keys, recognised by their shape: `services` as an array of tables, `processes`, `agent`, hyphenated hook phases and so on), and **never adopts or deletes 0.x containers, volumes or data directories**. Its own resources use new names (`devflow-<name>-<id8>` compose projects, label `dev.devflow.project=<id>`, `df_` databases and `dfl_`/`dfo_` roles), so the two generations cannot collide.
 
 The migration has three parts: translate the configuration, move the data you want to keep, and remove the 0.x resources. Do all three with devflow 0.8 still installed for the steps that say so. Keep a copy of the 0.8 binary under another name (the examples use `devflow-0.8`) until you are done.
+
+## From an earlier 1.0 build
+
+The top-level `[postgres]` table became a service:
+
+```toml
+# before
+[postgres]
+mode = "managed"
+image = "postgres:18"
+```
+
+```toml
+# after
+[services.db]                    # the key is yours: lowercase letters, digits, '_' and '-', starting with a letter
+engine = "postgres"              # required
+mode = "managed"
+image = "postgres:18"
+```
+
+The keys inside are unchanged, `devflow.local.toml` overlays `[services.db]` the same way it overlaid `[postgres]`, and a project has at most one `postgres` service. devflow stops with the new spelling when it finds `[postgres]`, and refuses a file that mixes 1.0 and 0.x keys.
+
+Existing worktrees need no action. The first `devflow setup` or `switch` in each migrates its receipt in place (version 1 to 2) without touching any database: the old `data` binding moves to the project's sole postgres service, and the `database` phase is now called `services`. If the configuration has no postgres service the binding is kept as `receipt.unmapped`, reported by `setup` and `devflow doctor`, and not exported until you add the service. `devflow --json` documents now carry `receipt.services.<key>` where they carried `receipt.data`. A managed server started by an earlier build keeps working; its next `devflow db up` gives it a stable host port.
 
 ## What was removed
 
@@ -34,21 +57,21 @@ Commands and flags that changed:
 | `switch --no-services`, `--no-processes`, `--no-verify` | `--no-db`, `--no-hooks`. A skip is recorded: a later `devflow setup` does not run the skipped phase. |
 | `remove --keep-services` | `remove --keep-data` |
 | `remove --force` | Different meaning. 0.x skipped the confirmation; 1.0 overrides protections (dirty or locked worktree, failing or untrusted teardown hooks, an unmerged branch with `--delete-branch`). A person at a terminal gets a prompt instead of needing the flag. |
-| `init [PATH]`, `init --force` | `init [--name NAME] [--postgres managed\|external] [--hook]` in an existing repository. It never overwrites a configuration. |
+| `init [PATH]`, `init --force` | `init [--name NAME] [--postgres managed\|external\|none] [--plan\|--apply PLAN.json\|--yes] [--hook]` in an existing repository. It proposes a setup from what the repository contains, asks what to accept, and never overwrites a configuration. |
 | `doctor --strict` | `devflow doctor` always exits 1 when a check fails (warnings do not). |
 | `commit`, `update` | Removed. Commit with Git directly; upgrade by rerunning the installer. |
 | `install-hooks`, `uninstall-hooks`, `git-hook` | `devflow hook install`, `devflow hook uninstall`. The 1.0 hook runs `devflow setup --if-new`; see part 3 for removing the 0.x hooks. |
 | `sync-ai-configs` | Removed, with no replacement. |
 | `cleanup` | `devflow db branch list` and `db branch delete` for stray database branches; `devflow db reconcile` for interrupted operations. |
 | `project` | `devflow list --all` lists the registered projects. |
-| `plan` | Removed. There is no dry run; `devflow trust` shows the hook commands without running them. |
+| `plan` | Removed. There is no dry run; `devflow trust` shows what the project runs (hook commands, `[env]` recipes, pitchfork processes) without running anything. |
 | `config-validate` | `devflow doctor`; every command reports configuration errors. |
 
 ## 1. Translate the configuration
 
 | 0.x (`.devflow.yml`) | 1.0 (`devflow.toml`) |
 | --- | --- |
-| `services:` entry with `service_type: postgres` | `[postgres]` with `mode = "managed"` and `image = "postgres:18"`. The image must be PostgreSQL 18 or newer. |
+| `services:` entry with `service_type: postgres` | `[services.db]` with `engine = "postgres"`, `mode = "managed"` and `image = "postgres:18"`. The image must be PostgreSQL 18 or newer. The key (`db`) is yours to choose. |
 | other `services:` entries | Removed. Declare them in `compose.yaml` or `pitchfork.toml`. |
 | `worktree.path_template: "../{repo}.{workspace}"` | `[worktree] dir = "../{repo}.worktrees"`. This is the parent directory; each workspace gets a subdirectory. |
 | `worktree.copy_files` | `[worktree] copy` |
@@ -111,16 +134,18 @@ id = "…"                          # written by `devflow init`
 dir = "../{repo}.worktrees"
 copy = [".env.local"]
 
-[postgres]
+[services.db]
+engine = "postgres"
 mode = "managed"
 image = "postgres:18"
 
 [hooks]
-setup = ["mise trust", "npm ci", "npm run migrate"]   # DATABASE_URL is already set; a new worktree is not trusted by mise yet
+setup = ["mise exec -- devflow exec -- npm ci", "mise exec -- devflow exec -- npm run migrate"]   # devflow exec sets DATABASE_URL after mise has set its own
 ```
 
 ```toml
-# mise.toml: load the generated variables in every command in the worktree
+# mise.toml: load the generated variables in shells and editors in the worktree
+# (commands devflow runs get them from `devflow exec`)
 [env]
 _.file = ".devflow/env"
 ```
@@ -128,10 +153,11 @@ _.file = ".devflow/env"
 ```toml
 # pitchfork.toml
 [daemons.api]
-run = "mise exec -- npm run dev"
+run = "devflow exec -- npm run dev"
+mise = true
 ```
 
-Move or delete `.devflow.yml`, `.devflow.local.yml` and any 0.x `.devflow.toml`. `devflow init` refuses while a `.devflow.toml` exists, and until a `devflow.toml` exists the other commands stop with the migration error. Then run `devflow init --postgres managed`. It writes `devflow.toml` with a fresh project id; edit it as above. Do not run `devflow trust` yet: part 2 restores your data before the setup hooks, which usually migrate the database, run.
+Move or delete `.devflow.yml`, `.devflow.local.yml` and any 0.x `.devflow.toml`. `devflow init` stops with the migration error while a 0.x `.devflow.toml` exists, and until a `devflow.toml` exists the other commands stop with it too. Then run `devflow init` (`--postgres managed` forces a managed server when detection finds no PostgreSQL). It shows the proposed setup, hooks and daemons included, and writes `devflow.toml` with a fresh project id once you accept; edit it as above. Writing runs nothing, so you can accept the migration hook now and let it run after part 2. Do not run `devflow trust` yet: part 2 restores your data before the setup hooks, which usually migrate the database, run.
 
 ## 2. Move your data
 

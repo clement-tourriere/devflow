@@ -1,13 +1,13 @@
-//! Project and workspace commands: init, switch, list, path, setup, remove, hook.
+//! Workspace commands: switch, list, path, setup, remove, hook.
 use super::output::{self, Palette, Printer, note, say};
 use super::{Ctx, EXIT_ATTENTION, ProjectInfo, shell, trust};
 use anyhow::{Result, anyhow, bail};
-use clap::{Args, Subcommand, ValueEnum};
-use devflow_core::config::PostgresMode;
+use clap::{Args, Subcommand};
 use devflow_core::db::DataSource;
 use devflow_core::error::{Busy, Protected};
 use devflow_core::hooks::HookReport;
-use devflow_core::project::{self, InitOptions};
+use devflow_core::pitchfork::Pitchfork;
+use devflow_core::processes::{self as core_processes, Autostart};
 use devflow_core::receipt::{Phase, PhaseState, Receipt, Status};
 use devflow_core::setup::{
     self, CreateRequest, RemoveOptions, RemoveOutcome, SetupOptions, SetupOutcome, WorkspaceStatus,
@@ -19,36 +19,6 @@ use serde_json::json;
 use std::io::IsTerminal;
 use std::path::Path;
 use std::process::ExitCode;
-
-#[derive(Clone, Copy, ValueEnum)]
-pub enum PostgresChoice {
-    /// devflow runs a PostgreSQL container with docker compose
-    Managed,
-    /// An existing PostgreSQL 18+ server
-    External,
-}
-
-impl From<PostgresChoice> for PostgresMode {
-    fn from(choice: PostgresChoice) -> Self {
-        match choice {
-            PostgresChoice::Managed => PostgresMode::Managed,
-            PostgresChoice::External => PostgresMode::External,
-        }
-    }
-}
-
-#[derive(Args)]
-pub struct InitArgs {
-    /// Project name (default: the checkout's directory name)
-    #[arg(long)]
-    pub name: Option<String>,
-    /// Add a [postgres] section for database branches
-    #[arg(long, value_enum)]
-    pub postgres: Option<PostgresChoice>,
-    /// Also install the post-checkout Git hook
-    #[arg(long)]
-    pub hook: bool,
-}
 
 #[derive(Args)]
 pub struct SwitchArgs {
@@ -69,6 +39,9 @@ pub struct SwitchArgs {
     /// Do not run hooks
     #[arg(long)]
     pub no_hooks: bool,
+    /// Run setup hooks without checking that mise hands them this workspace's variables (recorded in the receipt)
+    #[arg(long)]
+    pub skip_mise_check: bool,
 }
 
 #[derive(Args)]
@@ -98,6 +71,9 @@ pub struct SetupArgs {
     /// Data origin: a workspace, snapshot:NAME[@vN], branch:ID or empty
     #[arg(long, value_name = "SRC")]
     pub data_from: Option<DataSource>,
+    /// Run setup hooks without checking that mise hands them this workspace's variables (recorded in the receipt)
+    #[arg(long)]
+    pub skip_mise_check: bool,
     /// Entry point of the post-checkout Git hook: never prompts and never fails
     #[arg(long, hide = true)]
     pub from_git_hook: bool,
@@ -135,50 +111,6 @@ impl HookAction {
     }
 }
 
-// --- init ---------------------------------------------------------------
-
-pub fn init(ctx: &Ctx, args: InitArgs) -> Result<ExitCode> {
-    let project = project::init(
-        &ctx.cwd,
-        InitOptions {
-            name: args.name,
-            postgres: args.postgres.map(Into::into),
-        },
-    )?;
-    // The project is usable even if the optional hook cannot be installed.
-    let hook = args.hook.then(|| githook::install(&project));
-    if ctx.json {
-        let hook = hook.as_ref().map(|result| match result {
-            Ok(path) => json!({ "installed": true, "path": path }),
-            Err(error) => json!({ "installed": false, "error": format!("{error:#}") }),
-        });
-        let body = json!({
-            "project": ProjectInfo::of(&project),
-            "config": project.config_path,
-            "postgres": project.config.postgres.as_ref().map(|pg| pg.mode),
-            "hook": hook,
-        });
-        output::emit(ctx, "init", &body)?;
-        return Ok(ExitCode::SUCCESS);
-    }
-    say(format!("Created {}", project.config_path.display()));
-    match hook {
-        Some(Ok(path)) => note(format!(
-            "Installed the post-checkout hook at {}",
-            path.display()
-        )),
-        Some(Err(error)) => note(format!(
-            "warning: could not install the Git hook: {}",
-            redact::text(&format!("{error:#}"))
-        )),
-        None => {}
-    }
-    note(
-        "Next: review devflow.toml, commit it, then `devflow switch -c NAME` to create a workspace.",
-    );
-    Ok(ExitCode::SUCCESS)
-}
-
 // --- switch -------------------------------------------------------------
 
 pub fn switch(ctx: &Ctx, args: SwitchArgs) -> Result<ExitCode> {
@@ -188,21 +120,44 @@ pub fn switch(ctx: &Ctx, args: SwitchArgs) -> Result<ExitCode> {
         data_from: args.data_from,
         no_db: args.no_db,
         no_hooks: args.no_hooks,
+        skip_mise_check: args.skip_mise_check,
         ..SetupOptions::default()
     };
     let mut printer =
-        Printer::new(ctx).announcing_database(project.config.postgres.is_some() && !args.no_db);
+        Printer::new(ctx).announcing_database(!project.config.services.is_empty() && !args.no_db);
     let (outcome, created, switch_hooks) = if args.create {
-        options.trust_hooks = trust::resolve(ctx, &project, !args.no_hooks)?;
-        let request = CreateRequest {
+        // A workspace that does not exist yet is judged by the one it is made from.
+        let source = trust::target_of(&project, args.from.as_deref());
+        let relevant = trust::governs_setup(&project, !args.no_hooks)
+            || (!args.no_hooks && !project.config.hooks.switch.is_empty());
+        options.approval = trust::resolve(ctx, &project, &source, relevant)?;
+        let mut request = CreateRequest {
             name: args.name,
             from: args.from,
             options: options.clone(),
         };
-        let mut outcome = match setup::create(&project, request, &mut printer) {
+        let mut outcome = match setup::create(&project, request.clone(), &mut printer) {
             Ok(outcome) => outcome,
             Err(error) => return in_progress(ctx, "switch", &project, None, error),
         };
+        // The review was of the workspace this one is made from. An existing
+        // branch can hold other hooks, [env] or pitchfork files: core ran none
+        // of it on that approval. Ask again about what the new workspace
+        // actually holds, then resume.
+        if outcome.approval_differs && relevant && ctx.interactive() {
+            note(format!(
+                "{} holds a different configuration than the workspace it was made from.",
+                outcome.workspace.name
+            ));
+            options.approval = trust::resolve(ctx, &project, &outcome.workspace.path, true)?;
+            if options.approval.is_some() {
+                request.options = options.clone();
+                outcome = match setup::create(&project, request, &mut printer) {
+                    Ok(outcome) => outcome,
+                    Err(error) => return in_progress(ctx, "switch", &project, None, error),
+                };
+            }
+        }
         // Entering the new workspace is a switch too: its switch hooks run once
         // setup has finished.
         let hooks = first_entry_hooks(&project, &mut outcome, &options, &mut printer)?;
@@ -214,13 +169,16 @@ pub fn switch(ctx: &Ctx, args: SwitchArgs) -> Result<ExitCode> {
                 args.name
             )
         })?;
-        let hooks_may_run = !args.no_hooks && switch_runs_hooks(&project, &workspace);
-        options.trust_hooks = trust::resolve(ctx, &project, hooks_may_run)?;
+        let relevant = switch_needs_trust(&project, &workspace, args.no_hooks);
+        options.approval = trust::resolve(ctx, &project, &workspace.path, relevant)?;
         match setup::switch(&project, &workspace, options, &mut printer) {
             Ok(outcome) => (outcome, false, None),
             Err(error) => return in_progress(ctx, "switch", &project, Some(&workspace), error),
         }
     };
+    // Process state is reported apart from readiness: a start that fails or
+    // is refused never changes the workspace's status or this command's exit code.
+    let started = autostart_after(&project, &outcome);
     let code = report(
         ctx,
         "switch",
@@ -228,11 +186,26 @@ pub fn switch(ctx: &Ctx, args: SwitchArgs) -> Result<ExitCode> {
         &outcome,
         created,
         switch_hooks.as_ref(),
+        started.as_ref(),
     )?;
     if !ctx.json {
         hand_off(&outcome.workspace.path);
     }
     Ok(code)
+}
+
+/// `[pitchfork] autostart`: start the daemons of a workspace that is `ready`.
+/// `None` when the project does not ask for it.
+fn autostart_after(project: &Project, outcome: &SetupOutcome) -> Option<Autostart> {
+    if outcome.status != Status::Ready {
+        return None;
+    }
+    core_processes::autostart(
+        Pitchfork::locate().as_ref(),
+        project,
+        &outcome.workspace,
+        core_processes::DEFAULT_START_TIMEOUT,
+    )
 }
 
 /// Run the switch hooks of a freshly created workspace once it is ready: the
@@ -315,16 +288,18 @@ fn still_running(palette: Palette, workspace: &str) -> String {
     )
 }
 
-/// Whether switching into `workspace` can run hooks, so a trust prompt is
-/// worth showing: switch hooks exist, or setup is not finished.
-fn switch_runs_hooks(project: &Project, workspace: &Workspace) -> bool {
-    if !project.config.hooks.switch.is_empty() {
-        return true;
-    }
-    match Receipt::load(&workspace.git_dir) {
+/// Whether switching into `workspace` can run something an approval governs,
+/// so a trust prompt is worth showing: switch hooks exist, or setup is not
+/// finished and would run setup hooks or apply `[env]` recipes.
+fn switch_needs_trust(project: &Project, workspace: &Workspace, no_hooks: bool) -> bool {
+    let setup_runs = match setup::receipt(project, workspace) {
         Ok(Some(receipt)) => receipt.status() != Status::Ready,
         _ => true,
-    }
+    };
+    let hooks = !no_hooks
+        && (!project.config.hooks.switch.is_empty()
+            || (setup_runs && !project.config.hooks.setup.is_empty()));
+    hooks || (setup_runs && !project.config.env.is_empty())
 }
 
 /// Move the caller's shell into `path`: through the wrapper when installed,
@@ -421,18 +396,21 @@ fn workspace_table(ctx: &Ctx, items: &[WorkspaceStatus]) -> String {
             } else {
                 " "
             };
-            let database = item
-                .receipt
-                .as_ref()
-                .and_then(|receipt| receipt.data.as_ref())
-                .map_or("—".to_string(), |data| data.database.clone());
+            let database =
+                item.receipt.as_ref().map_or("—".to_string(), |receipt| {
+                    match receipt.first_postgres() {
+                        Some(binding) => binding.database.clone(),
+                        None if receipt.unmapped.is_some() => "(unmapped)".to_string(),
+                        None => "—".to_string(),
+                    }
+                });
             vec![
                 format!("{marker} {}", workspace.name),
                 workspace
                     .branch
                     .clone()
                     .unwrap_or_else(|| "(detached)".into()),
-                status_label(item).to_string(),
+                status_label(item),
                 database,
                 output::tilde(&workspace.path),
             ]
@@ -441,7 +419,7 @@ fn workspace_table(ctx: &Ctx, items: &[WorkspaceStatus]) -> String {
     output::table(&["  NAME", "BRANCH", "STATUS", "DATABASE", "PATH"], &rows)
 }
 
-fn status_label(item: &WorkspaceStatus) -> &'static str {
+fn status_label(item: &WorkspaceStatus) -> String {
     if item.workspace.missing {
         "missing"
     } else if item.busy {
@@ -449,11 +427,23 @@ fn status_label(item: &WorkspaceStatus) -> &'static str {
     } else {
         match item.status {
             None => "not set up",
-            Some(Status::Ready) => "ready",
+            Some(Status::Ready) => {
+                // Ready, but nobody checked what mise hands the setup hooks.
+                let skipped = item
+                    .receipt
+                    .as_ref()
+                    .is_some_and(|r| r.mise_check_skipped_at.is_some());
+                if skipped {
+                    "ready (mise check skipped)"
+                } else {
+                    "ready"
+                }
+            }
             Some(Status::NeedsAttention) => "needs attention",
             Some(Status::InProgress) => "in progress",
         }
     }
+    .to_string()
 }
 
 pub fn path(ctx: &Ctx, args: PathArgs) -> Result<ExitCode> {
@@ -485,11 +475,18 @@ pub fn setup(ctx: &Ctx, args: SetupArgs) -> Result<ExitCode> {
     let project = ctx.project()?;
     ctx.register(&project);
     let workspace = current_workspace(ctx, &project)?;
-    let provisions = project.config.postgres.is_some() && args.database_url.is_none();
+    let provisions = project.config.containers().next().is_some()
+        || (project.config.postgres().is_some() && args.database_url.is_none());
     let options = SetupOptions {
         data_from: args.data_from,
         database_url: args.database_url,
-        trust_hooks: trust::resolve(ctx, &project, true)?,
+        approval: trust::resolve(
+            ctx,
+            &project,
+            &workspace.path,
+            trust::governs_setup(&project, true),
+        )?,
+        skip_mise_check: args.skip_mise_check,
         ..SetupOptions::default()
     };
     let mut printer = Printer::new(ctx).announcing_database(provisions);
@@ -505,7 +502,18 @@ pub fn setup(ctx: &Ctx, args: SetupArgs) -> Result<ExitCode> {
         Err(error) => return in_progress(ctx, "setup", &project, Some(&workspace), error),
     };
     match outcome {
-        Some(outcome) => report(ctx, "setup", &project, &outcome, false, None),
+        Some(outcome) => {
+            let started = autostart_after(&project, &outcome);
+            report(
+                ctx,
+                "setup",
+                &project,
+                &outcome,
+                false,
+                None,
+                started.as_ref(),
+            )
+        }
         None => {
             if ctx.json {
                 let body = json!({
@@ -538,7 +546,6 @@ fn setup_from_git_hook(ctx: &Ctx, args: SetupArgs) -> ExitCode {
         let options = SetupOptions {
             data_from: args.data_from,
             database_url: args.database_url,
-            trust_hooks: devflow_core::trust::env_override(),
             ..SetupOptions::default()
         };
         setup::setup(
@@ -547,7 +554,7 @@ fn setup_from_git_hook(ctx: &Ctx, args: SetupArgs) -> ExitCode {
             options,
             args.if_new,
             args.new_instance,
-            &mut Printer::new(ctx).announcing_database(project.config.postgres.is_some()),
+            &mut Printer::new(ctx).announcing_database(!project.config.services.is_empty()),
         )
     })();
     match result {
@@ -588,6 +595,7 @@ fn report(
     outcome: &SetupOutcome,
     created: bool,
     switch_hooks: Option<&HookReport>,
+    processes: Option<&Autostart>,
 ) -> Result<ExitCode> {
     if ctx.json {
         #[derive(Serialize)]
@@ -600,6 +608,9 @@ fn report(
             /// reported apart from `hooks`, which holds the setup run.
             #[serde(skip_serializing_if = "Option::is_none")]
             switch_hooks: Option<&'a HookReport>,
+            /// What `[pitchfork] autostart` did, apart from `status`.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            processes: Option<&'a Autostart>,
             #[serde(flatten)]
             outcome: &'a SetupOutcome,
         }
@@ -609,11 +620,17 @@ fn report(
             skipped: false,
             path: &outcome.workspace.path,
             switch_hooks,
+            processes,
             outcome,
         };
         output::emit(ctx, command, &doc)?;
     } else {
         print_summary(outcome);
+        if let Some(autostart) = processes {
+            for line in super::processes::autostart_lines(autostart, Palette::stderr()) {
+                note(line);
+            }
+        }
     }
     Ok(match outcome.status {
         Status::Ready => ExitCode::SUCCESS,
@@ -635,11 +652,20 @@ fn summary_lines(outcome: &SetupOutcome, palette: Palette) -> Vec<String> {
         .map(|warning| format!("warning: {}", redact::text(warning)))
         .collect();
     match outcome.status {
-        Status::Ready => lines.push(format!(
-            "{} {} is ready",
-            palette.green("✓"),
-            workspace.name
-        )),
+        Status::Ready => {
+            lines.push(format!(
+                "{} {} is ready",
+                palette.green("✓"),
+                workspace.name
+            ));
+            if outcome.receipt.mise_check_skipped_at.is_some() {
+                lines.push(
+                    "  The setup hooks ran with --skip-mise-check: nobody checked that mise \
+                     hands them this workspace's variables."
+                        .to_string(),
+                );
+            }
+        }
         Status::InProgress => lines.push(still_running(palette, &workspace.name)),
         Status::NeedsAttention => {
             lines.push(format!(
@@ -647,7 +673,7 @@ fn summary_lines(outcome: &SetupOutcome, palette: Palette) -> Vec<String> {
                 palette.yellow("!"),
                 workspace.name
             ));
-            let mut hooks_skipped = false;
+            let mut needs_trust = false;
             let mut failed = false;
             for phase in Phase::ALL {
                 let record = outcome.receipt.phase(phase);
@@ -655,14 +681,19 @@ fn summary_lines(outcome: &SetupOutcome, palette: Palette) -> Vec<String> {
                 if record.state != PhaseState::Failed && !skipped {
                     continue;
                 }
-                hooks_skipped |= skipped && phase == Phase::Hooks;
+                needs_trust |= skipped
+                    && matches!(phase, Phase::Hooks | Phase::Env)
+                    && record
+                        .detail
+                        .as_deref()
+                        .is_some_and(|d| d.contains("devflow trust"));
                 failed |= record.state == PhaseState::Failed;
                 let detail = record.detail.as_deref().unwrap_or("no details recorded");
                 lines.push(format!("  {}: {}", phase.as_str(), redact::text(detail)));
             }
-            if hooks_skipped {
+            if needs_trust {
                 lines.push(
-                    "  Review the hooks with `devflow trust` (or set DEVFLOW_TRUST_HOOKS=1), then run `devflow setup` here to finish."
+                    "  Review what this project runs with `devflow trust` (or set DEVFLOW_TRUST_HOOKS=1), then run `devflow setup` here to finish."
                         .to_string(),
                 );
             }
@@ -670,6 +701,13 @@ fn summary_lines(outcome: &SetupOutcome, palette: Palette) -> Vec<String> {
                 lines.push(format!(
                     "  Logs: {}. Fix the problem, then run `devflow setup` in {} to resume.",
                     Receipt::logs_dir(&workspace.git_dir).display(),
+                    workspace.path.display()
+                ));
+            }
+            if !failed && !needs_trust {
+                // Phases reopened by a configuration change.
+                lines.push(format!(
+                    "  Run `devflow setup` in {} to apply the change.",
                     workspace.path.display()
                 ));
             }
@@ -686,8 +724,14 @@ pub fn remove(ctx: &Ctx, args: RemoveArgs) -> Result<ExitCode> {
         force: args.force,
         keep_data: args.keep_data,
         delete_branch: args.delete_branch,
-        trust_hooks: trust::resolve(ctx, &project, !project.config.hooks.teardown.is_empty())?,
+        approval: trust::resolve(
+            ctx,
+            &project,
+            &trust::target_of(&project, Some(&args.name)),
+            !project.config.hooks.teardown.is_empty(),
+        )?,
         cwd: Some(ctx.cwd.clone()),
+        pitchfork: None,
         // The user named the workspace on the command line just now.
         expect: None,
     };
@@ -732,6 +776,13 @@ pub fn remove(ctx: &Ctx, args: RemoveArgs) -> Result<ExitCode> {
         outcome.workspace.name,
         output::tilde(&outcome.workspace.path)
     ));
+    if !outcome.stopped_daemons.is_empty() {
+        say(format!(
+            "  stopped {} pitchfork daemon(s): {}",
+            outcome.stopped_daemons.len(),
+            outcome.stopped_daemons.join(", ")
+        ));
+    }
     if let Some(id) = outcome.dropped_branch {
         say(format!("  dropped database branch {id}"));
     } else if args.keep_data {
@@ -814,6 +865,7 @@ mod tests {
             payload: Vec::new(),
             hooks: None,
             warnings: vec!["could not clone x".into()],
+            approval_differs: false,
         }
     }
 
@@ -822,7 +874,7 @@ mod tests {
         for phase in [
             Phase::Materialize,
             Phase::Payload,
-            Phase::Database,
+            Phase::Services,
             Phase::Env,
         ] {
             receipt.set_phase(phase, PhaseState::Done, None);
@@ -844,12 +896,41 @@ mod tests {
     #[test]
     fn explains_skipped_hooks_and_failed_phases() {
         let mut receipt = receipt();
-        receipt.skip_required(Phase::Hooks, "hooks are not trusted".into());
+        receipt.skip_required(
+            Phase::Hooks,
+            "setup hooks are not trusted; review them with `devflow trust`".into(),
+        );
         let lines = summary_lines(&outcome(receipt.clone()), Palette::stdout()).join("\n");
         assert!(lines.contains("feature/a needs attention"), "{lines}");
-        assert!(lines.contains("hooks: hooks are not trusted"), "{lines}");
-        assert!(lines.contains("`devflow trust`"), "{lines}");
+        assert!(
+            lines.contains("hooks: setup hooks are not trusted"),
+            "{lines}"
+        );
+        assert!(
+            lines.contains("Review what this project runs with `devflow trust`"),
+            "{lines}"
+        );
         assert!(!lines.contains("Logs:"), "{lines}");
+
+        // Untrusted [env] recipes say the same; a skip a configuration change
+        // reopened asks for a setup, not for a review.
+        let mut env = self::receipt();
+        env.skip_required(
+            Phase::Env,
+            "the [env] recipes and presets are not trusted; review them with `devflow trust`"
+                .into(),
+        );
+        let lines = summary_lines(&outcome(env), Palette::stdout()).join("\n");
+        assert!(lines.contains("env: the [env] recipes"), "{lines}");
+        assert!(lines.contains("`devflow trust`"), "{lines}");
+        let mut drift = self::receipt();
+        drift.skip_required(
+            Phase::Env,
+            "configuration changed since .devflow/env was written; run `devflow setup`".into(),
+        );
+        let lines = summary_lines(&outcome(drift), Palette::stdout()).join("\n");
+        assert!(!lines.contains("Review what"), "{lines}");
+        assert!(lines.contains("to apply the change"), "{lines}");
 
         receipt.set_phase(
             Phase::Hooks,

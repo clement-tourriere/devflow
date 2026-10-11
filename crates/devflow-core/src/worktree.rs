@@ -397,27 +397,37 @@ fn plan_removal(project: &Project, workspace: &Workspace, ignore_lock: bool) -> 
 /// Whether `dir`'s `.git` is a regular file pointing at the administrative
 /// directory `admin`, which is how Git ties a checkout to its worktree.
 fn is_checkout_of(dir: &Path, admin: &Path) -> bool {
+    linked_git_dir(dir).is_some_and(|target| target == admin)
+}
+
+/// What the regular file `dir/.git` of a linked worktree points at
+/// (`gitdir: …`, a relative path resolved against `dir`), canonicalized.
+fn linked_git_dir(dir: &Path) -> Option<PathBuf> {
     let git_file = dir.join(".git");
-    if !git_file.symlink_metadata().is_ok_and(|m| m.is_file()) {
-        return false;
+    if !git_file.symlink_metadata().ok()?.is_file() {
+        return None;
     }
-    let Ok(text) = std::fs::read_to_string(&git_file) else {
-        return false;
-    };
-    let Some(target) = text
-        .lines()
-        .next()
-        .and_then(|line| line.strip_prefix("gitdir:"))
-    else {
-        return false;
-    };
-    let target = Path::new(target.trim());
+    let text = std::fs::read_to_string(&git_file).ok()?;
+    let target = text.lines().next()?.strip_prefix("gitdir:")?.trim();
+    let target = Path::new(target);
     let target = if target.is_relative() {
         dir.join(target)
     } else {
         target.to_path_buf()
     };
-    target.canonicalize().is_ok_and(|t| t == admin)
+    target.canonicalize().ok()
+}
+
+/// The Git directory of the checkout at `dir`, read from `dir/.git` without
+/// running Git: `.git` itself for a main checkout, what its `.git` file points
+/// at for a linked worktree. It is where devflow keeps the workspace's receipt.
+/// `None` when `dir` is not a checkout.
+pub fn git_dir_of(dir: &Path) -> Option<PathBuf> {
+    let dot_git = dir.join(".git");
+    if dot_git.symlink_metadata().ok()?.is_dir() {
+        return dot_git.canonicalize().ok();
+    }
+    linked_git_dir(dir)
 }
 
 fn remove_inner(project: &Project, workspace: &Workspace, ignore_lock: bool) -> Result<()> {

@@ -1,0 +1,16 @@
+[[services]]
+name = "app-db"
+type = "local"
+service_type = "postgres"
+default = true
+
+[worktree]
+path_template = "../{repo}.{workspace}"
+copy_files = [".env.local"]
+
+[hooks.post-create]
+install = "npm ci"
+migrate = "npm run migrate"
+
+[processes.daemons.api]
+run = "npm run dev"

@@ -1,15 +1,27 @@
 # pitchfork.toml: long-running processes. devflow does not supervise processes;
-# pitchfork discovers each worktree and namespaces its daemons, so the same file
-# works in every worktree and the daemons never collide.
+# pitchfork does. devflow gives each worktree its own namespace in a
+# machine-local pitchfork.local.toml, so the same file works in every worktree
+# and the daemons never collide. Do not declare a top-level `namespace` here:
+# pitchfork refuses sibling files that disagree, and devflow would write none.
 #
-# `mise exec --` loads .devflow/env (see mise.toml), so each daemon talks to the
-# database branch of the worktree it runs in.
+# `devflow exec -- CMD` puts the worktree's .devflow/env on the command after
+# whatever mise (`mise = true`: the toolchain) and the shell have set, so each
+# daemon talks to the database branch of the worktree it runs in, however mise
+# is configured. This is the only way the environment reaches a daemon: devflow
+# never writes env or credentials into pitchfork files.
 #
-# Ready checks, retries, schedules and the HTTPS proxy are pitchfork options;
-# see its documentation.
+# `devflow up` starts these daemons for a ready workspace whose pitchfork files
+# `devflow trust` approved. Avoid `cron`, `watch`, `boot_start` and `auto`
+# unless you want them: pitchfork starts those on its own (a supervisor started
+# anywhere in the repository runs them), so devflow then starts nothing in
+# bulk. Ready checks, retries and the HTTPS proxy are pitchfork options; see
+# its documentation.
 
 [daemons.api]
-run = "mise exec -- bun run dev"
+run = "devflow exec -- bun run dev"
+mise = true
+port = { expect = [3000], bump = true }
 
 [daemons.worker]
-run = "mise exec -- bun run worker"
+run = "devflow exec -- bun run worker"
+mise = true

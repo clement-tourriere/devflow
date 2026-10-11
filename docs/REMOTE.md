@@ -22,7 +22,7 @@ Run PostgreSQL once, on a machine that stays up, and let code run elsewhere: lap
 
 ## 1. Prepare the data host
 
-The server must be PostgreSQL 18 or newer, and its data directory must be on a filesystem that supports reflinks: btrfs, XFS created with `reflink=1`, ZFS 2.2 or newer, or an OrbStack volume. On ext4 and Docker Desktop, branches still work but each one is a full copy, and for a managed server devflow reports `copy`. For an external server devflow cannot measure the filesystem: it reports `unknown` unless you declare `cow` (below), and `copy` only when `file_copy_method` is not `clone`. Set `require_cow = true` under `[postgres]` to refuse branches unless copy-on-write is verified.
+The server must be PostgreSQL 18 or newer, and its data directory must be on a filesystem that supports reflinks: btrfs, XFS created with `reflink=1`, ZFS 2.2 or newer, or an OrbStack volume. On ext4 and Docker Desktop, branches still work but each one is a full copy, and for a managed server devflow reports `copy`. For an external server devflow cannot measure the filesystem: it reports `unknown` unless you declare `cow` (below), and `copy` only when `file_copy_method` is not `clone`. Set `require_cow = true` under `[services.db]` to refuse branches unless copy-on-write is verified.
 
 Check the filesystem before you declare anything. From a directory on the same filesystem as `$PGDATA`:
 
@@ -53,7 +53,8 @@ Commit only what is not secret:
 
 ```toml
 # devflow.toml
-[postgres]
+[services.db]
+engine = "postgres"
 mode = "external"
 app_host = "db.tailnet.example"      # host written into workspace URLs, if different from the admin endpoint
 app_port = 5432                      # port written into workspace URLs, if different from the admin endpoint
@@ -63,7 +64,7 @@ Keep the admin URL on the trusted machine, in the git-ignored `devflow.local.tom
 
 ```toml
 # devflow.local.toml
-[postgres]
+[services.db]                        # the same key as in devflow.toml
 admin_url = "postgres://prov:…@db.internal:5432/postgres"
 cow = "verified"                     # your declaration, after the check above; devflow cannot measure an external server
 ```
@@ -82,17 +83,18 @@ devflow db up
 
 ```toml
 # devflow.toml
-[postgres]
+[services.db]
+engine = "postgres"
 mode = "managed"
 image = "postgres:18"
 bind = "100.101.102.103"             # IP address (not a hostname) on the data host the container port is published on
-port = 5432                          # recommended: fixed, so URLs survive restarts
+port = 5432                          # optional: choose the port yourself (default 0: devflow allocates one and keeps it)
 app_host = "datahost.tailnet.example"
 ```
 
 Docker's volume storage on the engine host must be on a reflink filesystem. devflow measures the real clone path once per server start and records `verified`, `copy` or `unknown`; `devflow db status` and `devflow doctor` show it. `compose.yaml` and the generated superuser password (`admin.json`, mode 0600) are written on the machine where you run `devflow db up`, not on the engine host, under `postgres/<project id>/` in devflow's data directory: `~/Library/Application Support/devflow` on macOS, `$XDG_DATA_HOME/devflow` (default `~/.local/share/devflow`) on Linux, or `DEVFLOW_DATA_DIR`. `compose.yaml` there also contains the superuser password (mode 0600).
 
-Nothing enforces a fixed `port`. With `port = 0` Docker picks one and it changes when the container restarts: devflow rewrites the URLs of its own workspaces on the next `devflow switch`, but URL-only sandboxes are never refreshed.
+With `port = 0` (the default) devflow allocates the host port once, from the project and service identity in 20000–39999, records it in `admin.json` and publishes it fixed from then on, so URLs survive container restarts. The first allocation moves on to the next candidate when Docker cannot bind one; a recorded port that is taken later makes `devflow db up` fail with the port and the cause, and devflow never moves it. An explicit `port` overrides the allocation. Servers started by an earlier 1.0 build kept an ephemeral port: the next `devflow db up` allocates a stable one, and the next `devflow switch` rewrites the URLs of its own workspaces (URL-only sandboxes are never refreshed).
 
 With a bind address other than loopback, `on_busy_source` defaults to `fail`: cloning a database that has open connections is refused. On loopback a managed server defaults to `disconnect`, which terminates the open sessions of the source database. Set `"disconnect"` here only if aborting those sessions is acceptable.
 
@@ -117,7 +119,7 @@ The document also has `host`, `port`, `user`, `password` and `database`, and a `
 
 To make launcher retries safe, pass a stable id: `devflow db branch create --instance-id UUID …` reuses the branch created for that id and sets a new password instead of creating a second branch, which invalidates any URL handed out earlier.
 
-`db branch create` and `db url` are the only commands that print the password (it is also in the generated `.devflow/env`, mode 0600). Inject the URL into the sandbox through your launcher's secret mechanism. Inside the sandbox, with the repository checked out:
+`db branch create` and `db url` are the commands that print a database password (`devflow service NAME url` prints a container service's, and `devflow env list --show-values` the recipes and variables of a workspace; the password is also in the generated `.devflow/env`, mode 0600). Inject the URL into the sandbox through your launcher's secret mechanism. Inside the sandbox, with the repository checked out:
 
 ```sh
 devflow setup --database-url "$BRANCH_URL"
@@ -133,7 +135,9 @@ A VM fork copies the worktree, including its receipt and database binding. Give 
 devflow setup --new-instance            # or run `devflow setup` with DEVFLOW_INSTANCE_ID=UUID set
 ```
 
-This marks the database, env and hooks phases pending and provisions a new branch, from `--data-from` if given, otherwise as a clone of the previous binding's branch, otherwise from the recorded data source. It needs the admin URL, so use it only in a trusted fork. The copied binding has no authority over the original branch: only the instance that created a branch may reset or drop it.
+This marks the database, env and hooks phases pending and provisions a new branch, from `--data-from` if given, otherwise as a clone of the previous binding's branch, otherwise from the recorded data source. It needs the admin URL, so use it only in a trusted fork.
+
+The identity is also the pitchfork namespace (`df-<project8>-<instance8>`) the workspace's daemons run under, so devflow checks that the old identity's daemons are gone before it replaces it, and refuses (`daemons_running`, or `state_unknown` when it cannot tell) otherwise: run `devflow down` first. A receipt copied from another machine carries that machine's record of started daemons, which says nothing about this one. devflow tells the two situations apart by how the new identity is chosen: with `DEVFLOW_INSTANCE_ID` set to another instance the orchestrator has declared the receipt a copy, and the record and a pitchfork that cannot answer do not block (a daemon that this machine's own pitchfork lists as active in the old namespace still does). With `--new-instance` alone nothing is declared; if the copy has a record and no supervisor, run `pitchfork supervisor start` (an up supervisor that lists nothing active proves nothing runs) or use `DEVFLOW_INSTANCE_ID`. The copied binding has no authority over the original branch: only the instance that created a branch may reset or drop it.
 
 For an untrusted fork, provision from the trusted side and attach the result:
 

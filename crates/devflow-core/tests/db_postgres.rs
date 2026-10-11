@@ -53,7 +53,7 @@ struct Env {
 
 fn write_config(repo: &std::path::Path, name: &str, id: Uuid, postgres: &str, local: Option<&str>) {
     let text = format!(
-        "[project]\nname = \"{name}\"\nid = \"{id}\"\n\n[postgres]\nmode = \"managed\"\nimage = \"postgres:18\"\n{postgres}\n"
+        "[project]\nname = \"{name}\"\nid = \"{id}\"\n\n[services.db]\nengine = \"postgres\"\nmode = \"managed\"\nimage = \"postgres:18\"\n{postgres}\n"
     );
     std::fs::write(repo.join("devflow.toml"), text).unwrap();
     let local_path = repo.join("devflow.local.toml");
@@ -66,7 +66,7 @@ fn write_config(repo: &std::path::Path, name: &str, id: Uuid, postgres: &str, lo
 }
 
 impl Env {
-    /// `postgres` is extra lines for the `[postgres]` section of `devflow.toml`.
+    /// `postgres` is extra lines for the `[services.db]` section of `devflow.toml`.
     fn new(postgres: &str) -> Env {
         let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let data = tempfile::tempdir().unwrap();
@@ -85,7 +85,7 @@ impl Env {
         let project = Project::open(repo.path()).unwrap();
         let server = Server::for_project(&project)
             .unwrap()
-            .expect("[postgres] section");
+            .expect("postgres service");
         let managed = server.managed().expect("managed mode");
         let guard = ComposeGuard {
             project: managed.compose_project.clone(),
@@ -113,7 +113,7 @@ impl Env {
     fn server(&self) -> Server {
         Server::for_project(&self.project())
             .unwrap()
-            .expect("[postgres] section")
+            .expect("postgres service")
     }
 
     fn admin_json(&self) -> serde_json::Value {
@@ -152,6 +152,21 @@ fn url_for(creds: &BranchCredentials, db: &str) -> String {
         "postgres://{}:{}@{}:{}/{db}",
         creds.user, creds.password, creds.host, creds.port
     )
+}
+
+/// The branch logins that can connect to `db` through their own grants (no
+/// login inherits the owner, which does hold `CONNECT`): the one it belongs to.
+fn logins_with_connect(admin: &mut Client, db: &str) -> Vec<String> {
+    admin
+        .query(
+            "SELECT r.rolname::text FROM pg_roles r WHERE r.rolname LIKE 'dfl\\_%' \
+             AND has_database_privilege(r.oid, $1::name, 'CONNECT') ORDER BY 1",
+            &[&db],
+        )
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect()
 }
 
 fn can_connect(url: &str) -> bool {
@@ -334,11 +349,23 @@ fn lifecycle_isolation_snapshots_reset() {
          CREATE SCHEMA app; CREATE TABLE app.t (i int);",
     )
     .unwrap();
-    // RESET ROLE returns to the role from ALTER ROLE ... SET, so only
-    // SET ROLE NONE produces login-owned stragglers.
+    // RESET ROLE returns to the role from ALTER ROLE ... SET.
     ca.batch_execute("RESET ROLE").unwrap();
     assert_eq!(one::<String>(&mut ca, "SELECT current_user::text"), owner);
-    ca.batch_execute("SET ROLE NONE; CREATE TABLE straggler (i int); INSERT INTO straggler VALUES (7); RESET ROLE")
+    // The login does not inherit the owner, so it can no longer leave objects
+    // of its own behind with SET ROLE NONE (it has no CREATE on the schema).
+    assert!(
+        ca.batch_execute("SET ROLE NONE; CREATE TABLE nope (i int)")
+            .is_err()
+    );
+    ca.batch_execute("RESET ROLE").unwrap();
+    // Login-owned objects an earlier build allowed are made by the harness.
+    superuser(&server, &a.database)
+        .batch_execute(&format!(
+            "CREATE TABLE straggler (i int); INSERT INTO straggler VALUES (7); \
+             ALTER TABLE straggler OWNER TO {}",
+            a.user
+        ))
         .unwrap();
     assert_eq!(
         one::<String>(
@@ -439,7 +466,7 @@ fn lifecycle_isolation_snapshots_reset() {
     assert!(one::<bool>(
         &mut admin,
         &format!(
-            "SELECT inherit_option AND set_option FROM pg_auth_members \
+            "SELECT NOT inherit_option AND set_option FROM pg_auth_members \
              WHERE roleid = to_regrole('{owner}') AND member = to_regrole('{}')",
             a.user
         )
@@ -452,12 +479,17 @@ fn lifecycle_isolation_snapshots_reset() {
         ),
     );
     assert!(
-        acl.contains(&format!("{owner}=CT/")) && !acl.contains('*'),
-        "owner gets CREATE, TEMPORARY and no grant option: {acl}"
+        acl.contains(&format!("{owner}=CTc/")) && !acl.contains('*'),
+        "owner gets CREATE, TEMPORARY, CONNECT and no grant option: {acl}"
     );
     assert!(
         acl.contains(&format!("{}=c/", a.user)) && acl.matches("=c/").count() == 1,
-        "only the branch login has CONNECT: {acl}"
+        "the branch login has CONNECT: {acl}"
+    );
+    assert_eq!(
+        logins_with_connect(&mut admin, &a.database),
+        std::slice::from_ref(&a.user),
+        "no other branch login reaches it, though the shared owner can"
     );
     assert_eq!(
         count(
@@ -704,6 +736,181 @@ fn lifecycle_isolation_snapshots_reset() {
 /// them, retries, and warns.
 #[test]
 #[ignore = "needs Docker"]
+fn a_branch_is_named_by_the_short_id_a_listing_shows() {
+    use devflow_core::db::DataSource;
+    use devflow_core::ids::{IdRef, short};
+    let env = Env::new("");
+    let server = env.server();
+    server.up().unwrap();
+    let a = server
+        .create_branch("a", ResolvedSource::Empty, None)
+        .unwrap();
+    let b = server
+        .create_branch("b", ResolvedSource::Empty, None)
+        .unwrap();
+    let typed = |id: Uuid| -> IdRef { short(id).parse().unwrap() };
+    assert_eq!(
+        server.resolve_branch(&typed(a.branch.id)).unwrap(),
+        a.branch.id
+    );
+    assert_eq!(
+        server.resolve_branch(&typed(b.branch.id)).unwrap(),
+        b.branch.id
+    );
+    // Dashes and case do not matter; a whole UUID is not looked up.
+    let dashed: IdRef = format!("{}-{}", &short(a.branch.id)[..4], &short(a.branch.id)[4..])
+        .to_uppercase()
+        .parse()
+        .unwrap();
+    assert_eq!(server.resolve_branch(&dashed).unwrap(), a.branch.id);
+    assert_eq!(
+        server.resolve_branch(&IdRef::Full(a.branch.id)).unwrap(),
+        a.branch.id
+    );
+    // `--data-from branch:SHORT` names the same branch.
+    let source: DataSource = format!("branch:{}", short(b.branch.id)).parse().unwrap();
+    let ids: Vec<Uuid> = server
+        .list_branches()
+        .unwrap()
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(source.branch_id(ids).unwrap(), Some(b.branch.id));
+    // Unknown: an error, never another branch.
+    let error = server
+        .resolve_branch(&"deadbeef".parse().unwrap())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("no branch has an id starting with"),
+        "{error}"
+    );
+    // The drop by short id removes that branch only.
+    let id = server.resolve_branch(&typed(a.branch.id)).unwrap();
+    server.drop_branch(id).unwrap();
+    assert!(server.branch(a.branch.id).unwrap().is_none());
+    assert!(server.branch(b.branch.id).unwrap().is_some());
+}
+
+#[test]
+#[ignore = "needs Docker"]
+fn a_branch_login_can_size_its_own_database_and_still_reaches_no_other() {
+    let env = Env::new("extra_databases = [\"test\"]");
+    let server = env.server();
+    server.up().unwrap();
+    let mut admin = superuser(&server, "postgres");
+    let owner = format!("dfo_{}", &env.id.simple().to_string()[..8]);
+    let a = server
+        .create_branch("a", ResolvedSource::Empty, None)
+        .unwrap();
+    let b = server
+        .create_branch("b", ResolvedSource::Empty, None)
+        .unwrap();
+
+    // What GUI tools (pgAdmin, DBeaver, Prisma Studio) ask: the session acts
+    // as the owner, which can connect to the branch's own databases.
+    for url in [a.url.clone(), a.extra_urls["test"].clone()] {
+        let mut client = connect(&url);
+        assert_eq!(
+            one::<String>(&mut client, "SELECT current_user::text"),
+            owner
+        );
+        assert!(one::<bool>(
+            &mut client,
+            "SELECT has_database_privilege(current_database(), 'CONNECT')"
+        ));
+        assert!(one::<i64>(&mut client, "SELECT pg_database_size(current_database())") > 0);
+    }
+
+    // Isolation: no login connects to a sibling's database or scratch
+    // database, whatever the shared owner may do.
+    assert!(!can_connect(&url_for(&a, &b.database)));
+    assert!(!can_connect(&url_for(&b, &a.database)));
+    assert!(!can_connect(&url_for(&a, &b.branch.extras[0].db_name)));
+    assert!(!can_connect(&url_for(&b, &a.branch.extras[0].db_name)));
+    assert!(!can_connect(&url_for(&a, "devflow")));
+    assert_eq!(
+        logins_with_connect(&mut admin, &a.database),
+        std::slice::from_ref(&a.user)
+    );
+    assert_eq!(
+        logins_with_connect(&mut admin, &b.database),
+        std::slice::from_ref(&b.user)
+    );
+    assert_eq!(
+        count(
+            &mut admin,
+            &format!(
+                "SELECT 1 FROM pg_auth_members m WHERE m.roleid = to_regrole('{owner}') \
+                 AND m.member IN (to_regrole('{}'), to_regrole('{}')) AND m.inherit_option",
+                a.user, b.user
+            )
+        ),
+        0,
+        "no login inherits the owner"
+    );
+
+    // A branch made before this was so: the login inherited the owner, which
+    // held no CONNECT. The next operation on the project converges it, before
+    // anything else, and the isolation holds afterwards.
+    let scratch = a.branch.extras[0].db_name.clone();
+    admin
+        .batch_execute(&format!(
+            "REVOKE CONNECT ON DATABASE {db} FROM {owner}; \
+             REVOKE CONNECT ON DATABASE {scratch} FROM {owner}; \
+             GRANT {owner} TO {login} WITH INHERIT TRUE, SET TRUE, ADMIN FALSE",
+            db = a.database,
+            login = a.user,
+        ))
+        .unwrap();
+    let mut old = connect(&a.url);
+    assert!(!one::<bool>(
+        &mut old,
+        "SELECT has_database_privilege(current_database(), 'CONNECT')"
+    ));
+    assert!(
+        old.simple_query("SELECT pg_database_size(current_database())")
+            .is_err(),
+        "the old state is the reported failure"
+    );
+    drop(old);
+    let report = server.reconcile().unwrap();
+    assert!(
+        report
+            .actions
+            .iter()
+            .any(|action| action.contains("no longer inherit"))
+            && report
+                .actions
+                .iter()
+                .any(|action| action.contains("2 databases")),
+        "{report:?}"
+    );
+    let mut fixed = connect(&a.url);
+    assert!(one::<i64>(&mut fixed, "SELECT pg_database_size(current_database())") > 0);
+    assert!(!can_connect(&url_for(&a, &b.database)));
+    assert!(!can_connect(&url_for(&b, &a.database)));
+    assert_eq!(
+        logins_with_connect(&mut admin, &a.database),
+        std::slice::from_ref(&a.user)
+    );
+    // Converged: nothing left to do.
+    let again = server.reconcile().unwrap();
+    assert!(again.actions.is_empty(), "{again:?}");
+
+    // A reset keeps it (the replacement database is opened to both).
+    let reset = server
+        .reset_branch(a.branch.id, ResolvedSource::Empty)
+        .unwrap();
+    assert_eq!(reset.status, RecordStatus::Ready);
+    let mut after = connect(&a.url);
+    assert!(one::<i64>(&mut after, "SELECT pg_database_size(current_database())") > 0);
+    assert!(!can_connect(&url_for(&b, &a.database)));
+    assert!(!can_connect(&url_for(&a, &b.database)));
+}
+
+#[test]
+#[ignore = "needs Docker"]
 fn busy_source_policies() {
     let env = Env::new("on_busy_source = \"fail\"");
     let server = env.server();
@@ -798,7 +1005,7 @@ fn require_cow_follows_the_capability() {
     // External mode against the same server, as the superuser.
     let external = |cow: &str| {
         let local = format!(
-            "[postgres]\nmode = \"external\"\nadmin_url = \"{}\"\nrequire_cow = true\n{cow}\n",
+            "[services.db]\nengine = \"postgres\"\nmode = \"external\"\nadmin_url = \"{}\"\nrequire_cow = true\n{cow}\n",
             super_url(&server, "postgres")
         );
         env.write_config("", Some(&local));
@@ -872,7 +1079,7 @@ fn non_superuser_provisioner_external_mode() {
     env.write_config(
         "",
         Some(&format!(
-            "[postgres]\nmode = \"external\"\nadmin_url = \"postgres://prov:provpw@127.0.0.1:{port}/postgres\"\non_busy_source = \"fail\"\n"
+            "[services.db]\nengine = \"postgres\"\nmode = \"external\"\nadmin_url = \"postgres://prov:provpw@127.0.0.1:{port}/postgres\"\non_busy_source = \"fail\"\nextra_databases = [\"test\"]\n"
         )),
     );
     let server = env.server();
@@ -898,6 +1105,19 @@ fn non_superuser_provisioner_external_mode() {
         .create_branch("a", ResolvedSource::Empty, None)
         .unwrap();
     assert_eq!(a.branch.cow, CowCapability::Unknown);
+    // The scratch database of a non-superuser provisioner: created by the
+    // same protocol, owned by `prov`, open to the branch's login only.
+    assert_eq!(a.branch.extras.len(), 1);
+    let scratch = a.branch.extras[0].db_name.clone();
+    let mut test_a = connect(&a.extra_urls["test"]);
+    assert_eq!(
+        one::<String>(&mut test_a, "SELECT current_user::text"),
+        owner
+    );
+    test_a
+        .batch_execute("CREATE TABLE scratch_t (i int)")
+        .unwrap();
+    drop(test_a);
     let mut ca = connect(&a.url);
     ca.batch_execute(&format!(
         "CREATE EXTENSION citext;
@@ -908,15 +1128,25 @@ fn non_superuser_provisioner_external_mode() {
          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO PUBLIC;
          CREATE SEQUENCE ticket START 100;
          SELECT nextval('ticket');
-         SET ROLE NONE;
-         CREATE TABLE straggler (i int);
-         CREATE SEQUENCE straggler_seq;
-         CREATE SCHEMA straggler_schema;
-         CREATE TABLE straggler_schema.t (i int);
-         RESET ROLE;"
+         ;"
     ))
     .unwrap();
     drop(ca); // the external default policy is `fail`
+    // Login-owned objects an earlier build allowed (a login that inherited the
+    // owner could `SET ROLE NONE` and create them) are made by the harness.
+    superuser(&backend, &a.database)
+        .batch_execute(&format!(
+            "CREATE TABLE straggler (i int);
+             CREATE SEQUENCE straggler_seq;
+             CREATE SCHEMA straggler_schema;
+             CREATE TABLE straggler_schema.t (i int);
+             ALTER TABLE straggler OWNER TO {login};
+             ALTER SEQUENCE straggler_seq OWNER TO {login};
+             ALTER SCHEMA straggler_schema OWNER TO {login};
+             ALTER TABLE straggler_schema.t OWNER TO {login};",
+            login = a.user
+        ))
+        .unwrap();
 
     let b = server
         .create_branch("b", ResolvedSource::Branch(a.branch.id), None)
@@ -966,10 +1196,18 @@ fn non_superuser_provisioner_external_mode() {
     let mut cc = connect(&c.url);
     cc.batch_execute("DELETE FROM people").unwrap();
     drop(cc);
+    connect(&c.extra_urls["test"])
+        .batch_execute("CREATE TABLE junk (i int)")
+        .unwrap();
     server
         .reset_branch(c.branch.id, ResolvedSource::Snapshot(s.id))
         .unwrap();
     assert_eq!(count(&mut connect(&c.url), "SELECT * FROM people"), 2);
+    assert_eq!(
+        tables_in(&c.extra_urls["test"]),
+        0,
+        "a reset empties the scratch database, as the provisioner"
+    );
     server
         .reset_branch(c.branch.id, ResolvedSource::Branch(a.branch.id))
         .unwrap();
@@ -985,12 +1223,21 @@ fn non_superuser_provisioner_external_mode() {
         can_connect(&url_for(&a, "postgres")),
         "an external server's other databases are never altered"
     );
+    assert!(!can_connect(&url_for(&b, &scratch)));
+    assert!(!can_connect(&url_for(&a, &b.branch.extras[0].db_name)));
+    assert_eq!(tables_in(&b.extra_urls["test"]), 0, "clones start empty");
 
     // Login-specific references cannot be translated: the clone fails cleanly.
     let cases = [
         (
-            "SET ROLE NONE; ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO PUBLIC".to_string(),
-            "SET ROLE NONE; ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE SELECT ON TABLES FROM PUBLIC".to_string(),
+            format!(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA public GRANT SELECT ON TABLES TO PUBLIC",
+                a.user
+            ),
+            format!(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA public REVOKE SELECT ON TABLES FROM PUBLIC",
+                a.user
+            ),
         ),
         (
             format!("GRANT SELECT ON people TO {}", a.user),
@@ -1002,7 +1249,9 @@ fn non_superuser_provisioner_external_mode() {
         ),
     ];
     for (setup, cleanup) in cases {
-        connect(&a.url).batch_execute(&setup).unwrap();
+        superuser(&backend, &a.database)
+            .batch_execute(&setup)
+            .unwrap();
         let databases = df_databases(&mut admin);
         let roles = login_roles(&mut admin);
         let error = server
@@ -1030,7 +1279,9 @@ fn non_superuser_provisioner_external_mode() {
             .to_string();
         assert!(error.contains("login-specific"), "{error}");
         assert_eq!(server.list_snapshots().unwrap().len(), 1);
-        connect(&a.url).batch_execute(&cleanup).unwrap();
+        superuser(&backend, &a.database)
+            .batch_execute(&cleanup)
+            .unwrap();
     }
     server
         .create_branch("fine", ResolvedSource::Branch(a.branch.id), None)
@@ -1040,7 +1291,7 @@ fn non_superuser_provisioner_external_mode() {
     env.write_config(
         "",
         Some(&format!(
-            "[postgres]\nmode = \"external\"\nadmin_url = \"postgres://prov:provpw@127.0.0.1:{port}/postgres\"\non_busy_source = \"disconnect\"\n"
+            "[services.db]\nengine = \"postgres\"\nmode = \"external\"\nadmin_url = \"postgres://prov:provpw@127.0.0.1:{port}/postgres\"\non_busy_source = \"disconnect\"\nextra_databases = [\"test\"]\n"
         )),
     );
     let server = env.server();
@@ -1514,6 +1765,14 @@ fn managed_server_restart_keeps_data_and_remeasures_cow() {
     print_cow(&env, &status);
     let first = env.admin_json();
     let password = first["password"].as_str().unwrap().to_string();
+    let port = first["port"]
+        .as_u64()
+        .expect("the allocated port is recorded") as u16;
+    assert_eq!(
+        server.managed().unwrap().published_port().unwrap(),
+        port,
+        "docker publishes the recorded port"
+    );
     let a = server
         .create_branch("a", ResolvedSource::Empty, None)
         .unwrap();
@@ -1558,8 +1817,11 @@ fn managed_server_restart_keeps_data_and_remeasures_cow() {
         format!("{:?}", status.cow).to_lowercase(),
         second["cow"]["capability"].as_str().unwrap()
     );
-    // The ephemeral port may have changed: URLs are rebuilt from the endpoint.
-    let (host, port) = server.app_endpoint().unwrap();
+    // The port was allocated once and kept: it is the same after a restart.
+    assert_eq!(second["port"], first["port"], "the port never moves");
+    let (host, now) = server.app_endpoint().unwrap();
+    assert_eq!(now, port);
+    let port = now;
     let url = format!(
         "postgres://{}:{}@{host}:{port}/{}",
         a.user, a.password, a.database
@@ -1574,12 +1836,185 @@ fn managed_server_restart_keeps_data_and_remeasures_cow() {
     );
 }
 
+/// `port = 0`: the server's host port is allocated once from the project and
+/// service identity, recorded in admin.json, published fixed and never moved;
+/// a conflict at the first allocation moves on to the next candidates, a
+/// conflict later is an error naming the port.
+#[test]
+#[ignore = "needs Docker"]
+fn managed_port_is_allocated_once_and_never_moved() {
+    use std::net::TcpListener;
+    let env = Env::new("");
+    let server = env.server();
+    let candidates = devflow_core::db::candidate_ports(env.id, "db");
+    assert!((20_000..40_000).contains(&candidates[0]), "{candidates:?}");
+
+    // Something already holds the first candidate: the next one is taken.
+    let blocker = TcpListener::bind(("127.0.0.1", candidates[0]))
+        .unwrap_or_else(|e| panic!("test setup: port {} is busy: {e}", candidates[0]));
+    let status = server.up().unwrap();
+    let recorded = env.admin_json()["port"].as_u64().unwrap() as u16;
+    assert_ne!(recorded, candidates[0], "the busy candidate was skipped");
+    assert!(
+        candidates.contains(&recorded),
+        "{recorded} in {candidates:?}"
+    );
+    assert_eq!(
+        server.managed().unwrap().published_port().unwrap(),
+        recorded
+    );
+    assert_eq!(
+        status.endpoint.as_deref(),
+        Some(format!("127.0.0.1:{recorded}").as_str())
+    );
+    drop(blocker);
+    let compose = std::fs::read_to_string(server.managed().unwrap().compose_file()).unwrap();
+    assert!(
+        compose.contains(&format!("\"127.0.0.1:{recorded}:5432\"")),
+        "{compose}"
+    );
+
+    // Restarting keeps it, even though the first candidate is free again.
+    server.down().unwrap();
+    server.up().unwrap();
+    assert_eq!(env.admin_json()["port"].as_u64().unwrap() as u16, recorded);
+    assert_eq!(
+        server.managed().unwrap().published_port().unwrap(),
+        recorded
+    );
+
+    // A later conflict on the recorded port is reported, not worked around.
+    server.down().unwrap();
+    let thief = TcpListener::bind(("127.0.0.1", recorded)).unwrap();
+    let error = format!("{:#}", server.up().unwrap_err());
+    assert!(error.contains(&recorded.to_string()), "{error}");
+    assert!(error.contains("not available"), "{error}");
+    assert!(error.contains("devflow keeps this port"), "{error}");
+    assert_eq!(
+        env.admin_json()["port"].as_u64().unwrap() as u16,
+        recorded,
+        "the recorded port is untouched"
+    );
+    drop(thief);
+    server.up().unwrap();
+    assert_eq!(env.admin_json()["port"].as_u64().unwrap() as u16, recorded);
+}
+
+/// A first allocation interrupted after Docker bound the port but before it was
+/// recorded keeps that port: the retry finds the journaled candidate (or, from
+/// a build without the journal, the running container) instead of starting
+/// over at an earlier candidate that has become free.
+#[test]
+#[ignore = "needs Docker"]
+fn an_interrupted_first_allocation_keeps_the_port_docker_bound() {
+    use std::net::TcpListener;
+    let env = Env::new("");
+    let server = env.server();
+    let candidates = devflow_core::db::candidate_ports(env.id, "db");
+    let blocker = TcpListener::bind(("127.0.0.1", candidates[0]))
+        .unwrap_or_else(|e| panic!("test setup: port {} is busy: {e}", candidates[0]));
+    server.up().unwrap();
+    let bound = env.admin_json()["port"].as_u64().unwrap() as u16;
+    assert_ne!(bound, candidates[0]);
+    drop(blocker);
+
+    // Rewrite admin.json as an interruption would have left it: the container
+    // runs on `bound`, the port itself was not recorded.
+    let path = server.managed().unwrap().dir.join("admin.json");
+    let rewrite = |change: &dyn Fn(&mut serde_json::Value)| {
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        change(&mut state);
+        std::fs::write(&path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+    };
+    for journaled in [true, false] {
+        rewrite(&|state| {
+            state.as_object_mut().unwrap().remove("port");
+            state.as_object_mut().unwrap().remove("pending_port");
+            if journaled {
+                state["pending_port"] = bound.into();
+            }
+        });
+        // The first candidate is free again; the retry must not move the server.
+        server.up().unwrap();
+        let state = env.admin_json();
+        assert_eq!(state["port"].as_u64().unwrap() as u16, bound, "{journaled}");
+        assert!(state.get("pending_port").is_none(), "{state}");
+        assert_eq!(
+            server.managed().unwrap().published_port().unwrap(),
+            bound,
+            "{journaled}"
+        );
+    }
+}
+
+/// An explicit `port` overrides the allocation and is not recorded.
+#[test]
+#[ignore = "needs Docker"]
+fn an_explicit_port_overrides_the_allocation() {
+    let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let env = Env::new(&format!("port = {port}"));
+    let server = env.server();
+    let status = server.up().unwrap();
+    assert_eq!(server.managed().unwrap().published_port().unwrap(), port);
+    assert_eq!(
+        status.endpoint.as_deref(),
+        Some(format!("127.0.0.1:{port}").as_str())
+    );
+    assert!(
+        env.admin_json().get("port").is_none(),
+        "an explicit port is configuration, not state"
+    );
+}
+
+/// On OrbStack the server also has a name other containers resolve: a compose
+/// label, reported as the container endpoint; the host URL stays on loopback.
+#[test]
+#[ignore = "needs Docker"]
+fn orbstack_names_the_server_for_containers() {
+    let env = Env::new("");
+    let server = env.server();
+    let status = server.up().unwrap();
+    let orbstack = Command::new("docker")
+        .args(["info", "--format", "{{.OperatingSystem}}"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("OrbStack"))
+        .unwrap_or(false);
+    let compose = std::fs::read_to_string(server.managed().unwrap().compose_file()).unwrap();
+    if orbstack {
+        let endpoint = status
+            .container_endpoint
+            .clone()
+            .expect("a container endpoint");
+        let host = endpoint.strip_suffix(":5432").expect("port 5432");
+        assert!(
+            host.starts_with("db.") && host.ends_with(".devflow.orb.local"),
+            "{endpoint}"
+        );
+        assert!(
+            compose.contains(&format!("dev.orbstack.domains: \"{host}\"")),
+            "{compose}"
+        );
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["container_endpoint"], endpoint.as_str());
+    } else {
+        assert!(status.container_endpoint.is_none());
+        assert!(!compose.contains("orbstack"), "{compose}");
+    }
+    assert!(
+        status.endpoint.unwrap().starts_with("127.0.0.1:"),
+        "applications connect over loopback"
+    );
+}
+
 /// An older server image is refused with an actionable error.
 #[test]
 #[ignore = "needs Docker"]
 fn older_postgres_is_refused() {
     let env = Env::new("");
-    env.write_config("", Some("[postgres]\nimage = \"postgres:17\"\n"));
+    env.write_config("", Some("[services.db]\nimage = \"postgres:17\"\n"));
     let server = env.server();
     let error = format!("{:#}", server.up().unwrap_err());
     println!("postgres:17 -> {error}");
@@ -2205,7 +2640,7 @@ fn bootstrap_never_adopts_a_foreign_devflow_database() {
     env.write_config(
         "",
         Some(&format!(
-            "[postgres]\nmode = \"external\"\nadmin_url = \"{}\"\n",
+            "[services.db]\nengine = \"postgres\"\nmode = \"external\"\nadmin_url = \"{}\"\n",
             super_url(&backend, "postgres")
         )),
     );
@@ -2491,7 +2926,7 @@ fn external_status_reports_unreachable_servers_and_honours_the_env_override() {
     std::fs::write(
         repo.path().join("devflow.toml"),
         format!(
-            "[project]\nname = \"devflow-test-ext\"\nid = \"{}\"\n\n[postgres]\nmode = \"external\"\n\
+            "[project]\nname = \"devflow-test-ext\"\nid = \"{}\"\n\n[services.db]\nengine = \"postgres\"\nmode = \"external\"\n\
              admin_url = \"postgres://prov:pw@127.0.0.1:{closed}/postgres\"\napp_host = \"db.internal\"\napp_port = 6543\n",
             Uuid::new_v4()
         ),
@@ -2532,4 +2967,947 @@ fn external_status_reports_unreachable_servers_and_honours_the_env_override() {
         Some(format!("127.0.0.1:{}", closed.wrapping_add(1)))
     );
     unsafe { std::env::remove_var("DEVFLOW_PG_ADMIN_URL") };
+}
+
+// ---- scratch databases (extra_databases) -----------------------------------
+
+/// `(name, database, status, generation)` of a branch's scratch rows, read
+/// straight from the metadata database (test-side inspection only).
+fn scratch_rows(meta: &mut Client, branch: Uuid) -> Vec<(String, String, String, i32)> {
+    meta.query(
+        "SELECT name, db_name, status, generation FROM scratch_databases \
+         WHERE branch_id = $1 ORDER BY seq",
+        &[&branch],
+    )
+    .unwrap()
+    .iter()
+    .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
+    .collect()
+}
+
+/// `(name, status, generation)` of a branch's scratch rows.
+fn scratch_states(meta: &mut Client, branch: Uuid) -> Vec<(String, String, i32)> {
+    scratch_rows(meta, branch)
+        .into_iter()
+        .map(|(name, _, status, generation)| (name, status, generation))
+        .collect()
+}
+
+fn database_exists(admin: &mut Client, name: &str) -> bool {
+    count(
+        admin,
+        &format!("SELECT 1 FROM pg_database WHERE datname = '{name}'"),
+    ) == 1
+}
+
+fn tables_in(url: &str) -> i64 {
+    count(
+        &mut connect(url),
+        "SELECT 1 FROM pg_tables WHERE schemaname = 'public'",
+    )
+}
+
+/// Scratch databases are created with the branch under the closed-creation
+/// protocol, are open to the branch's login only, are empty in every clone and
+/// never part of a snapshot, are emptied again by a reset, follow credential
+/// rotation, and go with the branch.
+#[test]
+#[ignore = "needs Docker"]
+fn scratch_databases_follow_the_branch_lifecycle() {
+    let env = Env::new("extra_databases = [\"test\", \"shadow\"]");
+    let server = env.server();
+    server.up().unwrap();
+    let mut admin = superuser(&server, "postgres");
+    let mut meta = superuser(&server, "devflow");
+    let project8 = env.id.simple().to_string()[..8].to_string();
+    let owner = format!("dfo_{project8}");
+
+    // Created with the branch: generated names, recorded, ready.
+    let a = server
+        .create_branch("a", ResolvedSource::Empty, None)
+        .unwrap();
+    assert_eq!(a.branch.status, RecordStatus::Ready);
+    let labels: Vec<_> = a.branch.extras.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(labels, ["test", "shadow"]);
+    let branch12 = a.branch.id.simple().to_string()[..12].to_string();
+    for (extra, seq) in a.branch.extras.iter().zip(1..) {
+        assert_eq!(extra.db_name, format!("df_{project8}_{branch12}_{seq}"));
+        assert_eq!(extra.status, RecordStatus::Ready);
+        assert!(!extra.orphaned && extra.error.is_none(), "{extra:?}");
+    }
+    assert_eq!(
+        scratch_states(&mut meta, a.branch.id),
+        [
+            ("test".to_string(), "ready".to_string(), 0),
+            ("shadow".to_string(), "ready".to_string(), 0)
+        ]
+    );
+    assert_eq!(
+        server.branch(a.branch.id).unwrap().unwrap().extras.len(),
+        2,
+        "reads show them too"
+    );
+    // The credentials hand out one URL per scratch database: same login and
+    // password, another database.
+    let test_db = a.branch.extras[0].db_name.clone();
+    let shadow_db = a.branch.extras[1].db_name.clone();
+    assert_eq!(a.extra_urls["test"], url_for(&a, &test_db));
+    assert_eq!(a.extra_urls["shadow"], url_for(&a, &shadow_db));
+
+    // Closed-creation end state, as for the branch's own database: owned by
+    // the admin, open, `PUBLIC` revoked, the project owner holds CREATE and
+    // TEMPORARY, only the branch's login holds CONNECT.
+    for db in [&test_db, &shadow_db] {
+        assert_eq!(
+            count(
+                &mut admin,
+                &format!(
+                    "SELECT 1 FROM pg_database WHERE datname = '{db}' AND datallowconn \
+                     AND NOT datistemplate AND datdba = to_regrole('postgres')"
+                )
+            ),
+            1,
+            "{db}"
+        );
+        let acl: String = one(
+            &mut admin,
+            &format!("SELECT datacl::text FROM pg_database WHERE datname = '{db}'"),
+        );
+        assert!(
+            acl.contains(&format!("{owner}=CTc/")) && !acl.contains('*'),
+            "{acl}"
+        );
+        assert!(
+            acl.contains(&format!("{}=c/", a.user)) && acl.matches("=c/").count() == 1,
+            "the branch login has CONNECT: {acl}"
+        );
+        assert_eq!(
+            logins_with_connect(&mut admin, db),
+            std::slice::from_ref(&a.user)
+        );
+    }
+    // Sessions act as the project owner, who owns the schema, so the tools
+    // that reset a schema (Prisma, Django flush) work without create-database
+    // rights; the login keeps NOCREATEDB.
+    let mut test_a = connect(&a.extra_urls["test"]);
+    assert_eq!(
+        one::<String>(&mut test_a, "SELECT current_user::text"),
+        owner
+    );
+    assert_eq!(
+        one::<String>(&mut test_a, "SELECT session_user::text"),
+        a.user
+    );
+    assert_eq!(
+        one::<String>(
+            &mut test_a,
+            "SELECT pg_get_userbyid(nspowner)::text FROM pg_namespace WHERE nspname = 'public'"
+        ),
+        owner
+    );
+    test_a
+        .batch_execute("CREATE TABLE t (i int); INSERT INTO t VALUES (1), (2)")
+        .unwrap();
+    assert_eq!(
+        one::<String>(
+            &mut test_a,
+            "SELECT tableowner::text FROM pg_tables WHERE tablename = 't'"
+        ),
+        owner
+    );
+    assert!(
+        connect(&a.url)
+            .batch_execute("CREATE DATABASE not_allowed")
+            .is_err(),
+        "branch logins keep NOCREATEDB"
+    );
+    assert!(
+        test_a.batch_execute("CREATE DATABASE not_allowed").is_err(),
+        "so do their sessions in a scratch database"
+    );
+    // Two kinds of data: the branch's own and the scratch ones.
+    let mut ca = connect(&a.url);
+    ca.batch_execute("CREATE TABLE items (i int); INSERT INTO items VALUES (7)")
+        .unwrap();
+    connect(&a.extra_urls["shadow"])
+        .batch_execute("CREATE TABLE s (i int)")
+        .unwrap();
+    drop((ca, test_a));
+
+    // A sibling's login reaches neither database of this branch, and this
+    // branch's login reaches none of the sibling's.
+    let b = server
+        .create_branch("b", ResolvedSource::Empty, None)
+        .unwrap();
+    for extra in &a.branch.extras {
+        assert!(!can_connect(&url_for(&b, &extra.db_name)), "{extra:?}");
+    }
+    for extra in &b.branch.extras {
+        assert!(!can_connect(&url_for(&a, &extra.db_name)), "{extra:?}");
+    }
+    for db in ["devflow", "postgres", "template1", "template0"] {
+        assert!(!can_connect(&url_for(&a, db)), "login reached {db}");
+    }
+    assert_ne!(a.branch.extras[0].db_name, b.branch.extras[0].db_name);
+    assert_eq!(tables_in(&b.extra_urls["test"]), 0);
+
+    // A clone gets its own empty scratch databases, never the source's.
+    let c = server
+        .create_branch("c", ResolvedSource::Branch(a.branch.id), None)
+        .unwrap();
+    assert_eq!(count(&mut connect(&c.url), "SELECT * FROM items"), 1);
+    assert_eq!(c.branch.extras.len(), 2);
+    for (mine, theirs) in c.branch.extras.iter().zip(&a.branch.extras) {
+        assert_ne!(mine.db_name, theirs.db_name);
+    }
+    assert_eq!(tables_in(&c.extra_urls["test"]), 0);
+    assert_eq!(tables_in(&c.extra_urls["shadow"]), 0);
+    assert_eq!(
+        count(&mut connect(&a.extra_urls["test"]), "SELECT * FROM t"),
+        2,
+        "the source keeps its data"
+    );
+    assert!(!can_connect(&url_for(&c, &a.branch.extras[0].db_name)));
+
+    // Snapshots hold the branch's own database and nothing of its scratch
+    // databases; a branch made from one gets empty ones.
+    let before = df_databases(&mut admin);
+    let snapshot = server.create_snapshot("seed", a.branch.id).unwrap();
+    let added: Vec<_> = df_databases(&mut admin)
+        .into_iter()
+        .filter(|db| !before.contains(db))
+        .collect();
+    assert_eq!(added, std::slice::from_ref(&snapshot.db_name));
+    assert_eq!(
+        count(
+            &mut meta,
+            &format!(
+                "SELECT 1 FROM scratch_databases WHERE db_name = '{}'",
+                snapshot.db_name
+            )
+        ),
+        0
+    );
+    let d = server
+        .create_branch("d", ResolvedSource::Snapshot(snapshot.id), None)
+        .unwrap();
+    assert_eq!(count(&mut connect(&d.url), "SELECT * FROM items"), 1);
+    assert_eq!(tables_in(&d.extra_urls["test"]), 0);
+
+    // Credential rotation covers the scratch databases: one login.
+    let rotated = server.rotate_credentials(a.branch.id).unwrap();
+    assert_ne!(rotated.password, a.password);
+    assert!(!can_connect(&a.url));
+    for old in a.extra_urls.values() {
+        assert!(!can_connect(old), "the old password still works");
+    }
+    assert_eq!(
+        count(&mut connect(&rotated.extra_urls["test"]), "SELECT * FROM t"),
+        2,
+        "rotation keeps the data"
+    );
+    assert!(can_connect(&rotated.extra_urls["shadow"]));
+    assert_eq!(rotated.branch.extras.len(), 2);
+
+    // A reset empties them again, under the same names and URLs, and the
+    // branch's own data is replaced as before.
+    let mut held = connect(&rotated.extra_urls["test"]);
+    let reset = server
+        .reset_branch(a.branch.id, ResolvedSource::Empty)
+        .unwrap();
+    assert_eq!(reset.generation, 1);
+    assert_eq!(
+        reset
+            .extras
+            .iter()
+            .map(|e| (e.name.as_str(), e.db_name.as_str(), e.status))
+            .collect::<Vec<_>>(),
+        [
+            ("test", test_db.as_str(), RecordStatus::Ready),
+            ("shadow", shadow_db.as_str(), RecordStatus::Ready)
+        ]
+    );
+    assert!(
+        held.simple_query("SELECT 1").is_err(),
+        "sessions on a scratch database end with its reset"
+    );
+    assert_eq!(tables_in(&rotated.url), 0);
+    assert_eq!(tables_in(&rotated.extra_urls["test"]), 0);
+    assert_eq!(tables_in(&rotated.extra_urls["shadow"]), 0);
+    assert_eq!(
+        scratch_states(&mut meta, a.branch.id),
+        [
+            ("test".to_string(), "ready".to_string(), 1),
+            ("shadow".to_string(), "ready".to_string(), 1)
+        ]
+    );
+    // The protocol's end state again, and still only the login.
+    for db in [&test_db, &shadow_db] {
+        let acl: String = one(
+            &mut admin,
+            &format!("SELECT datacl::text FROM pg_database WHERE datname = '{db}'"),
+        );
+        assert!(
+            acl.contains(&format!("{}=c/", a.user)) && acl.matches("=c/").count() == 1,
+            "{acl}"
+        );
+        assert!(!can_connect(&url_for(&b, db)));
+    }
+    connect(&rotated.extra_urls["test"])
+        .batch_execute("CREATE TABLE after_reset (i int)")
+        .unwrap();
+    // The siblings were not touched by A's reset.
+    assert_eq!(count(&mut connect(&c.url), "SELECT * FROM items"), 1);
+
+    // Dropped with the branch, by recorded identity: both databases, the rows,
+    // the login. The others stay.
+    let b_extras: Vec<String> = b.branch.extras.iter().map(|e| e.db_name.clone()).collect();
+    server.drop_branch(b.branch.id).unwrap();
+    for db in &b_extras {
+        assert!(!database_exists(&mut admin, db), "{db} outlived its branch");
+    }
+    assert!(scratch_rows(&mut meta, b.branch.id).is_empty());
+    assert!(server.branch(b.branch.id).unwrap().is_none());
+    assert!(database_exists(&mut admin, &test_db));
+    assert_eq!(tables_in(&c.extra_urls["test"]), 0);
+    for id in [a.branch.id, c.branch.id, d.branch.id] {
+        server.drop_branch(id).unwrap();
+    }
+    server.delete_snapshot("seed", 1).unwrap();
+    assert!(
+        df_databases(&mut admin).is_empty(),
+        "{:?}",
+        df_databases(&mut admin)
+    );
+    assert!(login_roles(&mut admin).is_empty());
+    assert_eq!(count(&mut meta, "SELECT 1 FROM scratch_databases"), 0);
+    let report = server.reconcile().unwrap();
+    assert!(
+        report.actions.is_empty() && report.problems.is_empty() && report.orphans.is_empty(),
+        "{report:?}"
+    );
+}
+
+/// Names that leave the configuration become recorded orphans: kept, reported,
+/// untouched by resets, dropped only on request. Names that join it are
+/// provisioned for the branches that already exist. A metadata database from
+/// before scratch databases is read as having none and upgraded by the next
+/// mutation.
+#[test]
+#[ignore = "needs Docker"]
+fn scratch_orphans_additions_and_the_schema_upgrade() {
+    let env = Env::new("extra_databases = [\"test\", \"shadow\"]");
+    let server = env.server();
+    server.up().unwrap();
+    let mut admin = superuser(&server, "postgres");
+    let mut meta = superuser(&server, "devflow");
+    let a = server
+        .create_branch("a", ResolvedSource::Empty, None)
+        .unwrap();
+    for url in a.extra_urls.values() {
+        connect(url)
+            .batch_execute("CREATE TABLE kept (i int)")
+            .unwrap();
+    }
+    let shadow_db = a.branch.extras[1].db_name.clone();
+
+    // `shadow` leaves the configuration: nothing is dropped, everything says so.
+    env.write_config("extra_databases = [\"test\"]", None);
+    let server = env.server();
+    let listed = server.list_branches().unwrap();
+    assert_eq!(
+        listed[0]
+            .extras
+            .iter()
+            .map(|e| (e.name.as_str(), e.orphaned))
+            .collect::<Vec<_>>(),
+        [("test", false), ("shadow", true)]
+    );
+    assert!(database_exists(&mut admin, &shadow_db));
+    let report = server.reconcile().unwrap();
+    assert!(report.problems.is_empty(), "{report:?}");
+    assert_eq!(report.orphans.len(), 1, "{report:?}");
+    assert!(
+        report.orphans[0].contains("'shadow'") && report.orphans[0].contains(&shadow_db),
+        "{report:?}"
+    );
+    // `doctor` says so too, and points at the way out.
+    let doctor = |project: &Project| -> Vec<devflow_core::doctor::Check> {
+        devflow_core::doctor::run(Some(project))
+            .into_iter()
+            .filter(|check| check.name == "postgres-scratch")
+            .collect()
+    };
+    let checks = doctor(&env.project());
+    assert_eq!(checks.len(), 1, "{checks:?}");
+    assert_eq!(checks[0].status, devflow_core::doctor::CheckStatus::Warn);
+    assert!(checks[0].detail.contains(&shadow_db), "{checks:?}");
+    assert!(
+        checks[0]
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("--drop-orphans")),
+        "{checks:?}"
+    );
+    // A reset empties what is configured and leaves the orphan alone.
+    server
+        .reset_branch(a.branch.id, ResolvedSource::Empty)
+        .unwrap();
+    assert_eq!(tables_in(&a.extra_urls["test"]), 0);
+    assert_eq!(
+        tables_in(&a.extra_urls["shadow"]),
+        1,
+        "the orphan's tables are still there"
+    );
+    assert_eq!(
+        scratch_states(&mut meta, a.branch.id),
+        [
+            ("test".to_string(), "ready".to_string(), 1),
+            ("shadow".to_string(), "ready".to_string(), 0)
+        ],
+        "the orphan was not emptied for the new generation"
+    );
+    // Its login reaches it, but it is not handed out as a URL.
+    let rotated = server.rotate_credentials(a.branch.id).unwrap();
+    assert_eq!(rotated.extra_urls.keys().collect::<Vec<_>>(), ["test"]);
+    assert!(can_connect(&url_for(&rotated, &shadow_db)));
+    // Other mutations do not drop it either, and `reconcile` keeps saying so.
+    let other = server
+        .create_branch("other", ResolvedSource::Empty, None)
+        .unwrap();
+    assert_eq!(
+        other.branch.extras.len(),
+        1,
+        "new branches get what is configured"
+    );
+    assert!(database_exists(&mut admin, &shadow_db));
+    assert_eq!(server.reconcile().unwrap().orphans.len(), 1);
+
+    // Dropping orphans is explicit, by recorded identity, and only orphans.
+    let dropped = server.drop_orphans().unwrap();
+    assert_eq!(dropped.len(), 1, "{dropped:?}");
+    assert!(!database_exists(&mut admin, &shadow_db));
+    assert_eq!(scratch_rows(&mut meta, a.branch.id).len(), 1);
+    assert!(server.reconcile().unwrap().orphans.is_empty());
+    assert!(server.drop_orphans().unwrap().is_empty());
+    assert!(doctor(&env.project()).is_empty(), "nothing left to decide");
+
+    // Names added to the configuration reach the branches that exist, empty;
+    // repeating changes nothing.
+    env.write_config("extra_databases = [\"test\", \"e2e\"]", None);
+    let server = env.server();
+    assert_eq!(
+        server.branch(a.branch.id).unwrap().unwrap().extras.len(),
+        1,
+        "nothing is provisioned behind the user's back"
+    );
+    let first = server.ensure_scratch(a.branch.id).unwrap();
+    assert_eq!(
+        first.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+        ["test", "e2e"]
+    );
+    assert!(
+        first
+            .iter()
+            .all(|e| e.status == RecordStatus::Ready && !e.orphaned)
+    );
+    assert_eq!(
+        first[1].db_name,
+        format!(
+            "df_{}_{}_3",
+            &env.id.simple().to_string()[..8],
+            &a.branch.id.simple().to_string()[..12]
+        ),
+        "a sequence number is not reused within a branch"
+    );
+    let again = server.ensure_scratch(a.branch.id).unwrap();
+    assert_eq!(
+        again.iter().map(|e| e.id).collect::<Vec<_>>(),
+        first.iter().map(|e| e.id).collect::<Vec<_>>()
+    );
+    assert_eq!(tables_in(&url_for(&rotated, &first[1].db_name)), 0);
+    assert!(server.ensure_scratch(Uuid::new_v4()).is_err());
+
+    // A branch dropped while it has orphans takes them with it.
+    env.write_config("extra_databases = [\"e2e\"]", None);
+    let server = env.server();
+    assert_eq!(
+        server.reconcile().unwrap().orphans.len(),
+        2,
+        "`test` of A and of the other branch"
+    );
+    server.drop_branch(other.branch.id).unwrap();
+    assert_eq!(server.reconcile().unwrap().orphans.len(), 1);
+    server.drop_branch(a.branch.id).unwrap();
+    assert!(df_databases(&mut admin).is_empty());
+    assert!(login_roles(&mut admin).is_empty());
+    assert!(server.reconcile().unwrap().orphans.is_empty());
+
+    // A server written by a devflow without scratch databases: readers see no
+    // scratch databases and create nothing; the next mutation upgrades it.
+    let plain = server
+        .create_branch("plain", ResolvedSource::Empty, None)
+        .unwrap();
+    meta.batch_execute(
+        "DROP TABLE scratch_databases; ALTER TABLE branches DROP COLUMN scratch_seq, \
+         DROP COLUMN op_scratch; \
+         UPDATE meta SET value = '1' WHERE key = 'schema_version'",
+    )
+    .unwrap();
+    let listed = server.list_branches().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(listed[0].extras.is_empty());
+    assert!(
+        server
+            .branch(plain.branch.id)
+            .unwrap()
+            .unwrap()
+            .extras
+            .is_empty()
+    );
+    assert_eq!(
+        count(
+            &mut meta,
+            "SELECT 1 FROM pg_class WHERE relname = 'scratch_databases'"
+        ),
+        0,
+        "reading does not migrate"
+    );
+    let upgraded = server
+        .create_branch("upgraded", ResolvedSource::Empty, None)
+        .unwrap();
+    assert_eq!(upgraded.branch.extras.len(), 1);
+    assert_eq!(
+        one::<String>(
+            &mut meta,
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ),
+        "3"
+    );
+    // The branch that predates the table gets its scratch database on request.
+    assert_eq!(server.ensure_scratch(plain.branch.id).unwrap().len(), 1);
+    // A newer schema is refused, as before.
+    meta.batch_execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+        .unwrap();
+    let error = format!("{:#}", server.reconcile().unwrap_err());
+    assert!(error.contains("newer than this devflow"), "{error}");
+    meta.batch_execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
+        .unwrap();
+    server.drop_branch(plain.branch.id).unwrap();
+    server.drop_branch(upgraded.branch.id).unwrap();
+    assert!(df_databases(&mut admin).is_empty());
+}
+
+/// Runs that die half-way are completed by `reconcile`: a reset that emptied
+/// one scratch database and stopped before the other (the one emptied keeps
+/// what was written after), unfinished builds and drops, and a branch creation
+/// that stopped after its first scratch database.
+#[test]
+#[ignore = "needs Docker"]
+fn interrupted_scratch_work_is_reconciled() {
+    let env = Env::new("extra_databases = [\"test\", \"shadow\"]");
+    let server = env.server();
+    server.up().unwrap();
+    let mut admin = superuser(&server, "postgres");
+    let mut meta = superuser(&server, "devflow");
+    let key = i64::from_be_bytes(env.id.as_bytes()[..8].try_into().unwrap());
+    let project = env.id;
+    let a = server
+        .create_branch("a", ResolvedSource::Empty, None)
+        .unwrap();
+    let shadow_db = a.branch.extras[1].db_name.clone();
+    connect(&a.url)
+        .batch_execute("CREATE TABLE old (i int)")
+        .unwrap();
+    for url in a.extra_urls.values() {
+        connect(url)
+            .batch_execute("CREATE TABLE before_reset (i int)")
+            .unwrap();
+    }
+
+    // 1. A reset whose lock is lost while it empties the second scratch
+    // database: a trigger holds the write that starts that rebuild until the
+    // lock session is cut.
+    meta.batch_execute(
+        "CREATE FUNCTION df_test_stall_scratch() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN PERFORM pg_advisory_xact_lock(4301); RETURN NEW; END $$; \
+         CREATE TRIGGER stall_scratch BEFORE UPDATE ON scratch_databases FOR EACH ROW \
+           WHEN (NEW.name = 'shadow' AND NEW.status = 'creating') \
+           EXECUTE FUNCTION df_test_stall_scratch()",
+    )
+    .unwrap();
+    let mut probe = superuser(&server, "devflow");
+    let outcome = std::thread::scope(|scope| {
+        let mut gate = superuser(&server, "devflow");
+        gate.query("SELECT pg_advisory_lock(4301)", &[]).unwrap();
+        let reset = scope.spawn(|| server.reset_branch(a.branch.id, ResolvedSource::Empty));
+        let stalled = blocked_backend(&mut probe, "UPDATE scratch_databases", &[]);
+        let holder = advisory_holder(&mut probe, key);
+        assert_eq!(Some(stalled), holder, "the write runs on the lock session");
+        // The branch's data is replaced and open, the first scratch database is
+        // empty again; the user starts working before the reset is finished.
+        assert_eq!(tables_in(&a.url), 0);
+        assert_eq!(tables_in(&a.extra_urls["test"]), 0);
+        connect(&a.extra_urls["test"])
+            .batch_execute("CREATE TABLE after_reset (i int)")
+            .unwrap();
+        assert_eq!(
+            tables_in(&a.extra_urls["shadow"]),
+            1,
+            "the second one still has its old tables"
+        );
+        probe
+            .query("SELECT pg_terminate_backend($1)", &[&stalled])
+            .unwrap();
+        gate.query("SELECT pg_advisory_unlock(4301)", &[]).unwrap();
+        reset.join().unwrap()
+    });
+    meta.batch_execute("DROP TRIGGER stall_scratch ON scratch_databases")
+        .unwrap();
+    let error = outcome.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("project lock connection was lost"),
+        "{error:#}"
+    );
+    assert_eq!(
+        one::<String>(
+            &mut meta,
+            &format!("SELECT op_phase FROM branches WHERE id = '{}'", a.branch.id)
+        ),
+        "cleanup",
+        "the journal stays open"
+    );
+    let report = server.reconcile().unwrap();
+    assert!(report.problems.is_empty(), "{report:?}");
+    assert_eq!(report.actions.len(), 1, "{report:?}");
+    assert!(report.actions[0].contains("finished reset"), "{report:?}");
+    assert_eq!(
+        count(
+            &mut connect(&a.extra_urls["test"]),
+            "SELECT * FROM after_reset"
+        ),
+        0,
+        "the table written after the reset is there"
+    );
+    assert_eq!(
+        tables_in(&a.extra_urls["test"]),
+        1,
+        "what was written after the reset was not emptied again"
+    );
+    assert_eq!(tables_in(&a.extra_urls["shadow"]), 0, "now empty");
+    assert_eq!(
+        scratch_states(&mut meta, a.branch.id),
+        [
+            ("test".to_string(), "ready".to_string(), 1),
+            ("shadow".to_string(), "ready".to_string(), 1)
+        ]
+    );
+    let converged = server.reconcile().unwrap();
+    assert!(
+        converged.actions.is_empty() && converged.problems.is_empty(),
+        "{converged:?}"
+    );
+
+    // 2. Unfinished builds and drops, as dead runs leave them.
+    let hex = |id: Uuid, n: usize| id.simple().to_string()[..n].to_string();
+    let scratch_of = |seq: i32| format!("df_{}_{}_{seq}", hex(project, 8), hex(a.branch.id, 12));
+    // (a) The intent to build `shadow` again was recorded, the database was
+    // dropped and never created: the name is configured, so it is built.
+    meta.execute(
+        "UPDATE scratch_databases SET status = 'creating' WHERE branch_id = $1 AND name = 'shadow'",
+        &[&a.branch.id],
+    )
+    .unwrap();
+    admin
+        .batch_execute(&format!("DROP DATABASE \"{shadow_db}\" WITH (FORCE)"))
+        .unwrap();
+    // (b) A half-made database (closed, never opened) of a name the
+    // configuration does not list: nothing of value, dropped.
+    // (c) A drop that died before `DROP DATABASE`: finished.
+    let (half, dying) = (scratch_of(3), scratch_of(4));
+    for db in [&half, &dying] {
+        admin
+            .batch_execute(&format!(
+                "CREATE DATABASE \"{db}\" TEMPLATE template0 ALLOW_CONNECTIONS false"
+            ))
+            .unwrap();
+    }
+    for (db, seq, name, status) in [
+        (&half, 3, "half", "creating"),
+        (&dying, 4, "dying", "deleting"),
+    ] {
+        meta.execute(
+            "INSERT INTO scratch_databases (id, project_id, branch_id, name, seq, db_name, status) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            &[
+                &Uuid::new_v4(),
+                &project,
+                &a.branch.id,
+                &name,
+                &seq,
+                db,
+                &status,
+            ],
+        )
+        .unwrap();
+    }
+    let report = server.reconcile().unwrap();
+    assert!(report.problems.is_empty(), "{report:?}");
+    assert_eq!(report.actions.len(), 3, "{report:?}");
+    assert!(!database_exists(&mut admin, &half));
+    assert!(!database_exists(&mut admin, &dying));
+    assert!(database_exists(&mut admin, &shadow_db));
+    assert_eq!(tables_in(&a.extra_urls["shadow"]), 0);
+    assert_eq!(
+        scratch_states(&mut meta, a.branch.id)
+            .iter()
+            .map(|(name, status, _)| (name.as_str(), status.as_str()))
+            .collect::<Vec<_>>(),
+        [("test", "ready"), ("shadow", "ready")]
+    );
+    let converged = server.reconcile().unwrap();
+    assert!(
+        converged.actions.is_empty() && converged.problems.is_empty(),
+        "{converged:?}"
+    );
+
+    // 3. A creation that stopped after its first scratch database: the branch
+    // is `creating`, so everything is rolled back, scratch databases included.
+    let crashed = Uuid::new_v4();
+    let crashed_db = format!("df_{}_{}", hex(project, 8), hex(crashed, 12));
+    let crashed_login = format!("dfl_{}", hex(crashed, 12));
+    let crashed_scratch = format!("{crashed_db}_1");
+    admin
+        .batch_execute(&format!("CREATE ROLE {crashed_login} LOGIN"))
+        .unwrap();
+    admin
+        .batch_execute(&format!("CREATE DATABASE \"{crashed_db}\""))
+        .unwrap();
+    admin
+        .batch_execute(&format!("CREATE DATABASE \"{crashed_scratch}\""))
+        .unwrap();
+    admin
+        .batch_execute(&format!(
+            "GRANT CONNECT ON DATABASE \"{crashed_scratch}\" TO {crashed_login}"
+        ))
+        .unwrap();
+    meta.execute(
+        "INSERT INTO branches (id, project_id, name, db_name, role_name, source_kind, status) \
+         VALUES ($1, $2, 'crashed', $3, $4, 'empty', 'creating')",
+        &[&crashed, &project, &crashed_db, &crashed_login],
+    )
+    .unwrap();
+    meta.execute(
+        "INSERT INTO scratch_databases (id, project_id, branch_id, name, seq, db_name, status) \
+         VALUES ($1, $2, $3, 'test', 1, $4, 'ready')",
+        &[&Uuid::new_v4(), &project, &crashed, &crashed_scratch],
+    )
+    .unwrap();
+    let report = server.reconcile().unwrap();
+    assert!(report.problems.is_empty(), "{report:?}");
+    assert_eq!(report.actions.len(), 1, "{report:?}");
+    assert!(!database_exists(&mut admin, &crashed_db));
+    assert!(!database_exists(&mut admin, &crashed_scratch));
+    assert!(scratch_rows(&mut meta, crashed).is_empty());
+    assert_eq!(login_roles(&mut admin), vec![a.user.clone()]);
+    assert_eq!(
+        df_databases(&mut admin).len(),
+        3,
+        "A's database and its two scratch databases"
+    );
+    assert!(server.reconcile().unwrap().actions.is_empty(), "converged");
+    server.drop_branch(a.branch.id).unwrap();
+    assert!(df_databases(&mut admin).is_empty());
+}
+
+/// Reset a branch to empty and cut the project lock the moment the rebuild of
+/// the scratch database labelled `stall_at` starts: whatever came before it in
+/// the cleanup phase is done, that one and the later ones are not, and the
+/// journal stays open. Returns the reset's error.
+fn reset_interrupted_at(server: &Server, env: &Env, branch: Uuid, stall_at: &str) -> anyhow::Error {
+    let mut meta = superuser(server, "devflow");
+    let key = i64::from_be_bytes(env.id.as_bytes()[..8].try_into().unwrap());
+    meta.batch_execute(&format!(
+        "CREATE FUNCTION df_test_stall_scratch() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN PERFORM pg_advisory_xact_lock(4301); RETURN NEW; END $$; \
+         CREATE TRIGGER stall_scratch BEFORE UPDATE ON scratch_databases FOR EACH ROW \
+           WHEN (NEW.name = '{stall_at}' AND NEW.status = 'creating') \
+           EXECUTE FUNCTION df_test_stall_scratch()"
+    ))
+    .unwrap();
+    let mut probe = superuser(server, "devflow");
+    let outcome = std::thread::scope(|scope| {
+        let mut gate = superuser(server, "devflow");
+        gate.query("SELECT pg_advisory_lock(4301)", &[]).unwrap();
+        let reset = scope.spawn(|| server.reset_branch(branch, ResolvedSource::Empty));
+        let stalled = blocked_backend(&mut probe, "UPDATE scratch_databases", &[]);
+        assert_eq!(Some(stalled), advisory_holder(&mut probe, key));
+        probe
+            .query("SELECT pg_terminate_backend($1)", &[&stalled])
+            .unwrap();
+        gate.query("SELECT pg_advisory_unlock(4301)", &[]).unwrap();
+        reset.join().unwrap()
+    });
+    meta.batch_execute(
+        "DROP TRIGGER stall_scratch ON scratch_databases; DROP FUNCTION df_test_stall_scratch()",
+    )
+    .unwrap();
+    let error = outcome.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("project lock connection was lost"),
+        "{error:#}"
+    );
+    assert_eq!(
+        one::<String>(
+            &mut meta,
+            &format!("SELECT op_phase FROM branches WHERE id = '{branch}'")
+        ),
+        "cleanup",
+        "the journal stays open"
+    );
+    error
+}
+
+/// A reset journals the scratch databases it empties. Finishing it after an
+/// interruption empties exactly those, whatever `extra_databases` says by then:
+/// a label removed since is still emptied (it would keep what the reset was to
+/// clear), a recorded orphan that was listed again since is not touched (it was
+/// never part of the reset).
+#[test]
+#[ignore = "needs Docker"]
+fn an_interrupted_reset_is_finished_for_the_scratch_databases_it_recorded() {
+    let env = Env::new("extra_databases = [\"test\", \"shadow\"]");
+    let server = env.server();
+    server.up().unwrap();
+    let mut meta = superuser(&server, "devflow");
+    let a = server
+        .create_branch("a", ResolvedSource::Empty, None)
+        .unwrap();
+    for url in a.extra_urls.values() {
+        connect(url)
+            .batch_execute("CREATE TABLE before_reset (i int)")
+            .unwrap();
+    }
+
+    // 1. A label removed after the reset began. `test` was emptied, the rebuild
+    // of `shadow` was cut off; then `shadow` leaves the configuration.
+    reset_interrupted_at(&server, &env, a.branch.id, "shadow");
+    assert_eq!(
+        tables_in(&a.extra_urls["test"]),
+        0,
+        "emptied before the cut"
+    );
+    assert_eq!(tables_in(&a.extra_urls["shadow"]), 1, "not yet");
+    assert_eq!(
+        one::<i64>(
+            &mut meta,
+            &format!(
+                "SELECT cardinality(op_scratch)::bigint FROM branches WHERE id = '{}'",
+                a.branch.id
+            )
+        ),
+        2,
+        "the journal names both scratch databases"
+    );
+    env.write_config("extra_databases = [\"test\"]", None);
+    let server = env.server();
+    let report = server.reconcile().unwrap();
+    assert!(report.problems.is_empty(), "{report:?}");
+    assert!(
+        report.actions.iter().any(|a| a.contains("finished reset")),
+        "{report:?}"
+    );
+    assert_eq!(
+        tables_in(&a.extra_urls["shadow"]),
+        0,
+        "the database the reset recorded is emptied although its label is gone"
+    );
+    assert_eq!(
+        scratch_states(&mut meta, a.branch.id),
+        [
+            ("test".to_string(), "ready".to_string(), 1),
+            ("shadow".to_string(), "ready".to_string(), 1)
+        ]
+    );
+    assert_eq!(
+        server.reconcile().unwrap().orphans.len(),
+        1,
+        "`shadow` is still a reported orphan"
+    );
+    assert!(
+        one::<bool>(
+            &mut meta,
+            &format!(
+                "SELECT op_scratch IS NULL FROM branches WHERE id = '{}'",
+                a.branch.id
+            )
+        ),
+        "the journal is cleared with the operation"
+    );
+
+    // 2. An orphan listed again after the reset began. `shadow` is an orphan
+    // holding data when the reset starts, so the reset does not select it; the
+    // first rebuild (`test`) is cut off; then `shadow` is listed again.
+    connect(&a.extra_urls["shadow"])
+        .batch_execute("CREATE TABLE precious (i int)")
+        .unwrap();
+    connect(&a.extra_urls["test"])
+        .batch_execute("CREATE TABLE before_second_reset (i int)")
+        .unwrap();
+    reset_interrupted_at(&server, &env, a.branch.id, "test");
+    assert_eq!(tables_in(&a.extra_urls["test"]), 1, "not yet emptied");
+    env.write_config("extra_databases = [\"test\", \"shadow\"]", None);
+    let server = env.server();
+    let report = server.reconcile().unwrap();
+    assert!(report.problems.is_empty(), "{report:?}");
+    assert!(
+        report.actions.iter().any(|a| a.contains("finished reset")),
+        "{report:?}"
+    );
+    assert_eq!(
+        tables_in(&a.extra_urls["test"]),
+        0,
+        "the recorded one is emptied"
+    );
+    assert_eq!(
+        tables_in(&a.extra_urls["shadow"]),
+        1,
+        "the orphan was not part of the reset and keeps its data"
+    );
+    assert_eq!(
+        scratch_states(&mut meta, a.branch.id),
+        [
+            ("test".to_string(), "ready".to_string(), 2),
+            ("shadow".to_string(), "ready".to_string(), 1)
+        ],
+        "`shadow` was not emptied for the second generation"
+    );
+    let converged = server.reconcile().unwrap();
+    assert!(
+        converged.actions.is_empty() && converged.problems.is_empty(),
+        "{converged:?}"
+    );
+
+    // 3. A journal written before the set was recorded (no ids) falls back to
+    // the configuration as it is now.
+    connect(&a.extra_urls["shadow"])
+        .batch_execute("CREATE TABLE legacy_case (i int)")
+        .unwrap();
+    reset_interrupted_at(&server, &env, a.branch.id, "shadow");
+    meta.execute(
+        "UPDATE branches SET op_scratch = NULL WHERE id = $1",
+        &[&a.branch.id],
+    )
+    .unwrap();
+    let report = server.reconcile().unwrap();
+    assert!(report.problems.is_empty(), "{report:?}");
+    assert_eq!(tables_in(&a.extra_urls["shadow"]), 0);
+
+    server.drop_branch(a.branch.id).unwrap();
+    let mut admin = superuser(&server, "postgres");
+    assert!(df_databases(&mut admin).is_empty());
 }

@@ -78,6 +78,48 @@ pub fn libpq_env_vars() -> impl Iterator<Item = &'static str> {
     ])
 }
 
+/// The `PG*` variables a connection URL can express, in libpq's table order.
+pub fn pg_env_names() -> impl Iterator<Item = &'static str> {
+    KEYWORDS.iter().map(|(_, env)| *env)
+}
+
+/// Everything except the RFC 3986 unreserved characters is percent-encoded.
+const URL_COMPONENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+/// `text` as one component (user, password, database name) of a URL.
+pub fn url_component(text: &str) -> String {
+    percent_encoding::utf8_percent_encode(text, URL_COMPONENT).to_string()
+}
+
+/// `host` as the host part of a URL: IPv6 addresses are bracketed.
+pub fn url_host(host: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
+/// `url` (`scheme://authority/database?options`) with another database: the
+/// credentials, endpoint and options are kept byte for byte, `database` is
+/// percent-encoded. `None` when `url` is not a URL.
+pub fn url_with_database(url: &str, database: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    // The authority ends at the first `/` or `?` (a `/` inside it would be
+    // percent-encoded).
+    let end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    let options = tail.find('?').map_or("", |at| &tail[at..]);
+    Some(format!(
+        "{scheme}://{authority}/{}{options}",
+        url_component(database)
+    ))
+}
+
 /// Keywords whose values are credentials.
 pub fn is_secret_keyword(keyword: &str) -> bool {
     matches!(keyword, "password" | "sslpassword")
@@ -261,7 +303,9 @@ fn parse_conninfo(input: &str) -> Result<Vec<(String, String)>> {
             chars.next();
         }
         if chars.next() != Some('=') {
-            bail!("missing '=' after '{key}' in connection string");
+            // The keyword is not named: in a string with a typo it may be the
+            // password itself.
+            bail!("a keyword in the connection string has no '=' and value");
         }
         while chars.peek().is_some_and(|c| c.is_whitespace()) {
             chars.next();
@@ -274,7 +318,7 @@ fn parse_conninfo(input: &str) -> Result<Vec<(String, String)>> {
                     Some('\\') => value.extend(chars.next()),
                     Some('\'') => break,
                     Some(c) => value.push(c),
-                    None => bail!("unterminated quoted value for '{key}'"),
+                    None => bail!("a quoted value in the connection string is not terminated"),
                 }
             }
         } else {
@@ -301,6 +345,33 @@ mod tests {
 
     fn env(url: &str) -> Vec<(&'static str, String)> {
         Params::parse(url).unwrap().env()
+    }
+
+    #[test]
+    fn a_url_keeps_everything_but_its_database() {
+        let with = |url: &str, db: &str| url_with_database(url, db);
+        assert_eq!(
+            with("postgres://dfl_a:p%40ss@127.0.0.1:5432/df_x", "df_x_1").as_deref(),
+            Some("postgres://dfl_a:p%40ss@127.0.0.1:5432/df_x_1") // kingfisher:ignore
+        );
+        // Options survive, an IPv6 host is left alone, the name is encoded.
+        assert_eq!(
+            with("postgres://u:p@[::1]:1/d?sslmode=require&x=a/b", "my db").as_deref(),
+            Some("postgres://u:p@[::1]:1/my%20db?sslmode=require&x=a/b") // kingfisher:ignore
+        );
+        // No database in the URL, with and without options.
+        assert_eq!(
+            with("postgres://u@h", "d").as_deref(),
+            Some("postgres://u@h/d")
+        );
+        assert_eq!(
+            with("postgres://u@h?sslmode=disable", "d").as_deref(),
+            Some("postgres://u@h/d?sslmode=disable")
+        );
+        assert_eq!(with("not a url", "d"), None);
+        // The parser reads back what was written.
+        let url = with("postgres://u:p@h:7/d", "other_1").unwrap(); // kingfisher:ignore
+        assert_eq!(Params::parse(&url).unwrap().get("dbname"), Some("other_1"));
     }
 
     #[test]
@@ -351,6 +422,21 @@ mod tests {
         assert_eq!(p.password(), Some("it's secret"));
         assert_eq!(p.get("host"), Some("h"));
         assert_eq!(p.get("dbname"), Some("d"));
+    }
+
+    #[test]
+    fn malformed_connection_strings_are_refused_without_their_text() {
+        for text in [
+            "REVIEWSECRET",
+            "host=h REVIEWSECRET",
+            "host=h password='REVIEWSECRET",
+            "postgres://u@h/db?REVIEWSECRET",
+            "postgres://u@[REVIEWSECRET/db",
+        ] {
+            let error = Params::parse(text).unwrap_err();
+            let shown = format!("{error} | {error:#} | {error:?}");
+            assert!(!shown.contains("REVIEWSECRET"), "{text}\n{shown}");
+        }
     }
 
     #[test]
@@ -423,6 +509,20 @@ mod tests {
         ] {
             assert!(cleared.contains(&var), "{var} must be cleared");
         }
+    }
+
+    #[test]
+    fn url_components_are_encoded_and_ipv6_hosts_bracketed() {
+        assert_eq!(url_component("simple-name_1.x~"), "simple-name_1.x~");
+        assert_eq!(
+            url_component("p@ss/w:rd#?% é"),
+            "p%40ss%2Fw%3Ard%23%3F%25%20%C3%A9"
+        );
+        assert_eq!(url_host("db.internal"), "db.internal");
+        assert_eq!(url_host("::1"), "[::1]");
+        assert_eq!(url_host("[::1]"), "[::1]");
+        assert!(pg_env_names().any(|n| n == "PGPASSWORD"));
+        assert!(pg_env_names().all(|n| n.starts_with("PG")));
     }
 
     #[test]

@@ -56,6 +56,15 @@ impl Session<'_> {
 
     /// `LOGIN` member of the owner acting as it (`SET role`), with a SCRAM
     /// verifier instead of the clear password.
+    ///
+    /// The membership is `SET` only, never `INHERIT`. The session acts as the
+    /// owner, so the owner is the role that needs `CONNECT` on the branch's
+    /// databases (`pg_database_size(current_database())` and the GUI tools that
+    /// call it check it); but the owner is shared by every branch of the
+    /// project, so a login that inherited the owner would inherit `CONNECT` on
+    /// its siblings' databases too. Without `INHERIT` the connection check
+    /// (made for the login before `SET role` applies) sees only the login's own
+    /// grant: one database.
     pub(super) fn create_login(&mut self, login: &str, owner: &str, password: &str) -> Result<()> {
         self.step()?;
         if self.role_exists(login)? {
@@ -63,7 +72,7 @@ impl Session<'_> {
         }
         self.admin
             .batch_execute(&format!(
-                "CREATE ROLE {} LOGIN INHERIT {PLAIN_ROLE} PASSWORD {} IN ROLE {}",
+                "CREATE ROLE {} LOGIN NOINHERIT {PLAIN_ROLE} PASSWORD {} IN ROLE {}",
                 q(login),
                 quote_literal(&password_verifier(password)),
                 q(owner)
@@ -74,23 +83,37 @@ impl Session<'_> {
             q(login),
             quote_literal(owner)
         ))?;
-        // Membership must inherit and allow SET ROLE, and never carry ADMIN OPTION.
+        // Membership must allow SET ROLE, must not inherit, and never carries
+        // ADMIN OPTION.
         let usable: Option<bool> = self
             .admin
             .query_one(
-                "SELECT bool_or(inherit_option AND set_option AND NOT admin_option) \
+                "SELECT bool_or(NOT inherit_option AND set_option AND NOT admin_option) \
                  FROM pg_auth_members WHERE roleid = to_regrole($1) AND member = to_regrole($2)",
                 &[&owner, &login],
             )?
             .get(0);
         if usable != Some(true) {
             self.admin.batch_execute(&format!(
-                "GRANT {} TO {} WITH INHERIT TRUE, SET TRUE, ADMIN FALSE",
+                "GRANT {} TO {} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE",
                 q(owner),
                 q(login)
             ))?;
         }
         Ok(())
+    }
+
+    /// Stop `login` inheriting the owner's privileges (a login made by an
+    /// earlier build did), keeping `SET ROLE`.
+    pub(super) fn stop_inheriting(&mut self, login: &str, owner: &str) -> Result<()> {
+        self.step()?;
+        self.admin
+            .batch_execute(&format!(
+                "GRANT {} TO {} WITH INHERIT FALSE, SET TRUE, ADMIN FALSE",
+                q(owner),
+                q(login)
+            ))
+            .with_context(|| format!("cannot stop {login} inheriting {owner}"))
     }
 
     pub(super) fn set_password(&mut self, login: &str, password: &str) -> Result<()> {
@@ -238,8 +261,9 @@ impl Session<'_> {
         Ok((done, stuck))
     }
 
-    /// `PUBLIC` loses `CONNECT, TEMPORARY`; only the project owner gets
-    /// `CREATE, TEMPORARY` (no grant option, never `CONNECT`).
+    /// `PUBLIC` loses `CONNECT, TEMPORARY`; the project owner gets
+    /// `CREATE, TEMPORARY` (no grant option). `CONNECT` comes last, from
+    /// [`Session::grant_connect`].
     pub(super) fn restrict_database(&mut self, db: &str, owner: &str) -> Result<()> {
         self.step()?;
         self.admin
@@ -262,15 +286,33 @@ impl Session<'_> {
             .with_context(|| format!("cannot change connections to {db}"))
     }
 
-    pub(super) fn grant_connect(&mut self, db: &str, login: &str) -> Result<()> {
+    /// `CONNECT` on `db` for the branch's login and for the project owner.
+    /// The owner is the role the login's session acts as (`SET role`), so it
+    /// is the one `has_database_privilege(current_database(), 'CONNECT')` and
+    /// `pg_database_size` check. It is shared by the project's branches, which
+    /// is safe only because no login inherits it ([`Session::create_login`]).
+    pub(super) fn grant_connect(&mut self, db: &str, login: &str, owner: &str) -> Result<()> {
+        self.step()?;
+        self.admin
+            .batch_execute(&format!(
+                "GRANT CONNECT ON DATABASE {} TO {}, {}",
+                q(db),
+                q(login),
+                q(owner)
+            ))
+            .with_context(|| format!("cannot grant {login} access to {db}"))
+    }
+
+    /// `CONNECT` on `db` for the owner alone (the login already has its own).
+    pub(super) fn grant_owner_connect(&mut self, db: &str, owner: &str) -> Result<()> {
         self.step()?;
         self.admin
             .batch_execute(&format!(
                 "GRANT CONNECT ON DATABASE {} TO {}",
                 q(db),
-                q(login)
+                q(owner)
             ))
-            .with_context(|| format!("cannot grant {login} access to {db}"))
+            .with_context(|| format!("cannot grant {owner} access to {db}"))
     }
 
     /// Make the project owner own everything in a new database.

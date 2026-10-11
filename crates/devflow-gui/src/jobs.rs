@@ -1,18 +1,27 @@
 //! Blocking work that runs on GPUI's background executor: panic containment,
 //! progress forwarding, and the read-only refresh of a project's models.
-use crate::model::{DatabaseModel, LogFile, LogsModel, PitchforkModel, Section, WorkspaceTarget};
+use crate::{
+    model::{
+        DatabaseModel, LogFile, LogsModel, PitchforkModel, PitchforkOffer, Section,
+        WorkspaceSummary, WorkspaceTarget, workspace_summaries,
+    },
+    redaction::{self, RefusalView},
+    services::{ServiceBackend, ServicesModel},
+};
 use anyhow::Result;
 use devflow_core::{
     config::{ConfigDocument, PostgresMode},
     db::Server,
     error::{Busy, ConfigChanged, NotInitialized, Protected},
-    pitchfork,
+    pitchfork::{self, Detection, InstallPlan, Pitchfork},
+    processes,
     project::{self, InitOptions, Project},
     receipt::{Phase, PhaseState, Receipt},
     redact,
     registry::{self, Entry},
     setup::{self, Progress, WorkspaceStatus},
     trust::{self, TrustState},
+    worktree::Workspace,
 };
 use std::{
     cell::Cell,
@@ -92,6 +101,9 @@ impl FailureKind {
 pub struct Failure {
     pub message: String,
     pub kind: FailureKind,
+    /// Core refused the call with a typed refusal (a start that may not
+    /// happen): its kind, sentence and hint, for a view to keep.
+    pub refusal: Option<RefusalView>,
 }
 
 impl Failure {
@@ -99,6 +111,7 @@ impl Failure {
         Self {
             message: redact::text(message.as_ref()),
             kind: FailureKind::Other,
+            refusal: None,
         }
     }
 
@@ -106,6 +119,7 @@ impl Failure {
         Self {
             message: redact::text(&format!("{error:#}")),
             kind: FailureKind::of(error),
+            refusal: RefusalView::from_error(error),
         }
     }
 }
@@ -145,9 +159,30 @@ pub struct Done {
     pub warnings: Vec<String>,
     pub needs_attention: bool,
     pub select_workspace: Option<String>,
+    /// What this did to a workspace's processes, so the view can keep or
+    /// clear a refusal.
+    pub process: Option<ProcessNote>,
+}
+
+/// The outcome of asking core to start a workspace's processes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessNote {
+    /// The workspace's directory.
+    pub path: PathBuf,
+    /// Why core would not start them (a typed refusal); `None` when it did.
+    pub refusal: Option<RefusalView>,
 }
 
 impl Done {
+    /// The summary and its warnings as one paragraph.
+    pub fn line(&self) -> String {
+        let mut text = self.summary.clone();
+        for warning in &self.warnings {
+            text.push_str(&format!(" ({warning})"));
+        }
+        text
+    }
+
     /// The same report with credentials masked (core's warnings may quote URLs).
     pub fn redacted(mut self) -> Self {
         self.summary = redact::text(&self.summary);
@@ -378,13 +413,115 @@ pub fn init_project(start: PathBuf, managed_postgres: bool) -> Section<Uuid> {
 
 // ---- refresh -----------------------------------------------------------------
 
+/// Where the doctor's checks come from: core, or (tests) a fixed list.
+#[derive(Clone, Debug, Default)]
+pub enum DoctorSource {
+    #[default]
+    Core,
+    #[cfg(test)]
+    Fixed(Vec<devflow_core::doctor::Check>),
+}
+
+/// Which pitchfork core is asked: the one on `PATH`, or (tests) a fixed one.
+#[derive(Clone, Debug, Default)]
+pub enum PitchforkSource {
+    #[default]
+    OnPath,
+    #[cfg(test)]
+    Fixed {
+        pitchfork: Option<Pitchfork>,
+        /// How to install it; the machine's plan when `None`.
+        install: Option<InstallPlan>,
+    },
+}
+
+impl PitchforkSource {
+    /// A fixed pitchfork for tests.
+    #[cfg(test)]
+    pub fn fixed(pitchfork: Option<Pitchfork>) -> Self {
+        Self::Fixed {
+            pitchfork,
+            install: None,
+        }
+    }
+
+    /// How to get a usable pitchfork.
+    pub fn install_plan(&self) -> InstallPlan {
+        match self {
+            Self::OnPath => pitchfork::install_plan(),
+            #[cfg(test)]
+            Self::Fixed { install, .. } => install.clone().unwrap_or_else(pitchfork::install_plan),
+        }
+    }
+
+    /// What running it finds. The machine's is cached for a moment; a fixed
+    /// one (tests) is asked every time.
+    pub fn detection(&self) -> Detection {
+        match self {
+            Self::OnPath => detection_on_path(),
+            #[cfg(test)]
+            Self::Fixed {
+                pitchfork: Some(pitchfork),
+                ..
+            } => pitchfork.detect(),
+            #[cfg(test)]
+            Self::Fixed {
+                pitchfork: None, ..
+            } => missing(None),
+        }
+    }
+
+    pub fn resolve(&self) -> Option<Pitchfork> {
+        match self {
+            Self::OnPath => Pitchfork::locate(),
+            #[cfg(test)]
+            Self::Fixed { pitchfork, .. } => pitchfork.clone(),
+        }
+    }
+}
+
+/// How much of the processes picture a refresh reads. Asking pitchfork runs
+/// a few commands, so the tabs that do not show processes ask for less.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProcessWant {
+    /// Not at all.
+    #[default]
+    No,
+    /// Only if some workspace of the project has pitchfork configuration (the
+    /// Workspaces tab: the overview and the detail's processes).
+    WhenUsed,
+    /// Always, so the tab can say pitchfork is missing (the Daemons tab).
+    Always,
+}
+
+/// How the container services are read: through which backend, and whether
+/// in detail (which asks Docker) or only their counts (the catalog file).
+#[derive(Clone)]
+pub struct ServicesRead {
+    pub backend: Arc<dyn ServiceBackend>,
+    pub full: bool,
+}
+
+#[cfg(test)]
+impl ServicesRead {
+    /// Only the counts, through core: for tests that call `refresh` directly.
+    pub fn counts() -> Self {
+        Self {
+            backend: Arc::new(crate::services::CoreServices),
+            full: false,
+        }
+    }
+}
+
 pub struct RefreshRequest {
     pub root: PathBuf,
     pub load_config: bool,
     pub workspace: Option<WorkspaceTarget>,
-    pub want_daemons: bool,
+    pub processes: ProcessWant,
     pub want_logs: bool,
     pub selected_log: Option<PathBuf>,
+    pub pitchfork: PitchforkSource,
+    pub services: ServicesRead,
 }
 
 pub enum LoadError {
@@ -396,6 +533,7 @@ pub struct Refreshed {
     pub project: Arc<Project>,
     pub workspaces: Section<Vec<WorkspaceStatus>>,
     pub database: DatabaseModel,
+    pub services: ServicesModel,
     pub trust: Section<TrustState>,
     pub pitchfork: Option<PitchforkModel>,
     pub config: Option<Section<ConfigDocument>>,
@@ -412,10 +550,28 @@ pub fn refresh(request: RefreshRequest) -> Result<Refreshed, LoadError> {
     })?;
     let workspaces = catch(|| setup::list(&project));
     let database = load_database(&project);
-    let trust = catch(|| trust::state(&project));
-    let pitchfork = request
-        .want_daemons
-        .then(|| load_daemons(request.workspace.as_ref()));
+    let services = request.services.backend.load(
+        &project,
+        workspaces.as_deref().unwrap_or_default(),
+        request.services.full,
+    );
+    // What is trusted is judged for the workspace being looked at: a linked
+    // worktree has its own pitchfork files. With none selected, the main checkout.
+    let trust_dir = request
+        .workspace
+        .as_ref()
+        .map_or_else(|| project.root.clone(), |target| target.path.clone());
+    let trust = catch(|| trust::state_at(&project, &trust_dir));
+    let pitchfork = load_processes(
+        &request.pitchfork,
+        &project,
+        workspaces.as_deref().unwrap_or_default(),
+        request
+            .workspace
+            .as_ref()
+            .map(|target| target.path.as_path()),
+        request.processes,
+    );
     let config = request
         .load_config
         .then(|| catch(|| ConfigDocument::open(&request.root)));
@@ -426,6 +582,7 @@ pub fn refresh(request: RefreshRequest) -> Result<Refreshed, LoadError> {
         project: Arc::new(project),
         workspaces,
         database,
+        services,
         trust,
         pitchfork,
         config,
@@ -433,10 +590,19 @@ pub fn refresh(request: RefreshRequest) -> Result<Refreshed, LoadError> {
     })
 }
 
+/// A light read of one project's workspaces, for the sidebar tree of a project
+/// that is not the selected one (the selected project's refresh covers its own).
+pub fn summarize(root: &Path) -> Section<Vec<WorkspaceSummary>> {
+    catch(|| {
+        let project = Project::open(root)?;
+        Ok(workspace_summaries(&setup::list(&project)?))
+    })
+}
+
 /// Never fails: problems are recorded in the model so the tab can show them.
 fn load_database(project: &Project) -> DatabaseModel {
     let mut model = DatabaseModel {
-        configured: project.config.postgres.is_some(),
+        configured: project.config.postgres().is_some(),
         ..Default::default()
     };
     let server = match catch(|| Server::for_project(project)) {
@@ -472,23 +638,159 @@ fn load_database(project: &Project) -> DatabaseModel {
         }
     }
     model.status = Some(status);
+    redaction::database(&mut model);
     model
 }
 
-fn load_daemons(workspace: Option<&WorkspaceTarget>) -> PitchforkModel {
-    let available = catch_value(pitchfork::available).unwrap_or(false);
+/// How long a feature check of the installed pitchfork is trusted: it runs
+/// several commands, and the answer only changes when somebody installs.
+const DETECTION_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A detection that found nothing, with the reason when there is one.
+fn missing(problem: Option<String>) -> Detection {
+    Detection {
+        path: None,
+        installed: false,
+        version: None,
+        missing_features: Vec::new(),
+        problem,
+    }
+}
+
+/// Moves when something may have changed what is installed.
+static DETECTION_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The machine's pitchfork was installed or changed just now: look again.
+pub fn forget_detection() {
+    DETECTION_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The machine's pitchfork, checked at most every [`DETECTION_TTL`] and again
+/// after [`forget_detection`].
+fn detection_on_path() -> Detection {
+    use std::sync::{Mutex, atomic::Ordering};
+    use std::time::Instant;
+    static CACHE: Mutex<Option<(Instant, u64, Detection)>> = Mutex::new(None);
+    let epoch = DETECTION_EPOCH.load(Ordering::Relaxed);
+    if let Ok(cache) = CACHE.lock()
+        && let Some((at, when, found)) = cache.as_ref()
+        && *when == epoch
+        && at.elapsed() < DETECTION_TTL
+    {
+        return found.clone();
+    }
+    let found = pitchfork::detect();
+    if let Ok(mut cache) = CACHE.lock() {
+        *cache = Some((Instant::now(), epoch, found.clone()));
+    }
+    found
+}
+
+/// How long installing may take (mise may download and build).
+const INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Run the install `plan` the person was shown (core's
+/// [`pitchfork::run_install`], which runs that command and nothing else), then
+/// look at pitchfork again. The detection after it, which may still say
+/// pitchfork is not there (the app's `PATH` may not include mise's shims).
+pub fn install_pitchfork(source: &PitchforkSource, plan: &InstallPlan) -> Result<Detection> {
+    let ran = pitchfork::run_install(plan, INSTALL_TIMEOUT)?;
+    forget_detection();
+    anyhow::ensure!(
+        !ran.timed_out,
+        "installing pitchfork took longer than {} and was stopped",
+        devflow_core::text::counted(INSTALL_TIMEOUT.as_secs() / 60, "minute")
+    );
+    anyhow::ensure!(
+        ran.ok,
+        "installing pitchfork failed: {}",
+        ran.message
+            .as_deref()
+            .unwrap_or("the command exited with an error")
+    );
+    let mut detection = source.detection();
+    redaction::detection(&mut detection);
+    Ok(detection)
+}
+
+/// What the wizard shows about pitchfork for the project at `dir`: never
+/// fails, and asks pitchfork (not the supervisor) only if it is usable.
+pub fn load_offer(source: &PitchforkSource, dir: &Path) -> PitchforkOffer {
+    let mut detection =
+        catch_value(|| source.detection()).unwrap_or_else(|message| missing(Some(message)));
+    redaction::detection(&mut detection);
+    let proxy = if detection.usable() {
+        source
+            .resolve()
+            .and_then(|found| catch_value(|| found.proxy_status(dir)).ok()?.ok())
+            .map(|mut proxy| {
+                redaction::proxy(&mut proxy);
+                proxy
+            })
+    } else {
+        None
+    };
+    PitchforkOffer {
+        install: (!detection.usable()).then(|| source.install_plan()),
+        detection: Some(detection),
+        proxy,
+    }
+}
+
+/// Never fails: problems are recorded in the model so the tab can show them.
+/// `None` when the refresh did not ask, or nothing in the project uses
+/// pitchfork and the caller only wanted it if something did.
+fn load_processes(
+    source: &PitchforkSource,
+    project: &Project,
+    workspaces: &[WorkspaceStatus],
+    selected: Option<&Path>,
+    want: ProcessWant,
+) -> Option<PitchforkModel> {
+    let present: Vec<Workspace> = workspaces
+        .iter()
+        .map(|w| &w.workspace)
+        .filter(|w| !w.missing)
+        .cloned()
+        .collect();
+    match want {
+        ProcessWant::No => return None,
+        ProcessWant::WhenUsed => {
+            if !present.iter().any(|w| processes::uses_pitchfork(&w.path)) {
+                // Nothing to supervise: say so without asking pitchfork.
+                return Some(PitchforkModel {
+                    loaded: true,
+                    ..Default::default()
+                });
+            }
+        }
+        ProcessWant::Always => {}
+    }
+    let mut detection =
+        catch_value(|| source.detection()).unwrap_or_else(|message| missing(Some(message)));
+    redaction::detection(&mut detection);
     let mut model = PitchforkModel {
         loaded: true,
-        available,
+        install: (!detection.usable()).then(|| source.install_plan()),
         ..Default::default()
     };
-    if let (true, Some(ws)) = (available, workspace) {
-        match catch(|| pitchfork::daemons(&ws.path)) {
-            Ok(daemons) => model.daemons = daemons,
+    if detection.installed {
+        let located = source.resolve();
+        match catch_value(|| processes::status_all(located.as_ref(), project, &present)) {
+            Ok(mut all) => {
+                for status in &mut all {
+                    redaction::process_status(status);
+                }
+                model.status = selected
+                    .and_then(|path| all.iter().find(|status| status.path == path))
+                    .cloned();
+                model.all = all;
+            }
             Err(e) => model.error = Some(e),
         }
     }
-    model
+    model.detection = Some(detection);
+    Some(model)
 }
 
 // ---- logs --------------------------------------------------------------------
@@ -609,9 +911,7 @@ mod tests {
             FailureKind::NotInitialized
         );
         assert_eq!(
-            FailureKind::of(&anyhow::Error::new(Busy {
-                workspace: "w".into()
-            })),
+            FailureKind::of(&anyhow::Error::new(Busy::setup("w"))),
             FailureKind::Busy
         );
         // Wording alone never makes a failure overridable or "uninitialized".
@@ -685,7 +985,7 @@ mod tests {
         assert!(first.finished.is_none());
 
         // Phases are never dropped, and the skipped lines are announced.
-        progress.phase(Phase::Database, PhaseState::Done, Some("ready"));
+        progress.phase(Phase::Services, PhaseState::Done, Some("ready"));
         progress.flush();
         tx.send(Event::Finished(Ok(Done::default()))).unwrap();
         let rest = drain(&rx, 100);
@@ -693,7 +993,7 @@ mod tests {
         assert!(rest.events.iter().any(|e| matches!(
             e,
             Event::Phase {
-                phase: Phase::Database,
+                phase: Phase::Services,
                 ..
             }
         )));
@@ -806,9 +1106,11 @@ mod tests {
             root: root.to_path_buf(),
             load_config: true,
             workspace: None,
-            want_daemons: false,
+            processes: ProcessWant::No,
             want_logs: false,
             selected_log: None,
+            pitchfork: PitchforkSource::OnPath,
+            services: ServicesRead::counts(),
         }
     }
 

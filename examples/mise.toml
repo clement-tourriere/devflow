@@ -6,14 +6,18 @@ bun = "1.2"
 
 [env]
 # devflow writes DATABASE_URL, the PG* variables and DEVFLOW_* identifiers to
-# .devflow/env in every worktree. mise loads it for every command run through
-# mise (tasks, `mise exec`, activated shells) and for pitchfork daemons that
-# start with `mise exec --`.
+# .devflow/env in every worktree. mise loads it for the shells and editors you
+# use in the worktree. Commands devflow runs (setup hooks, pitchfork daemons)
+# do not depend on this: they go through `devflow exec`, which sets the file
+# after mise has set its own environment (see pitchfork.toml and devflow.toml).
 _.file = ".devflow/env"
 
 [tasks."db:migrate"]
-description = "Apply database migrations (used by devflow's setup hook)"
-run = "bun run db:migrate"
+description = "Apply database migrations"
+# A task's own `env` is applied after anything devflow sets, and `devflow exec`
+# cannot wrap a task from outside: run a command that needs the database
+# through it inside the task, or keep DATABASE_URL out of the task's `env`.
+run = "devflow exec -- bun run db:migrate"
 
 [tasks.dev]
 description = "Run the web app against this worktree's database"

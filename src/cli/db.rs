@@ -5,8 +5,10 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{Args, Subcommand};
 use devflow_core::Project;
 use devflow_core::conn::{self, Params};
-use devflow_core::db::{BranchCredentials, DataSource, Server, ServerStatus};
-use devflow_core::receipt::{DataBinding, Receipt};
+use devflow_core::db::{
+    BranchCredentials, DataSource, RecordStatus, ScratchInfo, Server, ServerStatus,
+};
+use devflow_core::receipt::ServiceBinding;
 use devflow_core::redact;
 use devflow_core::setup;
 use devflow_core::worktree::{self, Workspace};
@@ -28,7 +30,7 @@ pub enum DbCommand {
     /// Replace a workspace's data with a fresh clone of its source (or of --to)
     Reset(ResetArgs),
     /// Finish or roll back operations interrupted by a crash
-    Reconcile,
+    Reconcile(ReconcileArgs),
     /// Named, versioned, read-only copies of a workspace's data
     Snapshot {
         #[command(subcommand)]
@@ -54,6 +56,14 @@ pub struct ResetArgs {
     /// New data origin: a workspace, snapshot:NAME[@vN], branch:ID or empty
     #[arg(long, value_name = "SRC")]
     pub to: Option<DataSource>,
+}
+
+#[derive(Args)]
+pub struct ReconcileArgs {
+    /// Also drop the scratch databases whose name `extra_databases` no longer
+    /// lists (they are otherwise kept and reported)
+    #[arg(long)]
+    pub drop_orphans: bool,
 }
 
 #[derive(Subcommand)]
@@ -82,8 +92,9 @@ pub enum BranchCommand {
     Create(BranchCreateArgs),
     /// Drop a branch and its role
     Delete {
-        /// Branch id (see `devflow db branch list`)
-        id: uuid::Uuid,
+        /// Branch id: a UUID or a unique prefix of at least 8 hex characters
+        /// (see `devflow db branch list`)
+        id: devflow_core::ids::IdRef,
     },
 }
 
@@ -112,7 +123,7 @@ impl DbCommand {
             DbCommand::Url(_) => "db url",
             DbCommand::Psql(_) => return None,
             DbCommand::Reset(_) => "db reset",
-            DbCommand::Reconcile => "db reconcile",
+            DbCommand::Reconcile(_) => "db reconcile",
             DbCommand::Snapshot { command } => match command {
                 SnapshotCommand::Create { .. } => "db snapshot create",
                 SnapshotCommand::List => "db snapshot list",
@@ -155,17 +166,33 @@ pub fn run(ctx: &Ctx, command: DbCommand) -> Result<ExitCode> {
         DbCommand::Url(arg) => url(ctx, name, &project, arg),
         DbCommand::Psql(arg) => psql(ctx, &project, arg),
         DbCommand::Reset(args) => reset(ctx, name, &project, args),
-        DbCommand::Reconcile => {
-            let report = server(&project)?.reconcile()?;
+        DbCommand::Reconcile(args) => {
+            let server = server(&project)?;
+            let mut report = server.reconcile()?;
+            if args.drop_orphans {
+                // Explicit and by recorded identity: only what was reported.
+                report.actions.extend(server.drop_orphans()?);
+                report.orphans.clear();
+            }
             if ctx.json {
                 output::emit(ctx, name, &report)?;
-            } else if report.actions.is_empty() && report.problems.is_empty() {
+            } else if report.actions.is_empty()
+                && report.problems.is_empty()
+                && report.orphans.is_empty()
+            {
                 say("Nothing to reconcile.");
             } else {
                 report
                     .actions
                     .iter()
                     .for_each(|action| say(redact::text(&format!("- {action}"))));
+                if !report.orphans.is_empty() {
+                    say("Orphaned scratch databases (kept):");
+                    report
+                        .orphans
+                        .iter()
+                        .for_each(|orphan| say(redact::text(&format!("- {orphan}"))));
+                }
                 if !report.problems.is_empty() {
                     say("Needs an operator:");
                     report
@@ -184,7 +211,8 @@ pub fn run(ctx: &Ctx, command: DbCommand) -> Result<ExitCode> {
 fn server(project: &Project) -> Result<Server> {
     Server::for_project(project)?.ok_or_else(|| {
         anyhow!(
-            "{} has no [postgres] section; add one to enable database branches",
+            "{} has no postgres service; add `[services.db]` with `engine = \"postgres\"` \
+             to enable database branches",
             project.config_path.display()
         )
     })
@@ -215,6 +243,10 @@ fn show_status(
     if let Some(endpoint) = &status.endpoint {
         rows.push(("endpoint", endpoint.clone()));
     }
+    if let Some(endpoint) = &status.container_endpoint {
+        // For apps running in containers on the same Docker networks.
+        rows.push(("container_endpoint", endpoint.clone()));
+    }
     if let Some(version) = &status.server_version {
         rows.push(("version", version.clone()));
     }
@@ -235,7 +267,7 @@ fn show_status(
 
 // --- workspace databases ----------------------------------------------------
 
-fn workspace_arg(ctx: &Ctx, project: &Project, name: Option<&str>) -> Result<Workspace> {
+pub(super) fn workspace_arg(ctx: &Ctx, project: &Project, name: Option<&str>) -> Result<Workspace> {
     match name {
         Some(name) => worktree::find(project, name)?
             .ok_or_else(|| anyhow!("no workspace named '{name}'; see `devflow list`")),
@@ -248,36 +280,48 @@ fn workspace_arg(ctx: &Ctx, project: &Project, name: Option<&str>) -> Result<Wor
     }
 }
 
-/// The database a workspace is bound to, from its receipt (no server contact).
-fn binding(project: &Project, workspace: &Workspace) -> Result<DataBinding> {
-    let receipt = Receipt::load(&workspace.git_dir)?
-        .filter(|receipt| receipt.project_id == project.id())
+/// The database a workspace is bound to, from its receipt (no server contact):
+/// the binding of the project's postgres service, whatever its key.
+fn binding(project: &Project, workspace: &Workspace) -> Result<ServiceBinding> {
+    let receipt = setup::receipt(project, workspace)?.ok_or_else(|| {
+        anyhow!(
+            "workspace '{}' has not been set up; run `devflow setup` in {}",
+            workspace.name,
+            workspace.path.display()
+        )
+    })?;
+    receipt
+        .postgres(&project.config)
+        .map(|(_, binding)| binding.clone())
         .ok_or_else(|| {
             anyhow!(
-                "workspace '{}' has not been set up; run `devflow setup` in {}",
-                workspace.name,
-                workspace.path.display()
+                "workspace '{}' has no database; configure a postgres service in [services] \
+                 and run `devflow setup`",
+                workspace.name
             )
-        })?;
-    receipt.data.ok_or_else(|| {
-        anyhow!(
-            "workspace '{}' has no database; configure [postgres] and run `devflow setup`",
-            workspace.name
-        )
-    })
+        })
 }
 
 fn url(ctx: &Ctx, command: &str, project: &Project, arg: WorkspaceArg) -> Result<ExitCode> {
     let workspace = workspace_arg(ctx, project, arg.workspace.as_deref())?;
     let data = binding(project, &workspace)?;
     if ctx.json {
-        let body = json!({
+        let mut body = json!({
             "workspace": workspace.name,
             "url": data.url,
             "database": data.database,
             "role": data.role,
             "branch_id": data.branch_id,
         });
+        // The scratch databases (`extra_databases`), same login and password.
+        let extras: serde_json::Map<String, serde_json::Value> = data
+            .extras
+            .keys()
+            .filter_map(|name| Some((name.clone(), json!(data.extra_url(name)?))))
+            .collect();
+        if !extras.is_empty() {
+            body["extras"] = extras.into();
+        }
         output::emit_unredacted(ctx, command, &body)?;
     } else {
         say(&data.url);
@@ -474,10 +518,12 @@ fn branch(ctx: &Ctx, command: &str, project: &Project, action: BranchCommand) ->
             } else if branches.is_empty() {
                 say("No branches.");
             } else {
+                // The scratch databases get a column only when there are some.
+                let with_extras = branches.iter().any(|b| !b.extras.is_empty());
                 let rows: Vec<Vec<String>> = branches
                     .iter()
                     .map(|b| {
-                        vec![
+                        let mut row = vec![
                             b.id.to_string(),
                             b.name.clone(),
                             b.db_name.clone(),
@@ -485,18 +531,25 @@ fn branch(ctx: &Ctx, command: &str, project: &Project, action: BranchCommand) ->
                             output::snake(&b.status),
                             output::snake(&b.cow),
                             b.size_bytes.map_or("—".to_string(), output::bytes),
-                        ]
+                        ];
+                        if with_extras {
+                            row.push(extras_label(&b.extras));
+                        }
+                        row
                     })
                     .collect();
-                say(output::table(
-                    &["ID", "NAME", "DATABASE", "SOURCE", "STATUS", "COW", "SIZE"],
-                    &rows,
-                ));
+                let mut headers = vec!["ID", "NAME", "DATABASE", "SOURCE", "STATUS", "COW", "SIZE"];
+                if with_extras {
+                    headers.push("EXTRAS");
+                }
+                say(output::table(&headers, &rows));
             }
         }
         BranchCommand::Create(args) => branch_create(ctx, command, project, args)?,
         BranchCommand::Delete { id } => {
-            server(project)?.drop_branch(id)?;
+            let server = server(project)?;
+            let id = server.resolve_branch(&id)?;
+            server.drop_branch(id)?;
             if ctx.json {
                 output::emit(ctx, command, &json!({ "deleted": id }))?;
             } else {
@@ -505,6 +558,26 @@ fn branch(ctx: &Ctx, command: &str, project: &Project, action: BranchCommand) ->
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The scratch databases of a branch for the listing: `test, shadow (orphan)`.
+fn extras_label(extras: &[ScratchInfo]) -> String {
+    if extras.is_empty() {
+        return "—".into();
+    }
+    extras
+        .iter()
+        .map(|extra| {
+            if extra.orphaned {
+                format!("{} (orphan)", extra.name)
+            } else if extra.status != RecordStatus::Ready {
+                format!("{} ({})", extra.name, output::snake(&extra.status))
+            } else {
+                extra.name.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Creates a branch (or, with `--instance-id` and an existing branch, rotates
@@ -536,7 +609,7 @@ fn branch_create(
     if ctx.json {
         return output::emit_unredacted(ctx, command, &credentials);
     }
-    let rows = [
+    let mut rows = vec![
         ("branch", credentials.branch.id.to_string()),
         ("name", credentials.branch.name.clone()),
         ("host", credentials.host.clone()),
@@ -546,6 +619,18 @@ fn branch_create(
         ("password", credentials.password.clone()),
         ("url", credentials.url.clone()),
     ];
+    // The scratch databases (`extra_databases`): same login, other databases.
+    let labels: Vec<String> = credentials
+        .extra_urls
+        .keys()
+        .map(|name| format!("url.{name}"))
+        .collect();
+    rows.extend(
+        labels
+            .iter()
+            .map(String::as_str)
+            .zip(credentials.extra_urls.values().cloned()),
+    );
     say(output::key_values(&rows));
     Ok(())
 }

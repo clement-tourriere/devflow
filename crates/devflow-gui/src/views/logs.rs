@@ -1,7 +1,11 @@
 //! Logs tab: the selected workspace's setup logs, newest first, read-only.
 use super::ui;
-use crate::{model::fingerprint, state::AppState};
+use crate::{
+    model::{Tab, fingerprint},
+    state::AppState,
+};
 use gpui_kit::{
+    assets::IconName as Lucide,
     component::{
         ActiveTheme as _, Selectable as _, Sizable as _,
         button::{Button, ButtonVariants as _},
@@ -122,10 +126,19 @@ impl Render for LogsView {
             return ui::loading("Loading workspaces…", cx).into_any_element();
         }
         if files.is_empty() {
-            return ui::note(
+            let state = self.state.clone();
+            return ui::empty_state(
+                Lucide::Terminal,
                 "No setup logs yet",
-                "Logs appear here after a workspace's setup runs hooks.",
-                cx,
+                "Logs appear here after a workspace's setup runs hooks. Set a workspace up from the Workspaces tab.",
+                Some(
+                    Button::new("logs-open-workspaces")
+                        .primary()
+                        .label("Open Workspaces")
+                        .on_click(move |_, _, cx| {
+                            state.update(cx, |s, cx| s.go_to_tab(Tab::Workspaces, cx))
+                        }),
+                ),
             )
             .into_any_element();
         }
