@@ -1771,13 +1771,14 @@ fn a_snapshot_of_a_pre_release_build_is_refused_in_words_and_can_still_be_delete
     assert!(
         text.contains("pre-release build")
             && text.contains("dev.devflow.snapshot")
-            && text.contains("devflow service cache snapshot delete seed@v1")
-            && text.contains("take a new one"),
+            && text.contains("seed@v1")
+            && text.contains("Delete the snapshot and take a new one")
+            && !text.contains("devflow service"),
         "{text}"
     );
     assert_eq!(fx.volumes().len(), volumes, "{:?}", fx.volumes());
 
-    // The command it names removes it, by the catalog's record and the
+    // Deleting it removes it, by the catalog's record and the
     // project and service labels, without a snapshot label.
     let out = devflow(&fx, &["service", "cache", "snapshot", "delete", "seed@v1"]);
     assert!(
