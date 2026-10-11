@@ -101,8 +101,9 @@ pub enum Remedy {
     DropOrphanDatabases { root: PathBuf },
     /// Install the Git hook that sets up worktrees other tools create.
     InstallGitHook { root: PathBuf },
-    /// Add devflow to the `post-checkout` hook somebody else wrote (one line
-    /// appended to it; see [`crate::githook::chain`]).
+    /// Keep the `post-checkout` hook somebody else wrote and have devflow's
+    /// hook run it first (it is moved aside, never edited; see
+    /// [`crate::githook::chain`]).
     ChainGitHook { root: PathBuf },
     /// Install pitchfork (the plan is core's; the person is asked first).
     InstallPitchfork,
@@ -321,7 +322,7 @@ impl Remedy {
                 self.command()?
             )),
             Remedy::ChainGitHook { .. } => Some(format!(
-                "run `{}` to add the line to that hook for you",
+                "run `{}` to keep that hook and have devflow set up new worktrees after it runs",
                 self.command()?
             )),
             Remedy::PruneWorktrees { .. } => Some(format!(

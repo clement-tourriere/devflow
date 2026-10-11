@@ -73,10 +73,17 @@ impl AppState {
         );
     }
 
-    /// Add devflow to the `post-checkout` hook somebody else wrote: core
-    /// appends one line to the file (and refuses a hook it cannot edit
-    /// safely). The person confirmed first.
-    pub fn chain_git_hook(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    /// Keep the `post-checkout` hook somebody else wrote and make devflow's
+    /// hook run it first: core moves it aside (and refuses a hook it should
+    /// not touch, or one that is not the file `confirmed` the person was
+    /// shown).
+    pub fn chain_git_hook(
+        &mut self,
+        root: PathBuf,
+        confirmed: Option<githook::HookFingerprint>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let title = "Add worktree setup to the existing hook";
         if !self.open_project_at(&root, window, cx, title) {
             return;
@@ -87,8 +94,8 @@ impl AppState {
             FailureHint::None,
             window,
             cx,
-            |project, _| {
-                let done = githook::chain(&project)?;
+            move |project, _| {
+                let done = githook::chain(&project, confirmed.as_ref())?;
                 let path = crate::model::shorten_home(&done.path);
                 Ok(Done {
                     summary: if done.added {

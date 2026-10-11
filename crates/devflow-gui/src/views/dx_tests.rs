@@ -3398,7 +3398,7 @@ fn a_hook_somebody_else_wrote_is_refused_in_plain_words_and_added_to_after_confi
             Remedy::OpenFile { path: hook.clone() }
         ]
     );
-    assert!(offered[0].destructive(), "it edits a file somebody wrote");
+    assert!(offered[0].destructive(), "it moves a file somebody wrote");
     assert_eq!(std::fs::read_to_string(&hook).unwrap(), original);
 
     // Adding the line is confirmed first, and says which file it edits.
@@ -3423,8 +3423,13 @@ fn a_hook_somebody_else_wrote_is_refused_in_plain_words_and_added_to_after_confi
                 .as_ref()
                 .is_some_and(|a| a.title.starts_with("Add worktree setup") && a.outcome.is_some())
     });
+    // The person's hook is kept as it was, next to devflow's.
     let chained = std::fs::read_to_string(&hook).unwrap();
-    assert!(chained.starts_with(original), "{chained}");
+    assert!(chained.contains("devflow-managed-hook"), "{chained}");
+    assert_eq!(
+        std::fs::read_to_string(hook.with_file_name("post-checkout.devflow-original")).unwrap(),
+        original
+    );
 
     // A project that is not the open one changes nothing.
     run(

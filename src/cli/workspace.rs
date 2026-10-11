@@ -817,17 +817,6 @@ pub fn remove(ctx: &Ctx, args: RemoveArgs) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// What the CLI adds to a [`githook::ForeignHook`] refusal: the line to put in
-/// the hook by hand (`--chain` adds it for the person).
-pub fn foreign_hook_hint(error: &anyhow::Error) -> Option<String> {
-    let foreign = error.downcast_ref::<githook::ForeignHook>()?;
-    Some(format!(
-        "to set up worktrees created by other tools, add this line to {}:\n\n    {}\n",
-        foreign.path.display(),
-        githook::CHAIN_LINE
-    ))
-}
-
 /// Ask whether to remove a workspace despite a protection `--force` overrides.
 fn confirm_forced_removal(protected: &Protected) -> Result<bool> {
     let prompt = format!(
@@ -998,17 +987,27 @@ pub fn hook(ctx: &Ctx, action: HookAction) -> Result<ExitCode> {
     let name = action.json_name();
     match action {
         HookAction::Install(args) if args.chain => {
-            let done = githook::chain(&project)?;
+            // Typing `--chain` is the confirmation: the hook it names is the
+            // one looked at here, and core moves it aside only while it is
+            // still that file.
+            let seen = githook::foreign_fingerprint(&project)?;
+            let done = githook::chain(&project, seen.as_ref())?;
             if ctx.json {
                 output::emit(
                     ctx,
                     name,
-                    &json!({ "chained": true, "added": done.added, "path": done.path }),
+                    &json!({
+                        "chained": true, "added": done.added,
+                        "path": done.path, "original": done.original,
+                    }),
                 )?;
             } else if done.added {
                 say(format!(
-                    "Added devflow to the post-checkout hook at {}",
-                    done.path.display()
+                    "The post-checkout hook at {} now runs your hook first ({}) and then sets up new worktrees.",
+                    done.path.display(),
+                    done.original
+                        .as_deref()
+                        .map_or(String::new(), |p| p.display().to_string())
                 ));
             } else {
                 say(format!(
@@ -1029,9 +1028,17 @@ pub fn hook(ctx: &Ctx, action: HookAction) -> Result<ExitCode> {
             }
         }
         HookAction::Uninstall => {
-            let removed = githook::uninstall(&project)?;
+            let done = githook::uninstall(&project)?;
+            let removed = done != githook::Uninstalled::NothingToDo;
+            let restored = done == githook::Uninstalled::Restored;
             if ctx.json {
-                output::emit(ctx, name, &json!({ "removed": removed }))?;
+                output::emit(
+                    ctx,
+                    name,
+                    &json!({ "removed": removed, "restored": restored }),
+                )?;
+            } else if restored {
+                say("Removed devflow's post-checkout hook and put your original hook back.");
             } else if removed {
                 say("Removed the post-checkout hook.");
             } else {

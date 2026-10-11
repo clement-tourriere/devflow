@@ -305,41 +305,49 @@ pub fn run_scoped(state: &Entity<AppState>, remedy: &Remedy, window: &mut Window
     }
 }
 
-/// Add devflow to the Git hook somebody else wrote: the person sees which file
-/// is edited and what is added before anything is written.
+/// Keep the hook somebody else wrote and have devflow's hook run it: the
+/// person sees which file is moved aside before anything happens, and core
+/// moves exactly that file (it looks at the hook again first). With nothing to
+/// confirm (no such hook, one core would refuse, devflow's own already), the
+/// operation runs at once and says why it did nothing.
 fn chain_git_hook(state: &Entity<AppState>, root: &Path, window: &mut Window, cx: &mut App) {
-    let hook = state
+    let not_open = "That is about a project that is not the open one. Open it, then try again.";
+    let seen = state
         .read(cx)
         .selection
         .current()
         .filter(|model| model.entry.root == root)
         .and_then(|model| model.project.as_ref())
-        .and_then(|project| match devflow_core::githook::state(project) {
-            Ok(devflow_core::githook::InstallState::Foreign { path }) => Some(path),
-            _ => None,
-        });
+        .map(|project| devflow_core::githook::foreign_fingerprint(project));
     let (app, root) = (state.clone(), root.to_path_buf());
-    open_confirm(
-        window,
-        cx,
-        "Add worktree setup to the existing hook",
-        chain_lines(hook.as_deref()),
-        "Add",
-        move |window, cx| {
-            let root = root.clone();
-            app.update(cx, |s, cx| s.chain_git_hook(root, window, cx));
-        },
-    );
+    match seen {
+        None => refuse(window, cx, &Remedy::ChainGitHook { root }, not_open),
+        Some(Ok(Some(hook))) => {
+            let lines = chain_lines(Some(&hook.path));
+            open_confirm(
+                window,
+                cx,
+                "Add worktree setup to the existing hook",
+                lines,
+                "Add",
+                move |window, cx| {
+                    let (root, hook) = (root.clone(), hook.clone());
+                    app.update(cx, |s, cx| s.chain_git_hook(root, Some(hook), window, cx));
+                },
+            );
+        }
+        Some(_) => app.update(cx, |s, cx| s.chain_git_hook(root, None, window, cx)),
+    }
 }
 
 /// What the confirmation of [`chain_git_hook`] says.
 pub(crate) fn chain_lines(hook: Option<&Path>) -> Vec<String> {
-    let file = hook.map_or("The post-checkout hook".to_string(), |path| {
+    let file = hook.map_or("the post-checkout hook".to_string(), |path| {
         crate::redaction::shown(&crate::model::shorten_home(path))
     });
     vec![
-        format!("Add worktree setup to {file}?"),
-        "One line is added at the end of the hook, so that worktrees other tools create are set up too. Nothing else in it changes. A hook that is a link, is not a shell script or ends before the added line is left alone."
+        format!("Keep {file} and add worktree setup to it?"),
+        "That hook is renamed to post-checkout.devflow-original, and devflow's hook takes its place: it runs yours first, with the same arguments, then sets up the worktrees other tools create, and ends with your hook's result. Removing devflow's hook puts yours back. A hook that is a link is left alone."
             .to_string(),
     ]
 }

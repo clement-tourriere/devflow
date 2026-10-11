@@ -209,7 +209,6 @@ fn write(
             Err(error) => json!({
                 "installed": false,
                 "error": format!("{error:#}"),
-                "hint": super::workspace::foreign_hook_hint(error),
                 "remedies": devflow_core::remedy::describe(&devflow_core::remedy::remedies_of(error)),
             }),
         });
@@ -246,13 +245,9 @@ fn write(
                 "warning: could not install the Git hook: {}",
                 redact::text(&format!("{error:#}"))
             ));
-            for hint in super::workspace::foreign_hook_hint(&error)
-                .into_iter()
-                .chain(
-                    devflow_core::remedy::remedies_of(&error)
-                        .iter()
-                        .filter_map(devflow_core::remedy::Remedy::hint),
-                )
+            for hint in devflow_core::remedy::remedies_of(&error)
+                .iter()
+                .filter_map(devflow_core::remedy::Remedy::hint)
             {
                 note(format!("hint: {}", redact::text(&hint)));
             }

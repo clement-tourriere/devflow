@@ -676,7 +676,16 @@ fn git_hook(project: &Project) -> Vec<Check> {
         .fix(Remedy::InstallGitHook {
             root: project.root.clone(),
         }),
+        Ok(InstallState::Wrapped { path, original }) => Check::ok(
+            "git-hook",
+            format!(
+                "post-checkout at {} runs the hook it replaced ({}) and then sets up new worktrees",
+                path.display(),
+                original.display()
+            ),
+        ),
         Ok(InstallState::Foreign { path }) => {
+            // Somebody put devflow's call into their own hook by hand.
             let chained =
                 std::fs::read_to_string(&path).is_ok_and(|t| t.contains("--from-git-hook"));
             if chained {
@@ -688,7 +697,7 @@ fn git_hook(project: &Project) -> Vec<Check> {
                 Check::warn(
                     "git-hook",
                     format!("{} exists and was not written by devflow", path.display()),
-                    "it was left alone; devflow can add one line to it so that it also sets up new worktrees",
+                    "it was left alone; devflow can keep it, run it first and then set up new worktrees",
                 )
                 .fixes([
                     Remedy::ChainGitHook {
@@ -1050,6 +1059,21 @@ mod tests {
             assert!(!has_cli_text(text), "{text}");
             assert!(!text.contains("--from-git-hook"), "{text}");
         }
+    }
+
+    #[test]
+    fn a_wrapped_hook_is_reported_as_configured() {
+        let t = testutil::repo(None);
+        let hook = t.root.join(".git/hooks/post-checkout");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\necho mine\n").unwrap();
+        let seen = githook::foreign_fingerprint(&t.project).unwrap();
+        githook::chain(&t.project, seen.as_ref()).unwrap();
+        let checks = run(Some(&t.project));
+        let check = find(&checks, "git-hook")[0];
+        assert_eq!(check.status, CheckStatus::Ok, "{check:?}");
+        assert!(check.remedies.is_empty());
+        assert!(!check.detail.contains("echo mine"), "{}", check.detail);
     }
 
     #[test]
