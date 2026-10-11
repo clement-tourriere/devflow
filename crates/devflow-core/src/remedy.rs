@@ -105,10 +105,10 @@ pub enum Remedy {
     DropOrphanDatabases { root: PathBuf },
     /// Install the Git hook that sets up worktrees other tools create.
     InstallGitHook { root: PathBuf },
-    /// Keep the `post-checkout` hook somebody else wrote and have devflow's
-    /// hook run it first (it is moved aside, never edited; see
-    /// [`crate::githook::chain`]).
-    ChainGitHook { root: PathBuf },
+    /// Copy the line that sets up new worktrees ([`crate::githook::HOOK_LINE`])
+    /// so the person can add it to the `post-checkout` hook another tool wrote
+    /// at `path`. devflow never edits that hook.
+    CopyHookLine { path: PathBuf },
     /// Install pitchfork (the plan is core's; the person is asked first).
     InstallPitchfork,
     /// Review the worktrees whose directory is gone and forget the
@@ -149,7 +149,7 @@ impl Remedy {
             Remedy::ReconcileDatabases { .. } => "reconcile_databases",
             Remedy::DropOrphanDatabases { .. } => "drop_orphan_databases",
             Remedy::InstallGitHook { .. } => "install_git_hook",
-            Remedy::ChainGitHook { .. } => "chain_git_hook",
+            Remedy::CopyHookLine { .. } => "copy_hook_line",
             Remedy::InstallPitchfork => "install_pitchfork",
             Remedy::PruneWorktrees { .. } => "prune_worktrees",
             Remedy::RemoveWorkspace { .. } => "remove_workspace",
@@ -166,6 +166,9 @@ impl Remedy {
             Remedy::LocateProject { .. } => "Locate…",
             Remedy::MigrateConfig { .. } => "Migrate configuration…",
             Remedy::Init { .. } => "Set up devflow…",
+            Remedy::OpenFile { path } if path.file_name().is_some_and(|n| n == "post-checkout") => {
+                "Open the hook"
+            }
             Remedy::OpenFile { path } => {
                 return format!("Open {}", file_label(path));
             }
@@ -198,7 +201,7 @@ impl Remedy {
             Remedy::ReconcileDatabases { .. } => "Finish interrupted work",
             Remedy::DropOrphanDatabases { .. } => "Drop unused databases…",
             Remedy::InstallGitHook { .. } => "Install the Git hook",
-            Remedy::ChainGitHook { .. } => "Add worktree setup to the existing hook…",
+            Remedy::CopyHookLine { .. } => "Copy the line",
             Remedy::InstallPitchfork => "Install pitchfork…",
             Remedy::PruneWorktrees { .. } => "Review missing worktrees…",
             Remedy::RemoveWorkspace { name, .. } => {
@@ -224,7 +227,6 @@ impl Remedy {
                 | Remedy::DropServiceBranch { .. }
                 | Remedy::DropLostBranch { .. }
                 | Remedy::DropOrphanDatabases { .. }
-                | Remedy::ChainGitHook { .. }
                 | Remedy::PruneWorktrees { .. }
                 | Remedy::RemoveWorkspace { .. }
         )
@@ -276,7 +278,6 @@ impl Remedy {
                 Some("devflow db reconcile --drop-orphans".to_string())
             }
             Remedy::InstallGitHook { .. } => Some("devflow hook install".to_string()),
-            Remedy::ChainGitHook { .. } => Some("devflow hook install --chain".to_string()),
             Remedy::InstallPitchfork => Some("devflow pitchfork install".to_string()),
             Remedy::PruneWorktrees { .. } => Some("devflow prune".to_string()),
             Remedy::RemoveWorkspace { name, .. } => Some(format!("devflow remove {}", word(name))),
@@ -286,6 +287,7 @@ impl Remedy {
             }
             Remedy::Retry
             | Remedy::OpenFile { .. }
+            | Remedy::CopyHookLine { .. }
             | Remedy::Reveal { .. }
             | Remedy::OpenGuide { .. } => None,
         }
@@ -328,9 +330,10 @@ impl Remedy {
                 "run `{}` if you are sure (it removes data)",
                 self.command()?
             )),
-            Remedy::ChainGitHook { .. } => Some(format!(
-                "run `{}` to keep that hook and have devflow set up new worktrees after it runs",
-                self.command()?
+            Remedy::CopyHookLine { path } => Some(format!(
+                "add this line at the end of {} (a line after an `exit` never runs): {}",
+                path.display(),
+                crate::githook::HOOK_LINE
             )),
             Remedy::PruneWorktrees { .. } => Some(format!(
                 "run `{}` to see the worktrees whose directory is gone and forget the ones that own nothing",
@@ -485,9 +488,11 @@ pub fn remedies_of(error: &anyhow::Error) -> Vec<Remedy> {
         return protected.remedies.clone();
     }
     if let Some(foreign) = error.downcast_ref::<crate::githook::ForeignHook>() {
+        // The line first: it is the hint a terminal prints and the JSON
+        // document carries.
         return vec![
-            Remedy::ChainGitHook {
-                root: foreign.root.clone(),
+            Remedy::CopyHookLine {
+                path: foreign.path.clone(),
             },
             Remedy::OpenFile {
                 path: foreign.path.clone(),
@@ -626,7 +631,9 @@ mod tests {
             Remedy::ReconcileDatabases { root: "/p".into() },
             Remedy::DropOrphanDatabases { root: "/p".into() },
             Remedy::InstallGitHook { root: "/p".into() },
-            Remedy::ChainGitHook { root: "/p".into() },
+            Remedy::CopyHookLine {
+                path: "/p/.git/hooks/post-checkout".into(),
+            },
             Remedy::InstallPitchfork,
             Remedy::PruneWorktrees { root: "/p".into() },
             Remedy::RemoveWorkspace {
@@ -669,7 +676,6 @@ mod tests {
             "drop_service_branch",
             "drop_lost_branch",
             "drop_orphan_databases",
-            "chain_git_hook",
             "prune_worktrees",
             "remove_workspace",
         ] {

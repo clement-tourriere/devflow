@@ -73,42 +73,6 @@ impl AppState {
         );
     }
 
-    /// Keep the `post-checkout` hook somebody else wrote and make devflow's
-    /// hook run it first: core moves it aside (and refuses a hook it should
-    /// not touch, or one that is not the file `confirmed` the person was
-    /// shown).
-    pub fn chain_git_hook(
-        &mut self,
-        root: PathBuf,
-        confirmed: Option<githook::HookFingerprint>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let title = "Add worktree setup to the existing hook";
-        if !self.open_project_at(&root, window, cx, title) {
-            return;
-        }
-        self.start_job(
-            title.into(),
-            true,
-            FailureHint::None,
-            window,
-            cx,
-            move |project, _| {
-                let done = githook::chain(&project, confirmed.as_ref())?;
-                let path = crate::model::shorten_home(&done.path);
-                Ok(Done {
-                    summary: if done.added {
-                        format!("Worktrees other tools create are set up by the hook at {path}")
-                    } else {
-                        format!("The hook at {path} already sets up new worktrees")
-                    },
-                    ..Done::default()
-                })
-            },
-        );
-    }
-
     /// Finish interrupted PostgreSQL work; with `drop_orphans`, also drop the
     /// scratch databases the configuration no longer lists (by recorded
     /// identity, only the ones reconcile reported).

@@ -98,24 +98,16 @@ pub struct RemoveArgs {
 
 #[derive(Subcommand)]
 pub enum HookAction {
-    /// Install the post-checkout hook
-    Install(HookInstallArgs),
+    /// Install the post-checkout hook (a hook another tool wrote is left alone)
+    Install,
     /// Remove the post-checkout hook (only if devflow wrote it)
     Uninstall,
-}
-
-#[derive(clap::Args)]
-pub struct HookInstallArgs {
-    /// Add devflow to the post-checkout hook that is already there (one line is
-    /// appended; the rest of the hook is not changed)
-    #[arg(long)]
-    pub chain: bool,
 }
 
 impl HookAction {
     pub fn json_name(&self) -> &'static str {
         match self {
-            HookAction::Install(_) => "hook install",
+            HookAction::Install => "hook install",
             HookAction::Uninstall => "hook uninstall",
         }
     }
@@ -1014,37 +1006,7 @@ pub fn hook(ctx: &Ctx, action: HookAction) -> Result<ExitCode> {
     let project = ctx.project()?;
     let name = action.json_name();
     match action {
-        HookAction::Install(args) if args.chain => {
-            // Typing `--chain` is the confirmation: the hook it names is the
-            // one looked at here, and core moves it aside only while it is
-            // still that file.
-            let seen = githook::foreign_fingerprint(&project)?;
-            let done = githook::chain(&project, seen.as_ref())?;
-            if ctx.json {
-                output::emit(
-                    ctx,
-                    name,
-                    &json!({
-                        "chained": true, "added": done.added,
-                        "path": done.path, "original": done.original,
-                    }),
-                )?;
-            } else if done.added {
-                say(format!(
-                    "The post-checkout hook at {} now runs your hook first ({}) and then sets up new worktrees.",
-                    done.path.display(),
-                    done.original
-                        .as_deref()
-                        .map_or(String::new(), |p| p.display().to_string())
-                ));
-            } else {
-                say(format!(
-                    "The post-checkout hook at {} already sets up new worktrees.",
-                    done.path.display()
-                ));
-            }
-        }
-        HookAction::Install(_) => {
+        HookAction::Install => {
             let path = githook::install(&project)?;
             if ctx.json {
                 output::emit(ctx, name, &json!({ "installed": true, "path": path }))?;
@@ -1056,17 +1018,9 @@ pub fn hook(ctx: &Ctx, action: HookAction) -> Result<ExitCode> {
             }
         }
         HookAction::Uninstall => {
-            let done = githook::uninstall(&project)?;
-            let removed = done != githook::Uninstalled::NothingToDo;
-            let restored = done == githook::Uninstalled::Restored;
+            let removed = githook::uninstall(&project)?;
             if ctx.json {
-                output::emit(
-                    ctx,
-                    name,
-                    &json!({ "removed": removed, "restored": restored }),
-                )?;
-            } else if restored {
-                say("Removed devflow's post-checkout hook and put your original hook back.");
+                output::emit(ctx, name, &json!({ "removed": removed }))?;
             } else if removed {
                 say("Removed the post-checkout hook.");
             } else {

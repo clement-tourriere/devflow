@@ -664,6 +664,19 @@ fn hook_trust(project: &Project, cwd: &Path) -> Vec<Check> {
 
 fn git_hook(project: &Project) -> Vec<Check> {
     vec![match githook::state(project) {
+        // An unreleased build moved somebody's hook aside and wrapped it.
+        Ok(InstallState::Installed { path }) if githook::legacy_original(&path).is_some() => {
+            let original = githook::legacy_original(&path).unwrap_or_default();
+            Check::warn(
+                "git-hook",
+                format!(
+                    "post-checkout at {} is a wrapper from an older devflow that runs the hook it replaced ({}) first",
+                    path.display(),
+                    original.display()
+                ),
+                "it still works; removing devflow's Git hook (devflow hook uninstall) puts your original hook back",
+            )
+        }
         Ok(InstallState::Installed { path }) => Check::ok(
             "git-hook",
             format!("post-checkout installed at {}", path.display()),
@@ -676,19 +689,11 @@ fn git_hook(project: &Project) -> Vec<Check> {
         .fix(Remedy::InstallGitHook {
             root: project.root.clone(),
         }),
-        Ok(InstallState::Wrapped { path, original }) => Check::ok(
-            "git-hook",
-            format!(
-                "post-checkout at {} runs the hook it replaced ({}) and then sets up new worktrees",
-                path.display(),
-                original.display()
-            ),
-        ),
         Ok(InstallState::Foreign { path }) => {
             // Somebody put devflow's call into their own hook by hand.
-            let chained =
+            let added =
                 std::fs::read_to_string(&path).is_ok_and(|t| t.contains("--from-git-hook"));
-            if chained {
+            if added {
                 Check::ok(
                     "git-hook",
                     format!("{} sets up new worktrees through devflow", path.display()),
@@ -696,13 +701,14 @@ fn git_hook(project: &Project) -> Vec<Check> {
             } else {
                 Check::warn(
                     "git-hook",
-                    format!("{} exists and was not written by devflow", path.display()),
-                    "it was left alone; devflow can keep it, run it first and then set up new worktrees",
+                    format!(
+                        "{} is a post-checkout hook from another tool; devflow does not edit it",
+                        path.display()
+                    ),
+                    "add devflow's line to it so new worktrees are set up",
                 )
                 .fixes([
-                    Remedy::ChainGitHook {
-                        root: project.root.clone(),
-                    },
+                    Remedy::CopyHookLine { path: path.clone() },
                     Remedy::OpenFile { path },
                 ])
             }
@@ -1046,12 +1052,11 @@ mod tests {
         assert_eq!(
             check.remedies,
             [
-                Remedy::ChainGitHook {
-                    root: t.root.clone()
-                },
+                Remedy::CopyHookLine { path: hook.clone() },
                 Remedy::OpenFile { path: hook.clone() }
             ]
         );
+        assert!(check.detail.contains("devflow does not edit it"));
         for text in [Some(&check.detail), check.hint.as_ref()]
             .into_iter()
             .flatten()
@@ -1062,17 +1067,42 @@ mod tests {
     }
 
     #[test]
-    fn a_wrapped_hook_is_reported_as_configured() {
+    fn a_hook_with_devflows_line_added_by_hand_is_configured() {
         let t = testutil::repo(None);
         let hook = t.root.join(".git/hooks/post-checkout");
         std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-        std::fs::write(&hook, "#!/bin/sh\necho mine\n").unwrap();
-        let seen = githook::foreign_fingerprint(&t.project).unwrap();
-        githook::chain(&t.project, seen.as_ref()).unwrap();
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\necho mine\n{}\n", githook::HOOK_LINE),
+        )
+        .unwrap();
         let checks = run(Some(&t.project));
         let check = find(&checks, "git-hook")[0];
         assert_eq!(check.status, CheckStatus::Ok, "{check:?}");
         assert!(check.remedies.is_empty());
+        assert!(!check.detail.contains("echo mine"), "{}", check.detail);
+    }
+
+    #[test]
+    fn a_wrapper_from_an_older_build_is_reported_in_plain_words() {
+        let t = testutil::repo(None);
+        let hook = t.root.join(".git/hooks/post-checkout");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\n# devflow-managed-hook v2\n# devflow-wraps-original post-checkout.devflow-original\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::write(
+            hook.with_file_name("post-checkout.devflow-original"),
+            "#!/bin/sh\necho mine\n",
+        )
+        .unwrap();
+        let checks = run(Some(&t.project));
+        let check = find(&checks, "git-hook")[0];
+        assert_eq!(check.status, CheckStatus::Warn, "{check:?}");
+        assert!(check.detail.contains("wrapper from an older devflow"));
+        assert!(check.detail.contains("post-checkout.devflow-original"));
         assert!(!check.detail.contains("echo mine"), "{}", check.detail);
     }
 

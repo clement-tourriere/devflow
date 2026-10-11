@@ -1688,7 +1688,7 @@ fn hook_install_and_uninstall_round_trip() {
 }
 
 #[test]
-fn a_hook_somebody_else_wrote_is_left_alone_with_the_line_as_a_hint_and_a_chain_remedy() {
+fn a_hook_somebody_else_wrote_is_left_alone_and_the_line_to_add_is_the_hint() {
     let env = Env::new();
     env.init();
     let hook = env.repo.join(".git/hooks/post-checkout");
@@ -1704,46 +1704,46 @@ fn a_hook_somebody_else_wrote_is_left_alone_with_the_line_as_a_hint_and_a_chain_
     let out = env.run(&["--json", "hook", "install"]);
     failed(&out);
     let doc = json(&out);
-    // The message is plain words; the line to add is the hint, and the way to
-    // have devflow add it is a remedy.
+    // The message is plain words; the line to add is the hint, and the app's
+    // buttons are the remedies.
     let error = doc["error"].as_str().unwrap();
-    assert!(error.contains("was not written by devflow"), "{doc}");
-    assert!(!error.contains("--from-git-hook"), "{doc}");
     assert!(
-        doc["hint"]
-            .as_str()
-            .unwrap()
-            .contains("devflow hook install --chain"),
+        error.contains("already has a post-checkout hook from another tool"),
         "{doc}"
     );
-    assert_eq!(doc["remedies"][0]["kind"], "chain_git_hook", "{doc}");
-    assert_eq!(doc["remedies"][0]["destructive"], true, "{doc}");
-    assert_eq!(
-        doc["remedies"][0]["command"], "devflow hook install --chain",
-        "{doc}"
-    );
+    assert!(error.contains("devflow does not edit it"), "{doc}");
+    assert!(!error.contains("--from-git-hook"), "{doc}");
+    let line = devflow_core::githook::HOOK_LINE;
+    assert!(doc["hint"].as_str().unwrap().contains(line), "{doc}");
+    assert_eq!(doc["remedies"][0]["kind"], "copy_hook_line", "{doc}");
+    assert_eq!(doc["remedies"][0]["destructive"], false, "{doc}");
+    assert!(doc["remedies"][0].get("command").is_none(), "{doc}");
     assert_eq!(doc["remedies"][1]["kind"], "open_file", "{doc}");
+    assert_eq!(doc["remedies"][1]["label"], "Open the hook", "{doc}");
     assert_eq!(std::fs::read_to_string(&hook).unwrap(), original);
     let text = stderr(&env.run(&["hook", "install"]));
+    assert!(text.contains(&format!(
+        "hint: add this line at the end of {}",
+        hook.display()
+    )));
+    assert!(text.contains(line), "{text}");
+
+    // There is no `--chain`, and nothing of the hook was moved.
+    failed(&env.run(&["hook", "install", "--chain"]));
+    assert_eq!(std::fs::read_to_string(&hook).unwrap(), original);
     assert!(
-        text.contains("hint: run `devflow hook install --chain`"),
-        "{text}"
+        !hook
+            .with_file_name("post-checkout.devflow-original")
+            .exists()
     );
 
-    // `--chain` keeps the hook and puts devflow's in front of it, once.
-    let aside = hook.with_file_name("post-checkout.devflow-original");
-    let doc = json(ok(&env.run(&["--json", "hook", "install", "--chain"])));
-    assert_eq!(doc["command"], "hook install");
-    assert_eq!(doc["chained"], true, "{doc}");
-    assert_eq!(doc["added"], true, "{doc}");
-    assert_eq!(doc["original"], aside.to_str().unwrap(), "{doc}");
-    assert_eq!(std::fs::read_to_string(&aside).unwrap(), original);
-    let wrapper = std::fs::read_to_string(&hook).unwrap();
-    assert!(wrapper.contains("--from-git-hook"), "{wrapper}");
-    let doc = json(ok(&env.run(&["--json", "hook", "install", "--chain"])));
-    assert_eq!(doc["added"], false, "{doc}");
-    assert_eq!(std::fs::read_to_string(&hook).unwrap(), wrapper);
-    // The doctor counts it as configured.
+    // Uninstall never touches a hook devflow did not write.
+    let doc = json(ok(&env.run(&["--json", "hook", "uninstall"])));
+    assert_eq!(doc["removed"], false, "{doc}");
+    assert_eq!(std::fs::read_to_string(&hook).unwrap(), original);
+
+    // Once the person added the line, the doctor counts it as configured.
+    std::fs::write(&hook, format!("{original}{line}\n")).unwrap();
     let doc = json(&env.run(&["--json", "doctor"]));
     let check = doc["checks"]
         .as_array()
@@ -1752,21 +1752,6 @@ fn a_hook_somebody_else_wrote_is_left_alone_with_the_line_as_a_hint_and_a_chain_
         .find(|c| c["name"] == "git-hook")
         .unwrap();
     assert_eq!(check["status"], "ok", "{check}");
-    // Uninstall puts the person's hook back, exactly.
-    let doc = json(ok(&env.run(&["--json", "hook", "uninstall"])));
-    assert_eq!(doc["removed"], true, "{doc}");
-    assert_eq!(doc["restored"], true, "{doc}");
-    assert_eq!(std::fs::read_to_string(&hook).unwrap(), original);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(hook.metadata().unwrap().permissions().mode() & 0o777, 0o755);
-    }
-    assert!(!aside.exists());
-    // Nothing of devflow's is left to remove.
-    let doc = json(ok(&env.run(&["--json", "hook", "uninstall"])));
-    assert_eq!(doc["removed"], false, "{doc}");
-    assert!(hook.exists());
 }
 
 #[test]

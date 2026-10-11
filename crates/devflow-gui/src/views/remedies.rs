@@ -23,6 +23,7 @@ use gpui_kit::{
         Sizable as _, WindowExt as _,
         button::{Button, ButtonVariants as _},
         h_flex,
+        notification::Notification,
     },
     prelude::*,
     *,
@@ -268,7 +269,19 @@ pub fn run_scoped(state: &Entity<AppState>, remedy: &Remedy, window: &mut Window
             let root = root.clone();
             state.update(cx, |s, cx| s.install_git_hook(root, window, cx));
         }
-        Remedy::ChainGitHook { root } => chain_git_hook(state, root, window, cx),
+        // devflow never edits a hook another tool wrote: it hands over the
+        // exact line its own hook is made of (core's text, the CLI's too).
+        Remedy::CopyHookLine { .. } => {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                devflow_core::githook::HOOK_LINE.to_string(),
+            ));
+            window.push_notification(
+                Notification::success(
+                    "The line is on the clipboard. Add it at the end of the hook.",
+                ),
+                cx,
+            );
+        }
         Remedy::InstallPitchfork => install_pitchfork(state, window, cx),
         // Reviewed first: core lists what could be forgotten and the person
         // confirms exactly that list.
@@ -308,53 +321,6 @@ pub fn run_scoped(state: &Entity<AppState>, remedy: &Remedy, window: &mut Window
         | Remedy::Reveal { .. }
         | Remedy::OpenGuide { .. } => super::problems::run_remedy(state, None, remedy, window, cx),
     }
-}
-
-/// Keep the hook somebody else wrote and have devflow's hook run it: the
-/// person sees which file is moved aside before anything happens, and core
-/// moves exactly that file (it looks at the hook again first). With nothing to
-/// confirm (no such hook, one core would refuse, devflow's own already), the
-/// operation runs at once and says why it did nothing.
-fn chain_git_hook(state: &Entity<AppState>, root: &Path, window: &mut Window, cx: &mut App) {
-    let not_open = "That is about a project that is not the open one. Open it, then try again.";
-    let seen = state
-        .read(cx)
-        .selection
-        .current()
-        .filter(|model| model.entry.root == root)
-        .and_then(|model| model.project.as_ref())
-        .map(|project| devflow_core::githook::foreign_fingerprint(project));
-    let (app, root) = (state.clone(), root.to_path_buf());
-    match seen {
-        None => refuse(window, cx, &Remedy::ChainGitHook { root }, not_open),
-        Some(Ok(Some(hook))) => {
-            let lines = chain_lines(Some(&hook.path));
-            open_confirm(
-                window,
-                cx,
-                "Add worktree setup to the existing hook",
-                lines,
-                "Add",
-                move |window, cx| {
-                    let (root, hook) = (root.clone(), hook.clone());
-                    app.update(cx, |s, cx| s.chain_git_hook(root, Some(hook), window, cx));
-                },
-            );
-        }
-        Some(_) => app.update(cx, |s, cx| s.chain_git_hook(root, None, window, cx)),
-    }
-}
-
-/// What the confirmation of [`chain_git_hook`] says.
-pub(crate) fn chain_lines(hook: Option<&Path>) -> Vec<String> {
-    let file = hook.map_or("the post-checkout hook".to_string(), |path| {
-        crate::redaction::shown(&crate::model::shorten_home(path))
-    });
-    vec![
-        format!("Keep {file} and add worktree setup to it?"),
-        "That hook is renamed to post-checkout.devflow-original, and devflow's hook takes its place: it runs yours first, with the same arguments, then sets up the worktrees other tools create, and ends with your hook's result. Removing devflow's hook puts yours back. A hook that is a link is left alone."
-            .to_string(),
-    ]
 }
 
 /// Install pitchfork: the person sees what will run and confirms; the run is

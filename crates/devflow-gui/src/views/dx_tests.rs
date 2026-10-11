@@ -3360,7 +3360,7 @@ fn a_failed_operation_shows_the_fix_core_names_as_a_button(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
-fn a_hook_somebody_else_wrote_is_refused_in_plain_words_and_added_to_after_confirming(
+fn a_hook_somebody_else_wrote_is_refused_in_plain_words_and_its_line_is_copied(
     cx: &mut TestAppContext,
 ) {
     use devflow_core::remedy::Remedy;
@@ -3383,7 +3383,7 @@ fn a_hook_somebody_else_wrote_is_refused_in_plain_words_and_added_to_after_confi
     };
 
     // Installing is refused. The message is plain words (no shell line in a
-    // window); the way on is a button.
+    // window); the way on is two buttons.
     run(cx, &Remedy::InstallGitHook { root: root.clone() });
     settle(cx, &h, |s| {
         s.busy().is_none()
@@ -3392,7 +3392,11 @@ fn a_hook_somebody_else_wrote_is_refused_in_plain_words_and_added_to_after_confi
                 .is_some_and(|a| a.title.starts_with("Install the Git hook") && a.outcome.is_some())
     });
     let message = failure_of(cx, &h, "Install the Git hook").unwrap();
-    assert!(message.contains("was not written by devflow"), "{message}");
+    assert!(
+        message.contains("already has a post-checkout hook from another tool"),
+        "{message}"
+    );
+    assert!(message.contains("devflow does not edit it"), "{message}");
     assert!(
         !message.contains("--from-git-hook") && !message.contains("devflow setup"),
         "{message}"
@@ -3403,51 +3407,24 @@ fn a_hook_somebody_else_wrote_is_refused_in_plain_words_and_added_to_after_confi
     assert_eq!(
         offered,
         [
-            Remedy::ChainGitHook { root: root.clone() },
+            Remedy::CopyHookLine { path: hook.clone() },
             Remedy::OpenFile { path: hook.clone() }
         ]
     );
-    assert!(offered[0].destructive(), "it moves a file somebody wrote");
+    assert_eq!(offered[0].label(), "Copy the line");
+    assert_eq!(offered[1].label(), "Open the hook");
+    assert!(offered.iter().all(|r| !r.destructive()));
     assert_eq!(std::fs::read_to_string(&hook).unwrap(), original);
 
-    // Adding the line is confirmed first, and says which file it edits.
-    let text = super::remedies::chain_lines(Some(&hook)).join(" ");
-    assert!(text.contains("post-checkout"), "{text}");
-    assert!(
-        !text.contains("--from-git-hook") && !text.contains("devflow setup"),
-        "{text}"
-    );
+    // Copying puts core's line on the clipboard and touches nothing.
     run(cx, &offered[0]);
-    wait(cx, "the confirmation", |cx| exists(cx, &h, "confirm"));
-    std::thread::sleep(Duration::from_millis(350));
-    cancel_dialog(cx, &h);
-    assert_eq!(std::fs::read_to_string(&hook).unwrap(), original);
-    run(cx, &offered[0]);
-    wait(cx, "the confirmation", |cx| exists(cx, &h, "confirm"));
-    std::thread::sleep(Duration::from_millis(350));
-    click(cx, &h, "confirm");
-    settle(cx, &h, |s| {
-        s.busy().is_none()
-            && s.activity
-                .as_ref()
-                .is_some_and(|a| a.title.starts_with("Add worktree setup") && a.outcome.is_some())
-    });
-    // The person's hook is kept as it was, next to devflow's.
-    let chained = std::fs::read_to_string(&hook).unwrap();
-    assert!(chained.contains("devflow-managed-hook"), "{chained}");
+    let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
     assert_eq!(
-        std::fs::read_to_string(hook.with_file_name("post-checkout.devflow-original")).unwrap(),
-        original
+        copied.as_deref(),
+        Some(devflow_core::githook::HOOK_LINE),
+        "the same text the CLI prints"
     );
-
-    // A project that is not the open one changes nothing.
-    run(
-        cx,
-        &Remedy::ChainGitHook {
-            root: PathBuf::from("/somewhere/else"),
-        },
-    );
-    assert_eq!(std::fs::read_to_string(&hook).unwrap(), chained);
+    assert_eq!(std::fs::read_to_string(&hook).unwrap(), original);
 }
 
 #[gpui_kit::test]
