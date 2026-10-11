@@ -18,10 +18,33 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The pre-push secret scan, for pushes and pull requests made without the
+  # hooks: every commit and commit message after the audited commit in
+  # scripts/kingfisher.sh, plus the annotation of a pushed tag. Every other job
+  # waits for it: a failing scan builds, lints and publishes nothing.
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: kingfisher jq
+
+      - name: Scan with kingfisher
+        run: |
+          ref=HEAD
+          case "$GITHUB_REF" in refs/tags/*) ref=$GITHUB_REF ;; esac
+          echo "$ref $(git rev-parse "$ref") $ref 0" | sh scripts/kingfisher.sh pushed
+
   # Linux: everything except the GPUI desktop app, which needs a graphics stack
   # (Wayland/X11, Vulkan, fontconfig, ...) and is built on macOS below.
   build-and-test:
     name: Build & Test (Linux, without GUI)
+    needs: secrets
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
@@ -90,6 +113,7 @@ jobs:
   # variable is only for runs on OrbStack or a btrfs/XFS host.
   docker-tests:
     name: Docker PostgreSQL tests
+    needs: secrets
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
@@ -119,6 +143,7 @@ jobs:
   # so the database tests stay on Linux.
   macos:
     name: macOS (APFS, GUI)
+    needs: secrets
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -171,6 +196,7 @@ jobs:
 
   install-script:
     name: Install script
+    needs: secrets
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -186,6 +212,7 @@ jobs:
         run: >-
           shellcheck
           scripts/install.sh
+          scripts/kingfisher.sh
           examples/agent-task.sh
 
       - name: Install latest release
@@ -207,6 +234,7 @@ jobs:
     permissions:
       contents: write
     needs:
+      - secrets
       - build-and-test
       - docker-tests
       - macos

@@ -67,6 +67,10 @@ Redaction guards against accidental disclosure; it is not a secret scanner.
 - Access to the Docker engine that runs a managed server is superuser access to its database. Do not give sandboxes a Docker socket, context or SSH key for the data host.
 - Sandboxes should receive only their branch URL. See [docs/REMOTE.md](docs/REMOTE.md).
 
+## Repository hygiene
+
+The repository's Git hooks and CI scan every commit, commit message and tag for secrets with kingfisher before they are published; see [CONTRIBUTING.md](CONTRIBUTING.md#secrets).
+
 ## Dependencies
 
 Dependabot proposes Cargo and GitHub Actions updates, and CI runs `cargo audit` on every push. To run it locally:

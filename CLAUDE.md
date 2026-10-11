@@ -12,7 +12,7 @@ devflow 1.0 creates Git worktrees, clones their payloads copy-on-write, branches
 | `docs/` | `ARCHITECTURE.md`, `MIGRATING.md`, `REMOTE.md`, `plans/` |
 | `examples/` | Sample `devflow.toml`, `devflow.external.toml`, `mise.toml`, `pitchfork.toml`, `agent-task.sh` |
 | `tests/cli.rs`, `crates/devflow-core/tests/` | End-to-end CLI tests; core `workspace.rs` and Docker-only `db_postgres.rs` |
-| `scripts/` | `install.sh`, `sync-version.py` (release) |
+| `scripts/` | `install.sh`, `kingfisher.sh` (secret scanning), `sync-version.py` (release) |
 
 Core owns lifecycle policy and identity. The CLI and GUI build typed requests, call core, and render results; they make no lifecycle decisions.
 
@@ -41,6 +41,6 @@ cargo test -p devflow-core --test workspace -- --ignored pitchfork            # 
 
 `devflow-gui` is outside the default workspace members; it pulls in GPUI, which on Linux needs system libraries, so build and test it on macOS (CI does). On Linux use `--exclude devflow-gui`. The Docker tests are ignored by default and use isolated resources; they must not assert `verified` CoW unless `DEVFLOW_EXPECT_COW=verified` is set. Live remote-server checks and large-dataset performance must be reported separately from unit tests.
 
-Git hooks come from hk (`hk install`, config in `hk.pkl`): pre-commit runs rustfmt and clippy and stages their fixes.
+Git hooks come from hk (`hk install`, config in `hk.pkl`); secret scanning is `scripts/kingfisher.sh`. Pre-commit runs rustfmt and clippy and then scans the staged content and file names, commit-msg scans the message, and pre-push scans the contents, names, messages and authors of every new commit, and tags. Mark a fake credential in a test with `// kingfisher:ignore` on its line or the line above; never bypass the hooks with `--no-verify` or `HK=0`.
 
 `mise run ci` runs the format, clippy and test checks; clippy covers the GUI, so run it on macOS. There is no commit helper; use Git directly. Releases are cut with Commitizen (see CONTRIBUTING.md, Releases): `cz bump` replaces `## Unreleased` with notes generated from commit messages, so restore the curated notes afterwards; `scripts/sync-version.py` keeps `devflow`, `devflow-core`, `devflow-gui` and `Cargo.lock` on one version.

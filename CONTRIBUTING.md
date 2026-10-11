@@ -6,7 +6,7 @@ Thanks for helping. devflow 1.0 is deliberately small: Git worktrees, copy-on-wr
 
 1. Fork and clone the repository.
 2. Install the Rust version in `rust-toolchain.toml`, Git, Docker (for the database tests), and [mise](https://mise.jdx.dev/) 2026.8.16 or newer. Releases need [Commitizen](https://commitizen-tools.github.io/commitizen/) and a GPG key; `cargo audit`, shellcheck and pitchfork are needed only for the matching CI steps and ignored tests.
-3. `mise install`, then `hk install` for the Git hooks (`hk install --mise` if mise is not activated in your shell), then `mise run build` and `mise run test`.
+3. `mise install`, then `hk install` for the Git hooks (`hk install --mise` if mise is not activated in your shell; see [Secrets](#secrets)), then `mise run build` and `mise run test`.
 
 The project configures a mise Cargo wrapper for [Mr. Boxington](https://mr-boxington.jdx.dev/setup) (`mbx`) so checkouts share compilation results. Cargo commands run through it in `mise run` tasks, `mise exec -- cargo ...`, and shells with mise activation. Check it with `mise exec -- mbx doctor`.
 
@@ -34,7 +34,7 @@ Multi-feature builds and many worktrees can fill the disk; `mbx clean` reclaims 
 | `tests/`, `crates/devflow-core/tests/` | End-to-end CLI tests; core workspace tests and the Docker database tests |
 | `docs/` | Architecture, migration guide, remote data hosts, design plans |
 | `examples/` | Sample configuration and an agent script |
-| `scripts/` | Installer, release version sync |
+| `scripts/` | Installer, secret scanning, release version sync |
 | `mise.toml`, `hk.pkl`, `.cz.toml` | Tools and tasks, Git hooks, release configuration |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the module map and `CLAUDE.md` for working rules.
@@ -70,9 +70,18 @@ Scopes in use: `cli`, `core`, `config`, `worktree`, `cow`, `setup`, `hooks`, `tr
 - Use `DEVFLOW_CONFIG_DIR` and `DEVFLOW_DATA_DIR` to isolate tests from your real registry and managed servers.
 - The GUI needs macOS (GPUI on Linux requires system libraries and Vulkan). Linux rendering is not advertised until it has been checked.
 
+### Secrets
+
+Nothing that looks like a credential may be committed or pushed. The [hk](https://hk.jdx.dev) hooks in `hk.pkl` call `scripts/kingfisher.sh`, which runs [kingfisher](https://github.com/mongodb/kingfisher) without contacting any provider or applying its size and archive limits, and prints only the rule, location and commit of a finding, with the secret masked:
+
+- **pre-commit** runs rustfmt and clippy (fixes are staged), then scans every changed file in the index as Git stores it, binaries and archives included, and the changed file names. **commit-msg** scans the message.
+- **pre-push** scans everything the push publishes after the audited commit named in the script: file contents (deleted ones too), file names, commit messages and author fields, and tag annotations. A secret added in one commit and deleted in the next still blocks the push, whichever remote already has it. Shallow clones are refused; run `git fetch --unshallow`. CI runs the same scan before any other job.
+
+`hk check` scans the whole working tree. A scan that runs longer than `KINGFISHER_TIMEOUT` seconds (600) fails; `KINGFISHER_DEBUG=1` shows kingfisher's own errors. Tests need fake credentials; mark each one with a `// kingfisher:ignore` comment on its line or the line above. If a real secret was committed, rotate it first, then rewrite the unpushed commits; once it has been pushed, removing it from history does not make it safe again.
+
 ### Pull requests
 
-1. CI passes: Conventional Commits, formatting, clippy, tests, the Docker database tests, the GUI clippy, build and tests on macOS, shellcheck of the scripts, and `cargo audit`.
+1. CI passes: the secret scan, Conventional Commits, formatting, clippy, tests, the Docker database tests, the GUI clippy, build and tests on macOS, shellcheck of the scripts, and `cargo audit`.
 2. Update `docs/` or `README.md` when behavior changes, and `CLAUDE.md` or `AGENTS.md` when layout or the automation contract changes.
 3. Add a `CHANGELOG.md` entry under `Unreleased` for user-facing changes.
 

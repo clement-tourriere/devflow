@@ -1,7 +1,9 @@
 amends "package://github.com/jdx/hk/releases/download/v2.5.0/hk@2.5.0#/Config.pkl"
 
 // `hk install` once per clone (`hk install --mise` if mise is not activated in
-// your shell).
+// your shell). Secret scanning is scripts/kingfisher.sh: it never contacts a
+// provider and never prints a secret. Mark an intentional fake credential with
+// a `kingfisher:ignore` comment on its line or the line above.
 
 local rust = new Mapping<String, Step> {
     ["cargo-fmt"] {
@@ -17,8 +19,12 @@ local rust = new Mapping<String, Step> {
     }
 }
 
-// `hk check` and `hk fix`.
+// `hk check` and `hk fix`. The secret scan always covers the whole working
+// tree; it never puts file names on a command line.
 steps {
+    ["kingfisher"] {
+        check = "sh scripts/kingfisher.sh tree"
+    }
     ...rust
 }
 
@@ -28,6 +34,27 @@ hooks {
         stash = "git"
         steps {
             ...rust
+            // Last, once fixes are staged: the index is what the commit records.
+            ["kingfisher"] {
+                exclusive = true
+                check = "sh scripts/kingfisher.sh staged"
+            }
+        }
+    }
+    ["commit-msg"] {
+        steps {
+            ["kingfisher"] {
+                check = "sh scripts/kingfisher.sh message {{commit_msg_file}}"
+            }
+        }
+    }
+    // Every commit, commit message and tag the push publishes.
+    ["pre-push"] {
+        steps {
+            ["kingfisher"] {
+                check = "sh scripts/kingfisher.sh pushed"
+                stdin = "{{hook_stdin}}"
+            }
         }
     }
 }
