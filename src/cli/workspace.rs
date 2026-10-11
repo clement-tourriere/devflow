@@ -919,18 +919,46 @@ pub fn prune(ctx: &Ctx, args: PruneArgs) -> Result<ExitCode> {
         })
         .collect();
     if ctx.json {
-        output::emit(
-            ctx,
-            "prune",
-            &json!({
-                "project": ProjectInfo::of(&project),
-                "candidates": candidates,
-                "confirmed": confirmed,
-                "pruned": outcome.pruned,
-                "refused": refused,
-                "changed": outcome.changed,
-            }),
-        )?;
+        let mut doc = json!({
+            "project": ProjectInfo::of(&project),
+            "candidates": candidates,
+            "confirmed": confirmed,
+            "pruned": outcome.pruned,
+            "refused": refused,
+            "changed": outcome.changed,
+        });
+        // A run that kept something exits 1, and every failure has an `error`
+        // (and the way on as `remedies`) at the top; what was forgotten and
+        // what was kept stay in the same document.
+        if !outcome.refused.is_empty() {
+            let mut remedies: Vec<Remedy> = Vec::new();
+            for r in &outcome.refused {
+                for remedy in r.refusal.remedies(root, &r.name) {
+                    if !remedies.contains(&remedy) {
+                        remedies.push(remedy);
+                    }
+                }
+            }
+            doc["error"] = serde_json::Value::String(format!(
+                "{} kept: {}",
+                devflow_core::text::counted_as(
+                    outcome.refused.len() as u64,
+                    "worktree was",
+                    "worktrees were"
+                ),
+                outcome
+                    .refused
+                    .iter()
+                    .map(|r| format!("{}: {}", r.name, r.refusal.message()))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+            if let Some(hint) = remedies.iter().find_map(Remedy::hint) {
+                doc["hint"] = serde_json::Value::String(hint);
+            }
+            doc["remedies"] = serde_json::to_value(devflow_core::remedy::describe(&remedies))?;
+        }
+        output::emit(ctx, "prune", &doc)?;
     } else {
         for name in &outcome.pruned {
             say(format!(

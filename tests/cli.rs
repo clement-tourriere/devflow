@@ -1565,6 +1565,30 @@ fn prune_lists_first_forgets_only_what_owns_nothing_and_sends_the_rest_to_remove
         "{doc}"
     );
     assert!(receipt.is_file());
+    // A run that exits 1 has an `error` like every other failure, with the way
+    // on at the top, and the partial results stay in the same document.
+    let error = doc["error"].as_str().expect("an error is reported");
+    assert!(
+        error.contains("1 worktree was kept") && error.contains("feature/owner"),
+        "{doc}"
+    );
+    assert_eq!(doc["remedies"][0]["kind"], "remove_workspace", "{doc}");
+    assert_eq!(
+        doc["remedies"][0]["command"], "devflow remove feature/owner",
+        "{doc}"
+    );
+    assert!(
+        doc["hint"].as_str().unwrap().contains("devflow remove"),
+        "{doc}"
+    );
+    assert_eq!(doc["confirmed"], true, "{doc}");
+    assert!(doc["candidates"].is_array(), "{doc}");
+    // A run that kept nothing has no `error` and exits 0.
+    let doc = json(ok(&env.run(&["--json", "prune"])));
+    assert!(
+        doc.get("error").is_none() && doc.get("remedies").is_none(),
+        "{doc}"
+    );
     failed(&env.run(&["--json", "prune", "feature/nope", "--yes"]));
 }
 
