@@ -273,10 +273,16 @@ impl Service {
         if self.root.as_os_str().is_empty() {
             return problem;
         }
+        // The workspace that owns the branch is what the CLI starts it through.
+        let workspace = branch.and_then(|id| {
+            let project = Project::open(&self.root).ok()?;
+            workspace::bound_workspace(&project, &self.key, id)
+        });
         problem.with(crate::remedy::Remedy::StartService {
             root: self.root.clone(),
             key: self.key.clone(),
             branch,
+            workspace,
         })
     }
 
@@ -727,6 +733,7 @@ mod tests {
                 root: "/shop".into(),
                 key: "my_cache".into(),
                 branch: Some(Uuid::nil()),
+                workspace: None,
             }]
         );
         // A service made from the catalog alone knows no project: no remedy.

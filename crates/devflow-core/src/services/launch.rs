@@ -423,7 +423,7 @@ impl Service {
                     return problem.into_error();
                 }
                 problem
-                    .with(crate::remedy::Remedy::DropServiceBranch {
+                    .with(crate::remedy::Remedy::DropLostBranch {
                         root: self.root.clone(),
                         key: self.key.clone(),
                         branch: id,

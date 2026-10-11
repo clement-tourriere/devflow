@@ -26,6 +26,32 @@ pub fn binding<'a>(receipt: &'a Receipt, key: &str, engine: Engine) -> Option<&'
         .filter(|binding| binding.engine == engine && binding.branch_id.is_some())
 }
 
+/// The checkout whose receipt binds `branch` as the branch of service `key`,
+/// when exactly one does. `None` when none or several do, or when a receipt
+/// cannot be read: it names a place for a command to run in, and a guess is
+/// worse than no command. Reads only; takes no lock.
+pub fn bound_workspace(project: &Project, key: &str, branch: Uuid) -> Option<std::path::PathBuf> {
+    let mut found = None;
+    for workspace in worktree::list(project).ok()? {
+        if workspace.missing {
+            continue;
+        }
+        let receipt = Receipt::load_for(&workspace.git_dir, &project.config).ok()?;
+        let binds = receipt.is_some_and(|r| {
+            r.services
+                .get(key)
+                .is_some_and(|b| b.branch_id == Some(branch))
+        });
+        if binds {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(workspace.path);
+        }
+    }
+    found
+}
+
 /// What a `--data-from` request means for container service `svc`: the
 /// identity it resolves to in the service's catalog and the label recorded
 /// in the receipt. A missing source is an error naming the service, never an
@@ -356,6 +382,50 @@ pub fn drop_orphan(project: &Project, key: &str, branch: Uuid) -> Result<()> {
     Service::open(&fresh, key)?.remove_branch(branch)
 }
 
+/// Remove branch `branch` of the configured service `key` whose volume is
+/// gone: a workspace may own it (this is the recovery [`drop_orphan`] refuses
+/// to be), but its data is lost, so the only way on is to drop the record, the
+/// container and what is left, and set the workspace up again.
+///
+/// The project is read again from disk (same identity), the branch must be a
+/// ready record of the service, and Docker must say that its volume does not
+/// exist: a branch whose data is there is never dropped by this. The removal
+/// is by recorded identity, as `devflow service NAME drop ID` does it.
+pub fn drop_lost_branch(project: &Project, key: &str, branch: Uuid) -> Result<()> {
+    let fresh = fresh(project)?;
+    let svc = Service::open(&fresh, key)?;
+    let record = svc.branch(branch)?;
+    let present = match &record {
+        Some(record) => super::docker::inspect_volume(&record.volume)?.is_some(),
+        None => false,
+    };
+    confirm_lost(key, branch, record.as_ref(), present)?;
+    svc.remove_branch(branch)
+}
+
+/// The record of `branch` is a ready one and its volume is missing; anything
+/// else is an error that says why nothing was dropped.
+fn confirm_lost(
+    key: &str,
+    branch: Uuid,
+    record: Option<&super::catalog::BranchRecord>,
+    volume_present: bool,
+) -> Result<()> {
+    let record = record.with_context(|| {
+        format!("the catalog of service '{key}' has no branch {branch}; nothing was dropped")
+    })?;
+    ensure!(
+        record.state == RecordState::Ready,
+        "branch {branch} of service '{key}' is {:?}, not ready; nothing was dropped",
+        record.state
+    );
+    ensure!(
+        !volume_present,
+        "the volume of branch {branch} of service '{key}' exists, so its data is not lost;          start the branch instead. Nothing was dropped"
+    );
+    Ok(())
+}
+
 /// `branch` of `key` is an orphan in the catalog at `path` with every
 /// workspace's receipt read; anything else is an error.
 fn confirm_orphan(fresh: &Project, path: &std::path::Path, key: &str, branch: Uuid) -> Result<()> {
@@ -676,5 +746,98 @@ mod tests {
         assert!(found.is_complete());
         assert_eq!(found.branches.len(), 1);
         confirm_orphan(&project, &path, "cache", branch).unwrap();
+    }
+
+    #[test]
+    fn a_branch_is_dropped_as_lost_only_with_a_ready_record_and_no_volume() {
+        let (_dir, project, path, branch, _) = owned_branch();
+        let catalog = crate::services::catalog::read_file(&path).unwrap().unwrap();
+        let record = catalog.services["cache"].branch(branch).unwrap().clone();
+        // The data is there: starting is the remedy, not dropping.
+        let error = confirm_lost("cache", branch, Some(&record), true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not lost") && error.contains("Nothing was dropped"));
+        // Gone, and a workspace owns the branch: this is the recovery (an
+        // orphan check would refuse it).
+        confirm_lost("cache", branch, Some(&record), false).unwrap();
+        let error = confirm_orphan(&project, &path, "cache", branch)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not an orphan any more"), "{error}");
+        // Not in the catalog, or not ready.
+        assert!(confirm_lost("cache", branch, None, false).is_err());
+        let mut creating = record.clone();
+        creating.state = RecordState::Creating;
+        assert!(confirm_lost("cache", branch, Some(&creating), false).is_err());
+        // The loaded project is checked again before Docker is asked.
+        std::fs::write(
+            project.root.join("devflow.toml"),
+            toml(Uuid::new_v4(), "[services.cache]\nengine = \"valkey\"\n"),
+        )
+        .unwrap();
+        let error = drop_lost_branch(&project, "cache", branch)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("nothing was removed"), "{error}");
+    }
+
+    #[test]
+    fn the_workspace_that_binds_a_branch_is_found_only_when_there_is_one() {
+        let (dir, project, _, branch, _) = owned_branch();
+        let feature = worktree::find(&project, "feature").unwrap().unwrap();
+        // Bound by a receipt: that checkout.
+        let mut receipt = Receipt::load(&feature.git_dir).unwrap().unwrap();
+        receipt.services.insert(
+            "cache".into(),
+            ServiceBinding::container(
+                Engine::Valkey,
+                branch,
+                "redis://127.0.0.1:1".into(),
+                None,
+                "empty".into(),
+                CloneReport {
+                    method: None,
+                    captured_at: None,
+                    allocated_bytes: None,
+                    source_downtime_ms: None,
+                },
+                None,
+            ),
+        );
+        receipt.save(&feature.git_dir).unwrap();
+        assert_eq!(
+            bound_workspace(&project, "cache", branch),
+            Some(feature.path.clone())
+        );
+        assert_eq!(bound_workspace(&project, "cache", Uuid::new_v4()), None);
+        assert_eq!(bound_workspace(&project, "other", branch), None);
+
+        // The problem a stopped branch raises carries it, so the CLI's command
+        // starts that branch and not the caller's.
+        let mut svc = super::super::tests::service();
+        svc.key = "cache".into();
+        svc.root = project.root.clone();
+        let problem = svc.start_problem("it is stopped", Some(branch));
+        let [crate::remedy::Remedy::StartService { workspace, .. }] = &problem.remedies[..] else {
+            panic!("{problem:?}");
+        };
+        assert_eq!(workspace.as_deref(), Some(feature.path.as_path()));
+        assert_eq!(
+            problem.remedies[0].command().unwrap(),
+            format!("devflow -C {} service cache up", feature.path.display())
+        );
+
+        // Two checkouts that bind the same branch: no guess.
+        let second = dir.path().join("second");
+        git2::Repository::open(&project.root)
+            .unwrap()
+            .worktree("second", &second, None)
+            .unwrap();
+        let second = worktree::find(&project, "second").unwrap().unwrap();
+        receipt.save(&second.git_dir).unwrap();
+        assert_eq!(bound_workspace(&project, "cache", branch), None);
+        let problem = svc.start_problem("it is stopped", Some(branch));
+        assert_eq!(problem.remedies[0].command(), None);
     }
 }

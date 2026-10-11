@@ -1351,6 +1351,11 @@ impl ServiceBackend for FakeServices {
         Ok(())
     }
 
+    fn drop_lost_branch(&self, _: &Project, key: &str, branch: Uuid) -> anyhow::Result<()> {
+        self.record(format!("drop-lost {key} {branch}"));
+        Ok(())
+    }
+
     fn forget(&self, _: &Project, key: &str) -> anyhow::Result<Vec<String>> {
         self.record(format!("forget {key}"));
         Ok(vec!["branch x".into()])
@@ -2273,6 +2278,56 @@ fn dropping_an_orphan_and_forgetting_a_service_ask_first(cx: &mut TestAppContext
     wait(cx, "the service was forgotten", |_| {
         fake.calls().contains(&"forget queue".to_string())
     });
+}
+
+#[gpui_kit::test]
+fn a_branch_whose_volume_is_gone_is_dropped_by_its_own_confirmed_operation(
+    cx: &mut TestAppContext,
+) {
+    use devflow_core::remedy::Remedy;
+    let DataRig { h, fake, ids, .. } = &data_rig(cx);
+    let root = cx.read_entity(&h.state, |s, _| {
+        s.selection.current().unwrap().entry.root.clone()
+    });
+    // `feature-x` owns this branch: it is no orphan, so the orphan operation
+    // (which keeps what a workspace holds) is not the one that runs.
+    let lost = Remedy::DropLostBranch {
+        root: root.clone(),
+        key: "cache".into(),
+        branch: ids.feature,
+    };
+    assert!(lost.destructive());
+    let run = |cx: &mut TestAppContext| {
+        cx.update_window(h.window.into(), |_, window, cx| {
+            super::remedies::run_scoped(&h.state, &lost, window, cx)
+        })
+        .unwrap();
+        wait(cx, "the confirmation", |cx| exists(cx, h, "confirm"));
+        std::thread::sleep(Duration::from_millis(350));
+    };
+    // Nothing runs before the person confirms.
+    run(cx);
+    cancel_dialog(cx, h);
+    assert!(fake.calls().iter().all(|c| !c.contains("drop")));
+    run(cx);
+    click(cx, h, "confirm");
+    wait(cx, "the branch was dropped", |_| {
+        fake.calls()
+            .contains(&format!("drop-lost cache {}", ids.feature))
+    });
+    wait(cx, "the job finished", |cx| {
+        cx.read_entity(&h.state, |s, _| s.busy().is_none())
+    });
+    assert!(
+        fake.calls().iter().all(|c| !c.starts_with("drop cache")),
+        "{:?}",
+        fake.calls()
+    );
+    // The words do not claim that nobody owns it.
+    let text = super::service_dialogs::drop_lost_lines("cache", ids.feature).join(" ");
+    assert!(!text.contains("No workspace"), "{text}");
+    assert!(text.contains("no longer exists"), "{text}");
+    assert!(!text.contains("devflow "), "{text}");
 }
 
 #[gpui_kit::test]

@@ -678,6 +678,49 @@ pub fn open_drop(
     );
 }
 
+fn lost_name(branch: uuid::Uuid) -> String {
+    let id: String = branch.to_string().chars().take(8).collect();
+    format!("branch {id}")
+}
+
+/// What the confirmation of [`open_drop_lost`] says.
+pub(crate) fn drop_lost_lines(key: &str, branch: uuid::Uuid) -> Vec<String> {
+    vec![
+        format!("Drop {} of {}?", lost_name(branch), shown(key)),
+        "A workspace uses this branch, but its volume no longer exists, so its data is already gone. This removes the branch's record and what is left of its container, by recorded identity. Set the workspace up again afterwards to give it a new branch."
+            .to_string(),
+    ]
+}
+
+/// Ask before removing the branch `branch` of `key`, which a workspace owns
+/// but whose volume is gone. Core checks that the volume is still missing
+/// when the job runs; a branch whose data is there is kept.
+pub fn open_drop_lost(
+    state: &Entity<AppState>,
+    target: ServiceTarget,
+    branch: uuid::Uuid,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let state = state.clone();
+    let key = target.key.clone();
+    let name = lost_name(branch);
+    let lines = drop_lost_lines(&key, branch);
+    open_confirm(
+        window,
+        cx,
+        "Drop branch",
+        lines,
+        "Drop",
+        move |window, cx| {
+            let (target, name) = (target.clone(), name.clone());
+            state.update(cx, |s, cx| {
+                s.service_drop_lost(target, branch, name, window, cx)
+            });
+        },
+    );
+}
+
 /// Ask before forgetting a service the configuration no longer has.
 pub fn open_forget(
     state: &Entity<AppState>,

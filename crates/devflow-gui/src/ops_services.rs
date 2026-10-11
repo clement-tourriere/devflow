@@ -277,6 +277,34 @@ impl AppState {
         );
     }
 
+    /// Remove a branch a workspace owns whose volume is gone: its data is
+    /// lost, and the workspace has to be set up again to get a new one.
+    pub fn service_drop_lost(
+        &mut self,
+        target: ServiceTarget,
+        branch: Uuid,
+        label: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let service = target.key.clone();
+        let title = format!("Drop {label} from {service}");
+        self.service_job(
+            &target,
+            title,
+            window,
+            cx,
+            move |project, backend, progress| {
+                progress.output(&format!("Removing what is left of {label}…"));
+                backend.drop_lost_branch(project, &service, branch)?;
+                Ok(Done {
+                    summary: format!("Dropped {label} from {service}. Set the workspace up again to give it new data."),
+                    ..Done::default()
+                })
+            },
+        );
+    }
+
     /// Remove everything recorded for a service the configuration no longer has.
     pub fn service_forget(
         &mut self,

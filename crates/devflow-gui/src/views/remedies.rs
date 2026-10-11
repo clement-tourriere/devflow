@@ -177,7 +177,9 @@ pub fn run_scoped(state: &Entity<AppState>, remedy: &Remedy, window: &mut Window
                 }
             });
         }
-        Remedy::StartService { root, key, branch } => {
+        Remedy::StartService {
+            root, key, branch, ..
+        } => {
             let Some(target) = service_target(state, root, key, cx) else {
                 return refuse(window, cx, remedy, not_open);
             };
@@ -228,6 +230,12 @@ pub fn run_scoped(state: &Entity<AppState>, remedy: &Remedy, window: &mut Window
                 reason: String::new(),
             };
             service_dialogs::open_drop(state, target, orphan, window, cx);
+        }
+        Remedy::DropLostBranch { root, key, branch } => {
+            let Some(target) = service_target(state, root, key, cx) else {
+                return refuse(window, cx, remedy, not_open);
+            };
+            service_dialogs::open_drop_lost(state, target, *branch, window, cx);
         }
         Remedy::ReconcileDatabases { root } => {
             let root = root.clone();

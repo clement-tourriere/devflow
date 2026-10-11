@@ -56,11 +56,16 @@ pub enum Remedy {
     /// Start the project's managed PostgreSQL server.
     StartDatabase { root: PathBuf },
     /// Start the container of service `key` (the branch `branch`, when the
-    /// problem is about one).
+    /// problem is about one). `workspace` is the checkout whose receipt binds
+    /// that branch, when exactly one does: the CLI starts a service through
+    /// the workspace it belongs to, so without it there is no command that
+    /// starts this branch.
     StartService {
         root: PathBuf,
         key: String,
         branch: Option<Uuid>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<PathBuf>,
     },
     /// Measure again whether the volumes of the Docker engine that holds
     /// service `key` share blocks (the measurement is per engine; `key` names
@@ -72,8 +77,18 @@ pub enum Remedy {
     /// Remove everything recorded for service `key`, which the configuration
     /// no longer has (its containers and volumes included).
     ForgetService { root: PathBuf, key: String },
-    /// Remove the branch `branch` of service `key` by its recorded identity.
+    /// Remove the branch `branch` of service `key` by its recorded identity:
+    /// an orphan, which no workspace of the project owns.
     DropServiceBranch {
+        root: PathBuf,
+        key: String,
+        branch: Uuid,
+    },
+    /// Remove the branch `branch` of service `key`, which a workspace owns but
+    /// whose volume is gone (its data is lost, so the branch can only be
+    /// dropped and made again by setup). Core checks that the volume is
+    /// missing; an orphan is [`Remedy::DropServiceBranch`]'s.
+    DropLostBranch {
         root: PathBuf,
         key: String,
         branch: Uuid,
@@ -119,6 +134,7 @@ impl Remedy {
             Remedy::ReconcileService { .. } => "reconcile_service",
             Remedy::ForgetService { .. } => "forget_service",
             Remedy::DropServiceBranch { .. } => "drop_service_branch",
+            Remedy::DropLostBranch { .. } => "drop_lost_branch",
             Remedy::ReconcileDatabases { .. } => "reconcile_databases",
             Remedy::DropOrphanDatabases { .. } => "drop_orphan_databases",
             Remedy::InstallGitHook { .. } => "install_git_hook",
@@ -163,6 +179,10 @@ impl Remedy {
                 let id: String = branch.to_string().chars().take(8).collect();
                 return format!("Drop branch {id} of {key}…");
             }
+            Remedy::DropLostBranch { key, branch, .. } => {
+                let id: String = branch.to_string().chars().take(8).collect();
+                return format!("Drop branch {id} of {key}, whose data is gone…");
+            }
             Remedy::ReconcileDatabases { .. } => "Finish interrupted work",
             Remedy::DropOrphanDatabases { .. } => "Drop unused databases…",
             Remedy::InstallGitHook { .. } => "Install the Git hook",
@@ -189,6 +209,7 @@ impl Remedy {
             Remedy::ForgetProject { .. }
                 | Remedy::ForgetService { .. }
                 | Remedy::DropServiceBranch { .. }
+                | Remedy::DropLostBranch { .. }
                 | Remedy::DropOrphanDatabases { .. }
                 | Remedy::RemoveWorkspace { .. }
         )
@@ -210,6 +231,16 @@ impl Remedy {
             Remedy::Setup { .. } => Some("devflow setup".to_string()),
             Remedy::Trust { .. } => Some("devflow trust".to_string()),
             Remedy::StartDatabase { .. } => Some("devflow db up".to_string()),
+            // The CLI starts the branch of a workspace, so the command names
+            // the checkout that owns the branch; without one there is none.
+            Remedy::StartService {
+                key,
+                branch: Some(_),
+                workspace,
+                ..
+            } => workspace.as_ref().map(|workspace| {
+                format!("devflow -C {} service {} up", quote(workspace), word(key))
+            }),
             Remedy::StartService { key, .. } => Some(format!("devflow service {} up", word(key))),
             Remedy::MeasureServices { .. } => Some("devflow service status --probe".to_string()),
             Remedy::ReconcileService { key, .. } => {
@@ -218,7 +249,8 @@ impl Remedy {
             Remedy::ForgetService { key, .. } => {
                 Some(format!("devflow service {} forget", word(key)))
             }
-            Remedy::DropServiceBranch { key, branch, .. } => {
+            Remedy::DropServiceBranch { key, branch, .. }
+            | Remedy::DropLostBranch { key, branch, .. } => {
                 Some(format!("devflow service {} drop {branch}", word(key)))
             }
             Remedy::ReconcileDatabases { .. } => Some("devflow db reconcile".to_string()),
@@ -271,6 +303,7 @@ impl Remedy {
                 workspace.display()
             )),
             Remedy::DropServiceBranch { .. }
+            | Remedy::DropLostBranch { .. }
             | Remedy::DropOrphanDatabases { .. }
             | Remedy::ForgetService { .. }
             | Remedy::RemoveWorkspace { .. } => Some(format!(
@@ -523,6 +556,7 @@ mod tests {
                 root: "/p".into(),
                 key: "cache".into(),
                 branch: Some(Uuid::nil()),
+                workspace: Some("/p.wt/a".into()),
             },
             Remedy::MeasureServices {
                 root: "/p".into(),
@@ -537,6 +571,11 @@ mod tests {
                 key: "cache".into(),
             },
             Remedy::DropServiceBranch {
+                root: "/p".into(),
+                key: "cache".into(),
+                branch: Uuid::nil(),
+            },
+            Remedy::DropLostBranch {
                 root: "/p".into(),
                 key: "cache".into(),
                 branch: Uuid::nil(),
@@ -588,6 +627,7 @@ mod tests {
             "forget_project",
             "forget_service",
             "drop_service_branch",
+            "drop_lost_branch",
             "drop_orphan_databases",
             "remove_workspace",
         ] {
@@ -623,6 +663,35 @@ mod tests {
             root: "/tmp/x".into(),
         };
         assert_eq!(plain.command().unwrap(), "devflow project forget /tmp/x");
+    }
+
+    #[test]
+    fn starting_a_branch_names_its_workspace_or_has_no_command() {
+        let start = |branch, workspace: Option<&str>| Remedy::StartService {
+            root: "/p".into(),
+            key: "cache".into(),
+            branch,
+            workspace: workspace.map(PathBuf::from),
+        };
+        // `devflow service cache up` would start the branch of the directory
+        // it runs in, not this one: the command points at the owner.
+        let owned = start(Some(Uuid::nil()), Some("/p.wt/my feature"));
+        assert_eq!(
+            owned.command().unwrap(),
+            "devflow -C '/p.wt/my feature' service cache up"
+        );
+        assert!(owned.hint().unwrap().contains("-C"));
+        // Nobody is known to own it: there is no command for this branch.
+        let unowned = start(Some(Uuid::nil()), None);
+        assert_eq!(unowned.command(), None);
+        assert_eq!(unowned.hint(), None);
+        let json = serde_json::to_value(unowned.describe()).unwrap();
+        assert!(json.get("command").is_none() && json.get("workspace").is_none());
+        // About the service as a whole, not one branch.
+        assert_eq!(
+            start(None, None).command().unwrap(),
+            "devflow service cache up"
+        );
     }
 
     #[test]
