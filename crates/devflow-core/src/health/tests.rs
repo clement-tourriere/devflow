@@ -198,13 +198,13 @@ fn explaining_a_failed_open_uses_the_disk_and_falls_back_to_retry() {
     let dir = repo(&[]);
     let error = crate::Project::open(dir.path()).unwrap_err();
     assert_eq!(
-        explain(dir.path(), &error).kind,
+        explain(dir.path(), None, &error).kind,
         ProblemKind::NotInitialized
     );
 
     let healthy = repo(&[("devflow.toml", &current())]);
     let transient = anyhow::anyhow!("the lock is busy");
-    let explained = explain(healthy.path(), &transient);
+    let explained = explain(healthy.path(), None, &transient);
     assert_eq!(explained.kind, ProblemKind::Unreadable);
     assert_eq!(explained.message, "the lock is busy");
     assert_eq!(kinds(&explained), ["retry", "forget"]);

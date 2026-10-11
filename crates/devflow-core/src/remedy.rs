@@ -50,6 +50,21 @@ pub enum Remedy {
 }
 
 impl Remedy {
+    /// The `kind` this remedy serializes with (`forget_project`, ...): a stable
+    /// name for element ids and for matching on data.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Remedy::Retry => "retry",
+            Remedy::ForgetProject { .. } => "forget_project",
+            Remedy::LocateProject { .. } => "locate_project",
+            Remedy::MigrateConfig { .. } => "migrate_config",
+            Remedy::Init { .. } => "init",
+            Remedy::OpenFile { .. } => "open_file",
+            Remedy::Reveal { .. } => "reveal",
+            Remedy::OpenGuide { .. } => "open_guide",
+        }
+    }
+
     /// The button text: a verb phrase, in plain words.
     pub fn label(&self) -> String {
         match self {
@@ -299,6 +314,8 @@ mod tests {
             },
         ];
         for remedy in &all {
+            let serialized = serde_json::to_value(remedy).unwrap();
+            assert_eq!(serialized["kind"], remedy.kind());
             let label = remedy.label();
             assert!(
                 !label.contains("devflow ") && !label.contains('`'),

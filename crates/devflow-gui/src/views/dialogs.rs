@@ -26,7 +26,7 @@ use std::{path::PathBuf, rc::Rc};
 pub(super) type TrustRun = Rc<dyn Fn(TrustChoice, &mut Window, &mut App)>;
 type ConfirmRun = Rc<dyn Fn(&mut Window, &mut App)>;
 
-fn host(
+pub(super) fn host(
     window: &mut Window,
     cx: &mut App,
     title: &'static str,

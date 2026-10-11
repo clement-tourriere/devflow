@@ -8,6 +8,7 @@ use chrono::{DateTime, Local, Utc};
 use devflow_core::{
     config::{ConfigDocument, CowCapability, PostgresMode},
     db::{BranchInfo, CowSource, DataSource, RecordStatus, ServerStatus, SnapshotInfo},
+    health::ProjectProblem,
     pitchfork::{Detection, InstallPlan, ProxyStatus},
     processes::{DaemonState, ProcessStatus},
     project::Project,
@@ -175,7 +176,9 @@ pub enum LoadPhase {
     Ready,
     /// The folder is a project root candidate without `devflow.toml`.
     NotInitialized,
-    Failed(String),
+    /// The project cannot be opened (folder gone, configuration refused, ...):
+    /// core says what is wrong and what can be done about it.
+    Problem(ProjectProblem),
 }
 
 #[derive(Clone, Debug, Default)]

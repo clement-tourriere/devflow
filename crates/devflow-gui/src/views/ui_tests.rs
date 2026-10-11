@@ -509,11 +509,17 @@ fn project_states_without_data_render(cx: &mut TestAppContext) {
     });
     cx.update(|cx| {
         h.state.update(cx, |s, _| {
-            s.selection.current_mut().unwrap().phase = LoadPhase::Failed("boom".into());
+            s.selection.current_mut().unwrap().phase =
+                LoadPhase::Problem(devflow_core::health::ProjectProblem {
+                    kind: devflow_core::health::ProblemKind::Unreadable,
+                    message: "boom".into(),
+                    root: PathBuf::from("/tmp/devflow-slim"),
+                    remedies: vec![devflow_core::remedy::Remedy::Retry],
+                });
         })
     });
     frame(cx, &h, |window| {
-        assert!(window.find("retry").visible());
+        assert!(window.find("remedy-retry").visible());
     });
 }
 
@@ -579,8 +585,7 @@ fn deleting_a_snapshot_asks_first(cx: &mut TestAppContext) {
 
 /// A scratch repository initialized for devflow, plus an isolated registry.
 pub(super) struct Scratch {
-    _registry: std::sync::MutexGuard<'static, ()>,
-    _config: tempfile::TempDir,
+    _dirs: crate::jobs::ScratchDirs,
     pub(super) _outer: tempfile::TempDir,
     pub(super) entry: Entry,
 }
@@ -617,16 +622,11 @@ pub(super) fn init_scratch_repo(repo: &std::path::Path) -> Entry {
 }
 
 pub(super) fn scratch_project() -> Scratch {
-    let registry = crate::jobs::REGISTRY_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let config = tempfile::tempdir().unwrap();
+    let dirs = crate::jobs::ScratchDirs::new();
     let outer = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("DEVFLOW_CONFIG_DIR", config.path()) };
     let entry = init_scratch_repo(&outer.path().join("shop"));
     Scratch {
-        _registry: registry,
-        _config: config,
+        _dirs: dirs,
         _outer: outer,
         entry,
     }
@@ -3186,6 +3186,7 @@ fn the_trust_badge_follows_the_selected_workspace(cx: &mut TestAppContext) {
         };
         jobs::refresh(RefreshRequest {
             root: root.clone(),
+            listed: None,
             load_config: false,
             workspace: Some(WorkspaceTarget {
                 path: dir.to_path_buf(),

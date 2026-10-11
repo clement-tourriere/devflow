@@ -41,6 +41,22 @@ pub enum ProblemKind {
     Unreadable,
 }
 
+impl ProblemKind {
+    /// A short title for the problem, for a page or a list.
+    pub fn title(self) -> &'static str {
+        match self {
+            ProblemKind::FolderMissing => "This project's folder is gone",
+            ProblemKind::NotGitCheckout => "This folder is not a Git repository",
+            ProblemKind::NotInitialized => "devflow is not set up here",
+            ProblemKind::PreReleaseConfig => "This project's configuration needs updating",
+            ProblemKind::LegacyConfig => "This project has a devflow 0.x configuration",
+            ProblemKind::InvalidConfig => "This project's configuration has a problem",
+            ProblemKind::WrongProject => "A different project is in this folder",
+            ProblemKind::Unreadable => "This project cannot be opened",
+        }
+    }
+}
+
 /// A project devflow cannot open as it is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProjectProblem {
@@ -184,11 +200,16 @@ pub fn check_root(root: &Path, registered: Option<(Uuid, &str)>) -> Health {
     }
 }
 
-/// Explain why opening the project in `root` failed with `error`: the
-/// classification of the disk when it finds a problem, else a generic one
-/// that offers to try again (the failure was not about the project's files).
-pub fn explain(root: &Path, error: &anyhow::Error) -> ProjectProblem {
-    match check_root(root, None) {
+/// Explain why opening the project in `root` (listed as `registered`, when
+/// it is) failed with `error`: the classification of the disk when it finds a
+/// problem, else a generic one that offers to try again (the failure was not
+/// about the project's files).
+pub fn explain(
+    root: &Path,
+    registered: Option<(Uuid, &str)>,
+    error: &anyhow::Error,
+) -> ProjectProblem {
+    match check_root(root, registered) {
         Health::Problem(problem) => problem,
         Health::Ok => ProjectProblem {
             kind: ProblemKind::Unreadable,

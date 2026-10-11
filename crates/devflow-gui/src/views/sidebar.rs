@@ -5,13 +5,16 @@
 //! (`expanded`, `summaries`), not in the menu items: their own open state is
 //! keyed by position, so it would stick to the wrong project when the list
 //! changes. The tree is therefore drawn here, from plain menu items.
-use super::ui;
+use super::{problems, ui};
 use crate::{
     actions::OpenSettings,
     model::{Page, WorkspaceSummary},
     state::{AppEvent, AppState},
 };
-use devflow_core::registry::Entry;
+use devflow_core::{
+    health::{ProblemKind, ProjectProblem},
+    registry::Entry,
+};
 use gpui_kit::{
     assets::IconName as Lucide,
     component::{
@@ -37,8 +40,11 @@ struct ProjectNode {
     /// The project shown in the main area (and so given the accent).
     selected: bool,
     expanded: bool,
-    /// Registered projects fold; a folder that is not one yet has nothing to list.
+    /// Registered projects fold; a folder that is not one yet has nothing to list,
+    /// and neither has a project that cannot be opened.
     foldable: bool,
+    /// Why the project cannot be opened, with what to do about it.
+    problem: Option<ProjectProblem>,
     /// `None` until the workspaces were read.
     workspaces: Option<Vec<WorkspaceSummary>>,
     /// Why they could not be read.
@@ -55,6 +61,11 @@ enum Node {
     Project(Box<ProjectNode>),
     Item(Box<SidebarMenuItem>),
     Hint(SharedString),
+    /// The button that takes every project whose folder is gone off the list.
+    ForgetMissing {
+        names: Vec<String>,
+        state: Entity<AppState>,
+    },
 }
 
 impl Collapsible for Node {
@@ -84,6 +95,19 @@ impl SidebarItem for Node {
                 .text_color(ui::muted(cx))
                 .child(text)
                 .into_any_element(),
+            Node::ForgetMissing { names, state } => div()
+                .px_1()
+                .child(
+                    Button::new(FORGET_MISSING_ID)
+                        .ghost()
+                        .small()
+                        .icon(Icon::new(Lucide::Trash))
+                        .label(format!("Remove {} missing projects…", names.len()))
+                        .on_click(move |_, window, cx| {
+                            problems::confirm_forget_missing(&state, names.clone(), window, cx)
+                        }),
+                )
+                .into_any_element(),
         }
     }
 }
@@ -99,6 +123,14 @@ pub fn workspace_id(project: Uuid, workspace: &str) -> SharedString {
 
 pub fn new_workspace_id(project: Uuid) -> SharedString {
     format!("new-workspace-{project}").into()
+}
+
+/// The button that removes every project whose folder is gone.
+pub const FORGET_MISSING_ID: &str = "forget-missing-projects";
+
+/// The warning mark on a project that cannot be opened.
+pub fn problem_badge_id(project: Uuid) -> SharedString {
+    format!("problem-badge-{project}").into()
 }
 
 fn render_project(node: ProjectNode, window: &mut Window, cx: &mut App) -> AnyElement {
@@ -125,11 +157,26 @@ fn render_project(node: ProjectNode, window: &mut Window, cx: &mut App) -> AnyEl
     let set_up = state.clone();
     let entry = node.entry.clone();
     let expanded = node.expanded && node.foldable;
+    let warning = cx.theme().warning;
+    let problem = node.problem.clone();
+    let badge = node.problem.is_some();
 
     let row = SidebarMenuItem::new(node.entry.name.clone())
         .icon(Icon::new(Lucide::FolderGit2).when(node.selected, |icon| icon.text_color(primary)))
         .when(node.selected, |item| item.font_weight(FontWeight::SEMIBOLD))
         .on_click(select)
+        .when(badge, |item| {
+            item.suffix(move |_, _| {
+                div()
+                    .id(problem_badge_id(id))
+                    .child(
+                        Icon::new(Lucide::TriangleAlert)
+                            .size_4()
+                            .text_color(warning),
+                    )
+                    .test_support()
+            })
+        })
         .when(node.foldable, |item| {
             item.suffix(move |_, _| {
                 let fold = fold.clone();
@@ -149,6 +196,20 @@ fn render_project(node: ProjectNode, window: &mut Window, cx: &mut App) -> AnyEl
             let set_up = set_up.clone();
             let entry = entry.clone();
             let root = entry.root.clone();
+            // A project that cannot be opened offers what core says can be
+            // done about it; the others, setting up and leaving the list.
+            if let Some(problem) = &problem {
+                return problem.remedies.iter().fold(menu, |menu, remedy| {
+                    let (state, entry, run) = (remove.clone(), entry.clone(), remedy.clone());
+                    menu.item(
+                        PopupMenuItem::new(remedy.label())
+                            .icon(remedy_icon(remedy))
+                            .on_click(move |_, window, cx| {
+                                problems::run_remedy(&state, Some(&entry), &run, window, cx)
+                            }),
+                    )
+                });
+            }
             menu.item(
                 PopupMenuItem::new("Set up devflow…")
                     .icon(Lucide::WandSparkles)
@@ -159,8 +220,8 @@ fn render_project(node: ProjectNode, window: &mut Window, cx: &mut App) -> AnyEl
             .item(
                 PopupMenuItem::new("Remove from list")
                     .icon(Lucide::Trash)
-                    .on_click(move |_, _, cx| {
-                        remove.update(cx, |s, cx| s.remove_entry(entry.clone(), cx))
+                    .on_click(move |_, window, cx| {
+                        problems::confirm_forget(&remove, entry.clone(), window, cx)
                     }),
             )
         })
@@ -255,6 +316,21 @@ fn render_project(node: ProjectNode, window: &mut Window, cx: &mut App) -> AnyEl
         .into_any_element()
 }
 
+/// The icon of a remedy in a menu.
+fn remedy_icon(remedy: &devflow_core::remedy::Remedy) -> Lucide {
+    use devflow_core::remedy::Remedy;
+    match remedy {
+        Remedy::Retry => Lucide::RefreshCw,
+        Remedy::ForgetProject { .. } => Lucide::Trash,
+        Remedy::LocateProject { .. } => Lucide::FolderGit2,
+        Remedy::MigrateConfig { .. } => Lucide::Wrench,
+        Remedy::Init { .. } => Lucide::WandSparkles,
+        Remedy::OpenFile { .. } => Lucide::Pencil,
+        Remedy::Reveal { .. } => Lucide::FolderGit2,
+        Remedy::OpenGuide { .. } => Lucide::Globe,
+    }
+}
+
 /// A workspace as the sidebar names it: the name is a legal one even when it
 /// looks like a credential, so it is masked here; `open_workspace` keeps the
 /// raw one.
@@ -282,7 +358,8 @@ pub fn render(state: &Entity<AppState>, cx: &mut App) -> impl IntoElement {
                 entry: entry.clone(),
                 selected,
                 expanded: app.is_expanded(entry.id),
-                foldable: !entry.id.is_nil(),
+                foldable: !entry.id.is_nil() && !app.problems.contains_key(&entry.id),
+                problem: app.problems.get(&entry.id).cloned(),
                 workspaces: summary.filter(|_| loaded).map(|s| s.workspaces.clone()),
                 error: summary
                     .and_then(|s| s.error.clone())
@@ -295,6 +372,23 @@ pub fn render(state: &Entity<AppState>, cx: &mut App) -> impl IntoElement {
         .collect();
     if projects.is_empty() {
         projects.push(Node::Hint("No projects yet.".into()));
+    }
+    // Several folders gone: one row takes them all off the list.
+    let missing: Vec<String> = app
+        .entries
+        .iter()
+        .filter(|e| {
+            app.problems
+                .get(&e.id)
+                .is_some_and(|p| p.kind == ProblemKind::FolderMissing)
+        })
+        .map(|e| e.name.clone())
+        .collect();
+    if missing.len() >= 2 {
+        projects.push(Node::ForgetMissing {
+            names: missing,
+            state: state.clone(),
+        });
     }
     let settings_active = app.page == Page::Settings;
 

@@ -1282,7 +1282,8 @@ impl OnboardingView {
             .into_any_element()
     }
 
-    fn diff_card(&self, file: &FilePreview, cx: &mut Context<Self>) -> AnyElement {
+    /// A changed file as a card of diff lines (also the migration dialog's).
+    pub(super) fn diff_card(file: &FilePreview, cx: &App) -> AnyElement {
         const SHOWN: usize = 300;
         let change = match file.change {
             FileChange::Created => chip("will be created", Tone::Success, cx),
@@ -1376,7 +1377,7 @@ impl OnboardingView {
                         "These are the exact changes. Lines in your files stay as they are; comments and formatting are kept.",
                     ),
                 )
-                .children(files.iter().map(|f| self.diff_card(f, cx)))
+                .children(files.iter().map(|f| Self::diff_card(f, cx)))
                 .test_support()
                 .into_any_element(),
         }

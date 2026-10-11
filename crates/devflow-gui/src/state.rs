@@ -16,6 +16,7 @@ use crate::{
     settings::{self, Settings, SettingsWriter, ThemeChoice},
 };
 use devflow_core::{
+    health::ProjectProblem,
     project::Project,
     redact,
     registry::Entry,
@@ -125,6 +126,9 @@ pub struct AppState {
     pub tab: Tab,
     pub entries: Vec<Entry>,
     pub entries_error: Option<String>,
+    /// The listed projects that cannot be opened as they are, by id (core's
+    /// `health`): the sidebar marks them and the project page explains them.
+    pub problems: HashMap<Uuid, ProjectProblem>,
     pub selection: Selection,
     /// Output of the last workspace operation (running or finished).
     pub activity: Option<Activity>,
@@ -197,6 +201,7 @@ impl AppState {
             tab: Tab::default(),
             entries: Vec::new(),
             entries_error: None,
+            problems: HashMap::new(),
             selection: Selection::default(),
             activity: None,
             mutating: HashMap::new(),
@@ -233,6 +238,7 @@ impl AppState {
             tab: Tab::default(),
             entries: Vec::new(),
             entries_error: None,
+            problems: HashMap::new(),
             selection: Selection::default(),
             activity: None,
             mutating: HashMap::new(),
@@ -304,6 +310,7 @@ impl AppState {
         match loaded {
             Ok(loaded) => {
                 self.entries = loaded.entries;
+                self.problems = loaded.problems;
                 self.adhoc = loaded.adhoc;
                 self.entries_error = None;
                 self.forget_unknown_projects();
@@ -469,7 +476,7 @@ impl AppState {
                 cx.emit(AppEvent::OpenNewWorkspace);
             }
             // Nothing to create a workspace in: the page says why.
-            Some(LoadPhase::NotInitialized | LoadPhase::Failed(_)) => {
+            Some(LoadPhase::NotInitialized | LoadPhase::Problem(_)) => {
                 self.pending_new_workspace = None;
             }
             Some(LoadPhase::Loading) | None => {
@@ -811,6 +818,7 @@ impl AppState {
         let needs_target = tab.needs_workspace() && workspace.is_none();
         let request = RefreshRequest {
             root: model.entry.root.clone(),
+            listed: Some((model.entry.id, model.entry.name.clone())),
             load_config: model.config.is_none(),
             workspace,
             processes: match tab {
@@ -882,8 +890,15 @@ impl AppState {
                 model.phase = LoadPhase::NotInitialized;
                 model.project = None;
             }
-            Err(LoadError::Failed(message)) => model.phase = LoadPhase::Failed(message),
-            Ok(refreshed) => apply_loaded(model, refreshed),
+            Err(LoadError::Problem(problem)) => {
+                model.phase = LoadPhase::Problem(problem.clone());
+                model.project = None;
+                self.problems.insert(stamp.key.project, problem);
+            }
+            Ok(refreshed) => {
+                apply_loaded(model, refreshed);
+                self.problems.remove(&stamp.key.project);
+            }
         }
         // The sidebar's view of this project follows what was just read, and a
         // read of it that is still in flight is now older than that.
@@ -903,7 +918,7 @@ impl AppState {
                 summary.loaded = false;
                 summary.error = Some("not initialized".into());
             }
-            LoadPhase::Failed(message) => summary.error = Some(message.clone()),
+            LoadPhase::Problem(problem) => summary.error = Some(problem.message.clone()),
             LoadPhase::Loading => {}
         }
         if self.pending_new_workspace == Some(stamp.key.project) {
@@ -912,7 +927,7 @@ impl AppState {
                     self.pending_new_workspace = None;
                     cx.emit(AppEvent::OpenNewWorkspace);
                 }
-                LoadPhase::NotInitialized | LoadPhase::Failed(_) => {
+                LoadPhase::NotInitialized | LoadPhase::Problem(_) => {
                     self.pending_new_workspace = None;
                 }
                 LoadPhase::Loading => {}

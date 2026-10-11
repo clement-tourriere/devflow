@@ -15,6 +15,9 @@ mod onboarding;
 mod overview;
 mod palette;
 mod pitchfork_panel;
+mod problems;
+#[cfg(test)]
+mod problems_tests;
 mod processes;
 mod project;
 mod reading;

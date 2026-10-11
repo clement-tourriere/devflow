@@ -36,6 +36,8 @@ use std::{
 };
 use uuid::Uuid;
 
+mod projects;
+
 /// A title or label that names a workspace, snapshot or daemon, as it is drawn:
 /// those names are legal even when they look like credentials.
 pub(crate) use crate::redaction::shown;

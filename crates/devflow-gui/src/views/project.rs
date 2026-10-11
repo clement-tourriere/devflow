@@ -2,7 +2,7 @@
 //! tab content. Also the not-initialized / failed / loading states.
 use super::{
     config::ConfigView, daemons::DaemonsView, data::DataView, dialogs,
-    hooks_editor::HooksEditorView, logs::LogsView, onboarding, palette::tab_icon, ui,
+    hooks_editor::HooksEditorView, logs::LogsView, onboarding, palette::tab_icon, problems, ui,
     workspaces::WorkspacesView,
 };
 use crate::{
@@ -271,19 +271,21 @@ impl ProjectView {
 
 impl Render for ProjectView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (info, phase, tab, busy, entries_error) = {
+        let (info, phase, entry, tab, busy, entries_error) = {
             let state = self.state.read(cx);
             let info = state.selection.current().map(HeaderInfo::of);
             let phase = state.selection.current().map(|m| m.phase.clone());
+            let entry = state.selection.current().map(|m| m.entry.clone());
             (
                 info,
                 phase,
+                entry,
                 state.tab,
                 state.busy().map(str::to_string),
                 state.entries_error.clone(),
             )
         };
-        let (Some(info), Some(phase)) = (info, phase) else {
+        let (Some(info), Some(phase), Some(entry)) = (info, phase, entry) else {
             let state = self.state.clone();
             return match entries_error {
                 Some(message) => ui::empty_state(
@@ -327,6 +329,8 @@ impl Render for ProjectView {
                 );
                 let wizard_root = root.clone();
                 let wizard_state = app.clone();
+                let forget_state = app.clone();
+                let forget_entry = entry.clone();
                 v_flex()
                     .size_full()
                     .child(ui::empty_state(
@@ -344,28 +348,41 @@ impl Render for ProjectView {
                         ),
                     ))
                     .child(
-                        h_flex().pb_6().justify_center().child(
-                            Button::new("initialize")
-                                .ghost()
-                                .small()
-                                .label("Or start from a minimal devflow.toml")
-                                .on_click(move |_, window, cx| {
-                                    dialogs::open_initialize(&app, root.clone(), window, cx)
-                                }),
-                        ),
+                        h_flex()
+                            .pb_6()
+                            .gap_2()
+                            .justify_center()
+                            .child(
+                                Button::new("initialize")
+                                    .ghost()
+                                    .small()
+                                    .label("Or start from a minimal devflow.toml")
+                                    .on_click(move |_, window, cx| {
+                                        dialogs::open_initialize(&app, root.clone(), window, cx)
+                                    }),
+                            )
+                            // A listed project whose devflow.toml went away can
+                            // also just leave the list.
+                            .when(!forget_entry.id.is_nil(), |row| {
+                                row.child(
+                                    Button::new("forget-project")
+                                        .ghost()
+                                        .small()
+                                        .label("Remove from list")
+                                        .on_click(move |_, window, cx| {
+                                            problems::confirm_forget(
+                                                &forget_state,
+                                                forget_entry.clone(),
+                                                window,
+                                                cx,
+                                            )
+                                        }),
+                                )
+                            }),
                     )
                     .into_any_element()
             }
-            LoadPhase::Failed(message) => v_flex()
-                .size_full()
-                .p_8()
-                .gap_3()
-                .child(ui::heading("Cannot load this project"))
-                .child(ui::error_banner(message, cx))
-                .child(Button::new("retry").label("Retry").on_click(
-                    cx.listener(|this, _, _, cx| this.state.update(cx, |s, cx| s.refresh(cx))),
-                ))
-                .into_any_element(),
+            LoadPhase::Problem(problem) => problems::page(&self.state, &entry, &problem, cx),
             LoadPhase::Ready => {
                 let header = self.header(info, busy.as_deref(), cx);
                 let content = match tab {

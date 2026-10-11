@@ -1397,8 +1397,9 @@ fn an_unticked_mysql_is_still_started_by_the_compose_hook(cx: &mut TestAppContex
 #[test]
 fn a_suggested_compose_hook_starts_the_services_devflow_does_not_branch_an_unticked_mysql_included()
 {
-    let dir = tempfile::tempdir().unwrap();
-    let entry = unconfigured_repo(&dir.path().join("blog"), &MYSQL_AND_SEARCH);
+    // `init` registers the project: in a scratch registry, never the user's.
+    let scratch = scratch_project();
+    let entry = unconfigured_repo(&scratch._outer.path().join("blog"), &MYSQL_AND_SEARCH);
     // The Setup tab is for a project that is set up: no `project:init` in the
     // plan for a hook to wait for.
     devflow_core::project::init(

@@ -11,8 +11,10 @@ use crate::{
 use anyhow::Result;
 use devflow_core::{
     config::{ConfigDocument, PostgresMode},
+    config_edit::migrate::{self, Migration},
     db::Server,
     error::{Busy, ConfigChanged, NotInitialized, Protected},
+    health::{self, ProjectProblem},
     pitchfork::{self, Detection, InstallPlan, Pitchfork},
     processes,
     project::{self, InitOptions, Project},
@@ -25,6 +27,7 @@ use devflow_core::{
 };
 use std::{
     cell::Cell,
+    collections::HashMap,
     io::Read as _,
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
@@ -324,6 +327,9 @@ pub struct Entries {
     pub select: Option<Uuid>,
     /// A folder shown without being registered (not a devflow project yet).
     pub adhoc: Option<PathBuf>,
+    /// The registered projects devflow cannot open as they are, by id: what is
+    /// wrong and what can be done (core's `health`, read from the disk).
+    pub problems: HashMap<Uuid, ProjectProblem>,
 }
 
 /// Registered projects plus, optionally, one folder that is not (yet) a
@@ -346,10 +352,12 @@ pub fn load_entries(adhoc: Option<PathBuf>, preselect: Option<PathBuf>) -> Secti
                 adhoc = Some(root);
             }
         }
+        let problems = check_projects(&entries);
         Ok(Entries {
             entries,
             select,
             adhoc,
+            problems,
         })
     })?;
     // Once the folder is registered it no longer needs a placeholder.
@@ -361,6 +369,44 @@ pub fn load_entries(adhoc: Option<PathBuf>, preselect: Option<PathBuf>) -> Secti
         }
     }
     Ok(loaded)
+}
+
+/// Which of `entries` have a problem, by id. Reads the disk (folder, Git
+/// repository, `devflow.toml`), changes nothing.
+pub fn check_projects(entries: &[Entry]) -> HashMap<Uuid, ProjectProblem> {
+    entries
+        .iter()
+        .filter(|entry| !entry.id.is_nil())
+        .filter_map(|entry| Some((entry.id, health::check(entry).problem()?)))
+        .collect()
+}
+
+/// Point a registered project at the folder it moved to (core checks that the
+/// folder holds that project).
+pub fn relocate_project(id: Uuid, new_root: PathBuf) -> Section<Entry> {
+    catch(|| registry::relocate(id, &new_root))
+}
+
+/// Forget the project whose main checkout is `root`: the list entry only.
+pub fn forget_project(root: PathBuf) -> Section<()> {
+    catch(|| registry::remove(&root).map(|_| ()))
+}
+
+/// Forget every project whose folder no longer exists; the entries removed.
+pub fn forget_missing_projects() -> Section<Vec<Entry>> {
+    catch(registry::prune_missing)
+}
+
+/// What migrating the earlier build's configuration of the project at `root`
+/// would change (nothing is written).
+pub fn plan_migration(root: PathBuf) -> Section<Migration> {
+    catch(|| migrate::plan(&root))
+}
+
+/// Write a planned migration. The files it replaces must still be what the
+/// plan read.
+pub fn apply_migration(migration: Migration) -> Section<()> {
+    catch(|| migrate::apply(&migration).map(|_| ()))
 }
 
 /// A folder opened without being registered or initialized gets a placeholder
@@ -515,6 +561,10 @@ impl ServicesRead {
 
 pub struct RefreshRequest {
     pub root: PathBuf,
+    /// The id and name the project is listed under, when it is listed: a
+    /// folder that holds another project is a problem, and locating a moved
+    /// project needs the id.
+    pub listed: Option<(Uuid, String)>,
     pub load_config: bool,
     pub workspace: Option<WorkspaceTarget>,
     pub processes: ProcessWant,
@@ -526,7 +576,8 @@ pub struct RefreshRequest {
 
 pub enum LoadError {
     NotInitialized,
-    Failed(String),
+    /// The project cannot be opened: what is wrong and what can be done.
+    Problem(ProjectProblem),
 }
 
 pub struct Refreshed {
@@ -541,13 +592,26 @@ pub struct Refreshed {
 }
 
 pub fn refresh(request: RefreshRequest) -> Result<Refreshed, LoadError> {
-    let project = catch_typed(|| Project::open(&request.root)).map_err(|failure| {
-        if failure.kind == FailureKind::NotInitialized {
+    let listed = request
+        .listed
+        .as_ref()
+        .map(|(id, name)| (*id, name.as_str()));
+    let project = Project::open(&request.root).map_err(|error| {
+        if error.downcast_ref::<NotInitialized>().is_some() {
             LoadError::NotInitialized
         } else {
-            LoadError::Failed(failure.message)
+            let mut problem = health::explain(&request.root, listed, &error);
+            problem.message = redact::text(&problem.message);
+            LoadError::Problem(problem)
         }
     })?;
+    // A folder that holds another project than the listed one is not this project.
+    if listed.is_some_and(|(id, _)| !id.is_nil() && id != project.id())
+        && let health::Health::Problem(mut problem) = health::check_root(&request.root, listed)
+    {
+        problem.message = redact::text(&problem.message);
+        return Err(LoadError::Problem(problem));
+    }
     let workspaces = catch(|| setup::list(&project));
     let database = load_database(&project);
     let services = request.services.backend.load(
@@ -865,6 +929,37 @@ fn load_logs(workspace: Option<&WorkspaceTarget>, selected: Option<&Path>) -> Lo
 #[cfg(test)]
 pub(crate) static REGISTRY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Scratch `DEVFLOW_CONFIG_DIR` and `DEVFLOW_DATA_DIR` for one test, held
+/// under [`REGISTRY_LOCK`] until it is dropped. Every test that reaches core's
+/// registry, servers or trust file starts with this: core refuses the real
+/// directories in a test binary, and a test must never write to the user's
+/// project list (an earlier one left its scratch projects there).
+#[cfg(test)]
+pub(crate) struct ScratchDirs {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    _config: tempfile::TempDir,
+    _data: tempfile::TempDir,
+}
+
+#[cfg(test)]
+impl ScratchDirs {
+    pub(crate) fn new() -> Self {
+        let lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let config = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: the lock serializes every test that changes them.
+        unsafe {
+            std::env::set_var("DEVFLOW_CONFIG_DIR", config.path());
+            std::env::set_var("DEVFLOW_DATA_DIR", data.path());
+        }
+        Self {
+            _lock: lock,
+            _config: config,
+            _data: data,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1104,6 +1199,7 @@ mod tests {
     fn request(root: &Path) -> RefreshRequest {
         RefreshRequest {
             root: root.to_path_buf(),
+            listed: None,
             load_config: true,
             workspace: None,
             processes: ProcessWant::No,
@@ -1118,10 +1214,8 @@ mod tests {
     /// scratch repository and an isolated registry.
     #[test]
     fn add_initialize_and_refresh_a_real_project() {
-        let _registry = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let config = tempfile::tempdir().unwrap();
+        let _dirs = ScratchDirs::new();
         let repo = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("DEVFLOW_CONFIG_DIR", config.path()) };
         git(repo.path(), &["init", "-q", "-b", "main"]);
         git(
             repo.path(),
