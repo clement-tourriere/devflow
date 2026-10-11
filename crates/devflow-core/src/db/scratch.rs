@@ -259,8 +259,13 @@ fn recover_building(
 /// The recorded scratch databases whose name the configuration no longer
 /// lists: `(row, branch name)`.
 fn orphans(s: &mut Session) -> Result<Vec<(ScratchRow, String)>> {
-    let project = s.project_id();
     let names = configured(s);
+    orphans_unlisted_by(s, &names)
+}
+
+/// [`orphans`] against `names` instead of what the server was built with.
+fn orphans_unlisted_by(s: &mut Session, names: &[String]) -> Result<Vec<(ScratchRow, String)>> {
+    let project = s.project_id();
     let mut found = Vec::new();
     for row in meta::list_scratch(&mut s.admin, project)? {
         if names.contains(&row.name) || row.status == RecordStatus::Deleting {
@@ -285,10 +290,11 @@ pub(super) fn report_orphans(s: &mut Session, report: &mut ReconcileReport) -> R
     Ok(())
 }
 
-/// Drop every orphan, by recorded identity; one line per database dropped.
-pub(super) fn drop_orphans(s: &mut Session) -> Result<Vec<String>> {
+/// Drop every scratch database `listed` (the configuration as it is on disk
+/// now) does not list, by recorded identity; one line per database dropped.
+pub(super) fn drop_orphans(s: &mut Session, listed: &[String]) -> Result<Vec<String>> {
     let mut dropped = Vec::new();
-    for (row, branch) in orphans(s)? {
+    for (row, branch) in orphans_unlisted_by(s, listed)? {
         drop_row(s, &row).with_context(|| {
             format!(
                 "cannot drop the scratch database '{}' ({}) of branch '{branch}'",

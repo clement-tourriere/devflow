@@ -7,7 +7,7 @@
 //! A remedy names its project by root. The project must be the open one: the
 //! selection may have moved since the button was drawn, and an action never
 //! lands on a project it was not about.
-use super::{Done, FailureHint, server_of};
+use super::{Done, FailureHint, fresh_server_of};
 use crate::{jobs, state::AppState};
 use devflow_core::setup::Progress as _;
 use devflow_core::{
@@ -96,7 +96,7 @@ impl AppState {
             window,
             cx,
             move |project, progress| {
-                let server = server_of(&project)?;
+                let server = fresh_server_of(&project)?;
                 progress.output("Looking at the records of interrupted work…");
                 let mut report = server.reconcile()?;
                 if drop_orphans {

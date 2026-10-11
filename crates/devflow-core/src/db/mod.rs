@@ -44,7 +44,7 @@ mod steps;
 
 use crate::config::{CowCapability, PostgresMode};
 use crate::project::Project;
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -329,6 +329,43 @@ impl Server {
         }))
     }
 
+    /// [`Server::for_project`] for the project as its files say now. The
+    /// project the caller holds may be older than the files (the desktop app
+    /// keeps one for as long as a window is open) and its settings decide
+    /// what interrupted work is finished or dropped; the files must still be
+    /// the same project.
+    pub fn for_fresh_project(project: &Project) -> Result<Option<Server>> {
+        let fresh = project.reload_same()?;
+        Self::for_project(&fresh)
+    }
+
+    /// `extra_databases` of the PostgreSQL service as the configuration on
+    /// disk lists it now, for the same project. An error when the files cannot
+    /// be read, are another project's, or no longer have the service.
+    fn listed_extra_databases(&self) -> Result<Vec<String>> {
+        let fresh = Project::open(&self.root).with_context(|| {
+            format!(
+                "cannot read the configuration of {} again to check it before dropping \
+                 databases; nothing was dropped",
+                self.root.display()
+            )
+        })?;
+        anyhow::ensure!(
+            fresh.id() == self.project_id,
+            "{} is project {} now, not {}; nothing was dropped",
+            fresh.config_path.display(),
+            fresh.id(),
+            self.project_id
+        );
+        let (_, section) = fresh.config.postgres().with_context(|| {
+            format!(
+                "{} no longer has a postgres service; nothing was dropped",
+                fresh.config_path.display()
+            )
+        })?;
+        Ok(section.extra_databases.clone())
+    }
+
     pub fn mode(&self) -> PostgresMode {
         self.settings.mode
     }
@@ -475,6 +512,11 @@ impl Server {
     /// Drop the scratch databases whose name the configuration no longer
     /// lists, by recorded identity, and return a line for each. This is the
     /// one way to remove an orphan short of dropping its branch.
+    ///
+    /// "No longer lists" is decided by the configuration on disk when the
+    /// database lock is held, not by the project this server was built from:
+    /// a name put back into `extra_databases` meanwhile is kept, and nothing
+    /// is dropped when the files cannot be read or are another project's.
     pub fn drop_orphans(&self) -> Result<Vec<String>> {
         ops::drop_orphans(self)
     }
@@ -547,5 +589,68 @@ mod tests {
         ] {
             assert!(bad.parse::<DataSource>().is_err(), "{bad:?}");
         }
+    }
+
+    /// A repository whose `devflow.toml` holds an external PostgreSQL service
+    /// with `extras` as `extra_databases` (project id `id`).
+    fn external_repo(id: uuid::Uuid, extras: &[&str]) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap().join("shop");
+        std::fs::create_dir_all(&root).unwrap();
+        git2::Repository::init(&root).unwrap();
+        write_external(&root, id, extras);
+        (dir, root)
+    }
+
+    fn write_external(root: &std::path::Path, id: uuid::Uuid, extras: &[&str]) {
+        let list: Vec<String> = extras.iter().map(|n| format!("\"{n}\"")).collect();
+        std::fs::write(
+            root.join("devflow.toml"),
+            format!(
+                "[project]\nname = \"shop\"\nid = \"{id}\"\n[services.db]\nengine = \"postgres\"\n\
+                 mode = \"external\"\nextra_databases = [{}]\n",
+                list.join(", ")
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_scratch_databases_to_keep_are_read_from_the_files_now_not_from_the_loaded_project() {
+        let id = uuid::Uuid::new_v4();
+        let (_dir, root) = external_repo(id, &["test"]);
+        // What a window loaded earlier: `shadow` was removed from the list.
+        let loaded = Project::open(&root).unwrap();
+        let server = Server::for_project(&loaded).unwrap().unwrap();
+        assert_eq!(server.listed_extra_databases().unwrap(), ["test"]);
+        // It is put back before the person confirms dropping the unused ones:
+        // the stale server sees it listed, so it is no orphan.
+        write_external(&root, id, &["test", "shadow"]);
+        assert_eq!(server.listed_extra_databases().unwrap(), ["test", "shadow"]);
+        assert_eq!(server.settings.extra_databases, ["test"], "the stale list");
+        // A server built through `for_fresh_project` starts from the files.
+        let fresh = Server::for_fresh_project(&loaded).unwrap().unwrap();
+        assert_eq!(fresh.settings.extra_databases, ["test", "shadow"]);
+
+        // Another project in the same folder: nothing is dropped.
+        write_external(&root, uuid::Uuid::new_v4(), &["test", "shadow"]);
+        let error = server.listed_extra_databases().unwrap_err().to_string();
+        assert!(error.contains("nothing was dropped"), "{error}");
+        assert!(Server::for_fresh_project(&loaded).is_err());
+        // No postgres service any more, or files that cannot be read.
+        std::fs::write(
+            root.join("devflow.toml"),
+            format!("[project]\nname = \"shop\"\nid = \"{id}\"\n"),
+        )
+        .unwrap();
+        let error = server.listed_extra_databases().unwrap_err().to_string();
+        assert!(
+            error.contains("no longer has a postgres service"),
+            "{error}"
+        );
+        std::fs::write(root.join("devflow.toml"), "[project\n").unwrap();
+        assert!(server.listed_extra_databases().is_err());
+        std::fs::remove_file(root.join("devflow.toml")).unwrap();
+        assert!(server.listed_extra_databases().is_err());
     }
 }

@@ -1131,6 +1131,14 @@ fn server_of(project: &Project) -> Result<Server> {
     Server::for_project(project)?.context("PostgreSQL branching is not configured for this project")
 }
 
+/// [`server_of`] for the files as they are now: the window's project may be
+/// older, and what is finished or dropped as unused follows the configuration
+/// (core checks it again under the database lock before it drops anything).
+fn fresh_server_of(project: &Project) -> Result<Server> {
+    Server::for_fresh_project(project)?
+        .context("PostgreSQL branching is not configured for this project")
+}
+
 fn done_from(summary: String, outcome: &SetupOutcome) -> Done {
     let needs_attention = outcome.status == Status::NeedsAttention;
     let mut warnings = outcome.warnings.clone();

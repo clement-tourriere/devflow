@@ -68,6 +68,26 @@ impl Project {
     pub fn reload(&self) -> Result<Project> {
         Self::open(&self.root)
     }
+
+    /// [`Project::reload`], which must find the same project (by identity,
+    /// not by path): a folder that holds another project now is an error, and
+    /// so are files that cannot be read.
+    pub fn reload_same(&self) -> Result<Project> {
+        let fresh = self.reload().with_context(|| {
+            format!(
+                "cannot read {} again; nothing was changed",
+                self.config_path.display()
+            )
+        })?;
+        anyhow::ensure!(
+            fresh.id() == self.id(),
+            "{} is project {} now, not {}; nothing was changed",
+            fresh.config_path.display(),
+            fresh.id(),
+            self.id()
+        );
+        Ok(fresh)
+    }
 }
 
 pub struct InitOptions {

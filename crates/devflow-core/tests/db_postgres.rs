@@ -3346,7 +3346,14 @@ fn scratch_orphans_additions_and_the_schema_upgrade() {
         checks[0]
             .hint
             .as_deref()
-            .is_some_and(|hint| hint.contains("--drop-orphans")),
+            .is_some_and(|hint| hint.contains("extra_databases") && !hint.contains("--")),
+        "{checks:?}"
+    );
+    assert!(
+        matches!(
+            checks[0].remedies[..],
+            [devflow_core::remedy::Remedy::DropOrphanDatabases { .. }]
+        ),
         "{checks:?}"
     );
     // A reset empties what is configured and leaves the orphan alone.
@@ -3382,6 +3389,20 @@ fn scratch_orphans_additions_and_the_schema_upgrade() {
     );
     assert!(database_exists(&mut admin, &shadow_db));
     assert_eq!(server.reconcile().unwrap().orphans.len(), 1);
+
+    // A name put back into the configuration after this server was built is
+    // no orphan any more: the server still holds the old list, but the drop
+    // reads the files under the database lock and keeps the database.
+    env.write_config("extra_databases = [\"test\", \"shadow\"]", None);
+    assert!(server.drop_orphans().unwrap().is_empty());
+    assert!(database_exists(&mut admin, &shadow_db), "restored: kept");
+    assert_eq!(scratch_rows(&mut meta, a.branch.id).len(), 2);
+    // An unreadable configuration proves nothing: nothing is dropped.
+    std::fs::write(env.repo.path().join("devflow.toml"), "[project\n").unwrap();
+    let error = server.drop_orphans().unwrap_err().to_string();
+    assert!(error.contains("nothing was dropped"), "{error}");
+    assert!(database_exists(&mut admin, &shadow_db));
+    env.write_config("extra_databases = [\"test\"]", None);
 
     // Dropping orphans is explicit, by recorded identity, and only orphans.
     let dropped = server.drop_orphans().unwrap();

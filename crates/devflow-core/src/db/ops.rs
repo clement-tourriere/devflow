@@ -606,7 +606,15 @@ pub(super) fn ensure_scratch(server: &Server, id: Uuid) -> Result<Vec<ScratchInf
 
 pub(super) fn drop_orphans(server: &Server) -> Result<Vec<String>> {
     let mut s = begin(server)?;
-    guarded(&mut s, scratch::drop_orphans)
+    guarded(&mut s, |s| {
+        // The database lock is held: the configuration is read again now, not
+        // taken from the project the server was built from (a window keeps
+        // that for as long as it is open). A name restored to
+        // `extra_databases` since is no orphan, and a configuration that
+        // cannot be read proves nothing.
+        let listed = server.listed_extra_databases()?;
+        scratch::drop_orphans(s, &listed)
+    })
 }
 
 // ---- reset ----------------------------------------------------------------
