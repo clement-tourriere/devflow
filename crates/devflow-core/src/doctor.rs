@@ -688,13 +688,13 @@ fn git_hook(project: &Project) -> Vec<Check> {
                 Check::warn(
                     "git-hook",
                     format!("{} exists and was not written by devflow", path.display()),
-                    "it was left alone; installing shows the line to add to it",
+                    "it was left alone; devflow can add one line to it so that it also sets up new worktrees",
                 )
                 .fixes([
-                    Remedy::OpenFile { path },
-                    Remedy::InstallGitHook {
+                    Remedy::ChainGitHook {
                         root: project.root.clone(),
                     },
+                    Remedy::OpenFile { path },
                 ])
             }
         }
@@ -1023,6 +1023,33 @@ mod tests {
         githook::install(&project).unwrap();
         let checks = run(Some(&project));
         assert_eq!(find(&checks, "git-hook")[0].status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn a_hook_somebody_else_wrote_is_offered_the_line_not_replaced() {
+        let t = testutil::repo(None);
+        let hook = t.root.join(".git/hooks/post-checkout");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\necho mine\n").unwrap();
+        let checks = run(Some(&t.project));
+        let check = find(&checks, "git-hook")[0];
+        assert_eq!(check.status, CheckStatus::Warn, "{check:?}");
+        assert_eq!(
+            check.remedies,
+            [
+                Remedy::ChainGitHook {
+                    root: t.root.clone()
+                },
+                Remedy::OpenFile { path: hook.clone() }
+            ]
+        );
+        for text in [Some(&check.detail), check.hint.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            assert!(!has_cli_text(text), "{text}");
+            assert!(!text.contains("--from-git-hook"), "{text}");
+        }
     }
 
     #[test]

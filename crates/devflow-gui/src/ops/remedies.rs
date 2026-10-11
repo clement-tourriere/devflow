@@ -52,9 +52,11 @@ impl AppState {
         if !self.open_project_at(&root, window, cx, title) {
             return;
         }
+        // Shown as an activity: a hook somebody else wrote is refused there,
+        // with the way on as buttons under the message.
         self.start_job(
             title.into(),
-            false,
+            true,
             FailureHint::None,
             window,
             cx,
@@ -65,6 +67,35 @@ impl AppState {
                         "Worktrees other tools create are set up by the hook at {}",
                         crate::model::shorten_home(&path)
                     ),
+                    ..Done::default()
+                })
+            },
+        );
+    }
+
+    /// Add devflow to the `post-checkout` hook somebody else wrote: core
+    /// appends one line to the file (and refuses a hook it cannot edit
+    /// safely). The person confirmed first.
+    pub fn chain_git_hook(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let title = "Add worktree setup to the existing hook";
+        if !self.open_project_at(&root, window, cx, title) {
+            return;
+        }
+        self.start_job(
+            title.into(),
+            true,
+            FailureHint::None,
+            window,
+            cx,
+            |project, _| {
+                let done = githook::chain(&project)?;
+                let path = crate::model::shorten_home(&done.path);
+                Ok(Done {
+                    summary: if done.added {
+                        format!("Worktrees other tools create are set up by the hook at {path}")
+                    } else {
+                        format!("The hook at {path} already sets up new worktrees")
+                    },
                     ..Done::default()
                 })
             },

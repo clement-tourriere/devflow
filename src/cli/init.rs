@@ -206,7 +206,12 @@ fn write(
     if ctx.json {
         let hook = hook.as_ref().map(|result| match result {
             Ok(path) => json!({ "installed": true, "path": path }),
-            Err(error) => json!({ "installed": false, "error": format!("{error:#}") }),
+            Err(error) => json!({
+                "installed": false,
+                "error": format!("{error:#}"),
+                "hint": super::workspace::foreign_hook_hint(error),
+                "remedies": devflow_core::remedy::describe(&devflow_core::remedy::remedies_of(error)),
+            }),
         });
         let body = json!({
             "project": project.as_ref().map(ProjectInfo::of),
@@ -236,10 +241,22 @@ fn write(
             "Installed the post-checkout hook at {}",
             path.display()
         )),
-        Some(Err(error)) => note(format!(
-            "warning: could not install the Git hook: {}",
-            redact::text(&format!("{error:#}"))
-        )),
+        Some(Err(error)) => {
+            note(format!(
+                "warning: could not install the Git hook: {}",
+                redact::text(&format!("{error:#}"))
+            ));
+            for hint in super::workspace::foreign_hook_hint(&error)
+                .into_iter()
+                .chain(
+                    devflow_core::remedy::remedies_of(&error)
+                        .iter()
+                        .filter_map(devflow_core::remedy::Remedy::hint),
+                )
+            {
+                note(format!("hint: {}", redact::text(&hint)));
+            }
+        }
         None => {}
     }
     if !steps.is_empty() {

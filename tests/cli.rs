@@ -1588,6 +1588,68 @@ fn hook_install_and_uninstall_round_trip() {
 }
 
 #[test]
+fn a_hook_somebody_else_wrote_is_left_alone_with_the_line_as_a_hint_and_a_chain_remedy() {
+    let env = Env::new();
+    env.init();
+    let hook = env.repo.join(".git/hooks/post-checkout");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    let original = "#!/bin/sh\necho mine\n";
+    std::fs::write(&hook, original).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let out = env.run(&["--json", "hook", "install"]);
+    failed(&out);
+    let doc = json(&out);
+    // The message is plain words; the line to add is the hint, and the way to
+    // have devflow add it is a remedy.
+    let error = doc["error"].as_str().unwrap();
+    assert!(error.contains("was not written by devflow"), "{doc}");
+    assert!(!error.contains("--from-git-hook"), "{doc}");
+    assert!(
+        doc["hint"]
+            .as_str()
+            .unwrap()
+            .contains("devflow setup --if-new --from-git-hook"),
+        "{doc}"
+    );
+    assert_eq!(doc["remedies"][0]["kind"], "chain_git_hook", "{doc}");
+    assert_eq!(doc["remedies"][0]["destructive"], true, "{doc}");
+    assert_eq!(
+        doc["remedies"][0]["command"], "devflow hook install --chain",
+        "{doc}"
+    );
+    assert_eq!(doc["remedies"][1]["kind"], "open_file", "{doc}");
+    assert_eq!(std::fs::read_to_string(&hook).unwrap(), original);
+    // The terminal gets the snippet as hint lines, as before.
+    let text = stderr(&env.run(&["hook", "install"]));
+    assert!(
+        text.contains("hint: to set up worktrees created by other tools, add this line"),
+        "{text}"
+    );
+    assert!(text.contains("--from-git-hook"), "{text}");
+
+    // `--chain` adds it, once.
+    let doc = json(ok(&env.run(&["--json", "hook", "install", "--chain"])));
+    assert_eq!(doc["command"], "hook install");
+    assert_eq!(doc["chained"], true, "{doc}");
+    assert_eq!(doc["added"], true, "{doc}");
+    let chained = std::fs::read_to_string(&hook).unwrap();
+    assert!(chained.starts_with(original), "{chained}");
+    assert!(chained.contains("--from-git-hook"), "{chained}");
+    let doc = json(ok(&env.run(&["--json", "hook", "install", "--chain"])));
+    assert_eq!(doc["added"], false, "{doc}");
+    assert_eq!(std::fs::read_to_string(&hook).unwrap(), chained);
+    // It is still the other tool's hook: uninstall does not remove it.
+    let doc = json(ok(&env.run(&["--json", "hook", "uninstall"])));
+    assert_eq!(doc["removed"], false, "{doc}");
+    assert!(hook.exists());
+}
+
+#[test]
 fn doctor_reports_checks() {
     let env = Env::new();
     env.init();

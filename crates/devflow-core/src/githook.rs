@@ -1,7 +1,7 @@
 //! The optional `post-checkout` Git hook that sets up worktrees created by
 //! other tools (`git worktree add`, IDEs, agents).
 use crate::project::Project;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -80,15 +80,42 @@ pub fn state(project: &Project) -> Result<InstallState> {
     }
 }
 
+/// A `post-checkout` hook that devflow did not write is in the way of
+/// installing its own. It was left alone. What to do about it travels as
+/// remedies ([`crate::remedy::remedies_of`]): add devflow to that hook
+/// ([`chain`]) or edit it by hand with [`CHAIN_LINE`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignHook {
+    /// The project's main checkout.
+    pub root: PathBuf,
+    /// The hook that is there.
+    pub path: PathBuf,
+}
+
+impl std::fmt::Display for ForeignHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} already exists and was not written by devflow, so it was left alone",
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for ForeignHook {}
+
 /// Install into the hooks directory (honours `core.hooksPath`). Refuses to
-/// replace a foreign hook and prints the line to add instead.
+/// replace a foreign hook with a [`ForeignHook`] error; [`chain`] adds devflow
+/// to it instead.
 pub fn install(project: &Project) -> Result<PathBuf> {
     let path = match state(project)? {
-        InstallState::Foreign { path } => bail!(
-            "{} already exists and was not written by devflow, so it was left alone.\n\
-             To set up worktrees created by other tools, add this line to it:\n\n    {CHAIN_LINE}\n",
-            path.display()
-        ),
+        InstallState::Foreign { path } => {
+            return Err(ForeignHook {
+                root: project.root.clone(),
+                path,
+            }
+            .into());
+        }
         InstallState::Installed { path } => path,
         InstallState::NotInstalled => hooks_dir(project)?.join(HOOK_NAME),
     };
@@ -100,6 +127,130 @@ pub fn install(project: &Project) -> Result<PathBuf> {
             .with_context(|| format!("cannot make {} executable", path.display()))?;
     }
     Ok(path)
+}
+
+/// What [`chain`] did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Chained {
+    /// The hook the line is in.
+    pub path: PathBuf,
+    /// `false` when the hook already had it (or is devflow's own).
+    pub added: bool,
+}
+
+/// Add devflow to the `post-checkout` hook somebody else wrote, so that it also
+/// sets up the worktrees other tools create: [`CHAIN_LINE`] is appended to the
+/// file itself, with a comment saying where it comes from. Nothing else in the
+/// hook changes, and the file keeps its inode, mode and owner (it is appended
+/// to, not replaced).
+///
+/// Repeating it changes nothing (a hook that already runs
+/// `devflow setup --from-git-hook` is left as it is), and a hook devflow cannot
+/// edit safely is refused with a [`Problem`](crate::remedy::Problem) that says
+/// why: a symbolic link (its target may be shared), a file that is not a
+/// text script for a POSIX shell, one Git would not run (not executable), and
+/// one that `exec`s or `exit`s at the top level, where an appended line would
+/// never run. The line is never written into a hook devflow wrote.
+pub fn chain(project: &Project) -> Result<Chained> {
+    let lock = project.git_common_dir.join("devflow").join("hook.lock");
+    crate::fsutil::with_lock(&lock, || chain_locked(project))
+}
+
+fn chain_locked(project: &Project) -> Result<Chained> {
+    use crate::remedy::{Problem, Remedy};
+    let path = match state(project)? {
+        InstallState::Installed { path } => return Ok(Chained { path, added: false }),
+        InstallState::NotInstalled => {
+            return Err(Problem::new(
+                "there is no post-checkout hook to add devflow to; install devflow's own",
+            )
+            .with(Remedy::InstallGitHook {
+                root: project.root.clone(),
+            })
+            .into_error());
+        }
+        InstallState::Foreign { path } => path,
+    };
+    let refuse = |why: String| {
+        Problem::new(format!(
+            "{} was left alone: {why}. Add the line by hand",
+            path.display()
+        ))
+        .with(Remedy::OpenFile { path: path.clone() })
+        .into_error()
+    };
+    let meta = std::fs::symlink_metadata(&path)
+        .with_context(|| format!("cannot inspect {}", path.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err(refuse(
+            "it is a symbolic link, and its target may be shared with other repositories".into(),
+        ));
+    }
+    if !meta.is_file() {
+        return Err(refuse("it is not a regular file".into()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 == 0 {
+            return Err(refuse(
+                "it is not executable, so Git does not run it".into(),
+            ));
+        }
+    }
+    let bytes = std::fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Err(refuse("it is not a text script".into()));
+    };
+    if text.contains("--from-git-hook") {
+        return Ok(Chained { path, added: false });
+    }
+    if let Err(why) = appendable(&text) {
+        return Err(refuse(why));
+    }
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("cannot write to {}", path.display()))?;
+    let lead = if text.ends_with('\n') { "" } else { "\n" };
+    file.write_all(
+        format!("{lead}# Added by devflow: sets up worktrees other tools create.\n{CHAIN_LINE}\n")
+            .as_bytes(),
+    )
+    .with_context(|| format!("cannot write to {}", path.display()))?;
+    Ok(Chained { path, added: true })
+}
+
+/// Whether a line appended to the script `text` would run, and the script is
+/// one [`CHAIN_LINE`] (POSIX shell) can be added to; otherwise why not.
+fn appendable(text: &str) -> std::result::Result<(), String> {
+    let first = text.lines().next().unwrap_or_default();
+    let Some(interpreter) = first.strip_prefix("#!") else {
+        return Err("it does not start with a shell interpreter line (#!/bin/sh)".into());
+    };
+    let mut words = interpreter.split_whitespace();
+    let mut program = words.next().unwrap_or_default();
+    if program.rsplit('/').next() == Some("env") {
+        program = words.find(|w| !w.starts_with('-')).unwrap_or_default();
+    }
+    let program = program.rsplit('/').next().unwrap_or_default();
+    if !["sh", "bash", "dash", "ash", "ksh", "zsh"].contains(&program) {
+        return Err(format!(
+            "it is a {} script, and the line is for a POSIX shell",
+            if program.is_empty() { "?" } else { program }
+        ));
+    }
+    for line in text.lines() {
+        // Not indented: the script's own flow, where `exec` or `exit` ends it.
+        if line == "exit" || line.starts_with("exit ") || line.starts_with("exec ") {
+            return Err(format!(
+                "it has `{}` before the end of the file, so a line added at the end would never run",
+                line.trim_end()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Remove the hook only if devflow wrote it.
@@ -290,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn a_foreign_hook_is_never_replaced_and_the_error_says_what_to_add() {
+    fn a_foreign_hook_is_never_replaced_and_the_error_is_typed_without_the_snippet() {
         let t = testutil::repo(None);
         let hooks = t.root.join(".git/hooks");
         std::fs::create_dir_all(&hooks).unwrap();
@@ -302,11 +453,165 @@ mod tests {
             state(&t.project).unwrap(),
             InstallState::Foreign { path: path.clone() }
         );
-        let error = install(&t.project).unwrap_err().to_string();
-        assert!(error.contains(CHAIN_LINE), "{error}");
-        assert!(error.contains(path.to_str().unwrap()), "{error}");
+        let error = install(&t.project).unwrap_err();
+        let foreign = error.downcast_ref::<ForeignHook>().expect("typed");
+        assert_eq!(foreign.path, path);
+        assert_eq!(foreign.root, t.root);
+        // The message is plain words: the snippet is data ([`CHAIN_LINE`]), and
+        // the way on travels as remedies.
+        let message = format!("{error:#}");
+        assert!(message.contains(path.to_str().unwrap()), "{message}");
+        assert!(!message.contains("devflow setup") && !message.contains(CHAIN_LINE));
+        assert_eq!(
+            crate::remedy::remedies_of(&error),
+            [
+                crate::remedy::Remedy::ChainGitHook {
+                    root: t.root.clone()
+                },
+                crate::remedy::Remedy::OpenFile { path: path.clone() }
+            ]
+        );
         assert!(!uninstall(&t.project).unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    fn foreign(t: &TestRepo, text: &str) -> PathBuf {
+        let hooks = t.root.join(".git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let path = hooks.join("post-checkout");
+        std::fs::write(&path, text).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o750)).unwrap();
+        path
+    }
+
+    #[test]
+    fn chaining_adds_the_line_once_keeps_the_rest_and_the_file_itself() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let t = testutil::repo(None);
+        // No newline at the end: the line still starts on its own.
+        let path = foreign(&t, "#!/bin/bash\nset -e\necho mine");
+        let before = path.metadata().unwrap();
+
+        let done = chain(&t.project).unwrap();
+        assert_eq!(
+            done,
+            Chained {
+                path: path.clone(),
+                added: true
+            }
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("#!/bin/bash\nset -e\necho mine\n# Added by devflow"));
+        assert!(text.ends_with(&format!("{CHAIN_LINE}\n")), "{text}");
+        // The same file, with the same mode: appended to, not replaced.
+        let after = path.metadata().unwrap();
+        assert_eq!(after.ino(), before.ino());
+        assert_eq!(after.permissions().mode(), before.permissions().mode());
+        // Still the other tool's hook (uninstall would not delete it), and
+        // the doctor reads it as chained.
+        assert!(matches!(
+            state(&t.project).unwrap(),
+            InstallState::Foreign { .. }
+        ));
+        assert!(!uninstall(&t.project).unwrap());
+        assert!(path.exists());
+
+        // Idempotent.
+        let again = chain(&t.project).unwrap();
+        assert_eq!(
+            again,
+            Chained {
+                path: path.clone(),
+                added: false
+            }
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        // The hook still runs, then sets up a fresh worktree.
+        let fake = FakeDevflow::new();
+        let out = run_hook(&path, [ZERO40, "x", "1"], &fake, &[], true);
+        assert!(out.status.success(), "{out:?}");
+        assert!(String::from_utf8_lossy(&out.stdout).contains("mine"));
+        assert_eq!(fake.calls().len(), 1);
+    }
+
+    #[test]
+    fn chaining_goes_through_a_hooks_path_and_leaves_devflows_own_hook_alone() {
+        let t = testutil::repo(None);
+        // Nothing there: install is the remedy, and nothing is written.
+        let error = chain(&t.project).unwrap_err();
+        assert_eq!(
+            crate::remedy::remedies_of(&error),
+            [crate::remedy::Remedy::InstallGitHook {
+                root: t.root.clone()
+            }]
+        );
+        assert!(!t.root.join(".git/hooks/post-checkout").exists());
+        // devflow's own hook already has the line.
+        let own = installed(&t);
+        let text = std::fs::read_to_string(&own).unwrap();
+        assert_eq!(
+            chain(&t.project).unwrap(),
+            Chained {
+                path: own.clone(),
+                added: false
+            }
+        );
+        assert_eq!(std::fs::read_to_string(&own).unwrap(), text);
+    }
+
+    #[test]
+    fn chaining_refuses_what_it_cannot_edit_safely_and_changes_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = testutil::repo(None);
+        let refused = |why: &str| {
+            let error = chain(&t.project).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains(why), "{message}");
+            assert!(!message.contains(CHAIN_LINE), "{message}");
+            assert!(matches!(
+                crate::remedy::remedies_of(&error)[..],
+                [crate::remedy::Remedy::OpenFile { .. }]
+            ));
+        };
+        let content_of = |p: &Path| std::fs::read(p).unwrap();
+
+        for (text, why) in [
+            ("#!/usr/bin/env python3\nprint('x')\n", "python3 script"),
+            ("echo no interpreter line\n", "interpreter line"),
+            (
+                "#!/bin/sh\nrun-things\nexec other-hook \"$@\"\n",
+                "exec other-hook",
+            ),
+            ("#!/bin/sh\nrun-things\nexit 0\n", "exit 0"),
+        ] {
+            let path = foreign(&t, text);
+            refused(why);
+            assert_eq!(content_of(&path), text.as_bytes(), "{text}");
+        }
+        // An indented exit is inside a block: the end of the file still runs.
+        let path = foreign(&t, "#!/usr/bin/env bash\nif [ x ]; then\n  exit 0\nfi\n");
+        assert!(chain(&t.project).unwrap().added);
+        assert!(content_of(&path).ends_with(format!("{CHAIN_LINE}\n").as_bytes()));
+
+        // Not UTF-8, not executable.
+        let path = foreign(&t, "#!/bin/sh\n");
+        std::fs::write(&path, b"#!/bin/sh\n\xff\xfe\n").unwrap();
+        refused("not a text script");
+        std::fs::write(&path, "#!/bin/sh\necho mine\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        refused("not executable");
+        assert_eq!(content_of(&path), b"#!/bin/sh\necho mine\n");
+
+        // A symbolic link: its target may be shared, so it is not touched.
+        let target = t.dir.path().join("shared-hook");
+        std::fs::write(&target, "#!/bin/sh\necho shared\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        refused("symbolic link");
+        assert_eq!(content_of(&target), b"#!/bin/sh\necho shared\n");
+        assert!(path.symlink_metadata().unwrap().file_type().is_symlink());
     }
 
     #[test]

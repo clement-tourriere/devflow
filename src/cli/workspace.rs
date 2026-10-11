@@ -99,15 +99,23 @@ pub struct RemoveArgs {
 #[derive(Subcommand)]
 pub enum HookAction {
     /// Install the post-checkout hook
-    Install,
+    Install(HookInstallArgs),
     /// Remove the post-checkout hook (only if devflow wrote it)
     Uninstall,
+}
+
+#[derive(clap::Args)]
+pub struct HookInstallArgs {
+    /// Add devflow to the post-checkout hook that is already there (one line is
+    /// appended; the rest of the hook is not changed)
+    #[arg(long)]
+    pub chain: bool,
 }
 
 impl HookAction {
     pub fn json_name(&self) -> &'static str {
         match self {
-            HookAction::Install => "hook install",
+            HookAction::Install(_) => "hook install",
             HookAction::Uninstall => "hook uninstall",
         }
     }
@@ -809,6 +817,17 @@ pub fn remove(ctx: &Ctx, args: RemoveArgs) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// What the CLI adds to a [`githook::ForeignHook`] refusal: the line to put in
+/// the hook by hand (`--chain` adds it for the person).
+pub fn foreign_hook_hint(error: &anyhow::Error) -> Option<String> {
+    let foreign = error.downcast_ref::<githook::ForeignHook>()?;
+    Some(format!(
+        "to set up worktrees created by other tools, add this line to {}:\n\n    {}\n",
+        foreign.path.display(),
+        githook::CHAIN_LINE
+    ))
+}
+
 /// Ask whether to remove a workspace despite a protection `--force` overrides.
 fn confirm_forced_removal(protected: &Protected) -> Result<bool> {
     let prompt = format!(
@@ -832,7 +851,27 @@ pub fn hook(ctx: &Ctx, action: HookAction) -> Result<ExitCode> {
     let project = ctx.project()?;
     let name = action.json_name();
     match action {
-        HookAction::Install => {
+        HookAction::Install(args) if args.chain => {
+            let done = githook::chain(&project)?;
+            if ctx.json {
+                output::emit(
+                    ctx,
+                    name,
+                    &json!({ "chained": true, "added": done.added, "path": done.path }),
+                )?;
+            } else if done.added {
+                say(format!(
+                    "Added devflow to the post-checkout hook at {}",
+                    done.path.display()
+                ));
+            } else {
+                say(format!(
+                    "The post-checkout hook at {} already sets up new worktrees.",
+                    done.path.display()
+                ));
+            }
+        }
+        HookAction::Install(_) => {
             let path = githook::install(&project)?;
             if ctx.json {
                 output::emit(ctx, name, &json!({ "installed": true, "path": path }))?;

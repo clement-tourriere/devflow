@@ -101,6 +101,9 @@ pub enum Remedy {
     DropOrphanDatabases { root: PathBuf },
     /// Install the Git hook that sets up worktrees other tools create.
     InstallGitHook { root: PathBuf },
+    /// Add devflow to the `post-checkout` hook somebody else wrote (one line
+    /// appended to it; see [`crate::githook::chain`]).
+    ChainGitHook { root: PathBuf },
     /// Install pitchfork (the plan is core's; the person is asked first).
     InstallPitchfork,
     /// Forget the Git registrations of worktrees whose directory is gone.
@@ -138,6 +141,7 @@ impl Remedy {
             Remedy::ReconcileDatabases { .. } => "reconcile_databases",
             Remedy::DropOrphanDatabases { .. } => "drop_orphan_databases",
             Remedy::InstallGitHook { .. } => "install_git_hook",
+            Remedy::ChainGitHook { .. } => "chain_git_hook",
             Remedy::InstallPitchfork => "install_pitchfork",
             Remedy::PruneWorktrees { .. } => "prune_worktrees",
             Remedy::RemoveWorkspace { .. } => "remove_workspace",
@@ -186,6 +190,7 @@ impl Remedy {
             Remedy::ReconcileDatabases { .. } => "Finish interrupted work",
             Remedy::DropOrphanDatabases { .. } => "Drop unused databases…",
             Remedy::InstallGitHook { .. } => "Install the Git hook",
+            Remedy::ChainGitHook { .. } => "Add worktree setup to the existing hook…",
             Remedy::InstallPitchfork => "Install pitchfork…",
             Remedy::PruneWorktrees { .. } => "Clean up missing worktrees",
             Remedy::RemoveWorkspace { name, .. } => {
@@ -211,6 +216,7 @@ impl Remedy {
                 | Remedy::DropServiceBranch { .. }
                 | Remedy::DropLostBranch { .. }
                 | Remedy::DropOrphanDatabases { .. }
+                | Remedy::ChainGitHook { .. }
                 | Remedy::RemoveWorkspace { .. }
         )
     }
@@ -258,6 +264,7 @@ impl Remedy {
                 Some("devflow db reconcile --drop-orphans".to_string())
             }
             Remedy::InstallGitHook { .. } => Some("devflow hook install".to_string()),
+            Remedy::ChainGitHook { .. } => Some("devflow hook install --chain".to_string()),
             Remedy::InstallPitchfork => Some("devflow pitchfork install".to_string()),
             // devflow has no command of its own for it; Git does it.
             Remedy::PruneWorktrees { .. } => Some("git worktree prune".to_string()),
@@ -308,6 +315,10 @@ impl Remedy {
             | Remedy::ForgetService { .. }
             | Remedy::RemoveWorkspace { .. } => Some(format!(
                 "run `{}` if you are sure (it removes data)",
+                self.command()?
+            )),
+            Remedy::ChainGitHook { .. } => Some(format!(
+                "run `{}` to add the line to that hook for you",
                 self.command()?
             )),
             Remedy::PruneWorktrees { .. } => Some(format!(
@@ -452,6 +463,16 @@ pub fn remedies_of(error: &anyhow::Error) -> Vec<Remedy> {
     if let Some(protected) = error.downcast_ref::<crate::error::Protected>() {
         return protected.remedies.clone();
     }
+    if let Some(foreign) = error.downcast_ref::<crate::githook::ForeignHook>() {
+        return vec![
+            Remedy::ChainGitHook {
+                root: foreign.root.clone(),
+            },
+            Remedy::OpenFile {
+                path: foreign.path.clone(),
+            },
+        ];
+    }
     if let Some(missing) = error.downcast_ref::<NotInitialized>() {
         return vec![Remedy::Init {
             root: missing.root.clone(),
@@ -583,6 +604,7 @@ mod tests {
             Remedy::ReconcileDatabases { root: "/p".into() },
             Remedy::DropOrphanDatabases { root: "/p".into() },
             Remedy::InstallGitHook { root: "/p".into() },
+            Remedy::ChainGitHook { root: "/p".into() },
             Remedy::InstallPitchfork,
             Remedy::PruneWorktrees { root: "/p".into() },
             Remedy::RemoveWorkspace {
@@ -629,6 +651,7 @@ mod tests {
             "drop_service_branch",
             "drop_lost_branch",
             "drop_orphan_databases",
+            "chain_git_hook",
             "remove_workspace",
         ] {
             assert!(by(kind).destructive(), "{kind}");

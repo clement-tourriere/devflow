@@ -3351,6 +3351,92 @@ fn a_failed_operation_shows_the_fix_core_names_as_a_button(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
+fn a_hook_somebody_else_wrote_is_refused_in_plain_words_and_added_to_after_confirming(
+    cx: &mut TestAppContext,
+) {
+    use devflow_core::remedy::Remedy;
+    let scratch = scratch_project();
+    let h = open_scratch(cx, &scratch);
+    let root = scratch.entry.root.clone();
+    let hook = root.join(".git/hooks/post-checkout");
+    let original = "#!/bin/sh\necho mine\n";
+    std::fs::write(&hook, original).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let run = |cx: &mut TestAppContext, remedy: &Remedy| {
+        cx.update_window(h.window.into(), |_, window, cx| {
+            super::remedies::run_scoped(&h.state, remedy, window, cx)
+        })
+        .unwrap();
+    };
+
+    // Installing is refused. The message is plain words (no shell line in a
+    // window); the way on is a button.
+    run(cx, &Remedy::InstallGitHook { root: root.clone() });
+    settle(cx, &h, |s| {
+        s.busy().is_none()
+            && s.activity
+                .as_ref()
+                .is_some_and(|a| a.title.starts_with("Install the Git hook") && a.outcome.is_some())
+    });
+    let message = failure_of(cx, &h, "Install the Git hook").unwrap();
+    assert!(message.contains("was not written by devflow"), "{message}");
+    assert!(
+        !message.contains("--from-git-hook") && !message.contains("devflow setup"),
+        "{message}"
+    );
+    let offered = cx.read_entity(&h.state, |s, _| {
+        s.activity.as_ref().unwrap().remedies.clone()
+    });
+    assert_eq!(
+        offered,
+        [
+            Remedy::ChainGitHook { root: root.clone() },
+            Remedy::OpenFile { path: hook.clone() }
+        ]
+    );
+    assert!(offered[0].destructive(), "it edits a file somebody wrote");
+    assert_eq!(std::fs::read_to_string(&hook).unwrap(), original);
+
+    // Adding the line is confirmed first, and says which file it edits.
+    let text = super::remedies::chain_lines(Some(&hook)).join(" ");
+    assert!(text.contains("post-checkout"), "{text}");
+    assert!(
+        !text.contains("--from-git-hook") && !text.contains("devflow setup"),
+        "{text}"
+    );
+    run(cx, &offered[0]);
+    wait(cx, "the confirmation", |cx| exists(cx, &h, "confirm"));
+    std::thread::sleep(Duration::from_millis(350));
+    cancel_dialog(cx, &h);
+    assert_eq!(std::fs::read_to_string(&hook).unwrap(), original);
+    run(cx, &offered[0]);
+    wait(cx, "the confirmation", |cx| exists(cx, &h, "confirm"));
+    std::thread::sleep(Duration::from_millis(350));
+    click(cx, &h, "confirm");
+    settle(cx, &h, |s| {
+        s.busy().is_none()
+            && s.activity
+                .as_ref()
+                .is_some_and(|a| a.title.starts_with("Add worktree setup") && a.outcome.is_some())
+    });
+    let chained = std::fs::read_to_string(&hook).unwrap();
+    assert!(chained.starts_with(original), "{chained}");
+
+    // A project that is not the open one changes nothing.
+    run(
+        cx,
+        &Remedy::ChainGitHook {
+            root: PathBuf::from("/somewhere/else"),
+        },
+    );
+    assert_eq!(std::fs::read_to_string(&hook).unwrap(), chained);
+}
+
+#[gpui_kit::test]
 fn a_workspace_that_waits_for_approval_leads_to_where_it_is_given(cx: &mut TestAppContext) {
     // The reason is in words, and the matching button is next to it.
     let h = open(cx, install_loaded);

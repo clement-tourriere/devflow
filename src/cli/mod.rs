@@ -353,6 +353,7 @@ fn hints(error: &anyhow::Error, remedies: &[Remedy]) -> Vec<String> {
             protected.workspace
         ));
     }
+    hints.extend(workspace::foreign_hook_hint(error));
     hints.extend(remedies.iter().filter_map(Remedy::hint));
     hints
 }

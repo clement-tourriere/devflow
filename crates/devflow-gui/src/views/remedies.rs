@@ -263,6 +263,7 @@ pub fn run_scoped(state: &Entity<AppState>, remedy: &Remedy, window: &mut Window
             let root = root.clone();
             state.update(cx, |s, cx| s.install_git_hook(root, window, cx));
         }
+        Remedy::ChainGitHook { root } => chain_git_hook(state, root, window, cx),
         Remedy::InstallPitchfork => install_pitchfork(state, window, cx),
         Remedy::PruneWorktrees { root } => {
             let root = root.clone();
@@ -300,6 +301,45 @@ pub fn run_scoped(state: &Entity<AppState>, remedy: &Remedy, window: &mut Window
         | Remedy::Reveal { .. }
         | Remedy::OpenGuide { .. } => super::problems::run_remedy(state, None, remedy, window, cx),
     }
+}
+
+/// Add devflow to the Git hook somebody else wrote: the person sees which file
+/// is edited and what is added before anything is written.
+fn chain_git_hook(state: &Entity<AppState>, root: &Path, window: &mut Window, cx: &mut App) {
+    let hook = state
+        .read(cx)
+        .selection
+        .current()
+        .filter(|model| model.entry.root == root)
+        .and_then(|model| model.project.as_ref())
+        .and_then(|project| match devflow_core::githook::state(project) {
+            Ok(devflow_core::githook::InstallState::Foreign { path }) => Some(path),
+            _ => None,
+        });
+    let (app, root) = (state.clone(), root.to_path_buf());
+    open_confirm(
+        window,
+        cx,
+        "Add worktree setup to the existing hook",
+        chain_lines(hook.as_deref()),
+        "Add",
+        move |window, cx| {
+            let root = root.clone();
+            app.update(cx, |s, cx| s.chain_git_hook(root, window, cx));
+        },
+    );
+}
+
+/// What the confirmation of [`chain_git_hook`] says.
+pub(crate) fn chain_lines(hook: Option<&Path>) -> Vec<String> {
+    let file = hook.map_or("The post-checkout hook".to_string(), |path| {
+        crate::redaction::shown(&crate::model::shorten_home(path))
+    });
+    vec![
+        format!("Add worktree setup to {file}?"),
+        "One line is added at the end of the hook, so that worktrees other tools create are set up too. Nothing else in it changes. A hook that is a link, is not a shell script or ends before the added line is left alone."
+            .to_string(),
+    ]
 }
 
 /// Install pitchfork: the person sees what will run and confirms; the run is
