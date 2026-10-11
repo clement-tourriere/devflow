@@ -48,15 +48,22 @@
 //! ([`FileMigration::preview`]) is therefore built from a masked copy of both
 //! texts: every value is masked by its *name* (the rules of `devflow env list`,
 //! [`masked_template`]) and by its content (the patterns of [`redact::text`]).
-//! The real text is kept in the crate for [`apply`] only; neither `Debug` nor
-//! the preview carries it.
+//! Comments are masked too (a commented `# SESSION_KEY = "..."` is as much a
+//! credential as the line it was before), in the diff, in `preview.after` and
+//! so in `Debug`. The real text is kept in the crate for [`apply`] only;
+//! neither `Debug` nor the preview carries it.
 //!
 //! # Apply
 //!
 //! [`apply`] writes only if both layers are what [`plan`] read (the contents,
 //! their absence, and which file is the project file), checks the merged result
 //! again, and writes the project file and then the local one. If the second
-//! write fails the first is put back, and the error says what was written.
+//! write fails the first is put back, and the error says what was written. A
+//! refused write may still have installed its replacement (the fallback
+//! without an atomic exchange only finds a concurrent edit afterwards), so the
+//! failed file is reconciled too, by what is on disk; the error names what was
+//! put back, what is still migrated and every file that keeps a version a
+//! concurrent save would have lost.
 use super::{ConfigFiles, FileState, Target, file_name, masked_template};
 use crate::config::{Config, LOCAL_CONFIG_FILE};
 use crate::error::ConfigChanged;
@@ -147,15 +154,31 @@ pub struct Migration {
 /// Whether a configuration file of the project in `root` still has the
 /// top-level `[postgres]` table (in any form). Reads only; `NotInitialized`
 /// without a project file.
+///
+/// `Ok(false)` means the configuration is valid as it is: there is nothing to
+/// migrate. A configuration that cannot be read (a file that is not valid
+/// TOML, a 0.x layout, a value that is refused) is an error with the problem's
+/// own remedies, never "nothing to migrate": when the files cannot be read the
+/// answer to "does this need migrating" is not "no".
 pub fn needed(root: &Path) -> Result<bool> {
     let files = ConfigFiles::read(root)?;
-    Ok([&files.project, &files.local].into_iter().any(|state| {
-        state
-            .text
-            .as_deref()
-            .and_then(|text| text.parse::<toml::Table>().ok())
-            .is_some_and(|table| table.contains_key("postgres"))
-    }))
+    let mut found = false;
+    for state in [&files.project, &files.local] {
+        let Some(text) = state.text.as_deref() else {
+            continue;
+        };
+        let table = text
+            .parse::<toml::Table>()
+            .map_err(|error| invalid_toml(state, text, error.message(), error.span()))?;
+        found |= table.contains_key("postgres");
+    }
+    if found {
+        return Ok(true);
+    }
+    // No `[postgres]`: the configuration is current, or it is something else
+    // devflow refuses (0.x, invalid); loading it says which.
+    Config::load(root)?;
+    Ok(false)
 }
 
 /// Work out the rewrite for the project in `root`. Reads only.
@@ -169,11 +192,8 @@ pub fn plan(root: &Path) -> Result<Migration> {
     for target in [Target::Project, Target::Local] {
         let state = files.file(target);
         let Some(text) = &state.text else { continue };
-        let doc: DocumentMut = text.parse().map_err(|_| {
-            not_automatic(
-                format!("{} is not valid TOML", file_name(&state.path)),
-                &files,
-            )
+        let doc: DocumentMut = text.parse().map_err(|error: toml_edit::TomlError| {
+            invalid_toml(state, text, error.message(), error.span())
         })?;
         docs.push((target, state, doc));
     }
@@ -183,6 +203,9 @@ pub fn plan(root: &Path) -> Result<Migration> {
         .map(|(target, _, _)| *target)
         .collect();
     if with_table.is_empty() {
+        // Nothing to move; but a configuration that is refused for another
+        // reason (0.x, invalid) is not "nothing to migrate".
+        Config::load(root)?;
         return Err(Problem::new(
             "no configuration file uses the top-level [postgres] table; there is nothing to migrate",
         )
@@ -367,7 +390,14 @@ pub fn apply(migration: &Migration) -> Result<Vec<PathBuf>> {
             if let Err(error) =
                 super::write_unless_changed(&file.path, &file.after, Some(&file.before_hash))
             {
-                return Err(undo(error, file, &written));
+                // A refused replacement can still have installed ours (the
+                // fallback without an atomic exchange swaps the file in and
+                // only then finds the edit it displaced): reconcile the
+                // failed target as well as the earlier writes.
+                let installed = std::fs::read(&file.path).is_ok_and(|bytes| {
+                    crate::fsutil::sha256_hex(&bytes) == sha256_hex(&file.after)
+                });
+                return Err(undo(error, file, installed, &written));
             }
             written.push(file);
         }
@@ -381,36 +411,90 @@ pub fn apply(migration: &Migration) -> Result<Vec<PathBuf>> {
     }
 }
 
-/// `failed` could not be written: put back the `written` files that are still
-/// what this migration wrote, and say how it ended.
-fn undo(error: anyhow::Error, failed: &FileMigration, written: &[&FileMigration]) -> anyhow::Error {
+/// `failed` could not be written: put back every file that this migration
+/// left rewritten (the `written` ones, and `failed` itself when its
+/// replacement went in before the refusal: `installed`) unless it changed
+/// since, and say how it ended: what was put back, what is still migrated,
+/// and every file that keeps a version a concurrent save would have lost.
+fn undo(
+    error: anyhow::Error,
+    failed: &FileMigration,
+    installed: bool,
+    written: &[&FileMigration],
+) -> anyhow::Error {
     let name = file_name(&failed.path);
-    if written.is_empty() {
+    if written.is_empty() && !installed {
         return error.context(format!("{name} was not written; nothing was changed"));
     }
     let mut restored = Vec::new();
     let mut stuck = Vec::new();
-    for file in written.iter().rev() {
+    let mut preserved: Vec<PathBuf> = kept_by(&error).into_iter().collect();
+    let rewritten = installed
+        .then_some(failed)
+        .into_iter()
+        .chain(written.iter().rev().copied());
+    for file in rewritten {
         let wrote = sha256_hex(&file.after);
         match super::write_unless_changed(&file.path, &file.before, Some(&wrote)) {
             Ok(()) => restored.push(file_name(&file.path)),
-            Err(_) => stuck.push(file_name(&file.path)),
+            Err(again) => {
+                preserved.extend(kept_by(&again));
+                // A refusal can come after the original went back in (the
+                // fallback without an atomic exchange finds the edit it
+                // displaced only afterwards): judge by what is on disk.
+                let back = std::fs::read(&file.path).is_ok_and(|bytes| {
+                    crate::fsutil::sha256_hex(&bytes) == sha256_hex(&file.before)
+                });
+                if back {
+                    restored.push(file_name(&file.path));
+                } else {
+                    stuck.push(file_name(&file.path));
+                }
+            }
         }
     }
-    let message = if stuck.is_empty() {
+    let mut message = if stuck.is_empty() {
         format!(
-            "{name} could not be written, so {} was put back as it was; nothing was changed",
-            restored.join(", ")
+            "{name} could not be written, so {} put back as it was; nothing was changed",
+            listed(&restored)
         )
     } else {
-        format!(
-            "{name} could not be written and {} was already migrated and could not be put \
-             back (it changed meanwhile or cannot be written); run the migration again or \
-             finish by hand",
-            stuck.join(", ")
-        )
+        let mut message = format!(
+            "{name} could not be written and {} already migrated and could not be put back \
+             (changed meanwhile or cannot be written); run the migration again or finish by hand",
+            listed(&stuck)
+        );
+        if !restored.is_empty() {
+            message.push_str(&format!("; {} put back as it was", listed(&restored)));
+        }
+        message
     };
+    preserved.sort();
+    preserved.dedup();
+    if !preserved.is_empty() {
+        let paths: Vec<_> = preserved.iter().map(|p| p.display().to_string()).collect();
+        message.push_str(&format!(
+            "; a version saved meanwhile is kept at {} (compare it before deleting it)",
+            paths.join(", ")
+        ));
+    }
     error.context(message)
+}
+
+/// The file a refused write kept a concurrent save in, if any.
+fn kept_by(error: &anyhow::Error) -> Option<PathBuf> {
+    error
+        .downcast_ref::<ConfigChanged>()
+        .and_then(|changed| changed.kept.clone())
+}
+
+/// `a was` / `a, b were`.
+fn listed(names: &[String]) -> String {
+    format!(
+        "{} {}",
+        names.join(", "),
+        if names.len() == 1 { "was" } else { "were" }
+    )
 }
 
 /// [`plan`] and [`apply`] in one step.
@@ -475,16 +559,146 @@ fn taken_by_other_engine(
 /// `text` with every value that may be a credential replaced by [`MASK`],
 /// for showing. TOML-aware: a value is judged by the name of its key, as
 /// `devflow env list` does ([`masked_template`]), and by its content.
+///
+/// Comments are text the value masking never sees (they are trivia around the
+/// values), and a person comments out `# SESSION_KEY = "..."` as readily as
+/// they write it: [`mask_comments`] runs over the result, and a last pass of
+/// [`redact::text`] over every line covers keys and headers.
 fn masked_text(text: &str) -> String {
-    match text.parse::<DocumentMut>() {
+    let masked = match text.parse::<DocumentMut>() {
         Ok(mut doc) => {
             for (key, item) in doc.iter_mut() {
                 mask_item(item, &key);
             }
             doc.to_string()
         }
-        Err(_) => redact::text(text),
+        Err(_) => text.to_string(),
+    };
+    redact_lines(&mask_comments(&masked))
+}
+
+/// [`redact::text`] over each line, so that no pattern spans two of them.
+fn redact_lines(text: &str) -> String {
+    text.split_inclusive('\n')
+        .map(|line| {
+            let body = line.trim_end_matches(['\n', '\r']);
+            format!("{}{}", redact::text(body), &line[body.len()..])
+        })
+        .collect()
+}
+
+/// `text` with the credentials in its comments masked. A small TOML lexer
+/// finds the comments (a `#` inside a string is not one), wherever they are:
+/// above a table, after a value, inside an array or an inline table.
+fn mask_comments(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '#' {
+            let start = i;
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            let comment: String = chars[start..i].iter().collect();
+            // A `\r` before the newline is not part of the comment.
+            let body = comment.trim_end_matches('\r');
+            out.push_str(&masked_comment(body));
+            out.push_str(&comment[body.len()..]);
+        } else if c == '"' || c == '\'' {
+            let triple = chars.get(i + 1) == Some(&c) && chars.get(i + 2) == Some(&c);
+            let open = if triple { 3 } else { 1 };
+            out.extend(&chars[i..i + open]);
+            i += open;
+            while i < chars.len() {
+                let d = chars[i];
+                if c == '"' && d == '\\' {
+                    out.push(d);
+                    if let Some(&next) = chars.get(i + 1) {
+                        out.push(next);
+                    }
+                    i += 2;
+                } else if d == c
+                    && (!triple || (chars.get(i + 1) == Some(&c) && chars.get(i + 2) == Some(&c)))
+                {
+                    let close = if triple { 3 } else { 1 };
+                    out.extend(&chars[i..i + close]);
+                    i += close;
+                    break;
+                } else if d == '\n' && !triple {
+                    // Unterminated: the line ends the string.
+                    break;
+                } else {
+                    out.push(d);
+                    i += 1;
+                }
+            }
+        } else {
+            out.push(c);
+            i += 1;
+        }
     }
+    out
+}
+
+/// One comment (starting at its `#`) with credentials masked: by content
+/// ([`redact::text`]) and by name, as `devflow env list` judges a variable
+/// ([`redact::is_secret_variable`]): in `NAME = value`, `NAME: value` or
+/// `"NAME" = "value"` with a secret-like NAME the value is replaced, a quoted
+/// one up to its closing quote and any other up to the end of the comment.
+fn masked_comment(comment: &str) -> String {
+    let chars: Vec<char> = redact::text(comment).chars().collect();
+    let is_name = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-');
+    let mut out = String::with_capacity(comment.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if !is_name(chars[i]) {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && is_name(chars[i]) {
+            i += 1;
+        }
+        let name: String = chars[start..i].iter().collect();
+        out.push_str(&name);
+        // The name, an optional closing quote, then `=` or `:`.
+        let mut j = i;
+        if matches!(chars.get(j), Some('"' | '\'')) {
+            j += 1;
+        }
+        while matches!(chars.get(j), Some(' ' | '\t')) {
+            j += 1;
+        }
+        let assign = match chars.get(j) {
+            Some('=') => true,
+            Some(':') => chars.get(j + 1) != Some(&'/'),
+            _ => false,
+        };
+        if !assign || !redact::is_secret_variable(&name) {
+            continue;
+        }
+        out.extend(&chars[i..=j]);
+        j += 1;
+        while matches!(chars.get(j), Some(' ' | '\t')) {
+            out.push(chars[j]);
+            j += 1;
+        }
+        let end = match chars.get(j) {
+            Some(&quote) if quote == '"' || quote == '\'' => chars[j + 1..]
+                .iter()
+                .position(|&c| c == quote)
+                .map_or(chars.len(), |close| j + 1 + close + 1),
+            _ => chars.len(),
+        };
+        if end > j {
+            out.push_str(MASK);
+        }
+        i = end;
+    }
+    out
 }
 
 fn mask_item(item: &mut Item, key: &str) {
@@ -621,6 +835,23 @@ fn moved_values(mut table: toml::Table, key: &str, add_engine: bool) -> Option<t
         .as_table_mut()?;
     services.insert(key.to_string(), toml::Value::Table(section));
     Some(table)
+}
+
+/// A layer that is not valid TOML: the parser's message with its position
+/// (never a value; see [`crate::diag::toml_syntax_error`]) and the file to open.
+fn invalid_toml(
+    state: &FileState,
+    text: &str,
+    message: &str,
+    span: Option<std::ops::Range<usize>>,
+) -> anyhow::Error {
+    let error = crate::diag::toml_syntax_error(&file_name(&state.path), text, message, span);
+    Problem::new(format!("{error:#}"))
+        .with(Remedy::OpenFile {
+            path: state.path.clone(),
+        })
+        .with(Remedy::Retry)
+        .into_error()
 }
 
 /// A refusal: what is wrong, with what to do about it (the file to look at, or

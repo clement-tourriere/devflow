@@ -435,6 +435,11 @@ pub(crate) mod seams {
         pub after_staging: Option<Box<dyn Fn()>>,
         /// Right after the swap, while the displaced content is aside.
         pub after_exchange: Option<Box<dyn Fn()>>,
+        /// In the fallback without an atomic exchange, right after the
+        /// target was linked to its backup.
+        pub after_backup: Option<Box<dyn Fn()>>,
+        /// Behave as on a filesystem without an atomic exchange.
+        pub no_exchange: bool,
     }
 
     thread_local! {
@@ -473,7 +478,8 @@ pub(crate) mod seams {
             let seams = ReplaceSeams {
                 after_staging: hooks.after_staging.as_deref(),
                 after_exchange: hooks.after_exchange.as_deref(),
-                ..ReplaceSeams::default()
+                after_backup: hooks.after_backup.as_deref(),
+                no_exchange: hooks.no_exchange,
             };
             replace_if_unchanged_with(path, text.as_bytes(), false, expected, &seams)
         })

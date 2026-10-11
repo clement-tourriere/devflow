@@ -505,3 +505,263 @@ fn a_first_file_changed_after_it_was_written_is_reported_not_overwritten() {
     );
     assert_eq!(read(&dir, "devflow.toml"), "# newer\n");
 }
+
+// -- review fixes, round 2 ---------------------------------------------------
+
+const COMMENT_SECRETS: [&str; 9] = [
+    "hunter2-decor",
+    "hunter2-above",
+    "urlpass-comment",
+    "hunter2-after",
+    "hunter2-array",
+    "sk-live-array",
+    "tok-inline",
+    "hunter2-quoted",
+    "trailing space",
+];
+
+#[test]
+fn comments_never_carry_a_credential_into_a_preview() {
+    let url = "postgres://app:urlpass-comment@h/db"; // kingfisher:ignore
+    let local = "\
+# SESSION_KEY = \"hunter2-above\"
+# cache: URL_HERE
+[worktree]
+copy = [
+  \"a\", # SESSION_KEY = 'hunter2-array'
+  # stripeKey: sk-live-array
+  \"b\",
+]
+[env]
+KEEP = \"${PGHOST}\" # DB_PASS = hunter2-after
+URL = \"http://x/#frag\" # not a secret
+OTHER = \"1\" # api_token=tok-inline
+# \"DB_PASS\" = \"hunter2-quoted\"
+# password = trailing space secret
+# DB_PASS = \"hunter2-decor\"
+[postgres]
+port = 5544
+"
+    .replace("URL_HERE", url);
+    let project_text = format!("[project]\nname = \"p\"\nid = \"{ID}\"\n");
+    let dir = project(&[
+        ("devflow.toml", &project_text),
+        ("devflow.local.toml", &local),
+    ]);
+    let migration = plan(dir.path()).unwrap();
+    let text = shown(&migration);
+    for secret in COMMENT_SECRETS {
+        assert!(!text.contains(secret), "{secret} leaked:\n{text}");
+    }
+    // `preview.after`, the context lines and Debug, one by one.
+    let file = &migration.files[0];
+    for secret in COMMENT_SECRETS {
+        assert!(!file.preview.after.contains(secret), "{secret} in after");
+        assert!(
+            !file.preview.diff.iter().any(|l| l.text.contains(secret)),
+            "{secret} in the diff"
+        );
+        assert!(!format!("{file:?}").contains(secret), "{secret} in Debug");
+    }
+    // Comments stay readable where they hold nothing secret, and a `#` in a
+    // string is not a comment.
+    assert!(file.preview.after.contains("# not a secret"));
+    assert!(file.preview.after.contains("\"http://x/#frag\""));
+    assert!(file.preview.after.contains("# SESSION_KEY = ***"));
+    // What is applied is the real text.
+    apply(&migration).unwrap();
+    let written = read(&dir, "devflow.local.toml");
+    for secret in COMMENT_SECRETS {
+        assert!(written.contains(secret), "{secret} lost from the file");
+    }
+}
+
+#[test]
+fn comments_in_a_multi_line_inline_table_and_other_layouts_are_masked_too() {
+    // TOML 1.1 allows comments inside an inline table; the lexer does not
+    // depend on how the document parses.
+    let text = "x = {\n  a = 1, # DB_PASS = hunter2-inline\n  # SESSION_KEY: s3cr3t-inline\n  b = \"# not a comment\",\n}\n";
+    let masked = masked_text(text);
+    assert!(
+        !masked.contains("hunter2-inline") && !masked.contains("s3cr3t-inline"),
+        "{masked}"
+    );
+    assert!(masked.contains("b = \"# not a comment\""), "{masked}");
+    // Line endings and multi-line strings.
+    let text = "a = \"\"\"\n# DB_PASS = in-string\n\"\"\" # DB_PASS = hunter2-crlf\r\nb = 1\r\n";
+    let masked = mask_comments(text);
+    assert!(!masked.contains("hunter2-crlf"), "{masked}");
+    assert!(masked.contains("# DB_PASS = in-string"), "{masked}");
+    assert!(masked.contains("\r\nb = 1\r\n"), "{masked:?}");
+}
+
+#[test]
+fn malformed_toml_is_an_error_not_nothing_to_migrate() {
+    let text =
+        format!("[project]\nname = \"p\"\nid = \"{ID}\"\n\n[postgres]\npassword = = \"hunter2\"\n");
+    let dir = project(&[("devflow.toml", &text)]);
+    for error in [
+        needed(dir.path()).unwrap_err(),
+        plan(dir.path()).unwrap_err(),
+    ] {
+        let refused = problem(error);
+        assert!(
+            refused.message.contains("invalid TOML"),
+            "{}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("devflow.toml"),
+            "{}",
+            refused.message
+        );
+        assert!(!refused.message.contains("hunter2"), "{}", refused.message);
+        assert!(
+            refused
+                .remedies
+                .iter()
+                .any(|r| matches!(r, Remedy::OpenFile { .. })),
+            "{refused:?}"
+        );
+    }
+    // The same in the local file.
+    let current = format!("[project]\nname = \"p\"\nid = \"{ID}\"\n");
+    let dir = project(&[
+        ("devflow.toml", &current),
+        ("devflow.local.toml", "[postgres\n"),
+    ]);
+    let refused = problem(needed(dir.path()).unwrap_err());
+    assert!(
+        refused.message.contains("devflow.local.toml"),
+        "{}",
+        refused.message
+    );
+    assert_eq!(read(&dir, "devflow.toml"), current);
+}
+
+#[test]
+fn a_zero_x_or_invalid_configuration_without_the_table_is_refused_not_current() {
+    let legacy = format!("[project]\nname = \"p\"\nid = \"{ID}\"\n\n[agent]\nx = 1\n");
+    let dir = project(&[("devflow.toml", &legacy)]);
+    for error in [
+        needed(dir.path()).unwrap_err(),
+        plan(dir.path()).unwrap_err(),
+    ] {
+        assert!(
+            crate::remedy::remedies_of(&error)
+                .iter()
+                .any(|r| matches!(r, Remedy::OpenGuide { .. })),
+            "{error:#}"
+        );
+    }
+    let invalid = format!("[project]\nname = \"p\"\nid = \"{ID}\"\n\n[services.db]\nengine = 3\n");
+    let dir = project(&[("devflow.toml", &invalid)]);
+    assert!(needed(dir.path()).is_err());
+    assert!(plan(dir.path()).is_err());
+    assert_eq!(read(&dir, "devflow.toml"), invalid);
+}
+
+#[test]
+fn a_valid_current_configuration_needs_nothing() {
+    let current = format!("[project]\nname = \"p\"\nid = \"{ID}\"\n");
+    let dir = project(&[("devflow.toml", &current)]);
+    assert!(!needed(dir.path()).unwrap());
+    let with_table = project(&[("devflow.toml", PRE_RELEASE)]);
+    assert!(needed(with_table.path()).unwrap());
+}
+
+#[test]
+fn a_replacement_that_went_in_before_its_refusal_is_put_back_too() {
+    // Without an atomic exchange the local file is swapped in and the edit
+    // that landed in place is found afterwards: the refusal comes after the
+    // file was already migrated.
+    let local_text = "[postgres]\nport = 5544\n";
+    let dir = project(&[
+        ("devflow.toml", PRE_RELEASE),
+        ("devflow.local.toml", local_text),
+    ]);
+    let migration = plan(dir.path()).unwrap();
+    assert_eq!(migration.files.len(), 2);
+    let local_path = dir.path().join("devflow.local.toml");
+    let edited = "[postgres]\nport = 5544\n# edited in place\n";
+    let calls = std::cell::Cell::new(0);
+    let guard = super::super::seams::install(super::super::seams::Hooks {
+        no_exchange: true,
+        after_backup: Some(Box::new({
+            let local_path = local_path.clone();
+            move || {
+                calls.set(calls.get() + 1);
+                if calls.get() == 2 {
+                    // In place, so the inode stays the one that was linked.
+                    std::fs::write(&local_path, edited).unwrap();
+                }
+            }
+        })),
+        ..Default::default()
+    });
+    let error = apply(&migration).unwrap_err();
+    let report = format!("{error:#}");
+    drop(guard);
+    assert!(error.downcast_ref::<ConfigChanged>().is_some(), "{report}");
+    // Both files are as they were; nothing is half migrated.
+    assert_eq!(read(&dir, "devflow.toml"), PRE_RELEASE);
+    assert_eq!(read(&dir, "devflow.local.toml"), local_text);
+    assert!(
+        report.contains("were put back") && report.contains("nothing was changed"),
+        "{report}"
+    );
+    // The edit that would have been lost is kept, and the report names it.
+    let kept: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.to_string_lossy().contains(".devflow-conflict-"))
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(std::fs::read_to_string(&kept[0]).unwrap(), edited);
+    assert!(report.contains(&kept[0].display().to_string()), "{report}");
+    // And the pair can be migrated again.
+    assert_eq!(plan(dir.path()).unwrap().files.len(), 2);
+}
+
+#[test]
+fn a_replacement_that_cannot_be_put_back_is_reported_with_every_kept_file() {
+    // The local file's replacement went in, then the project file goes
+    // before it is restored: the project file stays migrated and is named,
+    // the local file is put back, and the kept version is reported.
+    let dir = project(&[
+        ("devflow.toml", PRE_RELEASE),
+        ("devflow.local.toml", "[postgres]\nport = 5544\n"),
+    ]);
+    let migration = plan(dir.path()).unwrap();
+    let project_path = dir.path().join("devflow.toml");
+    let local_path = dir.path().join("devflow.local.toml");
+    let calls = std::cell::Cell::new(0);
+    let guard = super::super::seams::install(super::super::seams::Hooks {
+        no_exchange: true,
+        after_backup: Some(Box::new(move || {
+            calls.set(calls.get() + 1);
+            match calls.get() {
+                // The local file is edited in place: its write is refused
+                // after the replacement went in.
+                2 => std::fs::write(&local_path, "# edit\n").unwrap(),
+                // Restoring the local file: the project file goes meanwhile.
+                3 => std::fs::remove_file(&project_path).unwrap(),
+                _ => {}
+            }
+        })),
+        ..Default::default()
+    });
+    let error = apply(&migration).unwrap_err();
+    let report = format!("{error:#}");
+    drop(guard);
+    assert!(
+        report.contains("devflow.toml was already migrated")
+            && report.contains("devflow.local.toml was put back"),
+        "{report}"
+    );
+    assert!(report.contains(".devflow-conflict-"), "{report}");
+    assert_eq!(
+        read(&dir, "devflow.local.toml"),
+        "[postgres]\nport = 5544\n"
+    );
+}
