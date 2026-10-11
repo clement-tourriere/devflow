@@ -11,6 +11,12 @@ use git2::{
 use serde::Serialize;
 use std::path::{Component, Path, PathBuf};
 
+mod prune;
+pub use prune::{
+    PruneCandidate, PruneOutcome, PruneRefusal, PruneRefused, PruneTarget,
+    candidates as prune_candidates, prune,
+};
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Workspace {
     /// Branch name, or the worktree's directory name when HEAD is detached.
@@ -394,15 +400,18 @@ fn plan_removal(project: &Project, workspace: &Workspace, ignore_lock: bool) -> 
     let delete_dir = match path.symlink_metadata() {
         Ok(_) if is_checkout_of(path, &workspace.git_dir) => true,
         Ok(_) => {
-            return Err(protected(
+            return Err(protected_with(
                 name,
                 format!(
                     "{} exists but is not the checkout of worktree '{name}' (its .git file does not point at {}); \
-                     refusing to delete it. Move it away, or run `git worktree prune` to forget the registration",
+                     refusing to delete it. Move it away, or forget the registration",
                     path.display(),
                     workspace.git_dir.display()
                 ),
                 false,
+                vec![Remedy::PruneWorktrees {
+                    root: project.root.clone(),
+                }],
             ));
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
@@ -464,40 +473,6 @@ fn remove_inner(project: &Project, workspace: &Workspace, ignore_lock: bool) -> 
     registration
         .prune(Some(&mut options))
         .with_context(|| format!("cannot prune the Git registration of {}", workspace.name))
-}
-
-/// Forget the Git registrations of the worktrees whose directory is gone
-/// (what `git worktree prune` does). A locked registration is left alone.
-/// Returns the names of the workspaces that were forgotten. Their branches
-/// stay; only the registration (and the receipt beside it) goes.
-pub fn prune_missing(project: &Project) -> Result<Vec<String>> {
-    let repo = project.repo()?;
-    let mut pruned = Vec::new();
-    for workspace in list(project)?
-        .into_iter()
-        .filter(|w| w.missing && !w.locked && !w.is_default)
-    {
-        let Some(id) = workspace
-            .git_dir
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-        else {
-            continue;
-        };
-        let registration = repo.find_worktree(&id)?;
-        let mut options = WorktreePruneOptions::new();
-        if !registration
-            .is_prunable(Some(&mut options))
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        registration
-            .prune(Some(&mut options))
-            .with_context(|| format!("cannot prune the Git registration of {}", workspace.name))?;
-        pruned.push(workspace.name);
-    }
-    Ok(pruned)
 }
 
 /// Whether `branch` is contained in the default workspace's HEAD, so deleting
@@ -845,45 +820,6 @@ mod tests {
         // Branch is at the default HEAD, so it counts as merged.
         delete_branch(&t.project, "gone", false).unwrap();
         assert!(repo.find_branch("gone", BranchType::Local).is_err());
-    }
-
-    #[test]
-    fn pruning_forgets_the_registrations_whose_directory_is_gone_and_nothing_else() {
-        let t = repo(None);
-        let kept = create(&t.project, "kept", None).unwrap();
-        let gone = create(&t.project, "gone", None).unwrap();
-        let locked = create(&t.project, "locked", None).unwrap();
-        t.project
-            .repo()
-            .unwrap()
-            .find_worktree("locked")
-            .unwrap()
-            .lock(Some("keep"))
-            .unwrap();
-        std::fs::remove_dir_all(&gone.path).unwrap();
-        std::fs::remove_dir_all(&locked.path).unwrap();
-        assert!(list(&t.project).unwrap().iter().any(|w| w.missing));
-
-        assert_eq!(prune_missing(&t.project).unwrap(), ["gone"]);
-        let names: Vec<String> = list(&t.project)
-            .unwrap()
-            .into_iter()
-            .map(|w| w.name)
-            .collect();
-        assert!(names.contains(&"kept".to_string()), "{names:?}");
-        assert!(names.contains(&"locked".to_string()), "a locked one stays");
-        assert!(!names.contains(&"gone".to_string()), "{names:?}");
-        assert!(kept.path.is_dir());
-        // Its branch is not deleted.
-        assert!(
-            t.project
-                .repo()
-                .unwrap()
-                .find_branch("gone", BranchType::Local)
-                .is_ok()
-        );
-        // Nothing left to do the second time.
-        assert!(prune_missing(&t.project).unwrap().is_empty());
     }
 
     #[test]

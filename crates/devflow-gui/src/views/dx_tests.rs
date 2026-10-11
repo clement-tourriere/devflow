@@ -3437,6 +3437,86 @@ fn a_hook_somebody_else_wrote_is_refused_in_plain_words_and_added_to_after_confi
 }
 
 #[gpui_kit::test]
+fn cleaning_up_missing_worktrees_lists_them_first_and_keeps_what_owns_data(
+    cx: &mut TestAppContext,
+) {
+    use devflow_core::{receipt::Receipt, remedy::Remedy, worktree};
+    let scratch = scratch_project();
+    let h = open_scratch(cx, &scratch);
+    let root = scratch.entry.root.clone();
+    let project = devflow_core::Project::open(&root).unwrap();
+    // Two worktrees whose directory is gone; one of them owns a branch.
+    for name in ["gone", "owner"] {
+        let ws = worktree::create(&project, name, None).unwrap();
+        std::fs::remove_dir_all(&ws.path).unwrap();
+    }
+    let owner = worktree::find(&project, "owner").unwrap().unwrap();
+    let mut receipt = Receipt::new(project.id(), "owner", None);
+    receipt.creating = Some(devflow_core::receipt::PendingBranch {
+        service: "cache".into(),
+        branch_id: Uuid::new_v4(),
+    });
+    receipt.save(&owner.git_dir).unwrap();
+    let registered = |name: &str| root.join(".git/worktrees").join(name).is_dir();
+    let remedy = Remedy::PruneWorktrees { root: root.clone() };
+    assert!(remedy.destructive(), "it takes registrations away");
+    let run = |cx: &mut TestAppContext| {
+        cx.update_window(h.window.into(), |_, window, cx| {
+            super::remedies::run_scoped(&h.state, &remedy, window, cx)
+        })
+        .unwrap();
+        for _ in 0..200 {
+            cx.executor().advance_clock(Duration::from_millis(150));
+            cx.run_until_parked();
+            if exists(cx, &h, "confirm") {
+                break;
+            }
+        }
+        assert!(exists(cx, &h, "confirm"), "the review comes first");
+        std::thread::sleep(Duration::from_millis(350));
+    };
+
+    // Nothing is forgotten by clicking: the person is shown the list.
+    assert!(registered("gone") && registered("owner"));
+    run(cx);
+    assert!(
+        registered("gone") && registered("owner"),
+        "not before confirming"
+    );
+    cancel_dialog(cx, &h);
+    assert!(registered("gone") && registered("owner"));
+
+    let candidates = worktree::prune_candidates(&project).unwrap();
+    let (forgettable, kept): (Vec<_>, Vec<_>) =
+        candidates.into_iter().partition(|c| c.refusal.is_none());
+    let lines = super::remedies::forget_lines(&forgettable, &kept).join("\n");
+    assert!(lines.contains("- gone"), "{lines}");
+    assert!(lines.contains("Kept: owner: it still owns"), "{lines}");
+    assert!(lines.contains("not connected"), "{lines}");
+    assert!(
+        !lines.contains("devflow ") && !lines.contains("git worktree"),
+        "{lines}"
+    );
+
+    // Confirming forgets the listed registration and keeps the owner and its
+    // receipt.
+    run(cx);
+    click(cx, &h, "confirm");
+    settle(cx, &h, |s| {
+        s.busy().is_none()
+            && s.activity
+                .as_ref()
+                .is_some_and(|a| a.title.starts_with("Forget missing") && a.outcome.is_some())
+    });
+    assert!(!registered("gone"));
+    assert!(registered("owner"), "the owner stays registered");
+    assert!(
+        devflow_core::receipt::Receipt::path(&owner.git_dir).is_file(),
+        "with its receipt"
+    );
+}
+
+#[gpui_kit::test]
 fn a_workspace_that_waits_for_approval_leads_to_where_it_is_given(cx: &mut TestAppContext) {
     // The reason is in words, and the matching button is next to it.
     let h = open(cx, install_loaded);

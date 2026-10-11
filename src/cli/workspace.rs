@@ -845,6 +845,152 @@ fn confirm_forced_removal(protected: &Protected) -> Result<bool> {
     }
 }
 
+// --- prune --------------------------------------------------------------
+
+#[derive(Args)]
+pub struct PruneArgs {
+    /// Workspaces (or Git worktree names) to forget; default: every missing
+    /// worktree that owns nothing
+    pub names: Vec<String>,
+    /// Forget them without asking (without it, `--json` and a non-terminal only list them)
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+}
+
+/// Forget the registrations of worktrees whose directory is gone, as far as
+/// core allows: one that still owns data, or whose folder is missing too (an
+/// unplugged drive), is listed with why and kept.
+pub fn prune(ctx: &Ctx, args: PruneArgs) -> Result<ExitCode> {
+    let project = ctx.project()?;
+    let candidates = worktree::prune_candidates(&project)?;
+    // What the person asked for: the named ones (refused ones included, so
+    // that core says why), or everything that can go.
+    let chosen: Vec<&worktree::PruneCandidate> = if args.names.is_empty() {
+        candidates.iter().filter(|c| c.refusal.is_none()).collect()
+    } else {
+        let mut chosen = Vec::new();
+        for name in &args.names {
+            let found = candidates
+                .iter()
+                .find(|c| c.name == *name || c.id == *name)
+                .ok_or_else(|| anyhow!("no worktree called '{name}' has a missing directory"))?;
+            chosen.push(found);
+        }
+        chosen
+    };
+    let palette = Palette::stdout();
+    if !ctx.json {
+        if candidates.is_empty() {
+            say("No worktree has a missing directory.");
+        } else {
+            let rows: Vec<Vec<String>> = candidates
+                .iter()
+                .map(|c| {
+                    vec![
+                        c.name.clone(),
+                        output::tilde(&c.path),
+                        match &c.refusal {
+                            None => "can be forgotten".to_string(),
+                            Some(refusal) => format!("kept: {}", refusal.message()),
+                        },
+                    ]
+                })
+                .collect();
+            say(output::table(&["WORKSPACE", "WAS AT", "STATE"], &rows));
+        }
+    }
+    let confirmed = if chosen.is_empty() {
+        false
+    } else if args.yes {
+        true
+    } else if ctx.interactive() {
+        confirm(&format!(
+            "Forget the Git registration of {} worktree(s)? Their branches are kept.",
+            chosen.len()
+        ))?
+    } else {
+        false
+    };
+    let targets: Vec<worktree::PruneTarget> = chosen.iter().map(|c| c.target()).collect();
+    let outcome = if confirmed {
+        worktree::prune(&project, &targets)?
+    } else {
+        worktree::PruneOutcome::default()
+    };
+    let root = &project.root;
+    let refused: Vec<serde_json::Value> = outcome
+        .refused
+        .iter()
+        .map(|r| {
+            json!({
+                "name": r.name, "path": r.path, "refusal": r.refusal,
+                "message": r.refusal.message(),
+                "remedies": devflow_core::remedy::describe(&r.refusal.remedies(root, &r.name)),
+            })
+        })
+        .collect();
+    if ctx.json {
+        output::emit(
+            ctx,
+            "prune",
+            &json!({
+                "project": ProjectInfo::of(&project),
+                "candidates": candidates,
+                "confirmed": confirmed,
+                "pruned": outcome.pruned,
+                "refused": refused,
+                "changed": outcome.changed,
+            }),
+        )?;
+    } else {
+        for name in &outcome.pruned {
+            say(format!(
+                "{} forgot the registration of {name} (its branch is kept)",
+                palette.green("✓")
+            ));
+        }
+        for r in &outcome.refused {
+            say(format!(
+                "{} kept {}: {}",
+                palette.yellow("!"),
+                r.name,
+                r.refusal.message()
+            ));
+            for hint in r
+                .refusal
+                .remedies(root, &r.name)
+                .iter()
+                .filter_map(Remedy::hint)
+            {
+                note(format!("hint: {hint}"));
+            }
+        }
+        for id in &outcome.changed {
+            say(format!(
+                "{id} is not a missing worktree any more; left alone"
+            ));
+        }
+        if !confirmed && !chosen.is_empty() {
+            note("hint: pass --yes to forget them without being asked");
+        }
+    }
+    Ok(if outcome.refused.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+fn confirm(prompt: &str) -> Result<bool> {
+    match inquire::Confirm::new(prompt).with_default(false).prompt() {
+        Ok(answer) => Ok(answer),
+        Err(
+            inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
+        ) => bail!("cancelled"),
+        Err(error) => Err(error.into()),
+    }
+}
+
 // --- hook ---------------------------------------------------------------
 
 pub fn hook(ctx: &Ctx, action: HookAction) -> Result<ExitCode> {

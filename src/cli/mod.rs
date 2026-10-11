@@ -79,6 +79,8 @@ enum Command {
     Setup(workspace::SetupArgs),
     /// Remove a workspace, its database branch and (optionally) its Git branch
     Remove(workspace::RemoveArgs),
+    /// Forget the Git registrations of worktrees whose directory is gone (asks first)
+    Prune(workspace::PruneArgs),
     /// Review and approve the project's hook commands
     Trust(trust::TrustArgs),
     /// List and edit the setup, switch and teardown commands (`hook` is the Git hook)
@@ -147,6 +149,7 @@ impl Command {
             Command::Path(_) => "path",
             Command::Setup(_) => "setup",
             Command::Remove(_) => "remove",
+            Command::Prune(_) => "prune",
             Command::Trust(_) => "trust",
             Command::Hooks { command } => command.json_name(),
             Command::Env { command } => command.json_name(),
@@ -481,6 +484,7 @@ fn run(ctx: &Ctx, command: Command) -> Result<ExitCode> {
         Command::Exec(args) => exec::run(ctx, args),
         Command::Setup(args) => workspace::setup(ctx, args),
         Command::Remove(args) => workspace::remove(ctx, args),
+        Command::Prune(args) => workspace::prune(ctx, args),
         Command::Trust(args) => trust::command(ctx, args),
         Command::Hooks { command } => hooks::run(ctx, command),
         Command::Env { command } => env::run(ctx, command),

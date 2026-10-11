@@ -265,9 +265,11 @@ pub fn run_scoped(state: &Entity<AppState>, remedy: &Remedy, window: &mut Window
         }
         Remedy::ChainGitHook { root } => chain_git_hook(state, root, window, cx),
         Remedy::InstallPitchfork => install_pitchfork(state, window, cx),
+        // Reviewed first: core lists what could be forgotten and the person
+        // confirms exactly that list.
         Remedy::PruneWorktrees { root } => {
             let root = root.clone();
-            state.update(cx, |s, cx| s.prune_worktrees(root, window, cx));
+            state.update(cx, |s, cx| s.review_missing_worktrees(root, window, cx));
         }
         Remedy::RemoveWorkspace { root, name } => {
             let Some(found) = workspace_named(state, root, name, cx) else {
@@ -366,4 +368,76 @@ fn install_pitchfork(state: &Entity<AppState>, window: &mut Window, cx: &mut App
             app.update(cx, |s, cx| s.install_pitchfork(plan, window, cx));
         },
     );
+}
+
+/// Ask before forgetting the registrations of `forgettable`, naming each one
+/// and the ones that are kept with why; confirming forgets exactly the listed
+/// worktrees (core looks at each again first).
+pub(crate) fn open_forget_missing(
+    state: &Entity<AppState>,
+    root: PathBuf,
+    forgettable: &[devflow_core::worktree::PruneCandidate],
+    kept: &[devflow_core::worktree::PruneCandidate],
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let targets: Vec<_> = forgettable.iter().map(|c| c.target()).collect();
+    let app = state.clone();
+    open_confirm(
+        window,
+        cx,
+        "Forget missing worktrees",
+        forget_lines(forgettable, kept),
+        "Forget",
+        move |window, cx| {
+            let (root, targets) = (root.clone(), targets.clone());
+            app.update(cx, |s, cx| s.prune_worktrees(root, targets, window, cx));
+        },
+    );
+}
+
+/// The lines of the confirmation: what is forgotten, what is kept and why.
+pub(crate) fn forget_lines(
+    forgettable: &[devflow_core::worktree::PruneCandidate],
+    kept: &[devflow_core::worktree::PruneCandidate],
+) -> Vec<String> {
+    let mut lines = vec![format!(
+        "Forget the Git registration of {} worktree(s) whose directory is gone? Their branches are kept.",
+        forgettable.len()
+    )];
+    for c in forgettable {
+        lines.push(crate::redaction::shown(&format!(
+            "- {} (was at {})",
+            c.name,
+            crate::model::shorten_home(&c.path)
+        )));
+    }
+    for c in kept {
+        lines.push(crate::redaction::shown(&format!(
+            "Kept: {}: {}",
+            c.name,
+            c.refusal.as_ref().map(|r| r.message()).unwrap_or_default()
+        )));
+    }
+    lines.push(
+        "If one of these is on a drive that is not connected, connect it first: it looks the same as a deleted folder."
+            .to_string(),
+    );
+    lines
+}
+
+/// What to say when nothing can be forgotten.
+pub(crate) fn missing_worktrees_note(kept: &[devflow_core::worktree::PruneCandidate]) -> String {
+    if kept.is_empty() {
+        return "No worktree has a missing directory.".to_string();
+    }
+    let mut text = String::from("Nothing can be forgotten:");
+    for c in kept {
+        text.push_str(&format!(
+            "\n{}: {}",
+            c.name,
+            c.refusal.as_ref().map(|r| r.message()).unwrap_or_default()
+        ));
+    }
+    crate::redaction::shown(&text)
 }

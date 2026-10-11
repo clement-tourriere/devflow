@@ -890,7 +890,7 @@ fn workspaces(project: &Project) -> Vec<Check> {
             Check::warn(
                 "workspaces",
                 format!("directory missing for: {}", names(&missing)),
-                "forget the registrations of the missing worktrees, or remove the workspaces",
+                "a worktree on a drive that is not connected looks the same, so connect it first; otherwise review the registrations to forget (those that own data are kept), or remove the workspaces",
             )
             .fix(Remedy::PruneWorktrees {
                 root: project.root.clone(),

@@ -1493,6 +1493,82 @@ fn switch_create_list_path_and_remove_without_postgres() {
 }
 
 #[test]
+fn prune_lists_first_forgets_only_what_owns_nothing_and_sends_the_rest_to_remove() {
+    let env = Env::new();
+    env.init();
+    let make = |name: &str| {
+        let out = env.run(&["--json", "--non-interactive", "switch", "-c", name]);
+        ok(&out);
+        PathBuf::from(json(&out)["path"].as_str().unwrap())
+    };
+    let plain = make("feature/plain");
+    let owner = make("feature/owner");
+    // The second one records a branch being created: data only the normal
+    // removal knows how to drop.
+    let receipt = env
+        .repo
+        .join(".git/worktrees/feature-owner/devflow/receipt.json");
+    let mut doc: Value = serde_json::from_slice(&std::fs::read(&receipt).unwrap()).unwrap();
+    doc["creating"] = json!({"service": "cache", "branch_id": uuid::Uuid::new_v4()});
+    std::fs::write(&receipt, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+    std::fs::remove_dir_all(&plain).unwrap();
+    std::fs::remove_dir_all(&owner).unwrap();
+
+    // Without --yes nothing is forgotten: the list is the review.
+    let doc = json(ok(&env.run(&["--json", "prune"])));
+    assert_eq!(doc["command"], "prune");
+    assert_eq!(doc["confirmed"], false, "{doc}");
+    assert_eq!(doc["pruned"], json!([]), "{doc}");
+    let candidates = doc["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 2, "{doc}");
+    let by = |name: &str| candidates.iter().find(|c| c["name"] == name).unwrap();
+    assert!(by("feature/plain").get("refusal").is_none(), "{doc}");
+    assert_eq!(by("feature/owner")["refusal"]["kind"], "owns_data", "{doc}");
+    assert_eq!(
+        by("feature/owner")["remedies"][0]["kind"],
+        "remove_workspace",
+        "{doc}"
+    );
+    assert_eq!(by("feature/owner")["has_receipt"], true, "{doc}");
+    assert!(
+        by("feature/owner")["why"]
+            .as_str()
+            .unwrap()
+            .contains("does not exist"),
+        "{doc}"
+    );
+    let listed = json(&env.run(&["--json", "list"]));
+    assert_eq!(
+        listed["workspaces"].as_array().unwrap().len(),
+        3,
+        "{listed}"
+    );
+    // The terminal says the same and changes nothing either.
+    let text = stdout(ok(&env.run(&["--non-interactive", "prune"])));
+    assert!(text.contains("can be forgotten") && text.contains("kept: it still owns"));
+    assert!(receipt.is_file());
+
+    // --yes forgets what owns nothing; the owner stays with its receipt.
+    let doc = json(ok(&env.run(&["--json", "prune", "--yes"])));
+    assert_eq!(doc["pruned"], json!(["feature/plain"]), "{doc}");
+    assert_eq!(doc["refused"], json!([]), "{doc}");
+    assert!(receipt.is_file(), "the receipt is kept");
+
+    // Naming it explicitly is refused with the way on.
+    let out = env.run(&["--json", "prune", "feature/owner", "--yes"]);
+    failed(&out);
+    let doc = json(&out);
+    assert_eq!(doc["pruned"], json!([]), "{doc}");
+    assert_eq!(doc["refused"][0]["refusal"]["kind"], "owns_data", "{doc}");
+    assert_eq!(
+        doc["refused"][0]["remedies"][0]["command"], "devflow remove feature/owner",
+        "{doc}"
+    );
+    assert!(receipt.is_file());
+    failed(&env.run(&["--json", "prune", "feature/nope", "--yes"]));
+}
+
+#[test]
 fn switching_to_a_missing_workspace_suggests_create() {
     let env = Env::new();
     env.init();

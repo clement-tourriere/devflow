@@ -106,7 +106,10 @@ pub enum Remedy {
     ChainGitHook { root: PathBuf },
     /// Install pitchfork (the plan is core's; the person is asked first).
     InstallPitchfork,
-    /// Forget the Git registrations of worktrees whose directory is gone.
+    /// Review the worktrees whose directory is gone and forget the
+    /// registrations the person confirms ([`crate::worktree::prune_candidates`],
+    /// [`crate::worktree::prune`]). A registration that still owns data, or
+    /// whose folder is missing too (an unplugged drive), is never forgotten.
     PruneWorktrees { root: PathBuf },
     /// Remove the workspace `name` of the project at `root`.
     RemoveWorkspace { root: PathBuf, name: String },
@@ -192,7 +195,7 @@ impl Remedy {
             Remedy::InstallGitHook { .. } => "Install the Git hook",
             Remedy::ChainGitHook { .. } => "Add worktree setup to the existing hook…",
             Remedy::InstallPitchfork => "Install pitchfork…",
-            Remedy::PruneWorktrees { .. } => "Clean up missing worktrees",
+            Remedy::PruneWorktrees { .. } => "Review missing worktrees…",
             Remedy::RemoveWorkspace { name, .. } => {
                 return format!("Remove {name}…");
             }
@@ -217,6 +220,7 @@ impl Remedy {
                 | Remedy::DropLostBranch { .. }
                 | Remedy::DropOrphanDatabases { .. }
                 | Remedy::ChainGitHook { .. }
+                | Remedy::PruneWorktrees { .. }
                 | Remedy::RemoveWorkspace { .. }
         )
     }
@@ -266,8 +270,7 @@ impl Remedy {
             Remedy::InstallGitHook { .. } => Some("devflow hook install".to_string()),
             Remedy::ChainGitHook { .. } => Some("devflow hook install --chain".to_string()),
             Remedy::InstallPitchfork => Some("devflow pitchfork install".to_string()),
-            // devflow has no command of its own for it; Git does it.
-            Remedy::PruneWorktrees { .. } => Some("git worktree prune".to_string()),
+            Remedy::PruneWorktrees { .. } => Some("devflow prune".to_string()),
             Remedy::RemoveWorkspace { name, .. } => Some(format!("devflow remove {}", word(name))),
             Remedy::SwitchTo { name, .. } => Some(format!("devflow switch {}", word(name))),
             Remedy::AddEnvPreset { preset, .. } => {
@@ -322,7 +325,7 @@ impl Remedy {
                 self.command()?
             )),
             Remedy::PruneWorktrees { .. } => Some(format!(
-                "run `{}` to forget the worktrees whose directory is gone",
+                "run `{}` to see the worktrees whose directory is gone and forget the ones that own nothing",
                 self.command()?
             )),
             Remedy::StartDatabase { .. }
@@ -631,11 +634,7 @@ mod tests {
                 "{label}"
             );
             if let Some(command) = remedy.command() {
-                // `PruneWorktrees` is Git's own command: devflow has none.
-                assert!(
-                    command.starts_with("devflow ") || command == "git worktree prune",
-                    "{command}"
-                );
+                assert!(command.starts_with("devflow "), "{command}");
                 // What the CLI prints after `hint:` carries the command.
                 let hint = remedy.hint().unwrap();
                 assert!(hint.contains(&format!("`{command}`")), "{hint}");
@@ -652,6 +651,7 @@ mod tests {
             "drop_lost_branch",
             "drop_orphan_databases",
             "chain_git_hook",
+            "prune_worktrees",
             "remove_workspace",
         ] {
             assert!(by(kind).destructive(), "{kind}");

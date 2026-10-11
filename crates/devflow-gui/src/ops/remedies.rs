@@ -152,29 +152,112 @@ impl AppState {
         );
     }
 
-    /// Forget the Git registrations of worktrees whose folder is gone.
-    pub fn prune_worktrees(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let title = "Clean up missing worktrees";
+    /// Look at the worktrees whose folder is gone (read-only) and ask before
+    /// forgetting any: the dialog lists each registration that would be
+    /// forgotten and each one that is kept, with why. A worktree on a drive
+    /// that is not connected looks the same as a deleted one, and a
+    /// registration holds the receipt of the workspace's data.
+    pub fn review_missing_worktrees(
+        &mut self,
+        root: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = "Review missing worktrees";
+        if !self.open_project_at(&root, window, cx, title) {
+            return;
+        }
+        let Some(project) = self
+            .selection
+            .current()
+            .and_then(|model| model.project.clone())
+        else {
+            return;
+        };
+        self.spawn_light(
+            window,
+            cx,
+            move || jobs::catch(|| worktree::prune_candidates(&project)),
+            move |_, result, window, cx| match result {
+                Err(message) => Self::notify_error(window, cx, title, &message),
+                Ok(candidates) => {
+                    let (forgettable, kept): (Vec<_>, Vec<_>) =
+                        candidates.into_iter().partition(|c| c.refusal.is_none());
+                    if forgettable.is_empty() {
+                        let text = crate::views::remedies::missing_worktrees_note(&kept);
+                        window.push_notification(
+                            if kept.is_empty() {
+                                Notification::success(text)
+                            } else {
+                                Notification::warning(text)
+                            }
+                            .title(title),
+                            cx,
+                        );
+                        return;
+                    }
+                    let app = cx.entity();
+                    crate::views::remedies::open_forget_missing(
+                        &app,
+                        root,
+                        &forgettable,
+                        &kept,
+                        window,
+                        cx,
+                    );
+                }
+            },
+        );
+    }
+
+    /// Forget the registrations the person confirmed, and no others. Core
+    /// looks at each again under the workspace's locks and keeps what owns
+    /// data, what is busy and what is on a folder that is gone too.
+    pub fn prune_worktrees(
+        &mut self,
+        root: PathBuf,
+        targets: Vec<worktree::PruneTarget>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = "Forget missing worktrees";
         if !self.open_project_at(&root, window, cx, title) {
             return;
         }
         self.start_job(
             title.into(),
-            false,
+            true,
             FailureHint::None,
             window,
             cx,
-            |project, _| {
-                let pruned = worktree::prune_missing(&project)?;
+            move |project, _| {
+                let outcome = worktree::prune(&project, &targets)?;
+                let mut warnings: Vec<String> = outcome
+                    .refused
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "kept {} at {}: {}",
+                            r.name,
+                            crate::model::shorten_home(&r.path),
+                            r.refusal.message()
+                        )
+                    })
+                    .collect();
+                warnings.extend(outcome.changed.iter().map(|id| {
+                    format!("{id} is not a missing worktree any more; it was left alone")
+                }));
                 Ok(Done {
-                    summary: if pruned.is_empty() {
-                        "No worktree registration was left to forget".to_string()
+                    summary: if outcome.pruned.is_empty() {
+                        "No registration was forgotten".to_string()
                     } else {
                         format!(
                             "Forgot the registration of {}. Their branches are kept.",
-                            pruned.join(", ")
+                            outcome.pruned.join(", ")
                         )
                     },
+                    needs_attention: !outcome.refused.is_empty(),
+                    warnings,
                     ..Done::default()
                 })
             },
