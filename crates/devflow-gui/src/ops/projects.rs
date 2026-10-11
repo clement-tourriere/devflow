@@ -1,12 +1,12 @@
 //! Mending the list of projects from the app: forget one, forget the ones
-//! whose folder is gone, point one at the folder it moved to, and finish a
+//! whose folder was not found, point one at the folder it moved to, and finish a
 //! configuration migration. Each is a core call (`registry`,
 //! `config_edit::migrate`) on the background executor; nothing here knows how
 //! a project is repaired or shells out to the CLI.
 use crate::{jobs, state::AppState};
 use devflow_core::registry::Entry;
 use gpui_kit::{
-    Context, PathPromptOptions, Window,
+    AppContext as _, Context, PathPromptOptions, Window,
     component::{WindowExt as _, notification::Notification},
 };
 use std::path::PathBuf;
@@ -41,27 +41,86 @@ impl AppState {
         );
     }
 
-    /// Take every project whose folder no longer exists off the list.
-    pub fn forget_missing_projects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Take the `confirmed` projects whose folder is still not found off the
+    /// list: the ones the person was shown, and no others.
+    pub fn forget_missing_projects(
+        &mut self,
+        confirmed: Vec<Entry>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let asked = confirmed.len();
         self.spawn_light(
             window,
             cx,
-            jobs::forget_missing_projects,
-            |this, result, window, cx| match result {
+            move || jobs::forget_missing_projects(confirmed),
+            move |this, result, window, cx| match result {
                 Ok(removed) => {
+                    let mut text = format!(
+                        "Removed {} from the list. Nothing on disk was touched.",
+                        devflow_core::text::counted(removed.len() as u64, "project")
+                    );
+                    if removed.len() < asked {
+                        text.push_str(
+                            " The others were kept: their folder was found again or they changed.",
+                        );
+                    }
                     window.push_notification(
-                        Notification::success(format!(
-                            "Removed {} from the list. Nothing on disk was touched.",
-                            devflow_core::text::counted(removed.len() as u64, "project")
-                        ))
-                        .title("Remove missing projects"),
+                        Notification::success(text).title("Remove unavailable projects"),
                         cx,
                     );
                     this.reload_entries(None, None, cx);
                 }
-                Err(message) => Self::notify_error(window, cx, "Remove missing projects", &message),
+                Err(message) => {
+                    Self::notify_error(window, cx, "Remove unavailable projects", &message)
+                }
             },
         );
+    }
+
+    /// Look again at one project that could not be opened (recompute its
+    /// health from the disk), whichever project is selected. The selected
+    /// project is read from scratch; for another one only its mark in the list
+    /// changes, and the selection stays where it is.
+    pub fn retry_project(&mut self, entry: Entry, cx: &mut Context<Self>) {
+        if entry.id.is_nil() {
+            // A folder that is only being looked at has no health to recompute.
+            if self
+                .selection
+                .current()
+                .is_some_and(|m| m.entry.root == entry.root)
+            {
+                self.refresh(cx);
+            }
+            return;
+        }
+        let id = entry.id;
+        cx.spawn(async move |this, cx| {
+            let checked = cx
+                .background_spawn(async move { jobs::check_projects(&[entry]) })
+                .await;
+            this.update(cx, |this, cx| {
+                match checked.into_iter().find(|(key, _)| *key == id) {
+                    Some((_, problem)) => {
+                        this.problems.insert(id, problem);
+                    }
+                    None => {
+                        this.problems.remove(&id);
+                    }
+                }
+                if this
+                    .selection
+                    .current()
+                    .is_some_and(|m| m.key.project == id)
+                {
+                    this.project_changed(id, cx);
+                } else {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Ask for the folder a project moved to, then point the project at it.

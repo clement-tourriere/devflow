@@ -275,7 +275,7 @@ mod native {
     use futures::{StreamExt as _, channel::mpsc};
     use gpui_kit::App;
     use tray_icon::{
-        Icon, TrayIcon, TrayIconBuilder,
+        Icon, TrayIcon, TrayIconBuilder, TrayIconEvent,
         menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     };
 
@@ -299,9 +299,20 @@ mod native {
         Some(menu)
     }
 
+    /// Take the status item's own events (mouse moves, enter, leave, clicks)
+    /// out of tray-icon's channel. Without a handler the library queues each
+    /// one on an unbounded channel nobody reads, which grows for as long as the
+    /// pointer moves over the icon. The menu needs none of them: it opens by
+    /// itself and its choices arrive as [`MenuEvent`]s. Must run before the
+    /// item exists; the library keeps the first handler it is given.
+    pub(super) fn drop_tray_events() {
+        TrayIconEvent::set_event_handler(Some(|_: TrayIconEvent| {}));
+    }
+
     /// Must run on the main thread once the app has launched, which is where
     /// GPUI calls the closure given to `run`.
     pub fn create(items: &[Row], cx: &mut App) -> Option<Item> {
+        drop_tray_events();
         let made = (|| {
             let icon = Icon::from_rgba(template_icon(ICON_PX), ICON_PX, ICON_PX).ok()?;
             let tray = TrayIconBuilder::new()
@@ -450,6 +461,18 @@ mod tests {
             panic!("a project row")
         };
         assert!(label.chars().count() <= 41, "{label}");
+    }
+
+    /// The handler is installed before the item is built (`create` calls it
+    /// first), so nothing the item sends is ever queued. The library's own
+    /// sender is private, so what can be checked is that installing is
+    /// repeatable and leaves the receiver empty.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_status_items_raw_events_are_not_queued() {
+        native::drop_tray_events();
+        native::drop_tray_events();
+        assert!(tray_icon::TrayIconEvent::receiver().is_empty());
     }
 
     #[test]

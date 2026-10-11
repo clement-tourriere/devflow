@@ -133,6 +133,8 @@ fn several_missing_folders_leave_the_list_in_one_confirmed_step(cx: &mut TestApp
         another_scratch_project(&scratch, "blog"),
         another_scratch_project(&scratch, "wiki"),
     ];
+    // Not in the list the person confirms: its volume goes away meanwhile.
+    let unmounted = another_scratch_project(&scratch, "docs");
     for entry in &gone {
         std::fs::remove_dir_all(&entry.root).unwrap();
     }
@@ -147,12 +149,93 @@ fn several_missing_folders_leave_the_list_in_one_confirmed_step(cx: &mut TestApp
     assert!(exists(cx, &h, "confirm"));
     // The dialog slides in: let it settle before clicking inside it.
     frame(cx, &h, |_| {});
+    std::fs::remove_dir_all(&unmounted.root).unwrap();
     click(cx, &h, "confirm");
-    wait(cx, "the missing projects left the list", |cx| {
+    wait(cx, "the confirmed projects left the list", |cx| {
         let ids = listed(cx, &h);
-        ids == vec![healthy.id]
+        !ids.contains(&gone[0].id) && !ids.contains(&gone[1].id)
     });
-    assert_eq!(registry::list().unwrap().len(), 1);
+    // The one that became unavailable after the question was asked is still
+    // listed: it was not part of what was confirmed.
+    let kept: Vec<Uuid> = registry::list().unwrap().iter().map(|e| e.id).collect();
+    assert!(
+        kept.contains(&healthy.id) && kept.contains(&unmounted.id),
+        "{kept:?}"
+    );
+    assert_eq!(kept.len(), 2, "{kept:?}");
+}
+
+/// Run the app's handling of `remedy` for the listed project `entry`.
+fn run_remedy_for(cx: &mut TestAppContext, h: &Harness, entry: &Entry, remedy: Remedy) {
+    let state = h.state.clone();
+    let entry = entry.clone();
+    cx.update_window(h.window.into(), |_, window, cx| {
+        super::problems::run_remedy(&state, Some(&entry), &remedy, window, cx)
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn retry_looks_again_at_the_project_it_is_about_not_the_selected_one(cx: &mut TestAppContext) {
+    let scratch = scratch_project();
+    let selected = scratch.entry.clone();
+    let other = another_scratch_project(&scratch, "blog");
+    let parked = scratch._outer.path().join("parked");
+    std::fs::rename(&other.root, &parked).unwrap();
+
+    let h = open_registry(cx, &selected);
+    wait(cx, "the selected project is ready", |cx| {
+        matches!(phase(cx, &h), Some(LoadPhase::Ready))
+    });
+    let has_problem = |cx: &mut TestAppContext, id: Uuid| {
+        cx.read_entity(&h.state, |s, _| s.problems.contains_key(&id))
+    };
+    assert!(
+        has_problem(cx, other.id),
+        "the unselected project is marked"
+    );
+
+    // The folder comes back; Retry on the other project's row looks at it.
+    std::fs::rename(&parked, &other.root).unwrap();
+    run_remedy_for(cx, &h, &other, Remedy::Retry);
+    wait(cx, "the other project's mark is gone", |cx| {
+        !has_problem(cx, other.id)
+    });
+    // The selection did not move.
+    cx.read_entity(&h.state, |s, _| {
+        assert_eq!(s.selection.current().unwrap().key.project, selected.id);
+    });
+    let _ = scratch;
+}
+
+#[test]
+fn buttons_of_one_page_never_share_an_element_id() {
+    let root = PathBuf::from("/tmp/x");
+    let remedies = vec![
+        Remedy::OpenFile {
+            path: root.join("devflow.toml"),
+        },
+        Remedy::Retry,
+        Remedy::OpenFile {
+            path: root.join("devflow.local.toml"),
+        },
+        Remedy::OpenFile {
+            path: root.join("mise.toml"),
+        },
+    ];
+    let ids: Vec<String> = super::problems::remedy_ids(&remedies)
+        .iter()
+        .map(|id| id.to_string())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "remedy-open_file",
+            "remedy-retry",
+            "remedy-open_file-2",
+            "remedy-open_file-3"
+        ]
+    );
 }
 
 #[gpui_kit::test]
@@ -302,6 +385,9 @@ fn every_kind_of_problem_draws_one_button_per_remedy(cx: &mut TestAppContext) {
             Remedy::OpenFile {
                 path: root.join("devflow.toml"),
             },
+            Remedy::OpenFile {
+                path: root.join("devflow.local.toml"),
+            },
             Remedy::Reveal { path: root.clone() },
             Remedy::OpenGuide {
                 url: "https://example.com/guide".into(),
@@ -338,13 +424,17 @@ fn every_kind_of_problem_draws_one_button_per_remedy(cx: &mut TestAppContext) {
         });
         frame(cx, &h, |_| {});
         assert!(exists(cx, &h, "project-problem"), "{kind:?}");
-        for remedy in &problem.remedies {
+        // Both file buttons are there, each with an element id of its own.
+        let ids = super::problems::remedy_ids(&problem.remedies);
+        for (remedy, button) in problem.remedies.iter().zip(&ids) {
             assert!(
-                visible(cx, &h, id(format!("remedy-{}", remedy.kind()))),
-                "{kind:?}: {}",
+                visible(cx, &h, button.clone()),
+                "{kind:?}: {} ({button})",
                 remedy.label()
             );
         }
+        assert!(visible(cx, &h, id("remedy-open_file".into())));
+        assert!(visible(cx, &h, id("remedy-open_file-2".into())));
     }
 }
 

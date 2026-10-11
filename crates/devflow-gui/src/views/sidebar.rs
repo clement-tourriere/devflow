@@ -61,9 +61,10 @@ enum Node {
     Project(Box<ProjectNode>),
     Item(Box<SidebarMenuItem>),
     Hint(SharedString),
-    /// The button that takes every project whose folder is gone off the list.
+    /// The button that takes the projects whose folder was not found off the
+    /// list: these entries, as listed when it was drawn.
     ForgetMissing {
-        names: Vec<String>,
+        entries: Vec<Entry>,
         state: Entity<AppState>,
     },
 }
@@ -95,16 +96,16 @@ impl SidebarItem for Node {
                 .text_color(ui::muted(cx))
                 .child(text)
                 .into_any_element(),
-            Node::ForgetMissing { names, state } => div()
+            Node::ForgetMissing { entries, state } => div()
                 .px_1()
                 .child(
                     Button::new(FORGET_MISSING_ID)
                         .ghost()
                         .small()
                         .icon(Icon::new(Lucide::Trash))
-                        .label(format!("Remove {} missing projects…", names.len()))
+                        .label(format!("Remove {} unavailable projects…", entries.len()))
                         .on_click(move |_, window, cx| {
-                            problems::confirm_forget_missing(&state, names.clone(), window, cx)
+                            problems::confirm_forget_missing(&state, entries.clone(), window, cx)
                         }),
                 )
                 .into_any_element(),
@@ -125,7 +126,7 @@ pub fn new_workspace_id(project: Uuid) -> SharedString {
     format!("new-workspace-{project}").into()
 }
 
-/// The button that removes every project whose folder is gone.
+/// The button that removes the projects whose folder was not found.
 pub const FORGET_MISSING_ID: &str = "forget-missing-projects";
 
 /// The warning mark on a project that cannot be opened.
@@ -373,8 +374,9 @@ pub fn render(state: &Entity<AppState>, cx: &mut App) -> impl IntoElement {
     if projects.is_empty() {
         projects.push(Node::Hint("No projects yet.".into()));
     }
-    // Several folders gone: one row takes them all off the list.
-    let missing: Vec<String> = app
+    // Several folders not found: one row takes them all off the list (after
+    // asking, for exactly these entries).
+    let missing: Vec<Entry> = app
         .entries
         .iter()
         .filter(|e| {
@@ -382,11 +384,11 @@ pub fn render(state: &Entity<AppState>, cx: &mut App) -> impl IntoElement {
                 .get(&e.id)
                 .is_some_and(|p| p.kind == ProblemKind::FolderMissing)
         })
-        .map(|e| e.name.clone())
+        .cloned()
         .collect();
     if missing.len() >= 2 {
         projects.push(Node::ForgetMissing {
-            names: missing,
+            entries: missing,
             state: state.clone(),
         });
     }

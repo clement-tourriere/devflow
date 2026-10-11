@@ -35,9 +35,23 @@ use gpui_kit::{
 use std::path::PathBuf;
 use uuid::Uuid;
 
-/// The element id of a remedy's button (`remedy-forget_project`).
-pub fn remedy_id(remedy: &Remedy) -> SharedString {
-    format!("remedy-{}", remedy.kind()).into()
+/// The element ids of the buttons of `remedies`, in order: `remedy-<kind>`
+/// (`remedy-forget_project`), and `remedy-<kind>-2`, `-3`... for the second and
+/// later remedies of a kind (a problem can offer two files to open), so that
+/// no two buttons of a page share an element id.
+pub fn remedy_ids(remedies: &[Remedy]) -> Vec<SharedString> {
+    let mut seen: Vec<&'static str> = Vec::new();
+    remedies
+        .iter()
+        .map(|remedy| {
+            let kind = remedy.kind();
+            seen.push(kind);
+            match seen.iter().filter(|k| **k == kind).count() {
+                1 => format!("remedy-{kind}").into(),
+                n => format!("remedy-{kind}-{n}").into(),
+            }
+        })
+        .collect()
 }
 
 /// The project page for a project that cannot be opened.
@@ -47,9 +61,10 @@ pub fn page(
     problem: &ProjectProblem,
     cx: &App,
 ) -> AnyElement {
+    let ids = remedy_ids(&problem.remedies);
     let buttons = problem.remedies.iter().enumerate().map(|(index, remedy)| {
         let (state, entry, run) = (state.clone(), entry.clone(), remedy.clone());
-        let button = Button::new(remedy_id(remedy))
+        let button = Button::new(ids[index].clone())
             .label(remedy.label())
             .on_click(move |_, window, cx| run_remedy(&state, Some(&entry), &run, window, cx));
         if index == 0 {
@@ -128,7 +143,12 @@ pub fn run_remedy(
     cx: &mut App,
 ) {
     match remedy {
-        Remedy::Retry => state.update(cx, |s, cx| s.refresh(cx)),
+        // Look again at the project the button is about, not at whichever
+        // project is selected.
+        Remedy::Retry => match entry {
+            Some(entry) => state.update(cx, |s, cx| s.retry_project(entry.clone(), cx)),
+            None => state.update(cx, |s, cx| s.refresh(cx)),
+        },
         Remedy::ForgetProject { root } => {
             let listed = entry.filter(|e| e.root == *root).cloned().or_else(|| {
                 state
@@ -196,27 +216,36 @@ pub fn confirm_forget(state: &Entity<AppState>, entry: Entry, window: &mut Windo
     );
 }
 
-/// Ask before taking every project whose folder is gone off the list.
+/// Ask before taking the projects whose folder was not found off the list.
+/// Only the `entries` shown here are removed, and only if their folder is still
+/// not found when the person confirms.
 pub fn confirm_forget_missing(
     state: &Entity<AppState>,
-    names: Vec<String>,
+    entries: Vec<Entry>,
     window: &mut Window,
     cx: &mut App,
 ) {
     let state = state.clone();
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     let mut lines = vec![format!(
-        "These projects' folders no longer exist: {}.",
+        "These projects' folders were not found (moved, deleted, or on a drive that is not \
+         connected): {}.",
         names.join(", ")
     )];
-    lines.push("They are removed from the list. Nothing on disk is touched.".to_string());
+    lines.push(
+        "They are removed from the list; one whose folder is back by then is kept. Nothing on \
+         disk is touched."
+            .to_string(),
+    );
     open_confirm(
         window,
         cx,
-        "Remove missing projects",
+        "Remove unavailable projects",
         lines,
         "Remove",
         move |window, cx| {
-            state.update(cx, |s, cx| s.forget_missing_projects(window, cx));
+            let confirmed = entries.clone();
+            state.update(cx, |s, cx| s.forget_missing_projects(confirmed, window, cx));
         },
     );
 }

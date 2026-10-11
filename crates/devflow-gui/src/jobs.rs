@@ -392,9 +392,10 @@ pub fn forget_project(root: PathBuf) -> Section<()> {
     catch(|| registry::remove(&root).map(|_| ()))
 }
 
-/// Forget every project whose folder no longer exists; the entries removed.
-pub fn forget_missing_projects() -> Section<Vec<Entry>> {
-    catch(registry::prune_missing)
+/// Forget the `confirmed` projects whose folder is still not found; the
+/// entries removed. Nothing outside the list the person confirmed is touched.
+pub fn forget_missing_projects(confirmed: Vec<Entry>) -> Section<Vec<Entry>> {
+    catch(|| registry::forget_unavailable(&confirmed))
 }
 
 /// What migrating the earlier build's configuration of the project at `root`
