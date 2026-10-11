@@ -93,6 +93,11 @@ fn remove_locked(root: &Path) -> Result<bool> {
 pub fn resolve(base: &Path, path: &Path) -> PathBuf {
     use std::path::Component;
     let joined = base.join(path);
+    // An existing path is resolved by the filesystem first, so `..` after a
+    // symbolic link leaves the link's target, not the link's parent.
+    if let Ok(resolved) = joined.canonicalize() {
+        return resolved;
+    }
     let mut out = PathBuf::new();
     for component in joined.components() {
         match component {
@@ -228,5 +233,20 @@ mod tests {
         assert_eq!(resolve(&base, Path::new("a/../a/.")), base.join("a"));
         assert_eq!(resolve(&base, Path::new("gone/./x/..")), base.join("gone"));
         assert_eq!(resolve(&base, &base.join("a")), base.join("a"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dot_dot_after_a_symbolic_link_leaves_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("volume/repos")).unwrap();
+        std::fs::create_dir_all(base.join("volume/app")).unwrap();
+        std::fs::create_dir_all(base.join("work/app")).unwrap();
+        std::os::unix::fs::symlink(base.join("volume/repos"), base.join("work/link")).unwrap();
+        assert_eq!(
+            resolve(&base, Path::new("work/link/../app")),
+            base.join("volume/app")
+        );
     }
 }

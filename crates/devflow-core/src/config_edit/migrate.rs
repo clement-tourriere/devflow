@@ -66,7 +66,7 @@
 //! concurrent save would have lost.
 use super::{ConfigFiles, FileState, Target, file_name, masked_template};
 use crate::config::{Config, LOCAL_CONFIG_FILE};
-use crate::error::ConfigChanged;
+use crate::error::{ConfigChanged, NotInitialized};
 use crate::propose::{DiffKind, FileChange, FilePreview, diff_lines, sha256_hex};
 use crate::redact::{self, MASK};
 use crate::remedy::{Problem, Remedy, remedies_of};
@@ -161,7 +161,7 @@ pub struct Migration {
 /// own remedies, never "nothing to migrate": when the files cannot be read the
 /// answer to "does this need migrating" is not "no".
 pub fn needed(root: &Path) -> Result<bool> {
-    let files = ConfigFiles::read(root)?;
+    let files = read_files(root)?;
     let mut found = false;
     for state in [&files.project, &files.local] {
         let Some(text) = state.text.as_deref() else {
@@ -181,13 +181,25 @@ pub fn needed(root: &Path) -> Result<bool> {
     Ok(false)
 }
 
+/// [`ConfigFiles::read`], except that a checkout without a TOML project file
+/// but with a 0.x one (`.devflow.yml`) gets the error loading gives it (0.x
+/// layout, with the migration guide) rather than "not initialized".
+fn read_files(root: &Path) -> Result<ConfigFiles> {
+    match ConfigFiles::read(root) {
+        Err(error) if error.downcast_ref::<NotInitialized>().is_some() => {
+            Err(Config::load(root).err().unwrap_or(error))
+        }
+        other => other,
+    }
+}
+
 /// Work out the rewrite for the project in `root`. Reads only.
 ///
 /// Fails with a [`Problem`] when there is nothing to migrate or the rewrite
 /// would be wrong (see the module documentation); with `NotInitialized` when
 /// there is no project file.
 pub fn plan(root: &Path) -> Result<Migration> {
-    let files = ConfigFiles::read(root)?;
+    let files = read_files(root)?;
     let mut docs: Vec<(Target, &FileState, DocumentMut)> = Vec::new();
     for target in [Target::Project, Target::Local] {
         let state = files.file(target);
@@ -645,8 +657,8 @@ fn mask_comments(text: &str) -> String {
 /// One comment (starting at its `#`) with credentials masked: by content
 /// ([`redact::text`]) and by name, as `devflow env list` judges a variable
 /// ([`redact::is_secret_variable`]): in `NAME = value`, `NAME: value` or
-/// `"NAME" = "value"` with a secret-like NAME the value is replaced, a quoted
-/// one up to its closing quote and any other up to the end of the comment.
+/// `"NAME" = "value"` with a secret-like NAME everything after the `=` or `:`
+/// is replaced, up to the end of the comment.
 fn masked_comment(comment: &str) -> String {
     let chars: Vec<char> = redact::text(comment).chars().collect();
     let is_name = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-');
@@ -686,17 +698,13 @@ fn masked_comment(comment: &str) -> String {
             out.push(chars[j]);
             j += 1;
         }
-        let end = match chars.get(j) {
-            Some(&quote) if quote == '"' || quote == '\'' => chars[j + 1..]
-                .iter()
-                .position(|&c| c == quote)
-                .map_or(chars.len(), |close| j + 1 + close + 1),
-            _ => chars.len(),
-        };
-        if end > j {
+        // Everything after the assignment is masked: a comment is not TOML,
+        // so its quotes (triple, escaped, unbalanced) cannot be trusted to
+        // say where the value ends.
+        if j < chars.len() {
             out.push_str(MASK);
         }
-        i = end;
+        break;
     }
     out
 }

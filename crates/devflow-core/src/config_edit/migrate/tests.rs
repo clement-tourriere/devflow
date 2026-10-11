@@ -662,6 +662,41 @@ fn a_zero_x_or_invalid_configuration_without_the_table_is_refused_not_current() 
 }
 
 #[test]
+fn a_zero_x_yaml_only_checkout_gets_the_guide_not_set_up() {
+    let dir = project(&[(".devflow.yml", "services: []\n")]);
+    for error in [
+        needed(dir.path()).unwrap_err(),
+        plan(dir.path()).unwrap_err(),
+    ] {
+        assert!(
+            error.downcast_ref::<NotInitialized>().is_none(),
+            "{error:#}"
+        );
+        assert!(
+            crate::remedy::remedies_of(&error)
+                .iter()
+                .any(|r| matches!(r, Remedy::OpenGuide { .. })),
+            "{error:#}"
+        );
+    }
+}
+
+#[test]
+fn quotes_in_a_comment_never_end_a_masked_value_early() {
+    for comment in [
+        "# SESSION_KEY = \"\"\"canary-triple\"\"\"",
+        "# SESSION_KEY = \"canary-\\\"escaped\"",
+        "# SESSION_KEY = 'canary' and \"more-canary\"",
+    ] {
+        let masked = masked_comment(comment);
+        assert!(!masked.contains("canary"), "{comment} -> {masked}");
+        assert_eq!(masked, "# SESSION_KEY = ***", "{comment}");
+    }
+    let text = "# SESSION_KEY = \"\"\"canary-triple\"\"\"\n[postgres]\nport = 1\n";
+    assert!(!masked_text(text).contains("canary"));
+}
+
+#[test]
 fn a_valid_current_configuration_needs_nothing() {
     let current = format!("[project]\nname = \"p\"\nid = \"{ID}\"\n");
     let dir = project(&[("devflow.toml", &current)]);
