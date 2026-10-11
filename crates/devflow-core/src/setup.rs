@@ -3892,10 +3892,19 @@ mod tests {
     fn bound_to_cache(
         with_branch: bool,
     ) -> (crate::worktree::testutil::TestRepo, Workspace, uuid::Uuid) {
+        bound_to_cache_with("", with_branch)
+    }
+
+    /// [`bound_to_cache`] whose `[hooks] setup` is `setup` (TOML array items).
+    fn bound_to_cache_with(
+        setup: &str,
+        with_branch: bool,
+    ) -> (crate::worktree::testutil::TestRepo, Workspace, uuid::Uuid) {
         use crate::services::catalog::{BranchRecord, Catalog, ServiceCatalog, VERSION};
         let config = format!(
             "{}\n[services.cache]\nengine = \"valkey\"\n",
             crate::Config::template("shop", uuid::Uuid::new_v4(), None)
+                .replace("setup = []", &format!("setup = [{setup}]"))
         );
         let t = crate::worktree::testutil::repo(Some(&config));
         let ws = crate::worktree::create(&t.project, "feature", None).unwrap();
@@ -3996,12 +4005,73 @@ mod tests {
         let seen = load_receipt(&t.project, &ws).unwrap().unwrap();
         assert!(seen.phase(Phase::Services).deliberate);
         assert!(!seen.phase(Phase::Services).required_skip);
-        assert!(!complete(&seen, Phase::Env), "env still follows the branch");
+        // Nothing derived from services applies to such a workspace, so the
+        // binding it kept reopens nothing.
+        assert!(complete(&seen, Phase::Env) && complete(&seen, Phase::Hooks));
+        assert_eq!(seen.status(), Status::Ready);
 
         // No catalog file proves nothing: nothing is reopened.
         let (t, ws, _) = bound_to_cache(true);
         std::fs::remove_file(services::catalog::Store::path_for(t.project.id()).unwrap()).unwrap();
         let seen = load_receipt(&t.project, &ws).unwrap().unwrap();
         assert_eq!(seen.status(), Status::Ready);
+    }
+
+    #[test]
+    fn a_no_db_workspace_that_kept_a_lost_binding_stays_ready_and_runs_hooks_once() {
+        let (t, ws, _) = bound_to_cache_with(r#""echo run >> .devflow/runs""#, false);
+        trust::approve(&t.project).unwrap();
+        // `switch feature --no-db` after the branch was lost: services are
+        // skipped on request, the old binding stays, and setup has to
+        // write the environment and run the hooks.
+        let mut receipt = Receipt::load(&ws.git_dir).unwrap().unwrap();
+        receipt.skip_deliberate(Phase::Services, receipt::SKIP_NO_DB.into());
+        receipt.set_phase(Phase::Env, PhaseState::Pending, None);
+        receipt.set_phase(Phase::Hooks, PhaseState::Pending, None);
+        receipt.save(&ws.git_dir).unwrap();
+        let runs = || {
+            std::fs::read_to_string(ws.path.join(".devflow/runs"))
+                .map(|text| text.lines().count())
+                .unwrap_or(0)
+        };
+        let run_setup = || {
+            setup(
+                &t.project,
+                &ws,
+                SetupOptions::default(),
+                false,
+                false,
+                &mut NoProgress,
+            )
+            .unwrap()
+            .unwrap()
+        };
+        let outcome = run_setup();
+        assert_eq!(
+            outcome.status,
+            Status::Ready,
+            "{:?}",
+            outcome.receipt.phases
+        );
+        assert_eq!(runs(), 1);
+        assert!(
+            outcome.receipt.services.contains_key("cache"),
+            "the binding is kept, not cleared"
+        );
+
+        // Load, set up, load again: nothing flaps and the hooks do not run again.
+        for _ in 0..3 {
+            let seen = load_receipt(&t.project, &ws).unwrap().unwrap();
+            assert_eq!(seen.status(), Status::Ready);
+            let lock = acquire(&ws.git_dir).unwrap().unwrap();
+            let locked = load_receipt_locked(&t.project, &ws, &lock)
+                .unwrap()
+                .unwrap();
+            assert_eq!(locked.status(), Status::Ready);
+            drop(lock);
+            let outcome = run_setup();
+            assert_eq!(outcome.status, Status::Ready);
+            assert_eq!(runs(), 1, "hooks run once");
+        }
     }
 }

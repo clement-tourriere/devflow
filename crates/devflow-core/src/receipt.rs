@@ -753,8 +753,16 @@ impl Receipt {
     /// dropped because its volume was lost). A skip someone asked for is
     /// kept; calling it again changes nothing. Returns whether anything
     /// changed.
+    ///
+    /// A workspace whose services were skipped on request (`--no-db`) is left
+    /// alone, as [`Receipt::drift`] leaves it: nothing derived from services
+    /// applies to it (its `.devflow/env` is written without them), so the
+    /// stale binding it kept is no reason to run `env` and `hooks` again, and
+    /// setup, which keeps that skip, would never clear the reason. The binding
+    /// stays as it is: it is the record of which data the workspace had, and
+    /// clearing it would lose that.
     pub fn reopen_lost_branches(&mut self, lost: &[String]) -> bool {
-        if lost.is_empty() {
+        if lost.is_empty() || self.services_skipped_on_request() {
             return false;
         }
         let which = lost.join(", ");
