@@ -86,22 +86,46 @@ fn remove_locked(root: &Path) -> Result<bool> {
     Ok(removed)
 }
 
+/// `path` as an absolute path: a relative one is taken from `base` (a command's
+/// `-C` folder, not the process's), `.` and `..` are resolved, and symbolic
+/// links too when the path exists. A path that does not exist (the old folder
+/// of a project that moved) is kept as the lexical result.
+pub fn resolve(base: &Path, path: &Path) -> PathBuf {
+    use std::path::Component;
+    let joined = base.join(path);
+    let mut out = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out.canonicalize().unwrap_or(out)
+}
+
 /// The entry named by `selector`: a project id, or the path of its main
-/// checkout (as registered, or resolved when the folder exists).
+/// checkout (as registered, or resolved when the folder exists). A relative
+/// path is taken from the process's current directory; see [`find_from`].
 pub fn find(selector: &str) -> Result<Entry> {
+    find_from(selector, &std::env::current_dir().unwrap_or_default())
+}
+
+/// [`find`] with a relative path taken from `base`. The folder of the entry
+/// need not exist.
+pub fn find_from(selector: &str, base: &Path) -> Result<Entry> {
     let entries = read()?.projects;
     let by_id = uuid::Uuid::parse_str(selector.trim()).ok();
     let path = Path::new(selector);
-    let resolved = path.canonicalize().ok();
+    // As typed (joined to `base`, so an entry registered under a path that
+    // goes through a link still matches) and as resolved.
+    let joined = base.join(path);
+    let resolved = resolve(base, path);
     entries
         .into_iter()
-        .find(|entry| {
-            by_id == Some(entry.id)
-                || entry.root == path
-                || resolved
-                    .as_ref()
-                    .is_some_and(|resolved| entry.root == *resolved)
-        })
+        .find(|entry| by_id == Some(entry.id) || entry.root == joined || entry.root == resolved)
         .ok_or_else(|| {
             Problem::new("no registered project has that id or folder")
                 .with(Remedy::Retry)
@@ -189,4 +213,20 @@ pub fn relocate(id: uuid::Uuid, new_root: &Path) -> Result<Entry> {
         write(&file)?;
         Ok(entry)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_relative_path_is_taken_from_the_base_and_need_not_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(base.join("a")).unwrap();
+        assert_eq!(resolve(&base, Path::new(".")), base);
+        assert_eq!(resolve(&base, Path::new("a/../a/.")), base.join("a"));
+        assert_eq!(resolve(&base, Path::new("gone/./x/..")), base.join("gone"));
+        assert_eq!(resolve(&base, &base.join("a")), base.join("a"));
+    }
 }

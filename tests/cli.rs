@@ -4367,3 +4367,124 @@ fn forgetting_missing_projects_lists_what_it_removes() {
         describe(&again)
     );
 }
+
+fn forgotten_names(out: &Output) -> Vec<String> {
+    json(out)["forgotten"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn project_paths_are_taken_from_dash_c_not_the_process_directory() {
+    let env = Env::new();
+    env.init();
+    ok(&env.run(&["list"]));
+    let other = env.root.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    git2::Repository::init(&other).unwrap();
+    ok(&env.run_in(&other, &["init", "--yes", "--name", "other"]));
+    ok(&env.run_in(&other, &["list"]));
+    let other_dir = other.to_str().unwrap();
+
+    // The process runs in the repository; `.` is the folder `-C` names.
+    let forgotten = env.run(&["--json", "-C", other_dir, "project", "forget", "."]);
+    ok(&forgotten);
+    assert_eq!(json(&forgotten)["forgotten"][0]["root"], other_dir);
+    let listed = json(&env.run(&["--json", "list", "--all"]));
+    let names: Vec<_> = listed["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, ["shop"], "{listed}");
+
+    // A project that moved: its old folder no longer exists, and both the old
+    // and the new folder are relative to `-C`.
+    let id = listed["projects"][0]["id"].as_str().unwrap().to_string();
+    std::fs::rename(&env.repo, env.root.join("moved")).unwrap();
+    let root = env.root.to_str().unwrap();
+    let relocated = env.run_in(
+        &other,
+        &["--json", "-C", root, "project", "relocate", "repo", "moved"],
+    );
+    ok(&relocated);
+    let doc = json(&relocated);
+    assert_eq!(doc["project"]["id"], id.as_str(), "{doc}");
+    assert_eq!(
+        doc["project"]["root"],
+        env.root.join("moved").to_str().unwrap()
+    );
+    // And a folder that is gone can still be forgotten by its relative path.
+    std::fs::remove_dir_all(env.root.join("moved")).unwrap();
+    let forgotten = env.run_in(
+        &other,
+        &["--json", "-C", root, "project", "forget", "moved"],
+    );
+    ok(&forgotten);
+    assert_eq!(forgotten_names(&forgotten), ["shop"]);
+}
+
+#[test]
+fn config_migrate_uses_dash_c_and_does_not_hide_a_broken_configuration() {
+    let env = Env::new();
+    std::fs::write(env.config_path(), PRE_RELEASE).unwrap();
+    let elsewhere = env.root.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let out = env.run_in(
+        &elsewhere,
+        &[
+            "--json",
+            "-C",
+            env.repo.to_str().unwrap(),
+            "config",
+            "migrate",
+            "--dry-run",
+        ],
+    );
+    ok(&out);
+    assert_eq!(json(&out)["service_key"], "db");
+
+    // `[postgres]` with TOML that does not parse: an error, not "nothing to do".
+    let broken = format!("{PRE_RELEASE}port = = 1\n");
+    std::fs::write(env.config_path(), &broken).unwrap();
+    for args in [
+        &["--json", "config", "migrate"][..],
+        &["config", "migrate"][..],
+    ] {
+        let out = env.run(args);
+        failed(&out);
+        let text = describe(&out);
+        assert!(text.contains("invalid TOML"), "{text}");
+        assert!(!text.contains("Nothing to migrate"), "{text}");
+    }
+    assert_eq!(std::fs::read_to_string(env.config_path()).unwrap(), broken);
+
+    // A 0.x configuration without the table is refused, with the guide.
+    std::fs::write(
+        env.config_path(),
+        "[project]\nname = \"tt2\"\nid = \"3f2b1c7e-0b3c-4d2e-9a7a-8f6d5c4b3a21\"\n\n[agent]\nx = 1\n",
+    )
+    .unwrap();
+    let out = env.run(&["--json", "config", "migrate"]);
+    failed(&out);
+    assert_eq!(
+        json(&out)["remedies"][0]["kind"],
+        "open_guide",
+        "{}",
+        describe(&out)
+    );
+
+    // A valid current configuration is a successful no-op.
+    std::fs::write(
+        env.config_path(),
+        "[project]\nname = \"tt2\"\nid = \"3f2b1c7e-0b3c-4d2e-9a7a-8f6d5c4b3a21\"\n",
+    )
+    .unwrap();
+    let out = env.run(&["--json", "config", "migrate"]);
+    ok(&out);
+    assert_eq!(json(&out)["migrated"], false);
+}

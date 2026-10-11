@@ -102,10 +102,10 @@ fn forget(ctx: &Ctx, name: &str, args: ForgetArgs) -> Result<ExitCode> {
         }
     } else {
         let entry = match &args.project {
-            Some(selector) => registry::find(selector)?,
+            Some(selector) => registry::find_from(selector, &ctx.cwd)?,
             None => {
                 let root = main_checkout(&ctx.cwd)?;
-                registry::find(&root.display().to_string())?
+                registry::find_from(&root.display().to_string(), &ctx.cwd)?
             }
         };
         registry::remove(&entry.root)?;
@@ -140,8 +140,9 @@ fn confirm(prompt: &str) -> Result<bool> {
 }
 
 fn relocate(ctx: &Ctx, name: &str, args: RelocateArgs) -> Result<ExitCode> {
-    let entry = registry::find(&args.project)?;
-    let moved = registry::relocate(entry.id, &args.new_path)?;
+    let entry = registry::find_from(&args.project, &ctx.cwd)?;
+    let new_root = registry::resolve(&ctx.cwd, &args.new_path);
+    let moved = registry::relocate(entry.id, &new_root)?;
     if ctx.json {
         output::emit(
             ctx,
