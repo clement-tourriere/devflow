@@ -21,6 +21,7 @@ use devflow_core::{
     receipt::{Phase, PhaseState, Receipt},
     redact,
     registry::{self, Entry},
+    remedy::{self, Remedy},
     setup::{self, Progress, WorkspaceStatus},
     trust::{self, TrustState},
     worktree::Workspace,
@@ -106,7 +107,10 @@ pub struct Failure {
     pub kind: FailureKind,
     /// Core refused the call with a typed refusal (a start that may not
     /// happen): its kind, sentence and hint, for a view to keep.
-    pub refusal: Option<RefusalView>,
+    pub refusal: Option<Box<RefusalView>>,
+    /// What core says can be done about it (`remedy::remedies_of`), as actions
+    /// the view draws as buttons.
+    pub remedies: Box<[Remedy]>,
 }
 
 impl Failure {
@@ -115,6 +119,7 @@ impl Failure {
             message: redact::text(message.as_ref()),
             kind: FailureKind::Other,
             refusal: None,
+            remedies: Box::default(),
         }
     }
 
@@ -122,7 +127,8 @@ impl Failure {
         Self {
             message: redact::text(&format!("{error:#}")),
             kind: FailureKind::of(error),
-            refusal: RefusalView::from_error(error),
+            refusal: RefusalView::from_error(error).map(Box::new),
+            remedies: remedy::remedies_of(error).into(),
         }
     }
 }
@@ -991,6 +997,7 @@ mod tests {
                 workspace: "w".into(),
                 reason: "'w' has uncommitted changes".into(),
                 forceable,
+                remedies: Vec::new(),
             })
             .context("while removing")
         };

@@ -225,6 +225,9 @@ pub struct RefusalView {
     pub text: String,
     /// `Refusal::hint`, masked.
     pub hint: Option<String>,
+    /// The refusal itself, for the actions it implies
+    /// ([`RefusalView::remedies`]).
+    core: Box<Refusal>,
 }
 
 impl RefusalView {
@@ -233,7 +236,14 @@ impl RefusalView {
             code: refusal.code().to_string(),
             text: redact::text(&refusal.to_string()),
             hint: refusal.hint().map(|hint| redact::text(&hint)),
+            core: Box::new(refusal.clone()),
         }
+    }
+
+    /// What can be done about it for the workspace at `workspace`: install
+    /// pitchfork, set the workspace up, review and approve what it runs.
+    pub fn remedies(&self, workspace: &std::path::Path) -> Vec<devflow_core::remedy::Remedy> {
+        self.core.remedies(workspace)
     }
 
     /// The refusal that explains a start that did not happen, if the error
@@ -414,6 +424,33 @@ mod tests {
         detection(&mut found);
         let shown = format!("{found:?} {}", found.summary());
         assert!(!shown.contains(SECRET), "{shown}");
+    }
+
+    #[test]
+    fn a_refusal_carries_the_actions_it_implies_for_its_workspace() {
+        use devflow_core::remedy::Remedy;
+        let path = PathBuf::from("/work/shop.wt/feature");
+        let not_ready = Refusal::NotReady {
+            status: "needs_attention".into(),
+            detail: None,
+        };
+        let view = RefusalView::of(&not_ready);
+        assert_eq!(
+            view.remedies(&path),
+            [Remedy::Setup {
+                workspace: path.clone()
+            }]
+        );
+        assert!(!view.text.contains("`devflow"), "{}", view.text);
+        let missing = RefusalView::of(&Refusal::NotInstalled {
+            detail: "not found".into(),
+        });
+        assert_eq!(missing.remedies(&path), [Remedy::InstallPitchfork]);
+        assert!(
+            RefusalView::of(&Refusal::NothingConfigured)
+                .remedies(&path)
+                .is_empty()
+        );
     }
 
     #[test]

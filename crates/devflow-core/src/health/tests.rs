@@ -36,6 +36,7 @@ fn kinds(problem: &ProjectProblem) -> Vec<&'static str> {
             Remedy::OpenFile { .. } => "open_file",
             Remedy::Reveal { .. } => "reveal",
             Remedy::OpenGuide { .. } => "guide",
+            other => other.kind(),
         })
         .collect()
 }

@@ -1606,6 +1606,34 @@ fn doctor_reports_checks() {
     assert_eq!(doc["ok"], out.status.success());
 }
 
+#[test]
+fn doctor_prints_each_fix_as_a_hint_and_carries_it_as_a_remedy() {
+    let env = Env::new();
+    env.init();
+    // No Git hook yet: the check explains in words, the fix is a remedy.
+    let doc = json(&env.run(&["--json", "doctor"]));
+    let hook = doc["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "git-hook")
+        .unwrap();
+    assert_eq!(hook["status"], "warn", "{hook}");
+    assert!(
+        !hook["hint"].as_str().unwrap().contains("`devflow"),
+        "{hook}"
+    );
+    assert_eq!(hook["remedies"][0]["kind"], "install_git_hook", "{hook}");
+    assert_eq!(
+        hook["remedies"][0]["command"], "devflow hook install",
+        "{hook}"
+    );
+
+    let out = env.run(&["doctor"]);
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.contains("hint: run `devflow hook install`"), "{text}");
+}
+
 // --- review regressions -------------------------------------------------------
 
 /// Run with `DEVFLOW_NON_INTERACTIVE=value`.
@@ -2449,7 +2477,8 @@ fn a_missing_config_suggests_init() {
         .find(|check| check["name"] == "project")
         .unwrap();
     assert!(
-        project["hint"].as_str().unwrap().contains("devflow init"),
+        project["remedies"][0]["command"] == "devflow init"
+            && !project["hint"].as_str().unwrap().contains("`devflow"),
         "{project}"
     );
 }
@@ -3007,9 +3036,11 @@ fn up_refuses_with_an_explanation_and_never_starts_anything() {
     let error = doc["error"].as_str().unwrap();
     assert!(error.contains("changed since it was approved"), "{doc}");
     assert!(
-        doc["hint"].as_str().unwrap().contains("devflow trust"),
+        doc["hint"].as_str().unwrap().contains("approve")
+            && !doc["hint"].as_str().unwrap().contains("devflow trust"),
         "{doc}"
     );
+    assert_eq!(doc["remedies"][0]["command"], "devflow trust", "{doc}");
     assert!(fake.mutations().is_empty(), "{:?}", fake.calls());
 
     // Daemons that start on their own are never started in bulk.
@@ -3065,7 +3096,9 @@ fn down_refuses_a_changed_configuration_unless_forced() {
         doc["error"].as_str().unwrap().contains("lifecycle hooks"),
         "{doc}"
     );
-    assert!(doc["hint"].as_str().unwrap().contains("--force"), "{doc}");
+    assert!(doc["hint"].as_str().unwrap().contains("forcing"), "{doc}");
+    assert_eq!(doc["remedies"][0]["kind"], "trust", "{doc}");
+    assert_eq!(doc["remedies"][0]["command"], "devflow trust", "{doc}");
     assert!(fake.mutations().is_empty());
     fake.set(
         "after_stop.json",
@@ -3108,7 +3141,7 @@ fn autostart_starts_after_switch_and_reports_it_apart_from_readiness() {
         doc["processes"]["skipped"]
             .as_str()
             .unwrap()
-            .contains("devflow trust"),
+            .contains("review and approve"),
         "{doc}"
     );
     assert!(fake.mutations().is_empty());
@@ -3423,10 +3456,11 @@ fn doctor_reports_the_install_state_the_namespace_and_the_environment_wiring() {
     let pitchfork = check(&doc, "pitchfork");
     assert_eq!(pitchfork["status"], "warn", "{doc}");
     assert!(
-        pitchfork["hint"]
-            .as_str()
-            .unwrap()
-            .contains("devflow pitchfork install"),
+        pitchfork["remedies"][0]["command"] == "devflow pitchfork install"
+            && !pitchfork["hint"]
+                .as_str()
+                .unwrap()
+                .contains("devflow pitchfork"),
         "{pitchfork}"
     );
     assert!(

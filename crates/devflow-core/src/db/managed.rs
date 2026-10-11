@@ -3,6 +3,7 @@
 use super::admin::{Target, quote_ident, random_password};
 use crate::config::{CowCapability, PostgresSection};
 use crate::project::Project;
+use crate::remedy::{Problem, Remedy};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use postgres::Client;
@@ -34,6 +35,8 @@ pub struct ManagedServer {
     /// Compose project name, `devflow-<sanitized name>-<id8>`.
     pub compose_project: String,
     pub image: String,
+    /// The project's root, for the remedies of the errors it raises.
+    root: PathBuf,
     project_id: Uuid,
     /// The key of the postgres service (`[services.<key>]`).
     service_key: String,
@@ -106,6 +109,7 @@ impl ManagedServer {
                 .join(id.to_string()),
             compose_project: compose_project_name(project.name(), id),
             image: settings.image.clone(),
+            root: project.root.clone(),
             project_id: id,
             service_key: service_key.to_string(),
             container_host: orbstack_host(project.name(), id, service_key),
@@ -122,6 +126,7 @@ impl ManagedServer {
             dir,
             compose_project: "devflow-test".into(),
             image: "postgres:18".into(),
+            root: PathBuf::new(),
             project_id: Uuid::nil(),
             service_key: "db".into(),
             container_host: "test".into(),
@@ -315,14 +320,27 @@ impl ManagedServer {
     /// of the caller that is waiting for the server: past `budget` the command
     /// and what it started are killed and reaped.
     pub fn published_port_within(&self, budget: Duration) -> Result<u16> {
-        anyhow::ensure!(
-            self.compose_file().is_file(),
-            "the managed PostgreSQL server has not been started; run `devflow db up`"
-        );
+        if !self.compose_file().is_file() {
+            return Err(self.not_started());
+        }
         let out = self.compose_within(&["port", SERVICE, "5432"], budget)?;
-        parse_published_port(&out).with_context(|| {
-            "the managed PostgreSQL server is not running; run `devflow db up`".to_string()
+        parse_published_port(&out).ok_or_else(|| {
+            Problem::new("the managed PostgreSQL server is not running")
+                .with(Remedy::StartDatabase {
+                    root: self.root.clone(),
+                })
+                .into_error()
         })
+    }
+
+    /// The server was never started (or its files are gone): starting it
+    /// creates them.
+    fn not_started(&self) -> anyhow::Error {
+        Problem::new("the managed PostgreSQL server has not been started")
+            .with(Remedy::StartDatabase {
+                root: self.root.clone(),
+            })
+            .into_error()
     }
 
     pub fn container_state(&self) -> Result<ContainerState> {
@@ -335,9 +353,7 @@ impl ManagedServer {
 
     /// The generated superuser password.
     pub fn admin_password(&self) -> Result<String> {
-        let state = self
-            .load_state()?
-            .context("the managed PostgreSQL server has not been started; run `devflow db up`")?;
+        let state = self.load_state()?.ok_or_else(|| self.not_started())?;
         Ok(state.password)
     }
 
@@ -961,12 +977,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_server_that_was_never_started_offers_to_start_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = ManagedServer::for_test(dir.path().join("server"), "docker".into());
+        server.root = PathBuf::from("/shop");
+        for error in [
+            server.published_port().unwrap_err(),
+            server.admin_password().unwrap_err(),
+        ] {
+            assert!(!error.to_string().contains("`devflow"), "{error}");
+            assert_eq!(
+                crate::remedy::remedies_of(&error),
+                [Remedy::StartDatabase {
+                    root: PathBuf::from("/shop")
+                }]
+            );
+        }
+    }
+
+    #[test]
     fn an_unreadable_admin_file_is_described_without_its_content() {
         let dir = tempfile::tempdir().unwrap();
         let server = ManagedServer {
             dir: dir.path().to_path_buf(),
             compose_project: "devflow-x".into(),
             image: "postgres:18".into(),
+            root: PathBuf::new(),
             project_id: Uuid::nil(),
             service_key: "db".into(),
             container_host: "x".into(),

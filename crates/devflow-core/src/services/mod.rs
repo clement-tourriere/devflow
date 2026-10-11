@@ -70,6 +70,10 @@ pub struct Service {
     section: ContainerSection,
     store: Store,
     orbstack: bool,
+    /// The project's root, for the remedies of the errors this service
+    /// raises; empty for a service made from the catalog alone (a coordinator
+    /// that has no project), whose errors then carry none.
+    root: std::path::PathBuf,
 }
 
 /// Where a running branch is reached.
@@ -194,6 +198,7 @@ impl Service {
             section.clone(),
             &docker::daemon_id()?,
         )
+        .map(|service| service.in_project(project))
     }
 
     /// The service a receipt binding names, whether or not the configuration
@@ -214,6 +219,7 @@ impl Service {
             section,
             &docker::daemon_id()?,
         )
+        .map(|service| service.in_project(project))
     }
 
     /// The service of a recorded key, for a coordinator: the catalog knows
@@ -237,6 +243,43 @@ impl Service {
         )
     }
 
+    /// Remember the project's root, so that the errors raised carry remedies.
+    fn in_project(mut self, project: &Project) -> Service {
+        self.root = project.root.clone();
+        self
+    }
+
+    /// A problem with the remedy "finish or roll back this service's
+    /// interrupted operations".
+    pub(crate) fn reconcile_problem(&self, message: impl Into<String>) -> crate::remedy::Problem {
+        let problem = crate::remedy::Problem::new(message);
+        if self.root.as_os_str().is_empty() {
+            return problem;
+        }
+        problem.with(crate::remedy::Remedy::ReconcileService {
+            root: self.root.clone(),
+            key: self.key.clone(),
+        })
+    }
+
+    /// A problem with the remedy "start this service" (the branch `branch`,
+    /// when it is about one).
+    pub(crate) fn start_problem(
+        &self,
+        message: impl Into<String>,
+        branch: Option<Uuid>,
+    ) -> crate::remedy::Problem {
+        let problem = crate::remedy::Problem::new(message);
+        if self.root.as_os_str().is_empty() {
+            return problem;
+        }
+        problem.with(crate::remedy::Remedy::StartService {
+            root: self.root.clone(),
+            key: self.key.clone(),
+            branch,
+        })
+    }
+
     fn new(
         project: Uuid,
         project_name: &str,
@@ -254,6 +297,7 @@ impl Service {
             section,
             store: Store::open(project, daemon)?,
             orbstack: crate::db::orbstack(),
+            root: std::path::PathBuf::new(),
         })
     }
 
@@ -336,11 +380,12 @@ impl Service {
 
     /// The URL and endpoints of a branch (it need not be running).
     pub fn endpoint(&self, record: &BranchRecord) -> Result<Endpoint> {
-        let port = record.port.with_context(|| {
-            format!(
-                "branch {} has no port yet; start it with `devflow service {} up`",
-                record.id, self.key
+        let port = record.port.ok_or_else(|| {
+            self.start_problem(
+                format!("branch {} has no port yet; start it first", record.id),
+                Some(record.id),
             )
+            .into_error()
         })?;
         let (url, container_port) = match (self.engine, &record.mysql) {
             (Engine::Mysql, Some(identity)) => (
@@ -605,6 +650,7 @@ impl Service {
             if service.forgetting.is_some() {
                 return Err(catalog::Forgetting {
                     key: self.key.clone(),
+                    root: self.root.clone(),
                 }
                 .into());
             }
@@ -664,7 +710,27 @@ mod tests {
             section: ContainerSection::default(),
             store: Store::open(Uuid::nil(), "daemon").unwrap(),
             orbstack: true,
+            root: std::path::PathBuf::new(),
         }
+    }
+
+    #[test]
+    fn a_branch_without_a_port_offers_to_start_it() {
+        let mut svc = service();
+        svc.root = std::path::PathBuf::from("/shop");
+        let branch = BranchRecord::for_test(Uuid::nil());
+        let error = svc.endpoint(&branch).unwrap_err();
+        assert!(!error.to_string().contains("`devflow"), "{error}");
+        assert_eq!(
+            crate::remedy::remedies_of(&error),
+            [crate::remedy::Remedy::StartService {
+                root: "/shop".into(),
+                key: "my_cache".into(),
+                branch: Some(Uuid::nil()),
+            }]
+        );
+        // A service made from the catalog alone knows no project: no remedy.
+        assert!(crate::remedy::remedies_of(&service().endpoint(&branch).unwrap_err()).is_empty());
     }
 
     #[test]

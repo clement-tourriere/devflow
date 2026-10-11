@@ -591,13 +591,18 @@ impl Service {
                 // A dump that is missing is data that is missing, never an empty
                 // dataset: the catalog has no source that is recorded as empty
                 // (an empty reset copies nothing).
-                anyhow::ensure!(
-                    !report.empty,
-                    "the source volume {src_volume} holds no {what}; devflow will not treat \
-                     missing data as an empty dataset (start the source with `devflow service \
-                     {} up` so it saves, or reset to empty on purpose)",
-                    self.key
-                );
+                if report.empty {
+                    return Err(self
+                        .start_problem(
+                            format!(
+                                "the source volume {src_volume} holds no {what}; devflow will \
+                                 not treat missing data as an empty dataset (start the source so \
+                                 it saves, or reset to empty on purpose)"
+                            ),
+                            None,
+                        )
+                        .into_error());
+                }
                 Ok(report)
             }
             HelperOutcome::Exited { code, stdout } => {

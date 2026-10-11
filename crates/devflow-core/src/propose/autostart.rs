@@ -39,10 +39,10 @@ impl Builder<'_> {
             evidence.push(format!("{PITCHFORK_FILE}: proposed daemons"));
         }
         let mut risks = vec![
-            "Every `devflow setup` and `devflow switch` that finds the workspace ready runs \
+            "Every setup and switch that finds the workspace ready runs \
              `pitchfork start` for its daemons, so they run with your permissions as soon \
              as you enter a workspace. They start only when the workspace is ready and its \
-             pitchfork files are the ones `devflow trust` approved."
+             pitchfork files are the ones you approved."
                 .to_string(),
         ];
         let autonomous = ProcessesScope::read(self.root).autonomous;

@@ -6,6 +6,7 @@ use clap::{Args, CommandFactory};
 use clap_complete::Shell;
 use devflow_core::doctor::{self, Check, CheckStatus};
 use devflow_core::error::NotInitialized;
+use devflow_core::remedy::Remedy;
 use devflow_core::{Project, redact};
 use serde_json::json;
 use std::path::PathBuf;
@@ -60,15 +61,16 @@ pub fn doctor(ctx: &Ctx) -> Result<ExitCode> {
         Ok(project) => Some(project),
         Err(error) => {
             let hint = if error.downcast_ref::<NotInitialized>().is_some() {
-                "run `devflow init` to create devflow.toml"
+                "create devflow.toml"
             } else {
-                "run devflow inside a Git repository (`devflow init` creates devflow.toml)"
+                "run devflow inside a Git repository"
             };
             checks.push(Check {
                 name: "project".into(),
                 status: CheckStatus::Warn,
                 detail: format!("{error:#}"),
                 hint: Some(hint.into()),
+                remedies: devflow_core::remedy::remedies_of(&error),
             });
             None
         }
@@ -92,6 +94,10 @@ pub fn doctor(ctx: &Ctx) -> Result<ExitCode> {
     })
 }
 
+/// Hint lines under one check: a check with many remedies (an orphan per
+/// branch) prints the first ones; the JSON document lists them all.
+const MAX_HINTS: usize = 6;
+
 fn print_checks(checks: &[Check]) {
     let palette = Palette::stdout();
     let width = checks
@@ -109,9 +115,12 @@ fn print_checks(checks: &[Check]) {
             "{symbol} {:<width$}  {}",
             check.name, check.detail
         )));
-        if let Some(hint) = &check.hint
-            && check.status != CheckStatus::Ok
-        {
+        if check.status == CheckStatus::Ok {
+            continue;
+        }
+        // The plain-words hint, then one line per remedy that has a command.
+        let remedies = check.remedies.iter().filter_map(Remedy::hint);
+        for hint in check.hint.iter().cloned().chain(remedies).take(MAX_HINTS) {
             say(format!(
                 "  {}  {}",
                 " ".repeat(width),

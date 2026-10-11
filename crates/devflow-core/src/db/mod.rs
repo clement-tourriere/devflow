@@ -298,6 +298,8 @@ pub struct ReconcileReport {
 /// The project's Postgres server, as configured by its `engine = "postgres"`
 /// service in `[services]`.
 pub struct Server {
+    /// The project's root, for the remedies of the errors it raises.
+    root: std::path::PathBuf,
     project_id: uuid::Uuid,
     project_name: String,
     settings: crate::config::PostgresSection,
@@ -319,6 +321,7 @@ impl Server {
             PostgresMode::External => None,
         };
         Ok(Some(Server {
+            root: project.root.clone(),
             project_id: project.id(),
             project_name: project.name().to_string(),
             settings,

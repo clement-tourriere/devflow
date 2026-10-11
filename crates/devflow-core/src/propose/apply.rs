@@ -144,6 +144,7 @@ pub fn apply_interrupted_after(
 fn stale(message: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(StalePlan {
         message: message.into(),
+        root: PathBuf::new(),
     })
 }
 
@@ -164,6 +165,24 @@ pub(super) struct Probes<'a> {
 
 /// [`apply`] with test seams.
 pub(super) fn apply_with(
+    root: &Path,
+    plan: &Proposal,
+    accepted: &[ItemId],
+    probes: &Probes,
+) -> Result<ApplyReport> {
+    apply_checked(root, plan, accepted, probes).map_err(|error| {
+        // The refusal is raised far from the repository's path; say which one.
+        match error.downcast::<StalePlan>() {
+            Ok(stale) => anyhow::Error::new(StalePlan {
+                root: root.to_path_buf(),
+                ..stale
+            }),
+            Err(error) => error,
+        }
+    })
+}
+
+fn apply_checked(
     root: &Path,
     plan: &Proposal,
     accepted: &[ItemId],
@@ -263,7 +282,7 @@ fn apply_locked(
     if !changed.is_empty() {
         let mut message = format!(
             "the repository changed since the plan was made; nothing was written. Changed: {}. \
-             Run `devflow init --plan` again",
+             Make a new plan",
             changed.join(", ")
         );
         if let Some(journal) = previous.filter(|j| j.state == JournalState::Applying) {
@@ -425,14 +444,14 @@ fn resume(
         if journal.state == JournalState::Complete {
             return Err(stale(format!(
                 "this plan was already applied, and the files changed since: {}. Nothing was \
-                 written. Run `devflow init --plan` for a new plan",
+                 written. Make a new plan",
                 problems.join(", ")
             )));
         }
         return Err(stale(format!(
             "an earlier apply of this plan is unfinished, but the files changed since: {}. \
-             Nothing was written. Review the files, then delete {} to start over from a new \
-             `devflow init --plan`",
+             Nothing was written. Review the files, then delete {} to start over with a new \
+             plan",
             problems.join(", "),
             path.display()
         )));
@@ -453,14 +472,14 @@ fn resume(
             if done.is_empty() {
                 return Err(stale(
                     "the repository files detection reads changed since the plan was made; \
-                     nothing was written. Run `devflow init --plan` again",
+                     nothing was written. Make a new plan",
                 ));
             }
             return Err(stale(format!(
                 "an earlier apply of this plan is unfinished, but the repository changed since \
                  the plan was made (the files detection reads: manifests, lockfiles, compose, \
                  .env key names, ...). Nothing more was written. Review the files, then delete \
-                 {} to start over from a new `devflow init --plan`",
+                 {} to start over with a new plan",
                 path.display()
             )));
         }
@@ -585,7 +604,7 @@ fn ensure_unedited(
 
 /// The error for a file that is not what the plan saw.
 fn edited_error(what: &str, already: &[&str], journal: &Path) -> anyhow::Error {
-    let mut message = format!("{what}. Run `devflow init --plan` again");
+    let mut message = format!("{what}. Make a new plan");
     if !already.is_empty() {
         message.push_str(&format!(
             ". Already in place from this apply: {}; review the files, then delete {} to start \

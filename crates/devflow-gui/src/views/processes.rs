@@ -8,7 +8,7 @@
 //! its gates for starting and stopping (the workspace is ready, its own
 //! pitchfork files are the approved ones, no daemon starts on its own). The
 //! views never decide; a disabled button carries core's reason.
-use super::{dialogs, doctor, overview::ProcessReading, ui::Tone, widgets::banner};
+use super::{dialogs, doctor, overview::ProcessReading, remedies, ui::Tone, widgets::banner};
 use crate::{
     model::ProcessTarget,
     ops::TrustChoice,
@@ -350,7 +350,7 @@ pub(crate) fn refusal_banner(
             Button::new(SharedString::from(format!("{id}-doctor")))
                 .icon(Lucide::ListChecks)
                 .label("Run doctor")
-                .tooltip("Check what mise hands this workspace (devflow doctor)")
+                .tooltip("Check what mise hands this workspace")
                 .on_click(move |_, window, cx| {
                     doctor::open(&doctor_state, path.clone(), window, cx)
                 }),
@@ -367,7 +367,11 @@ pub(crate) fn refusal_banner(
                 }),
         )
     } else {
-        None
+        // Install pitchfork, set the workspace up, approve what it runs: the
+        // button core's refusal implies, if it implies one.
+        refusal.remedies(&target.path).first().map(|remedy| {
+            remedies::button_with_id(state, format!("{id}-fix").into(), remedy, false)
+        })
     };
     let dismiss = Button::new(SharedString::from(format!("{id}-dismiss")))
         .ghost()

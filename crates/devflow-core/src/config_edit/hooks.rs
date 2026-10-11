@@ -172,10 +172,7 @@ impl List<'_> {
                     .collect();
                 match found.as_slice() {
                     [one] => Ok(*one),
-                    [] => bail!(
-                        "hooks.{} has no entry with that name; `devflow hooks list` shows them",
-                        phase.as_str()
-                    ),
+                    [] => bail!("hooks.{} has no entry with that name", phase.as_str()),
                     _ => bail!(
                         "hooks.{} has several entries with that name",
                         phase.as_str()

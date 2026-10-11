@@ -693,7 +693,7 @@ fn start_refuses_a_workspace_that_is_not_ready() {
         matches!(refusal(&error), Refusal::NotReady { status, .. } if status == "needs_attention"),
         "{error:#}"
     );
-    assert!(error.to_string().contains("devflow setup"));
+    assert!(error.to_string().contains("set it up"));
     // A checkout devflow never set up.
     let bare = worktree::create(&t.project, "bare", None).unwrap();
     let error = start(&t, &fake, &bare).unwrap_err();
@@ -722,7 +722,7 @@ fn start_refuses_an_unapproved_configuration_and_a_changed_one() {
         "{error:#}"
     );
     assert_eq!(refusal(&error).code(), "not_approved");
-    assert!(refusal(&error).hint().unwrap().contains("devflow trust"));
+    assert!(refusal(&error).hint().unwrap().contains("approve"));
 
     approve_workspace(&t, &ws);
     // The worktree's pitchfork file changes after the approval.
@@ -1834,7 +1834,7 @@ fn stop_refuses_when_the_configuration_changed_unless_forced() {
         "{error:#}"
     );
     assert!(error.to_string().contains("lifecycle hooks"), "{error:#}");
-    assert!(refusal(&error).hint().unwrap().contains("--force"));
+    assert!(refusal(&error).hint().unwrap().contains("forcing"));
     assert!(fake.mutations().is_empty());
 
     let report = processes::stop_with(
@@ -2491,7 +2491,7 @@ fn an_unreadable_state_is_not_nothing_running() {
         "{error:#}"
     );
     assert_eq!(refusal(&error).code(), "state_unknown");
-    assert!(refusal(&error).hint().unwrap().contains("--force"));
+    assert!(refusal(&error).hint().unwrap().contains("forcing"));
     assert!(fake.mutations().is_empty());
 
     // Removal is protected, and the workspace stays.
@@ -3106,8 +3106,8 @@ fn a_supervisor_that_died_with_daemons_devflow_started_does_not_authorize_remova
     let hint = unknown.hint().unwrap();
     assert!(
         hint.contains("pitchfork supervisor start")
-            && hint.contains("devflow down")
-            && hint.contains("--force"),
+            && hint.contains("stop the workspace's processes")
+            && hint.contains("forcing"),
         "{hint}"
     );
     let error = setup::remove(
@@ -3565,13 +3565,7 @@ fn autostart_starts_an_approved_ready_workspace_and_explains_every_refusal() {
         matches!(outcome.refusal, Some(Refusal::NotApproved { .. })),
         "{outcome:?}"
     );
-    assert!(
-        outcome
-            .skipped
-            .as_deref()
-            .unwrap()
-            .contains("devflow trust")
-    );
+    assert!(outcome.skipped.as_deref().unwrap().contains("approve"));
     assert!(fake.mutations().is_empty());
     // Approved: started.
     approve_workspace(&t, &ws);
@@ -4210,7 +4204,10 @@ fn a_new_instance_is_refused_while_the_old_identitys_daemons_run() {
     let refused = refusal(&error);
     assert_eq!(refused.code(), "daemons_running");
     assert!(
-        refused.hint().unwrap().contains("devflow down"),
+        refused
+            .hint()
+            .unwrap()
+            .contains("stop the workspace's processes"),
         "{:?}",
         refused.hint()
     );
@@ -4288,9 +4285,9 @@ fn a_new_instance_is_refused_when_the_old_daemons_cannot_be_shown_gone() {
         };
         assert!(detail.contains(expect), "{name}: {detail}");
         assert!(
-            hint.as_deref().is_some_and(
-                |hint| hint.contains("devflow down") && hint.contains("DEVFLOW_INSTANCE_ID")
-            ),
+            hint.as_deref()
+                .is_some_and(|hint| hint.contains("stop the workspace's processes")
+                    && hint.contains("DEVFLOW_INSTANCE_ID")),
             "{name}: {hint:?}"
         );
         assert_eq!(instance_of(&t, &ws), old, "{name}");

@@ -49,9 +49,9 @@ fn fill_status(server: &Server, status: &mut ServerStatus) -> Result<()> {
         if !state.running {
             status.problem = Some(
                 if state.exists {
-                    "the PostgreSQL container is stopped; run `devflow db up`"
+                    "the PostgreSQL container is stopped"
                 } else {
-                    "the managed PostgreSQL server has not been started; run `devflow db up`"
+                    "the managed PostgreSQL server has not been started"
                 }
                 .into(),
             );
@@ -457,9 +457,9 @@ fn abandon(s: &mut Session, id: Uuid, error: anyhow::Error) -> anyhow::Error {
     );
     match reconcile::recover_branch(s, id) {
         Ok(_) => error,
-        Err(recovery) => anyhow::anyhow!(
-            "{error:#} (cleanup also failed: {recovery:#}; run `devflow db reconcile`)"
-        ),
+        Err(recovery) => s.needs_reconcile(format!(
+            "{error:#} (cleanup also failed: {recovery:#}; finish the interrupted work)"
+        )),
     }
 }
 
@@ -659,9 +659,9 @@ pub(super) fn reset_branch(
                     );
                     error
                 }
-                Err(recovery) => anyhow::anyhow!(
-                    "{error:#} (cleanup also failed: {recovery:#}; run `devflow db reconcile`)"
-                ),
+                Err(recovery) => s.needs_reconcile(format!(
+                    "{error:#} (cleanup also failed: {recovery:#}; finish the interrupted work)"
+                )),
             });
         }
         let row =
@@ -732,12 +732,15 @@ pub(super) fn drop_branch(server: &Server, id: Uuid) -> Result<()> {
         let Some(row) = meta::get_branch(&mut s.admin, project, id)? else {
             return Ok(());
         };
-        anyhow::ensure!(
-            row.op.is_none(),
-            "branch {} has an unrecovered reset ({}); resolve it before dropping",
-            row.name,
-            row.error.as_deref().unwrap_or("see `devflow db reconcile`")
-        );
+        if row.op.is_some() {
+            return Err(s.needs_reconcile(format!(
+                "branch {} has an unrecovered reset ({}); resolve it before dropping",
+                row.name,
+                row.error
+                    .as_deref()
+                    .unwrap_or("finish the interrupted work")
+            )));
+        }
         s.step()?;
         meta::set_branch_status(
             &mut s.admin,
@@ -916,9 +919,9 @@ pub(super) fn create_snapshot(
             );
             return Err(match reconcile::recover_snapshot(s, id) {
                 Ok(_) => error,
-                Err(recovery) => anyhow::anyhow!(
-                    "{error:#} (cleanup also failed: {recovery:#}; run `devflow db reconcile`)"
-                ),
+                Err(recovery) => s.needs_reconcile(format!(
+                    "{error:#} (cleanup also failed: {recovery:#}; finish the interrupted work)"
+                )),
             });
         }
         let mut info =
@@ -1332,6 +1335,7 @@ mod tests {
             project_name: "test".into(),
             settings: crate::config::PostgresSection::default(),
             managed: Some(managed),
+            root: std::path::PathBuf::new(),
         }
     }
 

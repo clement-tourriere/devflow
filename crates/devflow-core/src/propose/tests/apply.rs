@@ -455,7 +455,7 @@ fn a_file_edited_after_the_plan_was_read_is_never_overwritten() {
         error.contains("mise.toml was edited since the plan was made"),
         "{error}"
     );
-    assert!(error.contains("devflow init --plan"), "{error}");
+    assert!(error.contains("Make a new plan"), "{error}");
     assert!(
         error.contains("devflow.toml") && error.contains("init-apply.json"),
         "the first file was already written, and the journal is named: {error}"
@@ -576,7 +576,7 @@ fn a_save_between_staging_and_the_replacement_is_not_lost() {
     .to_string();
     assert!(
         error.contains("mise.toml was edited since the plan was made")
-            && error.contains("devflow init --plan"),
+            && error.contains("Make a new plan"),
         "{error}"
     );
     assert_eq!(repo.read("mise.toml"), edited, "the edit survived");

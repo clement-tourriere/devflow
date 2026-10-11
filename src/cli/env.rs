@@ -14,6 +14,7 @@ use devflow_core::config::EnvPreset;
 use devflow_core::config_edit::{
     self, Applied, ConfigFiles, Edit, EnvPreview, PreviewOrigin, PreviewRow, RecipeRow, Target,
 };
+use devflow_core::remedy::Remedy;
 use devflow_core::{Project, redact, trust, worktree};
 use serde_json::{Value, json};
 use std::process::ExitCode;
@@ -232,7 +233,13 @@ fn list(ctx: &Ctx, name: &str, args: ListArgs) -> Result<ExitCode> {
             "preview_workspace": workspace.as_ref().map(|w| &w.name),
             "trust": state,
             // Valid configuration that is probably not what was meant.
-            "warnings": project.config.env.hints(),
+            "warnings": project
+                .config
+                .env
+                .hints()
+                .iter()
+                .map(|hint| hint.message.as_str())
+                .collect::<Vec<_>>(),
         });
         if reveal {
             // The one document that prints credentials on purpose, like
@@ -246,7 +253,12 @@ fn list(ctx: &Ctx, name: &str, args: ListArgs) -> Result<ExitCode> {
 
     let palette = Palette::stdout();
     for hint in project.config.env.hints() {
-        note(format!("warning: {hint}"));
+        note(format!("warning: {}", hint.message));
+        let add = Remedy::AddEnvPreset {
+            root: project.root.clone(),
+            preset: hint.preset.to_string(),
+        };
+        note(format!("hint: {}", add.hint().unwrap_or_default()));
     }
     if view.presets.is_empty() && view.recipes.is_empty() {
         say("No [env] recipes or presets.");

@@ -190,6 +190,7 @@ pub fn run_remedy(
         }
         Remedy::Reveal { path } => cx.reveal_path(path),
         Remedy::OpenGuide { url } => cx.open_url(url),
+        scoped => super::remedies::run_scoped(state, scoped, window, cx),
     }
 }
 

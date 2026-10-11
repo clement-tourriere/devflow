@@ -691,7 +691,10 @@ fn summary_lines(outcome: &SetupOutcome, palette: Palette) -> Vec<String> {
                 palette.yellow("!"),
                 workspace.name
             ));
-            let mut needs_trust = false;
+            let needs_trust = outcome
+                .remedies
+                .iter()
+                .any(|r| matches!(r, Remedy::Trust { .. }));
             let mut failed = false;
             for phase in Phase::ALL {
                 let record = outcome.receipt.phase(phase);
@@ -699,12 +702,6 @@ fn summary_lines(outcome: &SetupOutcome, palette: Palette) -> Vec<String> {
                 if record.state != PhaseState::Failed && !skipped {
                     continue;
                 }
-                needs_trust |= skipped
-                    && matches!(phase, Phase::Hooks | Phase::Env)
-                    && record
-                        .detail
-                        .as_deref()
-                        .is_some_and(|d| d.contains("devflow trust"));
                 failed |= record.state == PhaseState::Failed;
                 let detail = record.detail.as_deref().unwrap_or("no details recorded");
                 lines.push(format!("  {}: {}", phase.as_str(), redact::text(detail)));
@@ -866,6 +863,12 @@ mod tests {
     use std::path::PathBuf;
 
     fn outcome(receipt: Receipt) -> SetupOutcome {
+        outcome_with(receipt, Vec::new())
+    }
+
+    /// The outcome of a run whose remedies core decided (approve what the
+    /// workspace asks to run, then run setup).
+    fn outcome_with(receipt: Receipt, remedies: Vec<Remedy>) -> SetupOutcome {
         SetupOutcome {
             workspace: Workspace {
                 name: "feature/a".into(),
@@ -883,6 +886,7 @@ mod tests {
             payload: Vec::new(),
             hooks: None,
             warnings: vec!["could not clone x".into()],
+            remedies,
             approval_differs: false,
         }
     }
@@ -918,7 +922,14 @@ mod tests {
             Phase::Hooks,
             "setup hooks are not trusted; review them with `devflow trust`".into(),
         );
-        let lines = summary_lines(&outcome(receipt.clone()), Palette::stdout()).join("\n");
+        let trust = Remedy::Trust {
+            workspace: PathBuf::from("/work/feature-a"),
+        };
+        let lines = summary_lines(
+            &outcome_with(receipt.clone(), vec![trust.clone()]),
+            Palette::stdout(),
+        )
+        .join("\n");
         assert!(lines.contains("feature/a needs attention"), "{lines}");
         assert!(
             lines.contains("hooks: setup hooks are not trusted"),
@@ -938,7 +949,7 @@ mod tests {
             "the [env] recipes and presets are not trusted; review them with `devflow trust`"
                 .into(),
         );
-        let lines = summary_lines(&outcome(env), Palette::stdout()).join("\n");
+        let lines = summary_lines(&outcome_with(env, vec![trust]), Palette::stdout()).join("\n");
         assert!(lines.contains("env: the [env] recipes"), "{lines}");
         assert!(lines.contains("`devflow trust`"), "{lines}");
         let mut drift = self::receipt();

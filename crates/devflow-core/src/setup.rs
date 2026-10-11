@@ -19,10 +19,11 @@ use crate::receipt::{
     self, DataBinding, ExtraBinding, PendingBranch, Phase, PhaseState, Receipt, ReceiptLock,
     ServiceBinding, Status,
 };
+use crate::remedy::{Problem, Remedy};
 use crate::services::catalog::{BranchRecord, RecordState, SnapshotRecord, SourceRef};
 use crate::services::{self, Adopted, NewBranch, Service};
-use crate::trust::{self, Approval, Verdict};
-use crate::worktree::{self, Workspace, protected};
+use crate::trust::{self, Approval, TrustState, Verdict};
+use crate::worktree::{self, Workspace, protected, protected_with};
 use crate::{cow, env_file};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
@@ -32,14 +33,14 @@ use std::path::{Path, PathBuf};
 mod mise_gate;
 
 const UNTRUSTED: &str =
-    "setup hooks are not trusted; review them with `devflow trust`, then re-run `devflow setup`";
-const UNTRUSTED_ENV: &str = "the [env] recipes and presets are not trusted; review them with \
-     `devflow trust`, then re-run `devflow setup`";
+    "setup hooks are not trusted; review and approve them, then run setup again";
+const UNTRUSTED_ENV: &str = "the [env] recipes and presets are not trusted; review and approve \
+     them, then run setup again";
 /// What a run reviewed is not what the workspace holds (an existing branch
 /// with other hooks, a pitchfork file that changed): nothing ran on that
 /// approval.
 const DIFFERS: &str = "this workspace's configuration differs from what you reviewed; \
-     review it with `devflow trust` inside the workspace, then re-run `devflow setup`";
+     review it again in the workspace, then run setup again";
 
 /// The service key of a URL-only attachment (`devflow setup --database-url`)
 /// in a project whose configuration has no PostgreSQL service.
@@ -100,6 +101,14 @@ pub struct SetupOutcome {
     pub payload: Vec<EntryReport>,
     pub hooks: Option<HookReport>,
     pub warnings: Vec<String>,
+    /// What a person can do about the outcome (approve what the workspace asks
+    /// to run, run setup again), most useful first; empty for a ready
+    /// workspace. See [`remedies_for`].
+    #[serde(
+        serialize_with = "crate::remedy::serialize_remedies",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub remedies: Vec<Remedy>,
     /// The run was given an approval of other content than the workspace
     /// holds, so its `env` and `hooks` phases were refused (they read
     /// `needs_attention`, nothing ran). A frontend can show the workspace's
@@ -118,6 +127,77 @@ pub struct WorkspaceStatus {
     pub busy: bool,
 }
 
+impl WorkspaceStatus {
+    /// What a person can do about this workspace's state: see [`remedies_for`].
+    /// A workspace whose directory is gone has none here (that is the
+    /// project's to settle: forget the registration or remove the workspace).
+    pub fn remedies(&self, project: &Project) -> Vec<Remedy> {
+        if self.workspace.missing {
+            return Vec::new();
+        }
+        remedies_for(
+            project,
+            &self.workspace.path,
+            self.receipt.as_ref(),
+            self.busy,
+        )
+    }
+}
+
+/// What a person can do about the workspace at `path` whose receipt is
+/// `receipt` (`None` for a checkout devflow has not set up): nothing while
+/// a setup run holds it or when it is ready; otherwise approve what it asks
+/// to run when that is what setup skipped (and the approval on record does not
+/// cover it), then run setup. Decided from the receipt's phases and the trust
+/// state, never from the wording of a reason.
+pub fn remedies_for(
+    project: &Project,
+    path: &Path,
+    receipt: Option<&Receipt>,
+    busy: bool,
+) -> Vec<Remedy> {
+    remedies_given(path, receipt, busy, || {
+        matches!(
+            trust::state_at(project, path),
+            Ok(TrustState::Untrusted { .. })
+        )
+    })
+}
+
+/// [`remedies_for`] with the question "is what the workspace asks to run
+/// unapproved?" answered by `untrusted` (asked only when it matters).
+fn remedies_given(
+    path: &Path,
+    receipt: Option<&Receipt>,
+    busy: bool,
+    untrusted: impl FnOnce() -> bool,
+) -> Vec<Remedy> {
+    if busy {
+        return Vec::new();
+    }
+    let setup = Remedy::Setup {
+        workspace: path.to_path_buf(),
+    };
+    let Some(receipt) = receipt else {
+        return vec![setup];
+    };
+    if receipt.status() == Status::Ready {
+        return Vec::new();
+    }
+    let awaiting_review = [Phase::Env, Phase::Hooks].into_iter().any(|phase| {
+        let record = receipt.phase(phase);
+        record.state == PhaseState::Skipped && record.required_skip
+    });
+    let mut remedies = Vec::new();
+    if awaiting_review && untrusted() {
+        remedies.push(Remedy::Trust {
+            workspace: path.to_path_buf(),
+        });
+    }
+    remedies.push(setup);
+    remedies
+}
+
 /// Create a new workspace and run the whole pipeline. A workspace of that name
 /// whose setup did not finish is resumed instead. `switch` hooks are not part
 /// of creation: a caller that wants them runs [`run_switch_hooks`] afterwards.
@@ -132,16 +212,25 @@ pub fn create(
     validate_options(&request.options)?;
     let all = worktree::list(project)?;
     if let Some(existing) = all.iter().find(|w| w.branch.as_deref() == Some(name)) {
-        ensure!(
-            !existing.is_default,
-            "'{name}' is the default workspace; use `devflow switch {name}`"
-        );
+        if existing.is_default {
+            return Err(Problem::new(format!(
+                "'{name}' is the default workspace; switch to it instead of creating it"
+            ))
+            .with(Remedy::SwitchTo {
+                root: project.root.clone(),
+                name: name.to_string(),
+            })
+            .into_error());
+        }
         let Some(receipt) = load_receipt(project, existing)? else {
-            bail!(
-                "workspace '{name}' already exists at {} but devflow has not set it up; \
-                 run `devflow setup` inside it",
+            return Err(Problem::new(format!(
+                "workspace '{name}' already exists at {} but devflow has not set it up",
                 existing.path.display()
-            );
+            ))
+            .with(Remedy::Setup {
+                workspace: existing.path.clone(),
+            })
+            .into_error());
         };
         ensure!(
             receipt.status() != Status::Ready,
@@ -240,7 +329,7 @@ fn refuse_borrowed_identity(
             receipt.project_id != project.id() || receipt.instance_id != id,
             "DEVFLOW_INSTANCE_ID {id} is the instance id recorded for workspace '{}' ({}); \
              refusing to give it to '{}'. The variable names the identity of one copied \
-             workspace: unset it, or use `devflow setup --new-instance` for a fresh one",
+             workspace: unset it, or set the workspace up as a new instance",
             other.name,
             other.path.display(),
             workspace.name
@@ -471,7 +560,10 @@ pub fn switch(
             }
             outcome.hooks = Some(report);
         }
-        SwitchHooks::NotRun(Some(why)) => outcome.warnings.push(why),
+        SwitchHooks::NotRun(Some((why, remedies))) => {
+            outcome.warnings.push(why);
+            outcome.remedies.extend(remedies);
+        }
         SwitchHooks::NotRun(None) => {}
     }
     Ok(outcome)
@@ -503,8 +595,9 @@ pub fn run_switch_hooks(
 
 enum SwitchHooks {
     Ran(HookReport),
-    /// Did not run; the reason when the user should hear about it.
-    NotRun(Option<String>),
+    /// Did not run; the reason when the user should hear about it, with what
+    /// can be done about it.
+    NotRun(Option<(String, Vec<Remedy>)>),
 }
 
 fn switch_hooks(
@@ -518,21 +611,27 @@ fn switch_hooks(
         return Ok(SwitchHooks::NotRun(None));
     }
     if receipt.status() != Status::Ready {
-        return Ok(SwitchHooks::NotRun(Some(
+        return Ok(SwitchHooks::NotRun(Some((
             "switch hooks were not run: the workspace is not ready".into(),
-        )));
+            remedies_for(project, &workspace.path, Some(receipt), false),
+        ))));
     }
     match hooks_verdict(project, &workspace.path, options.approval.as_ref())? {
         Verdict::Approved => {}
         Verdict::NotApproved => {
-            return Ok(SwitchHooks::NotRun(Some(
-                "switch hooks were not run: hooks are not trusted; review them with `devflow trust`"
-                    .into(),
-            )));
+            return Ok(SwitchHooks::NotRun(Some((
+                "switch hooks were not run: hooks are not trusted; review and approve them".into(),
+                vec![Remedy::Trust {
+                    workspace: workspace.path.clone(),
+                }],
+            ))));
         }
         Verdict::Differs => {
-            return Ok(SwitchHooks::NotRun(Some(format!(
-                "switch hooks were not run: {DIFFERS}"
+            return Ok(SwitchHooks::NotRun(Some((
+                format!("switch hooks were not run: {DIFFERS}"),
+                vec![Remedy::Trust {
+                    workspace: workspace.path.clone(),
+                }],
             ))));
         }
     }
@@ -780,14 +879,17 @@ pub fn remove(
         let verdict = hooks_verdict(project, &workspace.path, options.approval.as_ref())?;
         let trusted = verdict.approved();
         if !trusted && !force {
-            return Err(protected(
+            return Err(protected_with(
                 name,
                 if verdict == Verdict::Differs {
-                    "this workspace's configuration differs from what you reviewed; review its teardown hooks with `devflow trust` inside it"
+                    "this workspace's configuration differs from what you reviewed; review its teardown hooks again in the workspace"
                 } else {
-                    "teardown hooks are not trusted; review them with `devflow trust`"
+                    "teardown hooks are not trusted; review and approve them"
                 },
                 true,
+                vec![Remedy::Trust {
+                    workspace: workspace.path.clone(),
+                }],
             ));
         }
         if !trusted {
@@ -1159,8 +1261,8 @@ pub fn reset_data(
     to: Option<DataSource>,
 ) -> Result<BranchInfo> {
     let lock = lock(workspace)?;
-    let receipt = load_receipt_locked(project, workspace, &lock)?
-        .context("this workspace has no devflow receipt; run `devflow setup` first")?;
+    let receipt =
+        load_receipt_locked(project, workspace, &lock)?.ok_or_else(|| needs_setup(workspace))?;
     let (_, binding) = receipt
         .postgres(&project.config)
         .context("this workspace has no database")?;
@@ -1209,8 +1311,7 @@ fn provenance(info: &BranchInfo) -> Result<ResolvedSource> {
 /// Snapshot a workspace's branch as a new version of `name`.
 pub fn snapshot(project: &Project, workspace: &Workspace, name: &str) -> Result<SnapshotInfo> {
     crate::db::validate_snapshot_name(name)?;
-    let receipt = load_receipt(project, workspace)?
-        .context("this workspace has no devflow receipt; run `devflow setup` first")?;
+    let receipt = load_receipt(project, workspace)?.ok_or_else(|| needs_setup(workspace))?;
     let id = receipt
         .postgres(&project.config)
         .and_then(|(_, binding)| binding.branch_id)
@@ -1327,8 +1428,7 @@ pub fn reset_source(
                 project.config_path.display()
             )
         })?;
-    let receipt = load_receipt(project, workspace)?
-        .context("this workspace has no devflow receipt; run `devflow setup` first")?;
+    let receipt = load_receipt(project, workspace)?.ok_or_else(|| needs_setup(workspace))?;
     let binding = services::workspace::binding(&receipt, key, engine).with_context(|| {
         format!(
             "workspace '{}' has no branch of service '{key}'",
@@ -1388,19 +1488,22 @@ fn container_binding(
     key: &str,
     expect: Option<BranchExpect>,
 ) -> Result<(Service, Receipt, uuid::Uuid)> {
-    let receipt = load_receipt(project, workspace)?
-        .context("this workspace has no devflow receipt; run `devflow setup` first")?;
+    let receipt = load_receipt(project, workspace)?.ok_or_else(|| needs_setup(workspace))?;
     if let Some(expect) = expect {
         expect.verify(workspace, key, &receipt)?;
     }
     let svc = Service::open(project, key)?;
     let id = services::workspace::binding(&receipt, key, svc.engine)
         .and_then(|binding| binding.branch_id)
-        .with_context(|| {
-            format!(
-                "workspace '{}' has no branch of service '{key}'; run `devflow setup` there",
+        .ok_or_else(|| {
+            Problem::new(format!(
+                "workspace '{}' has no branch of service '{key}'",
                 workspace.name
-            )
+            ))
+            .with(Remedy::Setup {
+                workspace: workspace.path.clone(),
+            })
+            .into_error()
         })?;
     Ok((svc, receipt, id))
 }
@@ -1447,8 +1550,8 @@ pub fn service_reset(
     expect: Option<BranchExpect>,
 ) -> Result<BranchRecord> {
     let lock = lock(workspace)?;
-    let mut receipt = load_receipt_locked(project, workspace, &lock)?
-        .context("this workspace has no devflow receipt; run `devflow setup` first")?;
+    let mut receipt =
+        load_receipt_locked(project, workspace, &lock)?.ok_or_else(|| needs_setup(workspace))?;
     if let Some(expect) = expect {
         expect.verify(workspace, key, &receipt)?;
     }
@@ -1461,8 +1564,8 @@ pub fn service_reset(
     })?;
     ensure!(
         binding.owned,
-        "this workspace's branch of '{key}' was not created by this instance ({}); run \
-         `devflow setup --new-instance` to give it its own branch",
+        "this workspace's branch of '{key}' was not created by this instance ({}); set \
+         the workspace up as a new instance to give it its own branch",
         receipt.instance_id
     );
     let id = binding.branch_id.context("the binding names no branch")?;
@@ -1589,7 +1692,14 @@ impl<'a> Runner<'a> {
     }
 
     fn finish(self) -> SetupOutcome {
+        let remedies = remedies_for(
+            self.project,
+            &self.workspace.path,
+            Some(&self.receipt),
+            false,
+        );
         SetupOutcome {
+            remedies,
             status: self.receipt.status(),
             workspace: self.workspace,
             receipt: self.receipt,
@@ -1643,12 +1753,17 @@ impl<'a> Runner<'a> {
                 }
                 Err(error) => {
                     self.record(phase, PhaseState::Failed, Some(format!("{error:#}")))?;
-                    return Err(error.context(format!(
-                        "{} failed; '{}' is kept at {} (re-run `devflow setup` there to resume)",
-                        phase.as_str(),
-                        self.workspace.name,
-                        self.workspace.path.display()
-                    )));
+                    return Err(error.context(
+                        Problem::new(format!(
+                            "{} failed; '{}' is kept at {}",
+                            phase.as_str(),
+                            self.workspace.name,
+                            self.workspace.path.display()
+                        ))
+                        .with(Remedy::Setup {
+                            workspace: self.workspace.path.clone(),
+                        }),
+                    ));
                 }
             }
         }
@@ -1932,8 +2047,8 @@ impl<'a> Runner<'a> {
                 let label = self.receipt.data_source.clone().unwrap_or(pinned);
                 ensure_available(&server, resolved).with_context(|| {
                     format!(
-                        "the recorded data source ({label}) is unavailable; choose another with \
-                         `devflow setup --new-instance --data-from SRC`"
+                        "the recorded data source ({label}) is unavailable; set the workspace up \
+                         as a new instance with another data source"
                     )
                 })?;
                 (resolved, label)
@@ -2121,8 +2236,7 @@ impl<'a> Runner<'a> {
             format!(
                 "the data source of service '{key}' was chosen as {label} ({text}) and is gone; \
                  devflow clones that exact source or none, and does not look the name up again \
-                 (set the workspace up again with `devflow setup --new-instance` and a \
-                 `--data-from` of your choice)"
+                 (set the workspace up as a new instance, with a data source of your choice)"
             )
         })?;
         Ok(Some((source, label)))
@@ -2792,6 +2906,15 @@ fn lock(workspace: &Workspace) -> Result<crate::receipt::ReceiptLock> {
     acquire(&workspace.git_dir)?.ok_or_else(|| busy(&workspace.name))
 }
 
+/// The workspace has no receipt: devflow has not set it up.
+fn needs_setup(workspace: &Workspace) -> anyhow::Error {
+    Problem::new("this workspace has not been set up by devflow yet")
+        .with(Remedy::Setup {
+            workspace: workspace.path.clone(),
+        })
+        .into_error()
+}
+
 /// Another setup run holds the workspace's receipt lock.
 fn busy(workspace: &str) -> anyhow::Error {
     anyhow::Error::new(Busy::setup(workspace))
@@ -2812,7 +2935,7 @@ fn owned_branch(receipt: &Receipt, binding: &ServiceBinding) -> Result<uuid::Uui
     ensure!(
         binding.owned,
         "this workspace's database was not created by this instance ({}); \
-         run `devflow setup --new-instance` to give it its own branch",
+         set the workspace up as a new instance to give it its own branch",
         receipt.instance_id
     );
     Ok(id)
@@ -3378,6 +3501,88 @@ mod tests {
         receipt.services.clear();
         receipt.unmapped = Some(data);
         assert_eq!(recoverable(&receipt, "db"), None);
+    }
+
+    #[test]
+    fn a_workspace_that_is_not_ready_gets_remedies_from_its_phases_not_its_wording() {
+        let path = Path::new("/work/feature");
+        let setup = Remedy::Setup {
+            workspace: path.to_path_buf(),
+        };
+        let trust = Remedy::Trust {
+            workspace: path.to_path_buf(),
+        };
+        // Not set up at all: set it up.
+        assert_eq!(
+            remedies_given(path, None, false, || false),
+            std::slice::from_ref(&setup)
+        );
+        // A setup run holds it: nothing to do but wait.
+        assert!(remedies_given(path, None, true, || true).is_empty());
+
+        let mut receipt = Receipt::new(uuid::Uuid::new_v4(), "feature", None);
+        for phase in [Phase::Materialize, Phase::Payload, Phase::Services] {
+            receipt.set_phase(phase, PhaseState::Done, None);
+        }
+        receipt.set_phase(Phase::Env, PhaseState::Done, None);
+        receipt.skip_required(Phase::Hooks, "any words at all".into());
+        // Hooks waiting for approval that has not been given: review first.
+        assert_eq!(
+            remedies_given(path, Some(&receipt), false, || true),
+            [trust, setup.clone()]
+        );
+        // The approval is on record: only setup has to run again.
+        assert_eq!(
+            remedies_given(path, Some(&receipt), false, || false),
+            std::slice::from_ref(&setup)
+        );
+        // A failed phase is not about approval, and the question is not asked.
+        let mut failed = Receipt::new(uuid::Uuid::new_v4(), "feature", None);
+        failed.set_phase(Phase::Materialize, PhaseState::Failed, Some("boom".into()));
+        assert_eq!(
+            remedies_given(path, Some(&failed), false, || panic!("not asked")),
+            [setup]
+        );
+        // Ready: nothing to fix.
+        receipt.set_phase(Phase::Hooks, PhaseState::Done, None);
+        assert!(remedies_given(path, Some(&receipt), false, || true).is_empty());
+    }
+
+    #[test]
+    fn what_setup_tells_a_person_has_no_command_line_in_it() {
+        for text in [UNTRUSTED, UNTRUSTED_ENV, DIFFERS] {
+            assert!(
+                !text.contains("`devflow") && !text.contains("run devflow"),
+                "{text}"
+            );
+        }
+        let workspace = Workspace {
+            name: "feature".into(),
+            branch: Some("feature".into()),
+            path: PathBuf::from("/work/feature"),
+            git_dir: PathBuf::from("/repo/.git/worktrees/feature"),
+            is_default: false,
+            locked: false,
+            missing: false,
+            head: None,
+            fingerprint: None,
+        };
+        let error = needs_setup(&workspace);
+        assert!(!error.to_string().contains("devflow setup"), "{error}");
+        assert_eq!(
+            crate::remedy::remedies_of(&error),
+            [Remedy::Setup {
+                workspace: workspace.path.clone()
+            }]
+        );
+        // A failed phase keeps the cause under a problem that carries the remedy.
+        let failed = anyhow::anyhow!("boom").context(
+            Problem::new("hooks failed; 'feature' is kept at /work/feature").with(Remedy::Setup {
+                workspace: workspace.path.clone(),
+            }),
+        );
+        assert_eq!(crate::remedy::remedies_of(&failed).len(), 1);
+        assert!(format!("{failed:#}").ends_with("boom"), "{failed:#}");
     }
 
     #[test]

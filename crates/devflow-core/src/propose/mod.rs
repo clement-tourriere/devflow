@@ -293,14 +293,14 @@ impl Proposal {
         if self.proposal_version != PROPOSAL_VERSION {
             bail!(
                 "the plan has proposal_version {}, this devflow reads {PROPOSAL_VERSION}; \
-                 run `devflow init --plan` again",
+                 make a new plan",
                 self.proposal_version
             );
         }
         if self.schema_version != SCHEMA_VERSION {
             bail!(
                 "the plan targets configuration schema {}, this devflow writes {SCHEMA_VERSION}; \
-                 run `devflow init --plan` again",
+                 make a new plan",
                 self.schema_version
             );
         }
@@ -459,7 +459,7 @@ impl Proposal {
 pub(crate) fn journal_dir(root: &Path) -> Result<std::path::PathBuf> {
     let repo = git2::Repository::open(root).map_err(|error| {
         anyhow::anyhow!(
-            "{} is not the top of a Git checkout ({}); `devflow init` records its journal in the \
+            "{} is not the top of a Git checkout ({}); devflow records the setup journal in the \
              repository's .git directory",
             root.display(),
             error.message()

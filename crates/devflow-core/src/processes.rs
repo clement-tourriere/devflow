@@ -508,7 +508,7 @@ pub fn env_wiring(project: &Project, dir: &Path) -> Vec<String> {
     if through_mise.len() > without.len() && !mise_loads_env(dir) {
         problems.push(
             "mise does not load .devflow/env here: add `[env]` with `_.file = \".devflow/env\"` \
-             to mise.toml (devflow init proposes it)"
+             to mise.toml (setting the project up proposes it)"
                 .to_string(),
         );
     }
@@ -679,10 +679,7 @@ impl Refusal {
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Refusal::NotInstalled { detail } => write!(
-                f,
-                "pitchfork is not available: {detail}; see `devflow pitchfork status`"
-            ),
+            Refusal::NotInstalled { detail } => write!(f, "pitchfork is not available: {detail}"),
             Refusal::NothingConfigured => f.write_str(
                 "this workspace has no pitchfork configuration (no pitchfork.toml with daemons)",
             ),
@@ -698,7 +695,7 @@ impl std::fmt::Display for Refusal {
                 };
                 write!(
                     f,
-                    "the workspace {what}; run `devflow setup` there before starting processes{}",
+                    "the workspace {what}; set it up before starting processes{}",
                     detail
                         .as_deref()
                         .map(|d| format!(" ({d})"))
@@ -721,14 +718,14 @@ impl std::fmt::Display for Refusal {
                     Action::Start => write!(
                         f,
                         "what this workspace asks to run (hooks, [env], pitchfork processes) \
-                         {why}; review and approve it with `devflow trust` inside the workspace"
+                         {why}; review and approve it first"
                     ),
                     Action::Stop => write!(
                         f,
                         "what this workspace asks to run (hooks, [env], pitchfork processes) {why}, \
                          and pitchfork runs a daemon's lifecycle hooks (on_stop, …) from the \
-                         current file when it stops it; review it with `devflow trust`, or stop \
-                         the daemons yourself"
+                         current file when it stops it; review it first, or stop the daemons \
+                         yourself"
                     ),
                 }
             }
@@ -741,7 +738,7 @@ impl std::fmt::Display for Refusal {
                     f,
                     "pitchfork starts {} on its own (cron, watch, boot_start or auto), so devflow \
                      does not start everything at once; start the plain daemons by name \
-                     (`devflow up --daemon NAME`) or run pitchfork yourself",
+                     or run pitchfork yourself",
                     list.join(", ")
                 )
             }
@@ -753,8 +750,7 @@ impl std::fmt::Display for Refusal {
                 "daemon \"{daemon}\" depends on \"{dependency}\", which is not a daemon of this \
                  workspace's own pitchfork files; pitchfork would start it from outside the \
                  workspace, so devflow will not start \"{daemon}\", nor everything at once; the \
-                 daemons that do not depend on it can be started by name (`devflow up --daemon \
-                 NAME`)"
+                 daemons that do not depend on it can be started by name"
             ),
             Refusal::ForeignNamespace {
                 expected,
@@ -796,52 +792,72 @@ impl Refusal {
     /// What the person can do about it.
     pub fn hint(&self) -> Option<String> {
         Some(match self {
-            Refusal::NotInstalled { .. } => "run `devflow pitchfork install`".to_string(),
+            Refusal::NotInstalled { .. } => "install pitchfork".to_string(),
             Refusal::NothingConfigured => return None,
             Refusal::Unreadable { file, .. } => format!("fix {file}, then try again"),
-            Refusal::NotReady { .. } => "run `devflow setup` inside the workspace".to_string(),
+            Refusal::NotReady { .. } => "set the workspace up first".to_string(),
             Refusal::NotApproved {
                 action: Action::Start,
                 ..
-            } => "run `devflow trust` inside the workspace to review and approve it".to_string(),
+            } => "review and approve what the workspace asks to run".to_string(),
             Refusal::NotApproved {
                 action: Action::Stop,
                 ..
-            } => "run `devflow trust` inside the workspace, or pass --force to stop the daemons anyway"
-                .to_string(),
-            Refusal::AutonomousTriggers { .. } => {
-                "start plain daemons by name: `devflow up --daemon NAME`".to_string()
+            } => {
+                "review and approve it, or stop the daemons anyway by forcing the stop".to_string()
             }
-            Refusal::UnknownDaemon { .. } => "see the daemons with `devflow ps`".to_string(),
+            Refusal::AutonomousTriggers { .. } => "start the plain daemons by name".to_string(),
+            Refusal::UnknownDaemon { .. } => {
+                "pick one of the daemons the workspace's pitchfork files declare".to_string()
+            }
             Refusal::ExternalDependency { .. } => {
                 "declare the dependency in this workspace's pitchfork.toml (a plain name, or \
                  this workspace's namespace), or remove it"
                     .to_string()
             }
             Refusal::ForeignNamespace { .. } => format!(
-                "run `devflow setup` in the workspace to restore devflow's {LOCAL_FILE}, and \
-                 remove any other `namespace` from the pitchfork files"
+                "set the workspace up again to restore devflow's {LOCAL_FILE}, and remove any \
+                 other `namespace` from the pitchfork files"
             ),
             Refusal::StateUnknown {
                 hint: Some(hint), ..
             } => hint.clone(),
             Refusal::StateUnknown { hint: None, .. } => {
-                "see `devflow pitchfork status`; --force goes on without knowing and stops the \
-                 daemons the workspace declares"
+                "check pitchfork's state; forcing goes on without knowing and stops the daemons \
+                 the workspace declares"
                     .to_string()
             }
             Refusal::MiseDelivery { .. } => {
-                "check it with `devflow doctor` inside the workspace, fix the mise configuration, \
-                 then start again"
+                "check the doctor results for the workspace, fix the mise configuration, then \
+                 start again"
                     .to_string()
             }
             Refusal::DaemonsRunning { .. } => {
-                "run `devflow down` in the workspace first, then `devflow setup --new-instance`; \
-                 for a workspace copied from another machine, give the copy's identity with \
+                "stop the workspace's processes first, then set it up as a new instance; for a \
+                 workspace copied from another machine, give the copy's identity with \
                  DEVFLOW_INSTANCE_ID instead"
                     .to_string()
             }
         })
+    }
+}
+
+impl Refusal {
+    /// What can be done about it, as actions, for the workspace at
+    /// `workspace`: install pitchfork, set the workspace up, review and
+    /// approve what it asks to run.
+    pub fn remedies(&self, workspace: &Path) -> Vec<crate::remedy::Remedy> {
+        use crate::remedy::Remedy;
+        match self {
+            Refusal::NotInstalled { .. } => vec![Remedy::InstallPitchfork],
+            Refusal::NotReady { .. } | Refusal::ForeignNamespace { .. } => vec![Remedy::Setup {
+                workspace: workspace.to_path_buf(),
+            }],
+            Refusal::NotApproved { .. } => vec![Remedy::Trust {
+                workspace: workspace.to_path_buf(),
+            }],
+            _ => Vec::new(),
+        }
     }
 }
 
@@ -1778,14 +1794,14 @@ fn observe(
             reasons.push(format!(
                 "pitchfork lists daemons under the namespace devflow assigned to this workspace \
                  ({}), but the workspace's {LOCAL_FILE} is missing, so they are not attributed \
-                 to it; a start (`devflow up`) writes it again",
+                 to it; a start writes it again",
                 listed.join(", ")
             ));
         } else if let Some(record) = recorded {
             reasons.push(format!(
                 "the receipt records a start of this workspace's daemons ({}), but the \
                  workspace's {LOCAL_FILE} is missing, so what pitchfork lists cannot be \
-                 attributed to it; a start (`devflow up`) writes it again",
+                 attributed to it; a start writes it again",
                 record.ids.join(", ")
             ));
         }
@@ -2139,8 +2155,8 @@ fn report_after(
             state_error = Some(format!(
                 "the pitchfork namespace of this workspace changed while the operation ran \
                  (devflow assigned \"{captured}\", its files now give \"{files_now}\"), so the \
-                 result cannot be attributed to the workspace; check `devflow ps` and \
-                 `pitchfork list`"
+                 result cannot be attributed to the workspace; check the workspace's \
+                 processes and `pitchfork list`"
             ));
         }
     }
@@ -2509,8 +2525,8 @@ fn supervisor_down(
             detail,
             hint: Some(
                 "start the supervisor with `pitchfork supervisor start` (it takes back the \
-                 daemons that survived), then run `devflow down`; or pass --force to go on \
-                 without knowing"
+                 daemons that survived), then stop the workspace's processes; or go on \
+                 without knowing by forcing it"
                     .to_string(),
             ),
         });
@@ -2745,9 +2761,10 @@ pub fn check_replacement(
              namespace devflow no longer owns"
         ),
         hint: Some(
-            "start the supervisor with `pitchfork supervisor start`, run `devflow down` in the \
-             workspace, then `devflow setup --new-instance` again; for a workspace copied from \
-             another machine, give the copy's identity with DEVFLOW_INSTANCE_ID instead"
+            "start the supervisor with `pitchfork supervisor start`, stop the workspace's \
+             processes, then set the workspace up as a new instance again; for a workspace \
+             copied from another machine, give the copy's identity with DEVFLOW_INSTANCE_ID \
+             instead"
                 .to_string(),
         ),
     };

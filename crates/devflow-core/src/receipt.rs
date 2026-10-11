@@ -37,6 +37,17 @@ pub(crate) const SKIP_NO_HOOKS: &str = "--no-hooks";
 pub(crate) const SKIP_DEFAULT_HOOKS: &str =
     "not run when the default workspace is initialized implicitly";
 
+/// A phase's recorded detail in words for a person: the markers of a skip
+/// someone asked for are the flag names older receipts keep, which no
+/// graphical frontend shows as they are.
+pub fn plain_detail(detail: &str) -> &str {
+    match detail {
+        SKIP_NO_DB => "no database was asked for",
+        SKIP_NO_HOOKS => "no hooks were asked for",
+        other => other,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
@@ -715,7 +726,7 @@ impl Receipt {
                 Phase::Services,
                 format!(
                     "configuration changed since this workspace was set up ({}); \
-                     run `devflow setup`",
+                     setup has to run again",
                     drift.describe()
                 ),
             );
@@ -724,13 +735,13 @@ impl Receipt {
             Phase::Env,
             format!(
                 "configuration changed since .devflow/env was written ({}); \
-                 run `devflow setup`",
+                 setup has to run again",
                 drift.describe()
             ),
         );
         changed |= self.reopen_phase(
             Phase::Hooks,
-            "setup hooks run again after a configuration change; run `devflow setup`".into(),
+            "setup hooks run again after a configuration change".into(),
         );
         changed
     }
@@ -915,15 +926,15 @@ impl Receipt {
             // every other field are kept, like in the rest of the migration.
             let env = if self.unmapped.is_some() {
                 "this workspace's database is no longer exported (the configuration has no \
-                 postgres service to take it); run `devflow setup` to rewrite .devflow/env"
+                 postgres service to take it); setup has to run again to rewrite .devflow/env"
             } else {
-                "this workspace was set up by a previous devflow version; run `devflow setup` \
-                 to rewrite .devflow/env"
+                "this workspace was set up by a previous devflow version; setup has to run \
+                 again to rewrite .devflow/env"
             };
             self.reopen_in_place(Phase::Env, env);
             self.reopen_in_place(
                 Phase::Hooks,
-                "setup hooks run again after the environment is rewritten; run `devflow setup`",
+                "setup hooks run again after the environment is rewritten",
             );
         }
         self.version = VERSION;
@@ -1542,6 +1553,42 @@ mod tests {
         }
         receipt.env_generation = Some(config.env_generation());
         receipt
+    }
+
+    /// The reasons a phase is reopened for are read in a frontend: words, no
+    /// command line (the remedy that fixes it travels as data).
+    #[test]
+    fn the_reasons_for_reopening_a_phase_say_nothing_of_the_cli() {
+        let say_nothing_of_the_cli = |receipt: &Receipt| {
+            for phase in Phase::ALL {
+                if let Some(detail) = receipt.phase(phase).detail {
+                    assert!(
+                        !detail.contains("`devflow") && !detail.contains("run devflow"),
+                        "{phase:?}: {detail}"
+                    );
+                }
+            }
+        };
+        let after = config_with_postgres("db");
+        let mut changed = finished(&Config::default());
+        assert!(changed.reopen(&after));
+        say_nothing_of_the_cli(&changed);
+        let reopened = changed.phase(Phase::Services).detail.unwrap();
+        assert!(reopened.contains("setup has to run again"), "{reopened}");
+
+        let dir = tempfile::tempdir().unwrap();
+        write_v1(dir.path(), true);
+        for config in [config_with_postgres("main-db"), Config::default()] {
+            let migrated = Receipt::load_for(dir.path(), &config).unwrap().unwrap();
+            say_nothing_of_the_cli(&migrated);
+        }
+    }
+
+    #[test]
+    fn a_skip_someone_asked_for_is_worded_for_a_person() {
+        assert_eq!(plain_detail(SKIP_NO_DB), "no database was asked for");
+        assert_eq!(plain_detail(SKIP_NO_HOOKS), "no hooks were asked for");
+        assert_eq!(plain_detail("created /tmp/x"), "created /tmp/x");
     }
 
     #[test]

@@ -288,7 +288,14 @@ fn context(cli: &Cli) -> Result<Ctx> {
 /// asked for (whatever stage failed), and `error:` plus `hint:` lines on stderr.
 fn fail(ctx: Option<&Ctx>, json: bool, command: &str, error: &anyhow::Error) -> ExitCode {
     let message = format!("{error:#}");
-    let remedies = remedy::remedies_of(error);
+    let mut remedies = remedy::remedies_of(error);
+    if let (Some(refusal), Some(ctx)) = (
+        error.downcast_ref::<devflow_core::processes::Refusal>(),
+        ctx,
+    ) {
+        // The commands of a refusal act on the workspace the command ran in.
+        remedies.extend(refusal.remedies(&ctx.cwd));
+    }
     let hints = hints(error, &remedies);
     if json {
         let warnings = ctx.map(Ctx::take_warnings).unwrap_or_default();
@@ -307,7 +314,25 @@ fn fail(ctx: Option<&Ctx>, json: bool, command: &str, error: &anyhow::Error) -> 
 fn hints(error: &anyhow::Error, remedies: &[Remedy]) -> Vec<String> {
     let mut hints: Vec<String> = Vec::new();
     if let Some(refusal) = error.downcast_ref::<devflow_core::processes::Refusal>() {
-        hints.extend(refusal.hint());
+        // What only the command line has: its options and sibling commands.
+        use devflow_core::processes::{Action, Refusal};
+        match refusal {
+            Refusal::AutonomousTriggers { .. } => {
+                hints.push("start the plain daemons by name: `devflow up --daemon NAME`".into());
+            }
+            Refusal::UnknownDaemon { .. } => {
+                hints.push("see the daemons with `devflow ps`".into());
+            }
+            Refusal::NotApproved {
+                action: Action::Stop,
+                ..
+            }
+            | Refusal::StateUnknown { .. } => {
+                hints.extend(refusal.hint());
+                hints.push("pass --force to go on without knowing".into());
+            }
+            _ => hints.extend(refusal.hint()),
+        }
     }
     if let Some(protected) = error.downcast_ref::<Protected>()
         && protected.forceable
@@ -540,6 +565,7 @@ mod tests {
                 workspace: "feature/a".into(),
                 reason: "has uncommitted changes".into(),
                 forceable,
+                remedies: Vec::new(),
             })
         };
         assert!(hint(&protected(true))[0].contains("devflow remove feature/a --force"));

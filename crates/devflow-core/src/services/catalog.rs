@@ -73,6 +73,8 @@ pub struct ServiceCatalog {
 #[derive(Debug)]
 pub struct Forgetting {
     pub key: String,
+    /// The project's root, for the remedy; empty when it is not known.
+    pub root: std::path::PathBuf,
 }
 
 impl std::fmt::Display for Forgetting {
@@ -80,7 +82,7 @@ impl std::fmt::Display for Forgetting {
         write!(
             f,
             "service '{key}' is being forgotten, so nothing new is recorded for it; wait for \
-             `devflow service {key} forget` to finish, or run it again if it was interrupted",
+             that to finish, or forget it again if it was interrupted",
             key = self.key
         )
     }
@@ -94,6 +96,8 @@ impl std::error::Error for Forgetting {}
 pub struct ForgetRefused {
     pub key: String,
     pub found: Vec<String>,
+    /// The project's root, for the remedy; empty when it is not known.
+    pub root: std::path::PathBuf,
 }
 
 impl std::fmt::Display for ForgetRefused {
@@ -101,8 +105,8 @@ impl std::fmt::Display for ForgetRefused {
         write!(
             f,
             "service '{key}' was not forgotten: it holds what `forget` did not handle ({}); \
-             nothing was deleted. Settle it (`devflow service {key} reconcile`) and run `forget` \
-             again",
+             nothing was deleted. Settle it (finish or roll back its operations) and forget the \
+             service again",
             self.found.join(", "),
             key = self.key
         )
@@ -310,6 +314,42 @@ pub struct BranchRecord {
     pub generation: u32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[cfg(test)]
+impl BranchRecord {
+    /// A ready branch with no port, for tests in other modules.
+    pub(crate) fn for_test(id: Uuid) -> BranchRecord {
+        let now = Utc::now();
+        BranchRecord {
+            id,
+            name: "feature".into(),
+            owner: None,
+            state: RecordState::Ready,
+            container_name: "c".into(),
+            container_id: None,
+            volume: "v".into(),
+            image: "valkey/valkey:8-alpine".into(),
+            pin: "valkey/valkey@sha256:abc".into(),
+            password: "pw".into(),
+            root_password: None,
+            mysql: None,
+            port: None,
+            pending_port: None,
+            domain: None,
+            source: SourceRef::Empty,
+            captured_at: None,
+            capture_exact: true,
+            capture_last_save: false,
+            clone: None,
+            allocated_bytes: None,
+            downtime_ms: None,
+            stop: None,
+            generation: 1,
+            created_at: now,
+            updated_at: now,
+        }
+    }
 }
 
 fn yes() -> bool {
@@ -901,7 +941,7 @@ impl Catalog {
             entry.engine == engine,
             "service '{key}' was created as {} and is now configured as {engine}: their data is \
              not interchangeable. Use another key for the new engine (the old data stays \
-             recorded; `devflow service {key} forget` removes it)",
+             recorded until the old service is forgotten)",
             entry.engine
         );
         Ok(entry)
@@ -1016,6 +1056,7 @@ impl Store {
                 return Err(ForgetRefused {
                     key: key.to_string(),
                     found,
+                    root: std::path::PathBuf::new(),
                 }
                 .into());
             }
@@ -1684,6 +1725,7 @@ mod tests {
                 if service.forgetting.is_some() {
                     return Err(Forgetting {
                         key: "cache".into(),
+                        root: std::path::PathBuf::new(),
                     }
                     .into());
                 }

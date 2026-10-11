@@ -118,8 +118,8 @@ fn env_check(
         MiseDelivery::Overridden { .. } | MiseDelivery::Removed { .. } => {
             let hint = format!(
                 "{EXEC_HINT}; or fix mise's configuration ([env] keys, later `_.file` entries, \
-                 mise.local.toml, environment-specific files). `devflow setup \
-                 --skip-mise-check` runs the setup hooks anyway"
+                 mise.local.toml, environment-specific files). Setup can be asked to skip \
+                 this check and run the hooks anyway"
             );
             if blocking {
                 Check::fail("mise-env", detail, hint)
@@ -159,7 +159,7 @@ fn wiring_check(workspace: &str, delivery: &MiseDelivery) -> Option<Check> {
                 "{workspace}: shells in the worktree won't see the branch's variables through \
                  mise; {UNAFFECTED}"
             ),
-            "`devflow init` proposes `[env] _.file = \".devflow/env\"` for mise.toml",
+            "setting the project up proposes `[env] _.file = \".devflow/env\"` for mise.toml",
         ),
         MiseDelivery::Overridden { keys } | MiseDelivery::Removed { keys } => Check::warn(
             "mise-wiring",

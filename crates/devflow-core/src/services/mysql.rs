@@ -746,8 +746,8 @@ pub fn judge_stop(running: bool, exit_code: i64, logs: &str) -> Result<()> {
         !logs.contains(VERY_FAST_SHUTDOWN),
         "the server was shut down with innodb_fast_shutdown=2, which exits 0 but leaves a data \
          directory that needs crash recovery, so it is not a clean shutdown to copy. Start the \
-         source (`devflow service up`) and clone again: devflow sets innodb_fast_shutdown=0 \
-         before it stops a running source"
+         source and clone again: devflow sets innodb_fast_shutdown=0 before it stops a running \
+         source"
     );
     Ok(())
 }
@@ -908,12 +908,16 @@ impl Service {
         running: bool,
         stop_timeout_secs: u64,
     ) -> Result<(Option<Stopped>, DateTime<Utc>)> {
-        let info = self.find_container(branch)?.with_context(|| {
-            format!(
-                "branch {} has no container, so devflow cannot tell that its data directory was \
-                 shut down cleanly; start it with `devflow service {} up` and clone again",
-                branch.id, self.key
+        let info = self.find_container(branch)?.ok_or_else(|| {
+            self.start_problem(
+                format!(
+                    "branch {} has no container, so devflow cannot tell that its data directory \
+                     was shut down cleanly; start it and clone again",
+                    branch.id
+                ),
+                Some(branch.id),
             )
+            .into_error()
         })?;
         if running {
             // Refused here, while the source still serves, if it cannot be
@@ -936,12 +940,12 @@ impl Service {
                 finished_at(&stopped),
             ))
         } else {
-            let stopped = verify_stopped(&info.id).with_context(|| {
-                format!(
+            let stopped = verify_stopped(&info.id).map_err(|error| {
+                error.context(self.start_problem(
                     "the source is stopped, but not known to have shut down cleanly; start it \
-                     with `devflow service {} up` and clone again",
-                    self.key
-                )
+                     and clone again",
+                    Some(branch.id),
+                ))
             })?;
             Ok((None, finished_at(&stopped)))
         }
@@ -1579,7 +1583,7 @@ mod tests {
         assert!(
             error.contains("innodb_fast_shutdown=2")
                 && error.contains("crash recovery")
-                && error.contains("devflow service up"),
+                && error.contains("Start the source and clone again"),
             "{error}"
         );
         // The slow shutdown of the profile logs no such notice.

@@ -329,6 +329,8 @@ fn remedy_icon(remedy: &devflow_core::remedy::Remedy) -> Lucide {
         Remedy::OpenFile { .. } => Lucide::Pencil,
         Remedy::Reveal { .. } => Lucide::FolderGit2,
         Remedy::OpenGuide { .. } => Lucide::Globe,
+        // The others are drawn as buttons (`views::remedies`), not in a menu.
+        _ => Lucide::Wrench,
     }
 }
 

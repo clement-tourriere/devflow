@@ -278,7 +278,7 @@ pub(super) fn report_orphans(s: &mut Session, report: &mut ReconcileReport) -> R
     for (row, branch) in orphans(s)? {
         report.orphans.push(format!(
             "scratch database '{}' ({}) of branch '{branch}' is no longer in extra_databases; \
-             it is kept, and `devflow db reconcile --drop-orphans` drops it",
+             it is kept until you drop it",
             row.name, row.db_name
         ));
     }

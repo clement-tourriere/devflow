@@ -496,12 +496,14 @@ fn a_start_core_refused_is_kept_with_its_explanation_and_the_doctor_is_one_click
                 status: CheckStatus::Fail,
                 detail: "mise resolves DATABASE_URL elsewhere".into(),
                 hint: Some("check later _.file entries".into()),
+                remedies: Vec::new(),
             },
             Check {
                 name: "git".into(),
                 status: CheckStatus::Ok,
                 detail: "git 2.50".into(),
                 hint: None,
+                remedies: Vec::new(),
             },
         ]);
     });
@@ -510,7 +512,8 @@ fn a_start_core_refused_is_kept_with_its_explanation_and_the_doctor_is_one_click
     let failure = Failure {
         message: refusal.to_string(),
         kind: FailureKind::Other,
-        refusal: Some(RefusalView::of(&refusal)),
+        refusal: Some(Box::new(RefusalView::of(&refusal))),
+        remedies: Box::default(),
     };
     finish_with(
         cx,
@@ -550,7 +553,8 @@ fn a_start_core_refused_is_kept_with_its_explanation_and_the_doctor_is_one_click
         Err(Failure {
             message: other.to_string(),
             kind: FailureKind::Other,
-            refusal: Some(RefusalView::of(&other)),
+            refusal: Some(Box::new(RefusalView::of(&other))),
+            remedies: Box::default(),
         }),
     );
     assert_eq!(kept_refusals(cx, &h), 1);
@@ -3174,4 +3178,148 @@ fn the_data_tab_says_when_docker_could_not_be_asked_instead_of_listing_nothing(
         !exists(cx, h, "service-new-workspace"),
         "no empty-state invitation"
     );
+}
+
+// ---- remedies as buttons -------------------------------------------------------------
+
+#[gpui_kit::test]
+fn a_check_offers_its_fixes_as_buttons_that_call_the_app(cx: &mut TestAppContext) {
+    use devflow_core::remedy::Remedy;
+    let h = open(cx, install_loaded);
+    let path = main_path(cx, &h);
+    let fixes = vec![
+        Remedy::Trust {
+            workspace: path.clone(),
+        },
+        Remedy::InstallGitHook { root: path.clone() },
+    ];
+    update(cx, &h, |s, _| {
+        s.doctor = DoctorSource::Fixed(vec![
+            Check {
+                name: "hook-trust".into(),
+                status: CheckStatus::Warn,
+                detail: "the hooks have not been approved".into(),
+                hint: Some("review and approve them in that workspace".into()),
+                remedies: fixes.clone(),
+            },
+            Check {
+                name: "git".into(),
+                status: CheckStatus::Ok,
+                detail: "libgit2".into(),
+                hint: None,
+                remedies: fixes.clone(),
+            },
+        ]);
+    });
+    cx.update_window(h.window.into(), |_, window, cx| {
+        super::doctor::open(&h.state, path.clone(), window, cx)
+    })
+    .unwrap();
+    wait(cx, "the doctor's checks", |cx| {
+        exists(cx, &h, "doctor-checks")
+    });
+    // One button per remedy of the check that is wrong, none for the one that
+    // is fine; each is labelled in plain words, with no command line.
+    for (index, fix) in fixes.iter().enumerate() {
+        let id = super::setup_tests::id(format!("doctor-fix-0-{index}-{}", fix.kind()));
+        assert!(exists(cx, &h, id), "{}", fix.kind());
+        assert!(!fix.label().contains("devflow "), "{}", fix.label());
+    }
+    assert!(!exists(
+        cx,
+        &h,
+        super::setup_tests::id("doctor-fix-1-0-trust".into())
+    ));
+    // The button runs the app's own operation: approving is the Setup tab's.
+    click(
+        cx,
+        &h,
+        super::setup_tests::id("doctor-fix-0-0-trust".into()),
+    );
+    assert_eq!(cx.read_entity(&h.state, |s, _| s.tab), Tab::Setup);
+    assert!(
+        !exists(cx, &h, "doctor-checks"),
+        "the dialog closes when a fix starts"
+    );
+}
+
+#[gpui_kit::test]
+fn a_failed_operation_shows_the_fix_core_names_as_a_button(cx: &mut TestAppContext) {
+    use devflow_core::remedy::Remedy;
+    let h = open(cx, install_loaded);
+    let path = main_path(cx, &h);
+    update(cx, &h, |s, _| {
+        let key = s.selection.current().unwrap().key;
+        s.activity = Some(crate::activity::Activity::new(key, "Set up main"));
+    });
+    finish_with(
+        cx,
+        &h,
+        FailureHint::None,
+        Err(Failure {
+            message: "hooks failed; 'main' is kept".into(),
+            kind: FailureKind::Other,
+            refusal: None,
+            remedies: vec![Remedy::Trust {
+                workspace: path.clone(),
+            }]
+            .into(),
+        }),
+    );
+    frame(cx, &h, |_| {});
+    assert!(exists(
+        cx,
+        &h,
+        super::setup_tests::id("activity-fix-0-trust".into())
+    ));
+    click(
+        cx,
+        &h,
+        super::setup_tests::id("activity-fix-0-trust".into()),
+    );
+    assert_eq!(cx.read_entity(&h.state, |s, _| s.tab), Tab::Setup);
+
+    // A fix for a project that is not the open one changes nothing.
+    update(cx, &h, |s, cx| s.go_to_tab(Tab::Workspaces, cx));
+    cx.update_window(h.window.into(), |_, window, cx| {
+        super::remedies::run_scoped(
+            &h.state,
+            &Remedy::InstallGitHook {
+                root: PathBuf::from("/somewhere/else"),
+            },
+            window,
+            cx,
+        )
+    })
+    .unwrap();
+    assert!(cx.read_entity(&h.state, |s, _| s.busy().is_none()));
+}
+
+#[gpui_kit::test]
+fn a_workspace_that_waits_for_approval_leads_to_where_it_is_given(cx: &mut TestAppContext) {
+    // The reason is in words, and the matching button is next to it.
+    let h = open(cx, install_loaded);
+    update(cx, &h, |s, cx| {
+        let model = s.selection.current_mut().unwrap();
+        let receipt = model
+            .workspaces
+            .iter_mut()
+            .find(|w| w.workspace.name == "feature-x")
+            .and_then(|w| w.receipt.as_mut())
+            .unwrap();
+        receipt.skip_required(
+            devflow_core::receipt::Phase::Hooks,
+            "setup hooks are not trusted; review and approve them, then run setup again".into(),
+        );
+        model.selected_workspace = Some("feature-x".into());
+        cx.notify();
+    });
+    frame(cx, &h, |window| {
+        assert!(window.find("problem-hooks").visible());
+        // Either the review (when core finds the scope unapproved) or setup.
+        assert!(
+            window.try_find("problem-review-hooks").is_some()
+                || window.try_find("problem-fix-hooks").is_some()
+        );
+    });
 }

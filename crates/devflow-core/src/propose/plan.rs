@@ -623,7 +623,7 @@ impl<'a> Builder<'a> {
         .evidence(mise.evidence.clone())
         .risks([
             "mise has to trust the new worktree's configuration before this can run (a new \
-             worktree is a new path); setup stops there and `devflow doctor` lists the ways to \
+             worktree is a new path); setup stops there and the doctor checks list the ways to \
              trust it. `mise install` needs network access the first time."
                 .to_string(),
         ])
@@ -1025,8 +1025,8 @@ fn describe_entries<'a>(entries: impl Iterator<Item = &'a detect::MiseEnvEntry>)
 fn selected_override_warning(files: &str) -> String {
     format!(
         "{files} list env files that mise applies after .devflow/env when their MISE_ENV is \
-         selected; a scan cannot tell whether it is. `devflow setup` and `devflow doctor` check \
-         what mise really resolves."
+         selected; a scan cannot tell whether it is. setup and the doctor checks ask \
+         mise what it really resolves."
     )
 }
 

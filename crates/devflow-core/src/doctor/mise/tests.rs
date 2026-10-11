@@ -84,7 +84,7 @@ fn a_hook_that_runs_mise_and_an_overriding_mise_fail_by_key_and_hook() {
     );
     let hint = check.hint.as_deref().unwrap();
     assert!(
-        hint.contains("devflow exec") && hint.contains("--skip-mise-check"),
+        hint.contains("devflow exec") && hint.contains("skip this check"),
         "{hint}"
     );
     let text = shown(&checks);

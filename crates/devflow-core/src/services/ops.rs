@@ -43,12 +43,13 @@ impl Service {
 
     fn hold(&self, ids: &[Uuid]) -> Result<locks::Held> {
         let held = self.acquire_recovered(ids, None, LOCK_WAIT)?;
-        held.with_context(|| {
-            format!(
+        held.ok_or_else(|| {
+            self.reconcile_problem(format!(
                 "service '{}' is busy: another devflow command is changing it. Wait for it, or \
-                 run `devflow service {} reconcile` if it is stuck",
-                self.key, self.key
-            )
+                 finish or roll back its operations if it is stuck",
+                self.key
+            ))
+            .into_error()
         })
     }
 
@@ -139,9 +140,9 @@ impl Service {
         let _exclusive =
             locks::acquire_forget(&self.lock_dir(), &self.key, wait)?.with_context(|| {
                 format!(
-                    "service '{}' is busy: another `devflow service {} forget` is running. Wait \
-                     for it to finish, then run this again if the service is still listed",
-                    self.key, self.key
+                    "service '{}' is busy: it is already being forgotten. Wait for that to \
+                     finish, then do this again if the service is still listed",
+                    self.key
                 )
             })?;
         // Every other sweep leaves unknown attempts to this one while the
@@ -214,14 +215,26 @@ impl Service {
         // were read (the marker keeps planners out, but a coordinator that
         // was already running, or an operation another process journaled
         // before the marker, would have) is refused, not erased.
-        self.store.forget_service(
-            &self.key,
-            &Handled {
-                branches: records.branches.iter().map(|b| b.id).collect(),
-                snapshots: records.snapshots.iter().map(|s| s.id).collect(),
-                fenced,
-            },
-        )?;
+        self.store
+            .forget_service(
+                &self.key,
+                &Handled {
+                    branches: records.branches.iter().map(|b| b.id).collect(),
+                    snapshots: records.snapshots.iter().map(|s| s.id).collect(),
+                    fenced,
+                },
+            )
+            .map_err(
+                |error| match error.downcast::<super::catalog::ForgetRefused>() {
+                    // The store does not know the project; the service does.
+                    Ok(refused) => super::catalog::ForgetRefused {
+                        root: self.root.clone(),
+                        ..refused
+                    }
+                    .into(),
+                    Err(error) => error,
+                },
+            )?;
         Ok(removed)
     }
 }

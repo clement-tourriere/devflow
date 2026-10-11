@@ -21,6 +21,7 @@ mod problems_tests;
 mod processes;
 mod project;
 mod reading;
+pub(crate) mod remedies;
 pub(crate) mod service_dialogs;
 mod service_view;
 mod settings;

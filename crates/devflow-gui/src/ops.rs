@@ -37,6 +37,7 @@ use std::{
 use uuid::Uuid;
 
 mod projects;
+mod remedies;
 
 /// A title or label that names a workspace, snapshot or daemon, as it is drawn:
 /// those names are legal even when they look like credentials.
@@ -320,6 +321,11 @@ impl AppState {
             .as_mut()
             .filter(|a| a.key.project == key.project)
         {
+            activity.remedies = result
+                .as_ref()
+                .err()
+                .map(|failure| failure.remedies.to_vec())
+                .unwrap_or_default();
             activity.outcome = Some(result.clone().map_err(|failure| failure.message));
             activity.finished_at = Some(chrono::Local::now());
         }
@@ -344,6 +350,8 @@ impl AppState {
                 }
                 .title(format!("{} failed", meta.title))
                 .autohide(false);
+                // One button: a refused removal that force overrides has its
+                // own; otherwise what core says fixes the failure.
                 if let Some((target, choice)) = force_offer(failure.kind, meta.hint) {
                     let state = cx.entity();
                     note = note.action(move |_, _, _| {
@@ -359,6 +367,16 @@ impl AppState {
                                     })
                                 });
                             },
+                        )
+                    });
+                } else if let Some(remedy) = failure.remedies.first().cloned() {
+                    let state = cx.entity();
+                    note = note.action(move |_, _, _| {
+                        crate::views::remedies::button_with_id(
+                            &state,
+                            "failure-remedy".into(),
+                            &remedy,
+                            false,
                         )
                     });
                 }
@@ -415,7 +433,9 @@ impl AppState {
             }
             Err(failure) => {
                 if let (Some(refusal), Some(path)) = (&failure.refusal, meta.hint.process_path()) {
-                    model.refusals.insert(path.to_path_buf(), refusal.clone());
+                    model
+                        .refusals
+                        .insert(path.to_path_buf(), (**refusal).clone());
                 }
             }
         }

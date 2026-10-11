@@ -2,14 +2,17 @@
 //! its phases, a result tag, the error if it failed and the log. The
 //! Workspaces tab and the Data tab both show it, so a snapshot or a reset
 //! has its progress and its errors where it was started.
-use super::ui;
+use super::{remedies, ui};
 use crate::{
     activity::{Activity, state_label},
     jobs::Done,
     model::Section,
     state::AppState,
 };
-use devflow_core::receipt::{Phase, PhaseState};
+use devflow_core::{
+    receipt::{Phase, PhaseState},
+    remedy::Remedy,
+};
 use gpui_kit::{
     component::{
         ActiveTheme as _, IconName, Sizable as _,
@@ -28,6 +31,7 @@ struct ActivityView {
     title: String,
     phases: Vec<(Phase, PhaseState, Option<String>)>,
     outcome: Option<Section<Done>>,
+    remedies: Vec<Remedy>,
 }
 
 impl ActivityView {
@@ -36,6 +40,7 @@ impl ActivityView {
             title: activity.title.clone(),
             phases: activity.phases.clone(),
             outcome: activity.outcome.clone(),
+            remedies: activity.remedies.clone(),
         }
     }
 
@@ -204,6 +209,17 @@ impl Render for ActivityPanel {
             .when_some(
                 activity.outcome.as_ref().and_then(|o| o.as_ref().err()),
                 |col, error| col.child(ui::error_banner(error.clone(), cx)),
+            )
+            .when(
+                matches!(activity.outcome, Some(Err(_))) && !activity.remedies.is_empty(),
+                |col| {
+                    col.child(remedies::row(
+                        &self.state,
+                        "activity-fix",
+                        &activity.remedies,
+                        false,
+                    ))
+                },
             )
             .child(
                 div()

@@ -553,8 +553,8 @@ impl ContainerSection {
         }
         anyhow::ensure!(
             !SERVICE_SUBCOMMANDS.contains(&key),
-            "service key '{key}' is a `devflow service` subcommand; choose another key for a \
-             container service"
+            "service key '{key}' is a reserved name (devflow uses it as a service command); \
+             choose another key for a container service"
         );
         Ok(())
     }
@@ -659,6 +659,14 @@ impl std::fmt::Display for EnvPreset {
     }
 }
 
+/// A warning about `[env]` that is valid but probably not what was meant,
+/// with the preset the person most likely wanted (see [`EnvSection::hints`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvHint {
+    pub message: String,
+    pub preset: EnvPreset,
+}
+
 /// `[env]`: `presets = ["prisma", …]` and any number of `NAME = "value"`
 /// recipes. A value may reference devflow-generated variables as `${NAME}`
 /// (one pass: no defaults, no nesting, never another recipe); see
@@ -692,7 +700,7 @@ impl EnvSection {
     /// that sets a variable of that name, not the preset. When its value
     /// names a known preset the intent is clear; the message says what to
     /// write. Only the preset's own name is ever repeated, never another value.
-    pub fn hints(&self) -> Vec<String> {
+    pub fn hints(&self) -> Vec<EnvHint> {
         self.vars
             .iter()
             .filter(|(key, _)| near_presets(key))
@@ -700,11 +708,13 @@ impl EnvSection {
                 let preset = EnvPreset::ALL
                     .into_iter()
                     .find(|p| p.as_str().eq_ignore_ascii_case(value.trim()))?;
-                Some(format!(
-                    "[env] {key} = \"{preset}\" sets a variable named {key}, not the {preset} \
-                     preset: did you mean `presets = [\"{preset}\"]`? \
-                     (`devflow env preset add {preset}`)"
-                ))
+                Some(EnvHint {
+                    message: format!(
+                        "[env] {key} = \"{preset}\" sets a variable named {key}, not the \
+                         {preset} preset: did you mean `presets = [\"{preset}\"]`?"
+                    ),
+                    preset,
+                })
             })
             .collect()
     }
@@ -3305,10 +3315,7 @@ API_URL = "http://localhost:3000/${DEVFLOW_WORKSPACE}"
     fn service_keys_that_are_subcommands_cannot_name_a_container_service() {
         for key in ["status", "list", "up", "snapshot", "forget"] {
             let error = message(&format!("[services.{key}]\nengine = \"valkey\"\n"));
-            assert!(
-                error.contains("`devflow service` subcommand"),
-                "{key}: {error}"
-            );
+            assert!(error.contains("reserved name"), "{key}: {error}");
         }
         // A postgres service is not addressed with `devflow service`.
         assert!(parse("[services.status]\nengine = \"postgres\"\n").is_ok());
@@ -3357,10 +3364,13 @@ API_URL = "http://localhost:3000/${DEVFLOW_WORKSPACE}"
             let found = hints(&format!("{key} = \"prisma\"\n"));
             assert_eq!(found.len(), 1, "{key}: {found:?}");
             assert!(
-                found[0].contains("did you mean `presets = [\"prisma\"]`?"),
+                found[0]
+                    .message
+                    .contains("did you mean `presets = [\"prisma\"]`?"),
                 "{found:?}"
             );
-            assert!(found[0].contains(key), "{found:?}");
+            assert!(found[0].message.contains(key), "{found:?}");
+            assert_eq!(found[0].preset, EnvPreset::Prisma);
         }
         // Names are matched without regard to case.
         assert_eq!(hints("preset = \"Laravel\"\n").len(), 1);

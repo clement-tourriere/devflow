@@ -114,7 +114,7 @@ impl Builder<'_> {
             }
             let mut risks = candidate.risks.clone();
             risks.push(
-                "pitchfork.toml is part of what `devflow trust` approves; the daemon runs \
+                "pitchfork.toml is part of what you approve before devflow runs anything; the daemon runs \
                  whatever this command runs."
                     .to_string(),
             );

@@ -123,21 +123,7 @@ pub(super) fn has_code(error: &anyhow::Error, code: &SqlState) -> bool {
         .any(|e| e.code() == Some(code))
 }
 
-/// The project lock connection died: another process may now be working on the
-/// project, so the operation must stop without touching anything else.
-#[derive(Debug)]
-pub(super) struct LockLost;
-
-impl std::fmt::Display for LockLost {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "the project lock connection was lost; run `devflow db reconcile` before retrying"
-        )
-    }
-}
-
-impl std::error::Error for LockLost {}
+use crate::error::LockLost;
 
 pub(super) fn lock_lost(error: &anyhow::Error) -> bool {
     error.downcast_ref::<LockLost>().is_some()
@@ -408,7 +394,11 @@ impl<'a> Session<'a> {
         self.admin
             .simple_query("SELECT 1")
             .map(|_| ())
-            .map_err(|_| anyhow::Error::new(LockLost))
+            .map_err(|_| {
+                anyhow::Error::new(LockLost {
+                    root: self.server.root.clone(),
+                })
+            })
     }
 
     /// Classify a failed step. A terminated lock session aborts its statement
@@ -419,10 +409,23 @@ impl<'a> Session<'a> {
         if lock_lost(&error) {
             return error;
         }
+        if error.downcast_ref::<super::meta::LostRace>().is_some() {
+            return self.needs_reconcile(format!("{error:#}"));
+        }
         match self.step() {
             Ok(()) => error,
             Err(lost) => lost,
         }
+    }
+
+    /// An error that says what happened and carries the remedy: finish the
+    /// interrupted work.
+    pub(super) fn needs_reconcile(&self, message: impl Into<String>) -> anyhow::Error {
+        crate::remedy::Problem::new(message)
+            .with(crate::remedy::Remedy::ReconcileDatabases {
+                root: self.server.root.clone(),
+            })
+            .into_error()
     }
 
     pub(super) fn database_exists(&mut self, name: &str) -> Result<bool> {

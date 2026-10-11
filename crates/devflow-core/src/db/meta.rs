@@ -354,10 +354,26 @@ pub(super) fn latest_for_instance(
 /// A journal write that matched no row means the record is no longer in the
 /// state this operation read: it must stop without writing anything else.
 pub(super) fn lost_race(what: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "lost a race on {what}: the record was changed by another operation; run `devflow db reconcile`"
-    )
+    anyhow::Error::new(LostRace(what.to_string()))
 }
+
+/// A journal write matched no row; see [`lost_race`]. The session turns it into
+/// an error that carries the remedy (`Session::lock_failure`).
+#[derive(Debug)]
+pub(super) struct LostRace(String);
+
+impl std::fmt::Display for LostRace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "lost a race on {}: the record was changed by another operation; finish the \
+             interrupted work and try again",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for LostRace {}
 
 fn expect_one(updated: u64, what: &str) -> Result<()> {
     if updated == 1 {

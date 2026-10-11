@@ -2,6 +2,7 @@
 //! deletion. devflow never shells out to `git` for these.
 use crate::error::Protected;
 use crate::project::Project;
+use crate::remedy::{Problem, Remedy};
 use anyhow::{Context, Result, bail, ensure};
 use git2::{
     BranchType, ErrorCode, Repository, StatusOptions, WorktreeAddOptions, WorktreeLockStatus,
@@ -197,11 +198,16 @@ fn create_locked(project: &Project, name: &str, from: Option<&Workspace>) -> Res
     );
     let admin_name = sanitize(name);
     let admin = repo.commondir().join("worktrees").join(&admin_name);
-    ensure!(
-        repo.find_worktree(&admin_name).is_err() && !admin.exists(),
-        "a Git worktree named '{admin_name}' is already registered; \
-         run `git worktree prune` if its directory is gone"
-    );
+    if repo.find_worktree(&admin_name).is_ok() || admin.exists() {
+        return Err(Problem::new(format!(
+            "a Git worktree named '{admin_name}' is already registered; if its directory is \
+             gone, forget the registration"
+        ))
+        .with(Remedy::PruneWorktrees {
+            root: project.root.clone(),
+        })
+        .into_error());
+    }
     if let Some(other) = list(project)?
         .into_iter()
         .find(|w| w.branch.as_deref() == Some(name))
@@ -302,10 +308,21 @@ pub(crate) fn protected(
     reason: impl Into<String>,
     forceable: bool,
 ) -> anyhow::Error {
+    protected_with(workspace, reason, forceable, Vec::new())
+}
+
+/// [`protected`] with the remedies that lift the protection.
+pub(crate) fn protected_with(
+    workspace: &str,
+    reason: impl Into<String>,
+    forceable: bool,
+    remedies: Vec<crate::remedy::Remedy>,
+) -> anyhow::Error {
     anyhow::Error::new(Protected {
         workspace: workspace.to_string(),
         reason: reason.into(),
         forceable,
+        remedies,
     })
 }
 
@@ -447,6 +464,40 @@ fn remove_inner(project: &Project, workspace: &Workspace, ignore_lock: bool) -> 
     registration
         .prune(Some(&mut options))
         .with_context(|| format!("cannot prune the Git registration of {}", workspace.name))
+}
+
+/// Forget the Git registrations of the worktrees whose directory is gone
+/// (what `git worktree prune` does). A locked registration is left alone.
+/// Returns the names of the workspaces that were forgotten. Their branches
+/// stay; only the registration (and the receipt beside it) goes.
+pub fn prune_missing(project: &Project) -> Result<Vec<String>> {
+    let repo = project.repo()?;
+    let mut pruned = Vec::new();
+    for workspace in list(project)?
+        .into_iter()
+        .filter(|w| w.missing && !w.locked && !w.is_default)
+    {
+        let Some(id) = workspace
+            .git_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
+            continue;
+        };
+        let registration = repo.find_worktree(&id)?;
+        let mut options = WorktreePruneOptions::new();
+        if !registration
+            .is_prunable(Some(&mut options))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        registration
+            .prune(Some(&mut options))
+            .with_context(|| format!("cannot prune the Git registration of {}", workspace.name))?;
+        pruned.push(workspace.name);
+    }
+    Ok(pruned)
 }
 
 /// Whether `branch` is contained in the default workspace's HEAD, so deleting
@@ -797,6 +848,45 @@ mod tests {
     }
 
     #[test]
+    fn pruning_forgets_the_registrations_whose_directory_is_gone_and_nothing_else() {
+        let t = repo(None);
+        let kept = create(&t.project, "kept", None).unwrap();
+        let gone = create(&t.project, "gone", None).unwrap();
+        let locked = create(&t.project, "locked", None).unwrap();
+        t.project
+            .repo()
+            .unwrap()
+            .find_worktree("locked")
+            .unwrap()
+            .lock(Some("keep"))
+            .unwrap();
+        std::fs::remove_dir_all(&gone.path).unwrap();
+        std::fs::remove_dir_all(&locked.path).unwrap();
+        assert!(list(&t.project).unwrap().iter().any(|w| w.missing));
+
+        assert_eq!(prune_missing(&t.project).unwrap(), ["gone"]);
+        let names: Vec<String> = list(&t.project)
+            .unwrap()
+            .into_iter()
+            .map(|w| w.name)
+            .collect();
+        assert!(names.contains(&"kept".to_string()), "{names:?}");
+        assert!(names.contains(&"locked".to_string()), "a locked one stays");
+        assert!(!names.contains(&"gone".to_string()), "{names:?}");
+        assert!(kept.path.is_dir());
+        // Its branch is not deleted.
+        assert!(
+            t.project
+                .repo()
+                .unwrap()
+                .find_branch("gone", BranchType::Local)
+                .is_ok()
+        );
+        // Nothing left to do the second time.
+        assert!(prune_missing(&t.project).unwrap().is_empty());
+    }
+
+    #[test]
     fn remove_refuses_default_locked_and_handles_missing_directories() {
         let t = repo(None);
         let default = list(&t.project).unwrap().remove(0);
@@ -816,10 +906,7 @@ mod tests {
         let error = remove(&t.project, &ws).unwrap_err();
         let refusal = error.downcast_ref::<Protected>().expect("typed refusal");
         assert!(refusal.forceable, "{refusal}");
-        assert!(
-            refusal.to_string().ends_with("or pass --force"),
-            "{refusal}"
-        );
+        assert!(!refusal.to_string().contains("--force"), "{refusal}");
         assert!(ws.path.exists());
         force_remove(&t.project, &ws).unwrap();
         assert!(!ws.path.exists());

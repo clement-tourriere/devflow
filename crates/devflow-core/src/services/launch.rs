@@ -199,10 +199,9 @@ impl Service {
                 };
                 bail!(
                     "snapshot {which} (volume {name}) was made by a pre-release build without an \
-                     ownership label (`{}`), so devflow will not copy from it. Delete it with \
-                     `devflow service {} snapshot delete {which}` and take a new one",
+                     ownership label (`{}`), so devflow will not copy from it. Delete the snapshot \
+                     and take a new one",
                     docker::LABEL_SNAPSHOT,
-                    self.key
                 );
             }
         }
@@ -414,12 +413,22 @@ impl Service {
         if creating && record.source == SourceRef::Empty {
             self.ensure_volume(&record.volume, Some(VolumeOwner::Branch(id)))?;
         } else {
-            let volume = docker::inspect_volume(&record.volume)?.with_context(|| {
-                format!(
+            let volume = docker::inspect_volume(&record.volume)?.ok_or_else(|| {
+                let problem = crate::remedy::Problem::new(format!(
                     "volume {} of branch {id} no longer exists; its data is gone. Drop the \
-                     branch (`devflow service {} drop {id}`) and set the workspace up again",
-                    record.volume, self.key
-                )
+                     branch and set the workspace up again",
+                    record.volume
+                ));
+                if self.root.as_os_str().is_empty() {
+                    return problem.into_error();
+                }
+                problem
+                    .with(crate::remedy::Remedy::DropServiceBranch {
+                        root: self.root.clone(),
+                        key: self.key.clone(),
+                        branch: id,
+                    })
+                    .into_error()
             })?;
             // A container is started on this volume only if the catalog says
             // it holds this branch's data, not a namesake of the project.

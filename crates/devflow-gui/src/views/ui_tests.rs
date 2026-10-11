@@ -1945,6 +1945,7 @@ fn the_palette_opens_a_daemons_url_shows_how_to_install_pitchfork_and_runs_the_d
             status: devflow_core::doctor::CheckStatus::Ok,
             detail: "git 2.50".into(),
             hint: None,
+            remedies: Vec::new(),
         }]);
     });
     frame(cx, &h, |_| {});

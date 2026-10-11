@@ -856,7 +856,7 @@ impl Builder<'_> {
                     front: false,
                 }]);
             spec.risks.push(
-                "Presets are part of what `devflow trust` approves; the values are built from \
+                "Presets are part of what you approve before devflow applies them; the values are built from \
                  the workspace's connection and are never written to the project file."
                     .to_string(),
             );

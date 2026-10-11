@@ -93,6 +93,8 @@ pub struct Activity {
     pub outcome: Option<Section<Done>>,
     /// When the outcome arrived.
     pub finished_at: Option<chrono::DateTime<chrono::Local>>,
+    /// What core says can be done about a failure (buttons under its message).
+    pub remedies: Vec<devflow_core::remedy::Remedy>,
 }
 
 impl Activity {
@@ -107,6 +109,7 @@ impl Activity {
             log: LogBuffer::new(MAX_LINES),
             outcome: None,
             finished_at: None,
+            remedies: Vec::new(),
         }
     }
 

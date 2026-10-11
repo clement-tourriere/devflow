@@ -87,7 +87,7 @@ pub(super) fn check(
     if skip {
         verdict.skipped = true;
         verdict.warnings.push(
-            "--skip-mise-check: setup hooks ran without checking that mise trusts the \
+            "the mise check was skipped on request: setup hooks ran without checking that mise trusts the \
              worktree and leaves them the workspace's variables (recorded in the receipt)"
                 .to_string(),
         );
@@ -124,8 +124,8 @@ pub(super) fn check(
         )
     };
     const SKIP_HINT: &str = "No hook ran. Route the command through `devflow exec` \
-         (`mise exec -- devflow exec -- COMMAND`), fix mise's configuration and run \
-         `devflow setup`, or run the hooks anyway with `devflow setup --skip-mise-check`";
+         (`mise exec -- devflow exec -- COMMAND`), fix mise's configuration and run setup \
+         again, or ask setup to skip this check";
     match &delivery {
         MiseDelivery::Delivered | MiseDelivery::NotLoaded => {}
         MiseDelivery::Overridden { .. } | MiseDelivery::Removed { .. } => {
@@ -145,16 +145,16 @@ pub(super) fn check(
         MiseDelivery::Untrusted { .. } => {
             // devflow never trusts a configuration on its own.
             verdict.block = Some(format!(
-                "{}. No hook ran; run `devflow setup` again once mise trusts it (`devflow \
-                 doctor` lists the ways to do that)",
+                "{}. No hook ran; run setup again once mise trusts it (the doctor checks list \
+                 the ways to do that)",
                 delivery.describe()
             ));
         }
         MiseDelivery::Unavailable => {
             verdict.block = Some(format!(
                 "mise is not installed or not on PATH, and {} runs it. No hook ran; install \
-                 mise (https://mise.jdx.dev), then run `devflow setup`, or run the hooks anyway \
-                 with `devflow setup --skip-mise-check`",
+                 mise (https://mise.jdx.dev), then run setup again, or ask setup to skip this \
+                 check",
                 using[0].label
             ));
         }

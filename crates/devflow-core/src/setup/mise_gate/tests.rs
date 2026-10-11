@@ -100,7 +100,7 @@ fn a_mise_that_overrides_blocks_every_hook_and_names_the_key() {
     assert!(block.contains("setup hook #2"), "{block}");
     assert!(block.contains("mise.local.toml"), "{block}");
     assert!(block.contains("devflow exec"), "{block}");
-    assert!(block.contains("--skip-mise-check"), "{block}");
+    assert!(block.contains("skip this check"), "{block}");
     assert!(!block.contains("main-password") && !block.contains("db-password"));
     assert!(!block.contains("npm ci"), "no command text: {block}");
 }
@@ -147,7 +147,7 @@ fn the_escape_hatch_skips_the_check_and_says_so() {
         verdict
             .warnings
             .iter()
-            .any(|w| w.contains("--skip-mise-check"))
+            .any(|w| w.contains("skipped on request"))
     );
     // Nothing to skip when no hook goes through mise: nothing is recorded.
     let verdict = f.check(&[hook("echo hi")], true, &mise);
@@ -427,8 +427,8 @@ fn an_untrusted_configuration_is_never_trusted_for_the_user() {
         .block
         .expect("blocked");
     assert!(block.contains("mise trust /w/mise.toml"), "{block}");
-    assert!(block.contains("devflow doctor"), "{block}");
-    assert!(!block.contains("--skip-mise-check"), "{block}");
+    assert!(block.contains("doctor checks"), "{block}");
+    assert!(!block.contains("skip this check"), "{block}");
 }
 
 #[test]
@@ -446,7 +446,7 @@ fn a_check_that_fails_blocks_without_quoting_mise() {
         .block
         .expect("blocked");
     assert!(
-        block.contains("code 3") && block.contains("--skip-mise-check"),
+        block.contains("code 3") && block.contains("skip this check"),
         "{block}"
     );
     assert!(!block.contains("stderr-secret"), "{block}");

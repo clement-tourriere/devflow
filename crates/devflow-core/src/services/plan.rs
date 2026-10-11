@@ -427,12 +427,13 @@ impl Service {
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     if Instant::now() >= limit {
-                        bail!(
-                            "the operation is still running after {}; it continues on \
-                             its own. Check `devflow service {} reconcile` later",
-                            crate::text::counted(copy_timeout + WAIT_SLACK.as_secs(), "second"),
-                            self.key
-                        );
+                        return Err(self
+                            .reconcile_problem(format!(
+                                "the operation is still running after {}; it continues on its \
+                                 own. Check on it later",
+                                crate::text::counted(copy_timeout + WAIT_SLACK.as_secs(), "second"),
+                            ))
+                            .into_error());
                     }
                 }
             }

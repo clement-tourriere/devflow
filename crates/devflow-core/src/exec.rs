@@ -15,6 +15,7 @@
 //! `.devflow/env` (setup has not written it), or one that is not a plain file
 //! is an error, and the command does not start. Errors and this module's
 //! output never include a value.
+use crate::remedy::{Problem, Remedy};
 use anyhow::{Result, bail};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -72,6 +73,20 @@ pub fn prepare(start: &Path) -> Result<Prepared> {
     )
 }
 
+/// The workspace at `root` has no `.devflow/env`: setup has not run there.
+fn no_variables(root: &Path) -> anyhow::Error {
+    Problem::new(format!(
+        "{} has no {}/{}: this workspace has no variables yet, so the command was not started",
+        root.display(),
+        crate::env_file::DIR,
+        crate::env_file::FILE
+    ))
+    .with(Remedy::Setup {
+        workspace: root.to_path_buf(),
+    })
+    .into_error()
+}
+
 /// The variables of the workspace whose worktree root is `root`.
 pub fn prepare_root(root: &Path) -> Result<Prepared> {
     let dir = root.join(crate::env_file::DIR);
@@ -85,13 +100,7 @@ pub fn prepare_root(root: &Path) -> Result<Prepared> {
              through it",
             dir.display()
         ),
-        Err(_) => bail!(
-            "{} has no {}/{}: this workspace has no variables yet. Run `devflow setup` there \
-             first; the command was not started",
-            root.display(),
-            crate::env_file::DIR,
-            crate::env_file::FILE
-        ),
+        Err(_) => return Err(no_variables(root)),
     }
     match path.symlink_metadata() {
         Ok(meta) if meta.file_type().is_file() => {}
@@ -100,23 +109,21 @@ pub fn prepare_root(root: &Path) -> Result<Prepared> {
              through it",
             path.display()
         ),
-        Err(_) => bail!(
-            "{} has no {}/{}: this workspace has no variables yet. Run `devflow setup` there \
-             first; the command was not started",
-            root.display(),
-            crate::env_file::DIR,
-            crate::env_file::FILE
-        ),
+        Err(_) => return Err(no_variables(root)),
     }
     let vars = match crate::env_file::read(root) {
         Ok(vars) => vars,
         Err(_) => bail!("cannot read {}", path.display()),
     };
     if vars.is_empty() {
-        bail!(
-            "{} sets no variables; run `devflow setup` there again. The command was not started",
+        return Err(Problem::new(format!(
+            "{} sets no variables, so the command was not started",
             path.display()
-        );
+        ))
+        .with(Remedy::Setup {
+            workspace: root.to_path_buf(),
+        })
+        .into_error());
     }
     Ok(Prepared {
         root: root.to_path_buf(),
@@ -200,6 +207,28 @@ mod tests {
         std::fs::create_dir_all(root.join(".git")).unwrap();
         crate::env_file::write(&root, &[("DATABASE_URL".to_string(), DB.to_string())]).unwrap();
         root
+    }
+
+    #[test]
+    fn a_workspace_without_variables_says_so_and_offers_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let error = prepare_root(&root).unwrap_err();
+        assert!(!error.to_string().contains("`devflow"), "{error}");
+        assert!(error.to_string().contains("no variables yet"), "{error}");
+        assert_eq!(
+            crate::remedy::remedies_of(&error),
+            [Remedy::Setup {
+                workspace: root.clone()
+            }]
+        );
+        // An empty file is the same story.
+        std::fs::create_dir_all(root.join(crate::env_file::DIR)).unwrap();
+        std::fs::write(crate::env_file::path(&root), "").unwrap();
+        let error = prepare_root(&root).unwrap_err();
+        assert!(!error.to_string().contains("`devflow"), "{error}");
+        assert_eq!(crate::remedy::remedies_of(&error).len(), 1);
     }
 
     #[test]

@@ -5,6 +5,7 @@ use crate::db::CowSource;
 use crate::githook::{self, InstallState};
 use crate::project::Project;
 use crate::receipt::Status;
+use crate::remedy::{self, Remedy};
 use crate::trust::{self, TrustState};
 use crate::{cow, pitchfork, processes, setup, worktree};
 use serde::Serialize;
@@ -26,8 +27,18 @@ pub struct Check {
     pub name: String,
     pub status: CheckStatus,
     pub detail: String,
+    /// What to do about it, in words that are right in any frontend: never a
+    /// command line (that is what [`Check::remedies`] carry).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// The actions that fix it, most useful first. A frontend draws a button
+    /// per remedy; the CLI prints [`Remedy::hint`] lines and the JSON document
+    /// carries each with its CLI `command`.
+    #[serde(
+        serialize_with = "remedy::serialize_remedies",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub remedies: Vec<Remedy>,
 }
 
 impl Check {
@@ -37,6 +48,7 @@ impl Check {
             status,
             detail: detail.into(),
             hint: None,
+            remedies: Vec::new(),
         }
     }
 
@@ -55,6 +67,18 @@ impl Check {
     fn hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
         self
+    }
+
+    /// Add a remedy (the most useful first).
+    fn fix(mut self, remedy: Remedy) -> Self {
+        if !self.remedies.contains(&remedy) {
+            self.remedies.push(remedy);
+        }
+        self
+    }
+
+    fn fixes(self, remedies: impl IntoIterator<Item = Remedy>) -> Self {
+        remedies.into_iter().fold(self, Check::fix)
     }
 }
 
@@ -172,15 +196,29 @@ fn project_config(project: &Project) -> Vec<Check> {
         Err(e) => Check::fail(
             "project",
             format!("{} is invalid: {e:#}", project.config_path.display()),
-            "fix the file or run `devflow init`",
-        ),
+            "fix the file, or set the project up again",
+        )
+        .fixes([
+            Remedy::OpenFile {
+                path: project.config_path.clone(),
+            },
+            Remedy::Init {
+                root: project.root.clone(),
+            },
+        ]),
     }];
     for hint in project.config.env.hints() {
-        checks.push(Check::warn(
-            "env-presets",
-            hint,
-            "write the preset under `presets = [...]` and remove the variable",
-        ));
+        checks.push(
+            Check::warn(
+                "env-presets",
+                hint.message,
+                "write the preset under `presets = [...]` and remove the variable",
+            )
+            .fix(Remedy::AddEnvPreset {
+                root: project.root.clone(),
+                preset: hint.preset.to_string(),
+            }),
+        );
     }
     checks
 }
@@ -265,17 +303,23 @@ fn postgres(project: &Project) -> Vec<Check> {
         .clone()
         .unwrap_or_else(|| "unknown endpoint".into());
     if !status.reachable {
-        let hint = match server.mode() {
-            PostgresMode::Managed => "start it with `devflow db up`",
-            PostgresMode::External => {
-                "check `admin_url` of the postgres service / DEVFLOW_PG_ADMIN_URL and the network"
-            }
+        let (hint, remedy) = match server.mode() {
+            PostgresMode::Managed => (
+                "the managed server is not running",
+                Some(Remedy::StartDatabase {
+                    root: project.root.clone(),
+                }),
+            ),
+            PostgresMode::External => (
+                "check `admin_url` of the postgres service / DEVFLOW_PG_ADMIN_URL and the network",
+                None,
+            ),
         };
         let detail = status
             .problem
             .clone()
             .unwrap_or_else(|| format!("{endpoint} is not reachable"));
-        checks.push(Check::warn("postgres", detail, hint));
+        checks.push(Check::warn("postgres", detail, hint).fixes(remedy));
         return checks;
     }
     let version = status
@@ -322,7 +366,7 @@ fn postgres(project: &Project) -> Vec<Check> {
             "for an external server, declare `cow = \"verified\"` in devflow.local.toml after checking its filesystem",
         ),
     });
-    checks.extend(scratch_databases(&server));
+    checks.extend(scratch_databases(project, &server));
     checks
 }
 
@@ -397,16 +441,18 @@ fn container_services(project: &Project) -> Vec<Check> {
                 "copy-on-write could not be verified{measured} and require_cow is set{}",
                 status.cow_note.map_or(String::new(), |n| format!(": {n}"))
             ),
-            "`devflow service status --probe` measures it again",
-        ),
+            "measure it again",
+        )
+        .fix(measure(project, &configured[0].0)),
         CowCapability::Unknown => Check::warn(
             "services-cow",
             format!(
                 "copy-on-write could not be verified{measured}{}",
                 status.cow_note.map_or(String::new(), |n| format!(": {n}"))
             ),
-            "`devflow service status --probe` measures it again",
-        ),
+            "measure it again",
+        )
+        .fix(measure(project, &configured[0].0)),
     });
     for (key, _) in &configured {
         let Ok(svc) = Service::open(project, key) else {
@@ -416,13 +462,19 @@ fn container_services(project: &Project) -> Vec<Check> {
             Ok(records) => {
                 let unfinished = records.unfinished().len();
                 if unfinished > 0 {
-                    checks.push(Check::warn(
-                        &format!("service-{key}"),
-                        format!(
-                            "{unfinished} clone, snapshot or reset operation(s) did not finish"
-                        ),
-                        format!("`devflow service {key} reconcile` completes or rolls them back"),
-                    ));
+                    checks.push(
+                        Check::warn(
+                            &format!("service-{key}"),
+                            format!(
+                                "{unfinished} clone, snapshot or reset operation(s) did not finish"
+                            ),
+                            "finishing or rolling them back settles them",
+                        )
+                        .fix(Remedy::ReconcileService {
+                            root: project.root.clone(),
+                            key: key.clone(),
+                        }),
+                    );
                 } else {
                     // The engine, and what the last clone cost the source.
                     let ready = records
@@ -463,15 +515,26 @@ fn container_services(project: &Project) -> Vec<Check> {
     if let Some(orphans) = &orphans
         && (!orphans.services.is_empty() || !orphans.branches.is_empty())
     {
-        checks.push(Check::warn(
-            "services-orphans",
-            format!(
-                "{} service(s) no longer configured and {} branch(es) without a workspace are kept",
-                orphans.services.len(),
-                orphans.branches.len()
-            ),
-            "`devflow service list --orphans` shows them; `devflow service NAME forget` or `drop` removes them",
-        ));
+        checks.push(
+            Check::warn(
+                "services-orphans",
+                format!(
+                    "{} service(s) no longer configured and {} branch(es) without a workspace are kept",
+                    orphans.services.len(),
+                    orphans.branches.len()
+                ),
+                "they stay until you forget the service or drop the branch",
+            )
+            .fixes(orphans.services.iter().map(|key| Remedy::ForgetService {
+                root: project.root.clone(),
+                key: key.clone(),
+            }))
+            .fixes(orphans.branches.iter().map(|branch| Remedy::DropServiceBranch {
+                root: project.root.clone(),
+                key: branch.service.clone(),
+                branch: branch.branch,
+            })),
+        );
     }
     checks
 }
@@ -479,7 +542,7 @@ fn container_services(project: &Project) -> Vec<Check> {
 /// Scratch databases (`extra_databases`) that need a decision: names the
 /// configuration no longer lists (kept, never dropped implicitly) and ones
 /// that are not ready. Silent when there is nothing to say.
-fn scratch_databases(server: &crate::db::Server) -> Option<Check> {
+fn scratch_databases(project: &Project, server: &crate::db::Server) -> Option<Check> {
     use crate::db::RecordStatus;
     // The server is checked above; an unreadable listing is not this check's news.
     let branches = server.list_branches().ok()?;
@@ -499,28 +562,45 @@ fn scratch_databases(server: &crate::db::Server) -> Option<Check> {
         }
     }
     if !orphans.is_empty() {
-        return Some(Check::warn(
-            "postgres-scratch",
-            format!(
-                "{} scratch database(s) are no longer listed in extra_databases and are kept: {}",
-                orphans.len(),
-                orphans.join(", ")
-            ),
-            "`devflow db reconcile --drop-orphans` drops them; adding the name back keeps them in use",
-        ));
+        return Some(
+            Check::warn(
+                "postgres-scratch",
+                format!(
+                    "{} scratch database(s) are no longer listed in extra_databases and are kept: {}",
+                    orphans.len(),
+                    orphans.join(", ")
+                ),
+                "dropping them frees the space; adding the name back to extra_databases keeps them in use",
+            )
+            .fix(Remedy::DropOrphanDatabases {
+                root: project.root.clone(),
+            }),
+        );
     }
     if !unfinished.is_empty() {
-        return Some(Check::warn(
-            "postgres-scratch",
-            format!(
-                "{} scratch database(s) are not ready: {}",
-                unfinished.len(),
-                unfinished.join(", ")
-            ),
-            "`devflow db reconcile` finishes interrupted work",
-        ));
+        return Some(
+            Check::warn(
+                "postgres-scratch",
+                format!(
+                    "{} scratch database(s) are not ready: {}",
+                    unfinished.len(),
+                    unfinished.join(", ")
+                ),
+                "interrupted work has to be finished",
+            )
+            .fix(Remedy::ReconcileDatabases {
+                root: project.root.clone(),
+            }),
+        );
     }
     None
+}
+
+fn measure(project: &Project, key: &str) -> Remedy {
+    Remedy::MeasureServices {
+        root: project.root.clone(),
+        key: key.to_string(),
+    }
 }
 
 fn major_version(version: &str) -> Option<u32> {
@@ -569,8 +649,11 @@ fn hook_trust(project: &Project, cwd: &Path) -> Vec<Check> {
                     "the hooks, [env] and pitchfork processes have not been approved"
                 }
             ),
-            "review and approve them with `devflow trust` in that workspace; until then setup skips hooks and [env] recipes",
-        ),
+            "review and approve them in that workspace; until then setup skips hooks and [env] recipes",
+        )
+        .fix(Remedy::Trust {
+            workspace: dir.clone(),
+        }),
         Err(e) => Check::fail(
             "hook-trust",
             format!("{e:#}"),
@@ -588,22 +671,31 @@ fn git_hook(project: &Project) -> Vec<Check> {
         Ok(InstallState::NotInstalled) => Check::warn(
             "git-hook",
             "worktrees created by other tools (git worktree add, IDEs, agents) are not set up automatically",
-            "run `devflow hook install`",
-        ),
+            "installing the Git hook sets them up",
+        )
+        .fix(Remedy::InstallGitHook {
+            root: project.root.clone(),
+        }),
         Ok(InstallState::Foreign { path }) => {
             let chained =
                 std::fs::read_to_string(&path).is_ok_and(|t| t.contains("--from-git-hook"));
             if chained {
                 Check::ok(
                     "git-hook",
-                    format!("{} runs `devflow setup --if-new`", path.display()),
+                    format!("{} sets up new worktrees through devflow", path.display()),
                 )
             } else {
                 Check::warn(
                     "git-hook",
                     format!("{} exists and was not written by devflow", path.display()),
-                    "`devflow hook install` prints the line to add to it",
+                    "it was left alone; installing shows the line to add to it",
                 )
+                .fixes([
+                    Remedy::OpenFile { path },
+                    Remedy::InstallGitHook {
+                        root: project.root.clone(),
+                    },
+                ])
             }
         }
         Err(e) => Check::fail("git-hook", format!("{e:#}"), "check core.hooksPath"),
@@ -615,22 +707,23 @@ fn git_hook(project: &Project) -> Vec<Check> {
 /// would fix a problem are offered in the hint; none is run.
 fn pitchfork_checks(project: Option<&Project>, cwd: &Path) -> Vec<Check> {
     let detection = pitchfork::detect();
-    const INSTALL: &str =
-        "run `devflow pitchfork install` (it asks first), or `mise use -g pitchfork@latest`";
+    const INSTALL: &str = "install it (devflow asks first), or run `mise use -g pitchfork@latest`";
     let mut checks = vec![if detection.path.is_none() {
         Check::warn(
             "pitchfork",
             "`pitchfork` was not found on PATH (optional: daemons and the local HTTPS proxy)",
             INSTALL,
         )
+        .fix(Remedy::InstallPitchfork)
     } else if !detection.installed {
-        Check::warn("pitchfork", detection.summary(), INSTALL)
+        Check::warn("pitchfork", detection.summary(), INSTALL).fix(Remedy::InstallPitchfork)
     } else if !detection.missing_features.is_empty() {
         Check::warn(
             "pitchfork",
             detection.summary(),
             "upgrade it: `mise use -g pitchfork@latest`",
         )
+        .fix(Remedy::InstallPitchfork)
     } else {
         Check::ok("pitchfork", detection.summary())
     }];
@@ -646,7 +739,10 @@ fn pitchfork_checks(project: Option<&Project>, cwd: &Path) -> Vec<Check> {
             "pitchfork-namespace",
             problem,
             "daemon ids of this worktree collide with others until each worktree has its own namespace",
-        ),
+        )
+        .fix(Remedy::Setup {
+            workspace: dir.clone(),
+        }),
         None => {
             let namespace = processes::namespace_of(&dir);
             match namespace.source {
@@ -658,8 +754,11 @@ fn pitchfork_checks(project: Option<&Project>, cwd: &Path) -> Vec<Check> {
                         namespace.value,
                         dir.display()
                     ),
-                    "`devflow setup` in this workspace writes its own namespace",
-                ),
+                    "setting this workspace up again writes its own namespace",
+                )
+                .fix(Remedy::Setup {
+                    workspace: dir.clone(),
+                }),
                 _ => Check::ok(
                     "pitchfork-namespace",
                     format!("{} ({})", namespace.value, dir.display()),
@@ -730,25 +829,26 @@ fn workspaces(project: &Project) -> Vec<Check> {
             return vec![Check::fail(
                 "workspaces",
                 format!("{e:#}"),
-                "run `git worktree list`",
+                "check that the repository can be read",
             )];
         }
     };
-    let attention: Vec<String> = list
+    let attention: Vec<&setup::WorkspaceStatus> = list
         .iter()
         .filter(|w| matches!(w.status, Some(Status::NeedsAttention)))
-        .map(|w| w.workspace.name.clone())
         .collect();
-    let interrupted: Vec<String> = list
+    let interrupted: Vec<&setup::WorkspaceStatus> = list
         .iter()
         .filter(|w| matches!(w.status, Some(Status::InProgress)) && !w.busy)
-        .map(|w| w.workspace.name.clone())
         .collect();
-    let missing: Vec<String> = list
-        .iter()
-        .filter(|w| w.workspace.missing)
-        .map(|w| w.workspace.name.clone())
-        .collect();
+    let names = |some: &[&setup::WorkspaceStatus]| {
+        some.iter()
+            .map(|w| w.workspace.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let missing: Vec<&setup::WorkspaceStatus> =
+        list.iter().filter(|w| w.workspace.missing).collect();
     let unmapped: Vec<String> = list
         .iter()
         .filter(|w| w.receipt.as_ref().is_some_and(|r| r.unmapped.is_some()))
@@ -766,25 +866,40 @@ fn workspaces(project: &Project) -> Vec<Check> {
         ));
     }
     if !attention.is_empty() {
-        checks.push(Check::warn(
-            "workspaces",
-            format!("needs attention: {}", attention.join(", ")),
-            "run `devflow setup` inside each to see what failed and resume",
-        ));
+        checks.push(
+            Check::warn(
+                "workspaces",
+                format!("needs attention: {}", names(&attention)),
+                "setting each up again shows what failed and resumes it",
+            )
+            .fixes(attention.iter().flat_map(|w| w.remedies(project))),
+        );
     }
     if !interrupted.is_empty() {
-        checks.push(Check::warn(
-            "workspaces",
-            format!("setup was interrupted in: {}", interrupted.join(", ")),
-            "run `devflow setup` inside each to resume",
-        ));
+        checks.push(
+            Check::warn(
+                "workspaces",
+                format!("setup was interrupted in: {}", names(&interrupted)),
+                "setting each up again resumes it",
+            )
+            .fixes(interrupted.iter().flat_map(|w| w.remedies(project))),
+        );
     }
     if !missing.is_empty() {
-        checks.push(Check::warn(
-            "workspaces",
-            format!("directory missing for: {}", missing.join(", ")),
-            "run `git worktree prune`, or `devflow remove NAME`",
-        ));
+        checks.push(
+            Check::warn(
+                "workspaces",
+                format!("directory missing for: {}", names(&missing)),
+                "forget the registrations of the missing worktrees, or remove the workspaces",
+            )
+            .fix(Remedy::PruneWorktrees {
+                root: project.root.clone(),
+            })
+            .fixes(missing.iter().map(|w| Remedy::RemoveWorkspace {
+                root: project.root.clone(),
+                name: w.workspace.name.clone(),
+            })),
+        );
     }
     if checks.is_empty() {
         checks.push(Check::ok(
@@ -1011,6 +1126,99 @@ mod tests {
             CheckStatus::Ok,
             "{checks:?}"
         );
+    }
+
+    /// Text a person reads in a frontend: never a command line of the CLI.
+    /// (`devflow exec` inside a hook command is configuration, not a command
+    /// to run, and stays in the mise checks.)
+    fn has_cli_text(text: &str) -> bool {
+        ["`devflow ", "run devflow", "`git worktree prune"]
+            .iter()
+            .any(|needle| text.contains(needle))
+    }
+
+    #[test]
+    fn checks_carry_their_fixes_as_remedies_and_say_nothing_of_the_cli() {
+        let t = testutil::repo(None);
+        let ws = worktree::create(&t.project, "stuck", None).unwrap();
+        let mut receipt = crate::receipt::Receipt::new(t.project.id(), "stuck", None);
+        receipt.set_phase(
+            crate::receipt::Phase::Materialize,
+            crate::receipt::PhaseState::Done,
+            None,
+        );
+        receipt.skip_required(crate::receipt::Phase::Hooks, "hooks are not trusted".into());
+        receipt.save(&ws.git_dir).unwrap();
+        let gone = worktree::create(&t.project, "gone", None).unwrap();
+        std::fs::remove_dir_all(&gone.path).unwrap();
+
+        let checks = run(Some(&t.project));
+        for check in &checks {
+            for text in [Some(&check.detail), check.hint.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                assert!(!has_cli_text(text), "{}: {text}", check.name);
+            }
+        }
+        assert_eq!(
+            find(&checks, "git-hook")[0].remedies,
+            [Remedy::InstallGitHook {
+                root: t.root.clone()
+            }]
+        );
+        let workspaces = find(&checks, "workspaces");
+        let attention = workspaces
+            .iter()
+            .find(|c| c.detail.contains("needs attention"))
+            .expect("a workspace needs attention");
+        assert!(
+            attention.remedies.contains(&Remedy::Setup {
+                workspace: ws.path.clone()
+            }),
+            "{attention:?}"
+        );
+        let missing = workspaces
+            .iter()
+            .find(|c| c.detail.contains("directory missing"))
+            .expect("a directory is missing");
+        assert_eq!(
+            missing.remedies,
+            [
+                Remedy::PruneWorktrees {
+                    root: t.root.clone()
+                },
+                Remedy::RemoveWorkspace {
+                    root: t.root.clone(),
+                    name: "gone".into()
+                }
+            ]
+        );
+        // The JSON document carries each remedy with its CLI line.
+        let json = serde_json::to_value(attention).unwrap();
+        assert_eq!(json["remedies"][0]["kind"], "setup");
+        assert_eq!(json["remedies"][0]["command"], "devflow setup");
+        assert!(json["hint"].as_str().is_some_and(|h| !has_cli_text(h)));
+        // A check without a fix has no `remedies` key at all.
+        let ok = serde_json::to_value(find(&checks, "git")[0]).unwrap();
+        assert!(ok.get("remedies").is_none());
+    }
+
+    #[test]
+    fn an_unreachable_managed_server_offers_to_start_it() {
+        let t = testutil::repo(None);
+        let mut project = t.project.clone();
+        project.config.set_postgres("db", Default::default());
+        let checks = run(Some(&project));
+        let pg = find(&checks, "postgres");
+        if pg[0].status == CheckStatus::Warn {
+            assert!(
+                pg[0].remedies.contains(&Remedy::StartDatabase {
+                    root: project.root.clone()
+                }),
+                "{pg:?}"
+            );
+        }
     }
 
     #[test]

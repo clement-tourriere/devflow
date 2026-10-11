@@ -3,6 +3,7 @@
 //! core's (`devflow_core::doctor::run_in`), run on the background executor;
 //! nothing here judges them.
 use super::{
+    remedies,
     ui::{self, Tone},
     widgets::{card, chip, section_header},
 };
@@ -13,6 +14,7 @@ use crate::{
 use devflow_core::{
     doctor::{Check, CheckStatus},
     redact,
+    remedy::Remedy,
 };
 use gpui_kit::{
     assets::IconName as Lucide,
@@ -29,6 +31,8 @@ pub struct CheckRow {
     pub status: CheckStatus,
     pub detail: String,
     pub hint: Option<String>,
+    /// What fixes it, as actions: a button each. A check that is fine has none.
+    pub remedies: Vec<Remedy>,
 }
 
 impl CheckRow {
@@ -38,6 +42,11 @@ impl CheckRow {
             status: check.status,
             detail: redact::text(&check.detail),
             hint: check.hint.as_deref().map(redact::text),
+            remedies: if check.status == CheckStatus::Ok {
+                Vec::new()
+            } else {
+                check.remedies.clone()
+            },
         }
     }
 }
@@ -65,6 +74,7 @@ enum Run {
 }
 
 struct DoctorDialog {
+    state: Entity<AppState>,
     workspace: String,
     run: Run,
 }
@@ -86,6 +96,7 @@ pub fn open(state: &Entity<AppState>, path: PathBuf, window: &mut Window, cx: &m
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string());
     let view = cx.new(|_| DoctorDialog {
+        state: state.clone(),
         workspace,
         run: Run::Running,
     });
@@ -129,6 +140,7 @@ impl Render for DoctorDialog {
                 .into_any_element(),
             Run::Failed(message) => ui::error_banner(message.clone(), cx).into_any_element(),
             Run::Done(rows) => {
+                let state = self.state.clone();
                 let failing = rows.iter().filter(|r| r.status != CheckStatus::Ok).count();
                 card(cx)
                     .id("doctor-checks")
@@ -205,7 +217,18 @@ impl Render for DoctorDialog {
                                             )
                                             .children(row.hint.clone().map(|hint| {
                                                 div().text_xs().child(format!("To fix it: {hint}"))
-                                            })),
+                                            }))
+                                            .when(!row.remedies.is_empty(), |col| {
+                                                col.child(
+                                                    remedies::row(
+                                                        &state,
+                                                        &format!("doctor-fix-{index}"),
+                                                        &row.remedies,
+                                                        true,
+                                                    )
+                                                    .pt_1(),
+                                                )
+                                            }),
                                     )
                                     .test_support()
                             })),
@@ -243,6 +266,7 @@ mod tests {
             status,
             detail: detail.into(),
             hint: hint.map(str::to_string),
+            remedies: Vec::new(),
         }
     }
 

@@ -121,14 +121,15 @@ impl Service {
         {
             match self.recover_if_abandoned(&op)? {
                 Some(action) => actions.push(action),
-                None => bail!(
-                    "{:?} of {} is in progress (step {:?}); wait for it or run \
-                     `devflow service {} reconcile` if it is stuck",
-                    op.kind,
-                    op.target,
-                    op.step,
-                    self.key
-                ),
+                None => {
+                    return Err(self
+                        .reconcile_problem(format!(
+                            "{:?} of {} is in progress (step {:?}); wait for it, or finish or \
+                             roll it back if it is stuck",
+                            op.kind, op.target, op.step,
+                        ))
+                        .into_error());
+                }
             }
         }
         Ok(actions)
@@ -176,12 +177,13 @@ impl Service {
                 self.recover_if_abandoned(op)?;
             }
         }
-        bail!(
-            "service '{}' keeps having unfinished operations that touch the same resources; run \
-             `devflow service {} reconcile`",
-            self.key,
-            self.key
-        )
+        Err(self
+            .reconcile_problem(format!(
+                "service '{}' keeps having unfinished operations that touch the same resources; \
+                 finish or roll them back",
+                self.key,
+            ))
+            .into_error())
     }
 
     /// Recover `op` if no coordinator holds its locks. `None`: someone does
@@ -359,15 +361,15 @@ impl Service {
         // Docker refuse: the helpers go first, and again while it says the
         // volume is in use.
         self.remove_volume_clear_of_helpers(name, &self.volume_ownership(owner, legacy))
-            .with_context(|| self.kept_hint(&format!("volume {name}")))
+            .map_err(|error| error.context(self.kept_hint(&format!("volume {name}"))))
     }
 
-    fn kept_hint(&self, resource: &str) -> String {
-        format!(
+    fn kept_hint(&self, resource: &str) -> crate::remedy::Problem {
+        self.reconcile_problem(format!(
             "{resource} of service '{key}' was kept and the operation is not finished; if it is \
-             not devflow's, remove it yourself, then run `devflow service {key} reconcile`",
+             not devflow's, remove it yourself, then finish the operation",
             key = self.key
-        )
+        ))
     }
 
     /// Roll an operation back: the helper is killed and confirmed gone, what

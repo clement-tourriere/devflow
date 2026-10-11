@@ -7,7 +7,7 @@
 //! No lifecycle decision is made here: "Retry setup" calls core through the
 //! same operation as the table's row action.
 use super::{
-    dialogs, processes, ui,
+    dialogs, processes, remedies, ui,
     ui::Tone,
     widgets::{banner, caption, card, chip, empty_row, hoverable, mono, section_header},
 };
@@ -25,6 +25,7 @@ use devflow_core::{
     cow::{self, Measure},
     receipt::{PayloadOutcome, Phase, PhaseState, Receipt, ServiceBinding},
     redact,
+    remedy::Remedy,
     setup::WorkspaceStatus,
 };
 use gpui_kit::{
@@ -135,6 +136,9 @@ pub struct Detail {
     pub database: Option<DatabaseDisk>,
     /// How each container service's branch was cloned.
     pub clones: Vec<ServiceClone>,
+    /// What core says can be done about the workspace's state: approve what
+    /// it asks to run, run setup. Empty when it is ready, or busy.
+    pub remedies: Vec<Remedy>,
 }
 
 /// How a container service's branch was cloned, as its receipt binding
@@ -216,7 +220,10 @@ pub fn phase_rows(receipt: &Receipt) -> Vec<PhaseRow> {
                 phase,
                 title: phase_title(phase),
                 state: record.state,
-                detail: record.detail.as_deref().map(redact::text),
+                detail: record
+                    .detail
+                    .as_deref()
+                    .map(|d| redact::text(devflow_core::receipt::plain_detail(d))),
                 duration: record.duration(),
                 required_skip: record.required_skip,
                 deliberate: record.deliberate,
@@ -413,7 +420,17 @@ impl Detail {
             connections,
             database,
             clones,
+            remedies: model
+                .project
+                .as_ref()
+                .map(|project| status.remedies(project))
+                .unwrap_or_default(),
         }
+    }
+
+    /// The remedy of this kind the workspace has, if any.
+    pub fn remedy(&self, kind: &str) -> Option<&Remedy> {
+        self.remedies.iter().find(|r| r.kind() == kind)
     }
 
     /// Phases that went wrong or were left for someone to resolve.
@@ -1370,17 +1387,26 @@ impl WorkspaceDetailView {
                     None if failed => format!("{} failed.", row.title),
                     None => format!("{} was skipped.", row.title),
                 };
-                let action =
-                    (!failed && matches!(row.phase, Phase::Env | Phase::Hooks)).then(|| {
-                        Button::new(SharedString::from(format!(
-                            "problem-review-{}",
-                            row.phase.as_str()
-                        )))
-                        .label("Review in Setup")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.state.update(cx, |s, cx| s.go_to_tab(Tab::Setup, cx))
-                        }))
-                    });
+                // What core says fixes it, next to the reason: approving what
+                // setup skipped for want of approval, else running setup again.
+                let review = (!failed && matches!(row.phase, Phase::Env | Phase::Hooks))
+                    .then(|| detail.remedy("trust"))
+                    .flatten();
+                let action = match (review, detail.remedy("setup")) {
+                    (Some(trust), _) => Some(remedies::button_with_id(
+                        &self.state,
+                        format!("problem-review-{}", row.phase.as_str()).into(),
+                        trust,
+                        false,
+                    )),
+                    (None, Some(setup)) => Some(remedies::button_with_id(
+                        &self.state,
+                        format!("problem-fix-{}", row.phase.as_str()).into(),
+                        setup,
+                        false,
+                    )),
+                    (None, None) => None,
+                };
                 banner(
                     if failed { Tone::Danger } else { Tone::Warning },
                     if failed {

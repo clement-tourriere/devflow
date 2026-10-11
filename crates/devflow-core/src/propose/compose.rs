@@ -333,7 +333,7 @@ impl Builder<'_> {
                 run: up,
                 lead: None,
                 tail: vec![
-                    "Runs on every `devflow switch` into a ready workspace; `up -d --wait` does \
+                    "Runs on every switch into a ready workspace; `up -d --wait` does \
                      nothing when the containers are already running."
                         .into(),
                 ],
@@ -354,7 +354,7 @@ impl Builder<'_> {
                         "`-v` deletes the workspace's compose volumes. They belong to this \
                          workspace's COMPOSE_PROJECT_NAME, never to the main checkout's project."
                             .into(),
-                        "`|| true` keeps a stopped Docker daemon from blocking `devflow remove`."
+                        "`|| true` keeps a stopped Docker daemon from blocking the removal of a workspace."
                             .into(),
                     ],
                     evidence,
@@ -387,7 +387,8 @@ impl Builder<'_> {
                 );
             }
             tail.push(
-                "`|| true` keeps a stopped Docker daemon from blocking `devflow remove`.".into(),
+                "`|| true` keeps a stopped Docker daemon from blocking the removal of a workspace."
+                    .into(),
             );
             self.compose_hook(
                 "teardown",

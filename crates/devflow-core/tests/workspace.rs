@@ -440,7 +440,7 @@ fn untrusted_hooks_need_attention_until_approved_then_setup_resumes() {
     let hooks = out.receipt.phase(Phase::Hooks);
     assert_eq!(hooks.state, PhaseState::Skipped);
     assert!(hooks.required_skip);
-    assert!(hooks.detail.unwrap().contains("devflow trust"));
+    assert!(hooks.detail.unwrap().contains("approve"));
     assert!(out.hooks.is_none());
     assert!(!w.path.join(".devflow/marker").exists());
     // Everything before the hooks is in place.
@@ -1642,7 +1642,7 @@ fn untrusted_env_recipes_are_not_applied_and_leave_the_workspace_needing_attenti
         env.state == PhaseState::Skipped && env.required_skip,
         "{env:?}"
     );
-    assert!(env.detail.unwrap().contains("devflow trust"));
+    assert!(env.detail.unwrap().contains("approve"));
     let vars = env_map(&out.workspace);
     assert_eq!(
         vars["DATABASE_URL"], SECRET_URL,
@@ -2312,7 +2312,6 @@ fn remove_checks_every_protection_before_any_effect() {
     let error = remove("guarded", RemoveOptions::default()).unwrap_err();
     assert!(error.to_string().contains("uncommitted"), "{error:#}");
     assert!(protection(&error).forceable);
-    assert!(error.to_string().ends_with("or pass --force"), "{error:#}");
     still_there();
     std::fs::remove_file(w.path.join("wip.txt")).unwrap();
     std::fs::remove_dir_all(w.path.join("src")).unwrap();
@@ -2401,10 +2400,7 @@ fn teardown_failure_blocks_removal_unless_forced() {
         .workspace;
     let mut rec = Recorder::default();
     let error = setup::remove(&t.project, "stuck", RemoveOptions::default(), &mut rec).unwrap_err();
-    assert!(
-        error.to_string().contains("exit 5") && error.to_string().contains("--force"),
-        "{error:#}"
-    );
+    assert!(error.to_string().contains("exit 5"), "{error:#}");
     assert!(protection(&error).forceable, "--force removes it anyway");
     assert!(w.path.exists(), "removal was blocked");
     assert!(rec.lines.iter().any(|l| l == "cleaning"));
@@ -5288,7 +5284,7 @@ fn hooks_wait_for_a_mise_that_hands_them_the_workspaces_variables() {
             ) && detail.contains("mise.local.toml")
                 && detail.contains("setup hook #1")
                 && detail.contains("devflow exec")
-                && detail.contains("--skip-mise-check"),
+                && detail.contains("skip this check"),
             "{name}: {detail}"
         );
         assert!(!detail.contains(MAIN), "no value: {detail}");
@@ -5321,7 +5317,7 @@ fn hooks_wait_for_a_mise_that_hands_them_the_workspaces_variables() {
             again
                 .warnings
                 .iter()
-                .any(|w| w.contains("--skip-mise-check")),
+                .any(|w| w.contains("skipped on request")),
             "{name}: {:?}",
             again.warnings
         );

@@ -119,15 +119,16 @@ pub struct Protected {
     /// failure, untrusted teardown); `false` for the default workspace and
     /// the caller's own workspace.
     pub forceable: bool,
+    /// What can lift the protection besides force (approve the teardown
+    /// hooks, ...); see [`crate::remedy::remedies_of`].
+    pub remedies: Vec<crate::remedy::Remedy>,
 }
 
 impl std::fmt::Display for Protected {
+    /// The reason only: that `force` overrides it is `forceable`, which each
+    /// frontend words its own way.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.forceable {
-            write!(f, "{}, or pass --force", self.reason)
-        } else {
-            f.write_str(&self.reason)
-        }
+        f.write_str(&self.reason)
     }
 }
 
@@ -178,6 +179,8 @@ impl std::error::Error for ConfigChanged {}
 #[derive(Debug, Clone)]
 pub struct StalePlan {
     pub message: String,
+    /// The repository the plan was for; empty when it is not known.
+    pub root: PathBuf,
 }
 
 impl std::fmt::Display for StalePlan {
@@ -237,6 +240,26 @@ impl std::fmt::Display for InstanceChanged {
 
 impl std::error::Error for InstanceChanged {}
 
+/// The PostgreSQL project lock connection died: another process may now be
+/// working on the project, so the operation stopped without touching anything
+/// else. Finishing interrupted work settles what it left.
+#[derive(Debug, Clone)]
+pub struct LockLost {
+    /// The project's root, for the remedy.
+    pub root: PathBuf,
+}
+
+impl std::fmt::Display for LockLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "the project lock connection was lost, so the operation stopped; finish the \
+             interrupted work before retrying",
+        )
+    }
+}
+
+impl std::error::Error for LockLost {}
+
 /// One workspace whose receipt could not be read, so its instance is not
 /// known.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -260,8 +283,7 @@ impl std::fmt::Display for OwnershipUnknown {
         write!(
             f,
             "cannot tell whether a workspace owns the branch: {} receipt(s) could not be read ({}); \
-             nothing was dropped. Repair or remove them, or drop the branch by id with \
-             `devflow service NAME drop ID`",
+             nothing was dropped. Repair or remove them, or drop the branch by its id",
             self.problems.len(),
             self.problems
                 .iter()

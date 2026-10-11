@@ -6,7 +6,7 @@
 use crate::config::{EnvPreset, EnvSection};
 use crate::conn;
 use crate::diag::key_label;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -362,16 +362,43 @@ pub fn write(worktree: &Path, vars: &[(String, String)]) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Something other than devflow's file is where devflow writes: the person
+/// removes it (shown in the file manager), then setup runs again.
+fn replace_by_hand(path: &Path, message: String) -> anyhow::Error {
+    // `<workspace>/.devflow` or `<workspace>/.devflow/env`.
+    let in_dir = path.file_name().is_some_and(|name| name == FILE)
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == DIR);
+    let workspace = if in_dir {
+        path.parent().and_then(Path::parent)
+    } else {
+        path.parent()
+    }
+    .map(Path::to_path_buf);
+    let mut problem = crate::remedy::Problem::new(message).with(crate::remedy::Remedy::Reveal {
+        path: path.to_path_buf(),
+    });
+    if let Some(workspace) = workspace {
+        problem = problem.with(crate::remedy::Remedy::Setup { workspace });
+    }
+    problem.into_error()
+}
+
 fn ensure_plain_dir(dir: &Path) -> Result<()> {
     let meta = dir
         .symlink_metadata()
         .with_context(|| format!("cannot inspect {}", dir.display()))?;
     if !meta.file_type().is_dir() {
-        bail!(
-            "{} is a symlink or not a directory; refusing to write credentials through it. \
-             Remove it and re-run `devflow setup`",
-            dir.display()
-        );
+        return Err(replace_by_hand(
+            dir,
+            format!(
+                "{} is a symlink or not a directory; refusing to write credentials through it. \
+                 Remove it, then run setup again",
+                dir.display()
+            ),
+        ));
     }
     Ok(())
 }
@@ -380,10 +407,14 @@ fn ensure_plain_dir(dir: &Path) -> Result<()> {
 fn ensure_plain_file(path: &Path) -> Result<bool> {
     match path.symlink_metadata() {
         Ok(meta) if meta.file_type().is_file() => Ok(true),
-        Ok(_) => bail!(
-            "{} is a symlink or not a regular file; refusing to write through it. Remove it and re-run `devflow setup`",
-            path.display()
-        ),
+        Ok(_) => Err(replace_by_hand(
+            path,
+            format!(
+                "{} is a symlink or not a regular file; refusing to write through it. Remove it, \
+                 then run setup again",
+                path.display()
+            ),
+        )),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e).with_context(|| format!("cannot inspect {}", path.display())),
     }
@@ -419,6 +450,28 @@ fn unquote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn something_in_the_way_of_the_env_file_is_shown_and_setup_can_run_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(dir.path(), root.join(DIR)).unwrap();
+        let error = write(&root, &[("A".to_string(), "1".to_string())]).unwrap_err();
+        assert!(!error.to_string().contains("`devflow"), "{error}");
+        assert_eq!(
+            crate::remedy::remedies_of(&error),
+            [
+                crate::remedy::Remedy::Reveal {
+                    path: root.join(DIR)
+                },
+                crate::remedy::Remedy::Setup {
+                    workspace: root.clone()
+                }
+            ]
+        );
+    }
 
     fn generated(vars: &[(&str, &str)]) -> Vec<(String, String)> {
         vars.iter()
