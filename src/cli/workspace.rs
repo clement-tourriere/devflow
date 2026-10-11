@@ -5,10 +5,12 @@ use anyhow::{Result, anyhow, bail};
 use clap::{Args, Subcommand};
 use devflow_core::db::DataSource;
 use devflow_core::error::{Busy, Protected};
+use devflow_core::health::{self, ProjectProblem};
 use devflow_core::hooks::HookReport;
 use devflow_core::pitchfork::Pitchfork;
 use devflow_core::processes::{self as core_processes, Autostart};
 use devflow_core::receipt::{Phase, PhaseState, Receipt, Status};
+use devflow_core::remedy::Remedy;
 use devflow_core::setup::{
     self, CreateRequest, RemoveOptions, RemoveOutcome, SetupOptions, SetupOutcome, WorkspaceStatus,
 };
@@ -339,22 +341,33 @@ fn list_all(ctx: &Ctx) -> Result<ExitCode> {
         root: std::path::PathBuf,
         #[serde(skip_serializing_if = "Option::is_none")]
         workspaces: Option<Vec<WorkspaceStatus>>,
+        /// Why the project cannot be opened, with what to do about it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        problem: Option<ProjectProblem>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     }
     let rows: Vec<Row> = registry::list()?
         .into_iter()
         .map(|entry| {
-            let listed = Project::open(&entry.root).and_then(|project| setup::list(&project));
+            // A project in trouble is classified from the disk first, so the
+            // row says what is wrong and what to do instead of a parser's text.
+            let problem = health::check(&entry).problem();
+            let listed = match &problem {
+                Some(_) => None,
+                None => Some(Project::open(&entry.root).and_then(|project| setup::list(&project))),
+            };
             let (workspaces, error) = match listed {
-                Ok(items) => (Some(items), None),
-                Err(error) => (None, Some(format!("{error:#}"))),
+                Some(Ok(items)) => (Some(items), None),
+                Some(Err(error)) => (None, Some(format!("{error:#}"))),
+                None => (None, problem.as_ref().map(|p| p.message.clone())),
             };
             Row {
                 name: entry.name,
                 id: entry.id,
                 root: entry.root,
                 workspaces,
+                problem,
                 error,
             }
         })
@@ -375,6 +388,11 @@ fn list_all(ctx: &Ctx) -> Result<ExitCode> {
             (Some(items), _) => say(workspace_table(ctx, items)),
             (None, Some(error)) => say(format!("  ! {}", redact::text(error))),
             (None, None) => {}
+        }
+        if let Some(problem) = &row.problem {
+            for hint in problem.remedies.iter().filter_map(Remedy::hint) {
+                say(format!("    hint: {}", redact::text(&hint)));
+            }
         }
     }
     Ok(ExitCode::SUCCESS)

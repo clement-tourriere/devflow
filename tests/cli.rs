@@ -4114,3 +4114,185 @@ fn init_apply_with_a_rejected_cache_keeps_it_in_the_compose_hook() {
     ok(&again);
     assert_eq!(json(&again)["already_applied"], true);
 }
+
+// --- projects that cannot be opened -----------------------------------------
+
+const PRE_RELEASE: &str = "[project]\nname = \"tt2\"\nid = \"3f2b1c7e-0b3c-4d2e-9a7a-8f6d5c4b3a21\"\n\n# The database.\n[postgres]\nmode = \"managed\"\nimage = \"postgres:18\"\n";
+
+#[test]
+fn an_error_carries_its_remedies_as_hint_lines_and_as_data() {
+    let env = Env::new();
+    let out = env.run(&["list"]);
+    failed(&out);
+    assert!(
+        !stderr(&out).contains("run `devflow init` first"),
+        "the message is CLI-free: {}",
+        describe(&out)
+    );
+    let doc = json(&env.run(&["--json", "list"]));
+    assert!(
+        !doc["error"].as_str().unwrap().contains("devflow init"),
+        "{doc}"
+    );
+    let remedies = doc["remedies"].as_array().unwrap();
+    assert_eq!(remedies[0]["kind"], "init");
+    assert_eq!(remedies[0]["label"], "Set up devflow…");
+    assert_eq!(remedies[0]["command"], "devflow init");
+    assert_eq!(remedies[0]["root"], env.repo.to_str().unwrap());
+}
+
+#[test]
+fn a_pre_release_configuration_points_at_its_migration() {
+    let env = Env::new();
+    std::fs::write(env.config_path(), PRE_RELEASE).unwrap();
+    let out = env.run(&["list"]);
+    failed(&out);
+    assert!(
+        stderr(&out).contains("hint: run `devflow config migrate`"),
+        "{}",
+        describe(&out)
+    );
+    let doc = json(&env.run(&["--json", "list"]));
+    assert_eq!(doc["remedies"][0]["kind"], "migrate_config", "{doc}");
+}
+
+#[test]
+fn config_migrate_shows_the_change_then_writes_it() {
+    let env = Env::new();
+    std::fs::write(env.config_path(), PRE_RELEASE).unwrap();
+
+    let dry = env.run(&["--json", "config", "migrate", "--dry-run"]);
+    ok(&dry);
+    let doc = json(&dry);
+    assert_eq!(doc["migrated"], false);
+    assert_eq!(doc["dry_run"], true);
+    assert_eq!(doc["service_key"], "db");
+    assert_eq!(doc["files"][0]["file"], "devflow.toml");
+    assert_eq!(
+        std::fs::read_to_string(env.config_path()).unwrap(),
+        PRE_RELEASE,
+        "a dry run writes nothing"
+    );
+
+    let human = env.run(&["config", "migrate", "--dry-run"]);
+    ok(&human);
+    assert!(
+        stdout(&human).contains("- [postgres]"),
+        "{}",
+        describe(&human)
+    );
+    assert!(
+        stdout(&human).contains("+ [services.db]"),
+        "{}",
+        describe(&human)
+    );
+
+    let done = env.run(&["--json", "config", "migrate"]);
+    ok(&done);
+    assert_eq!(json(&done)["migrated"], true);
+    let text = std::fs::read_to_string(env.config_path()).unwrap();
+    assert!(
+        text.contains("# The database.\n[services.db]\nengine = \"postgres\"\n"),
+        "{text}"
+    );
+    ok(&env.run(&["--json", "list"]));
+
+    // Nothing is left to do.
+    let again = env.run(&["--json", "config", "migrate"]);
+    ok(&again);
+    assert_eq!(json(&again)["migrated"], false);
+}
+
+#[test]
+fn config_migrate_refuses_what_it_cannot_rewrite_and_says_why() {
+    let env = Env::new();
+    let text = format!("{PRE_RELEASE}\n[services.main]\nengine = \"postgres\"\n");
+    std::fs::write(env.config_path(), &text).unwrap();
+    let out = env.run(&["--json", "config", "migrate"]);
+    failed(&out);
+    let doc = json(&out);
+    assert!(doc["error"].as_str().unwrap().contains("both"), "{doc}");
+    assert_eq!(std::fs::read_to_string(env.config_path()).unwrap(), text);
+}
+
+#[test]
+fn the_project_list_shows_problems_and_can_be_mended() {
+    let env = Env::new();
+    env.init();
+    ok(&env.run(&["list"])); // registers the project
+    let listed = json(&env.run(&["--json", "list", "--all"]));
+    let project = listed["projects"][0].clone();
+    let id = project["id"].as_str().unwrap().to_string();
+    assert!(project.get("problem").is_none(), "{project}");
+
+    // The folder moves away.
+    let moved = env.root.join("moved");
+    std::fs::rename(&env.repo, &moved).unwrap();
+    let doc = json(&env.run_in(&env.root, &["--json", "list", "--all"]));
+    let problem = &doc["projects"][0]["problem"];
+    assert_eq!(problem["kind"], "folder_missing", "{doc}");
+    assert_eq!(problem["remedies"][0]["kind"], "locate_project");
+    assert!(
+        problem["remedies"][1]["command"]
+            .as_str()
+            .unwrap()
+            .starts_with("devflow project forget")
+    );
+    let human = env.run_in(&env.root, &["list", "--all"]);
+    assert!(
+        stdout(&human).contains("hint: if the folder moved"),
+        "{}",
+        describe(&human)
+    );
+
+    // A folder that is not that project is refused; the right one is accepted.
+    let other = env.root.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    git2::Repository::init(&other).unwrap();
+    failed(&env.run_in(
+        &env.root,
+        &["project", "relocate", &id, other.to_str().unwrap()],
+    ));
+    let relocated = env.run_in(
+        &env.root,
+        &[
+            "--json",
+            "project",
+            "relocate",
+            &id,
+            moved.to_str().unwrap(),
+        ],
+    );
+    ok(&relocated);
+    assert_eq!(json(&relocated)["project"]["root"], moved.to_str().unwrap());
+    let doc = json(&env.run_in(&env.root, &["--json", "list", "--all"]));
+    assert!(doc["projects"][0].get("problem").is_none(), "{doc}");
+
+    // Forgetting removes the entry and leaves the folder.
+    let forgotten = env.run_in(&env.root, &["--json", "project", "forget", &id]);
+    ok(&forgotten);
+    assert_eq!(json(&forgotten)["forgotten"][0]["id"], id.as_str());
+    assert!(moved.join("devflow.toml").is_file());
+    let doc = json(&env.run_in(&env.root, &["--json", "list", "--all"]));
+    assert_eq!(doc["projects"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn forgetting_missing_projects_leaves_the_others() {
+    let env = Env::new();
+    env.init();
+    ok(&env.run(&["list"]));
+    let gone = env.root.join("gone");
+    std::fs::create_dir_all(&gone).unwrap();
+    git2::Repository::init(&gone).unwrap();
+    ok(&env.run_in(&gone, &["init", "--yes", "--name", "gone"]));
+    std::fs::remove_dir_all(&gone).unwrap();
+
+    let out = env.run(&["--json", "project", "forget", "--missing"]);
+    ok(&out);
+    let doc = json(&out);
+    assert_eq!(doc["forgotten"].as_array().unwrap().len(), 1, "{doc}");
+    assert_eq!(doc["forgotten"][0]["name"], "gone");
+    let listed = json(&env.run(&["--json", "list", "--all"]));
+    assert_eq!(listed["projects"].as_array().unwrap().len(), 1);
+}

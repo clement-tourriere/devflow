@@ -1,5 +1,6 @@
 //! Command definitions and dispatch. Handlers parse arguments, prompt and
 //! render; every lifecycle decision is made by `devflow-core`.
+mod config;
 mod db;
 mod env;
 mod exec;
@@ -7,6 +8,7 @@ mod hooks;
 mod init;
 mod output;
 mod processes;
+mod project;
 mod service;
 mod shell;
 mod system;
@@ -17,7 +19,8 @@ use anyhow::{Context, Result};
 use clap::builder::BoolishValueParser;
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand};
-use devflow_core::error::{NotInitialized, Protected};
+use devflow_core::error::Protected;
+use devflow_core::remedy::{self, Remedy};
 use devflow_core::{Project, redact};
 use serde::Serialize;
 use std::cell::RefCell;
@@ -88,6 +91,16 @@ enum Command {
         #[command(subcommand)]
         command: env::EnvCommand,
     },
+    /// Mend the list of known projects: forget one, point one at its new folder
+    Project {
+        #[command(subcommand)]
+        command: project::ProjectCommand,
+    },
+    /// Bring the configuration files to the current format
+    Config {
+        #[command(subcommand)]
+        command: config::ConfigCommand,
+    },
     /// Manage the post-checkout Git hook that sets up worktrees made by other tools
     Hook {
         #[command(subcommand)]
@@ -138,6 +151,8 @@ impl Command {
             Command::Hooks { command } => command.json_name(),
             Command::Env { command } => command.json_name(),
             Command::Hook { action } => action.json_name(),
+            Command::Project { command } => command.json_name(),
+            Command::Config { command } => command.json_name(),
             Command::Db { command } => command.json_name()?,
             Command::Up(_) => "up",
             Command::Down(_) => "down",
@@ -270,39 +285,40 @@ fn context(cli: &Cli) -> Result<Ctx> {
 }
 
 /// Report a failure: one redacted JSON document on stdout when `--json` was
-/// asked for (whatever stage failed), and `error:` plus a hint on stderr.
+/// asked for (whatever stage failed), and `error:` plus `hint:` lines on stderr.
 fn fail(ctx: Option<&Ctx>, json: bool, command: &str, error: &anyhow::Error) -> ExitCode {
     let message = format!("{error:#}");
-    let hint = hint(error);
+    let remedies = remedy::remedies_of(error);
+    let hints = hints(error, &remedies);
     if json {
         let warnings = ctx.map(Ctx::take_warnings).unwrap_or_default();
-        output::emit_error(warnings, command, &message, hint.as_deref());
+        output::emit_error(warnings, command, &message, hints.first(), &remedies);
     }
     output::note(format!("error: {}", redact::text(&message)));
-    if let Some(hint) = hint {
+    for hint in hints {
         output::note(format!("hint: {}", redact::text(&hint)));
     }
     ExitCode::FAILURE
 }
 
-/// What the person can do about a failure, chosen from the error's type.
-fn hint(error: &anyhow::Error) -> Option<String> {
-    if let Some(missing) = error.downcast_ref::<NotInitialized>() {
-        return Some(format!(
-            "run `devflow init` in {} (`devflow init --plan` shows the proposed setup first)",
-            missing.root.display()
-        ));
-    }
+/// What the person can do about a failure, chosen from the error's type: the
+/// remedies core attached to it (or knows for it) and the CLI-specific
+/// refusals. The first line is also the JSON document's `hint`.
+fn hints(error: &anyhow::Error, remedies: &[Remedy]) -> Vec<String> {
+    let mut hints: Vec<String> = Vec::new();
     if let Some(refusal) = error.downcast_ref::<devflow_core::processes::Refusal>() {
-        return refusal.hint();
+        hints.extend(refusal.hint());
     }
-    match error.downcast_ref::<Protected>() {
-        Some(protected) if protected.forceable => Some(format!(
+    if let Some(protected) = error.downcast_ref::<Protected>()
+        && protected.forceable
+    {
+        hints.push(format!(
             "run `devflow remove {} --force` to override this protection",
             protected.workspace
-        )),
-        _ => None,
+        ));
     }
+    hints.extend(remedies.iter().filter_map(Remedy::hint));
+    hints
 }
 
 /// An argument error (or `--help`/`--version`) from clap. Help and version
@@ -331,7 +347,7 @@ fn usage_error(args: &[OsString], error: &clap::Error) -> ExitCode {
         } else {
             summary(&rendered.to_string())
         };
-        output::emit_error(Vec::new(), &command, &message, None);
+        output::emit_error(Vec::new(), &command, &message, None, &[]);
     }
     let text = if palette.is_enabled() {
         rendered.ansi().to_string()
@@ -432,6 +448,8 @@ fn run(ctx: &Ctx, command: Command) -> Result<ExitCode> {
         Command::Hooks { command } => hooks::run(ctx, command),
         Command::Env { command } => env::run(ctx, command),
         Command::Hook { action } => workspace::hook(ctx, action),
+        Command::Project { command } => project::run(ctx, command),
+        Command::Config { command } => config::run(ctx, command),
         Command::Db { command } => db::run(ctx, command),
         Command::Up(args) => processes::up(ctx, args),
         Command::Down(args) => processes::down(ctx, args),
@@ -508,11 +526,14 @@ mod tests {
 
     #[test]
     fn hints_follow_the_error_type() {
-        let missing = anyhow::Error::new(NotInitialized {
+        let hint = |error: &anyhow::Error| hints(error, &remedy::remedies_of(error));
+        let missing = anyhow::Error::new(devflow_core::error::NotInitialized {
             root: PathBuf::from("/repo"),
         })
         .context("while listing");
-        assert!(hint(&missing).unwrap().contains("devflow init"));
+        let shown = hint(&missing);
+        assert_eq!(shown.len(), 1);
+        assert!(shown[0].contains("`devflow init` in /repo"), "{shown:?}");
 
         let protected = |forceable| {
             anyhow::Error::new(Protected {
@@ -521,13 +542,23 @@ mod tests {
                 forceable,
             })
         };
-        assert!(
-            hint(&protected(true))
-                .unwrap()
-                .contains("devflow remove feature/a --force")
-        );
-        assert_eq!(hint(&protected(false)), None);
+        assert!(hint(&protected(true))[0].contains("devflow remove feature/a --force"));
+        assert!(hint(&protected(false)).is_empty());
         // The wording of a message never decides.
-        assert_eq!(hint(&anyhow::anyhow!("run `devflow init` first")), None);
+        assert!(hint(&anyhow::anyhow!("run `devflow init` first")).is_empty());
+
+        // A problem lists every remedy that has a CLI line, in order.
+        let problem = remedy::Problem::new("the folder is gone")
+            .with(Remedy::Retry)
+            .with(Remedy::ForgetProject {
+                root: "/gone".into(),
+            })
+            .into_error();
+        let shown = hint(&problem);
+        assert_eq!(shown.len(), 1);
+        assert!(
+            shown[0].contains("devflow project forget /gone"),
+            "{shown:?}"
+        );
     }
 }

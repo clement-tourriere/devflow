@@ -25,6 +25,8 @@ image = "postgres:18"
 
 The keys inside are unchanged, `devflow.local.toml` overlays `[services.db]` the same way it overlaid `[postgres]`, and a project has at most one `postgres` service. devflow stops with the new spelling when it finds `[postgres]`, and refuses a file that mixes 1.0 and 0.x keys.
 
+You do not have to edit the file: the desktop app offers **Migrate configuration…** on a project that has the old table (it shows the exact change first), and `devflow config migrate` does the same on the command line (`--dry-run` shows the change without writing it). Both rewrite `devflow.toml` and `devflow.local.toml` in place, keep comments and the table's position, and leave the server, its branches and your workspaces alone: they are identified by the project id, not by the service key. Nothing is written when a file has both `[postgres]` and a PostgreSQL service, or when `services.db` is already something else; fix that by hand and run it again.
+
 Existing worktrees need no action. The first `devflow setup` or `switch` in each migrates its receipt in place (version 1 to 2) without touching any database: the old `data` binding moves to the project's sole postgres service, and the `database` phase is now called `services`. If the configuration has no postgres service the binding is kept as `receipt.unmapped`, reported by `setup` and `devflow doctor`, and not exported until you add the service. `devflow --json` documents now carry `receipt.services.<key>` where they carried `receipt.data`. A managed server started by an earlier build keeps working; its next `devflow db up` gives it a stable host port.
 
 ## What was removed

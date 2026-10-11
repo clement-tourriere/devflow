@@ -5,6 +5,7 @@ use super::Ctx;
 use anyhow::Result;
 use devflow_core::receipt::{Phase, PhaseState};
 use devflow_core::redact;
+use devflow_core::remedy::Remedy;
 use devflow_core::setup::Progress;
 use serde::Serialize;
 use serde_json::Value;
@@ -178,11 +179,23 @@ pub fn emit_unredacted<T: Serialize>(ctx: &Ctx, command: &str, body: &T) -> Resu
 }
 
 /// Failures in `--json` mode still produce one document on stdout. Needs no
-/// [`Ctx`]: argument and context errors happen before one exists.
-pub fn emit_error(warnings: Vec<String>, command: &str, message: &str, hint: Option<&str>) {
+/// [`Ctx`]: argument and context errors happen before one exists. `hint` is
+/// the first thing to try; `remedies` are all of them, as data an agent can
+/// pick from (`kind`, `label`, and the `command` when the CLI has one).
+pub fn emit_error(
+    warnings: Vec<String>,
+    command: &str,
+    message: &str,
+    hint: Option<&String>,
+    remedies: &[Remedy],
+) {
     let mut body = serde_json::json!({ "error": message });
     if let Some(hint) = hint {
-        body["hint"] = Value::String(hint.to_string());
+        body["hint"] = Value::String(hint.clone());
+    }
+    if !remedies.is_empty() {
+        body["remedies"] =
+            serde_json::to_value(devflow_core::remedy::describe(remedies)).unwrap_or(Value::Null);
     }
     let _ = print_doc(warnings, command, &body, true);
 }

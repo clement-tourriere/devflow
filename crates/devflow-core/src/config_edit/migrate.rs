@@ -74,6 +74,20 @@ pub struct Migration {
     pub notes: Vec<String>,
 }
 
+/// Whether a configuration file of the project in `root` still has the
+/// top-level `[postgres]` table (in any form). Reads only; `NotInitialized`
+/// without a project file.
+pub fn needed(root: &Path) -> Result<bool> {
+    let files = ConfigFiles::read(root)?;
+    Ok([&files.project, &files.local].into_iter().any(|state| {
+        state
+            .text
+            .as_deref()
+            .and_then(|text| text.parse::<toml::Table>().ok())
+            .is_some_and(|table| table.contains_key("postgres"))
+    }))
+}
+
 /// Work out the rewrite for the project in `root`. Reads only.
 ///
 /// Fails with a [`Problem`] when there is nothing to migrate or the rewrite

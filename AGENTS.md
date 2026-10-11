@@ -12,6 +12,32 @@ devflow gives each task its own Git worktree, copy-on-write payloads, a database
 
 Every document has `"version"` (currently `1`) and `"command"`. With `--json` anywhere in the arguments before a `--`, every failure prints `{"version": 1, "command": …, "error": "…"}` and exits 1: a missing argument, a bad `-C` directory, a configuration problem and a refused operation alike. `command` is the subcommand that was asked for (`devflow` when none could be identified). When devflow knows the next step, the document also has `"hint"` (for example `run `devflow init` …` when there is no `devflow.toml`, or `devflow remove NAME --force` when only `--force` can override a protection). `--help` and `--version` still print their text.
 
+### Errors and remedies
+
+When devflow knows how to get past a failure, the error document also has `"remedies"`: an array, most useful first, of things that can be done about it. A remedy is data, not a sentence to parse:
+
+```json
+{"version": 1, "command": "list",
+ "error": "no devflow.toml in /work/shop",
+ "hint": "run `devflow init` in /work/shop (`devflow init --plan` shows the proposed setup first)",
+ "remedies": [{"kind": "init", "root": "/work/shop", "label": "Set up devflow…", "command": "devflow init", "destructive": false}]}
+```
+
+`kind` is one of `retry`, `forget_project` (`root`), `locate_project` (`id`, `root`), `migrate_config` (`root`), `init` (`root`), `open_file` (`path`), `reveal` (`path`) and `open_guide` (`url`); new kinds appear over time, so ignore the ones you do not know. `label` is the button text the desktop app shows. `command` is the equivalent CLI line when there is one (`devflow project forget PATH`, `devflow project relocate PATH NEW_PATH`, `devflow config migrate`, `devflow init`); it is absent for actions only a person at the desktop does (retry, open a file). `destructive` marks an action that takes something away and should be confirmed (forgetting a project removes the list entry; the folder and data are not touched). `error` never contains a command: the way out is always in `remedies` (and `hint`, the first command, for readers that want one line). The human output prints the same remedies as `hint:` lines on stderr.
+
+`devflow --json list --all` gives each registered project a `problem` (`kind`, `message`, `root`, `remedies`) instead of `workspaces` when it cannot be opened: `folder_missing`, `not_git_checkout`, `not_initialized`, `pre_release_config`, `legacy_config`, `invalid_config`, `wrong_project` or `unreadable`.
+
+```sh
+devflow --json list --all                                  # which projects have a problem
+devflow --json project forget PATH_OR_ID                   # remove an entry; nothing on disk changes
+devflow --json project forget --missing                    # every entry whose folder is gone
+devflow --json project relocate PATH_OR_ID NEW_PATH        # the folder moved (it must be that project)
+devflow --json config migrate --dry-run                    # show how an earlier build's [postgres] becomes [services.db]
+devflow --json config migrate                              # write it (never prompts under --json)
+```
+
+`config migrate` rewrites only the top-level `[postgres]` table of `devflow.toml` (or `.devflow.toml`) and `devflow.local.toml` into `[services.db]` with `engine = "postgres"`, keeping comments and the table's place. The server, its branches and the workspaces' receipts are identified by the project id, not by the service key, so they keep working. It refuses (nothing is written) when a file has both `[postgres]` and a PostgreSQL service, when `services.db` is something else, and for 0.x configuration, which is never rewritten. The document has `migrated`, `dry_run`, `service_key`, `files` (`file`, `path`, `added`, `removed`, `diff`) and `notes`.
+
 | Exit code | Meaning |
 | --- | --- |
 | 0 | Done; for `switch` and `setup`, the workspace is `ready` |
