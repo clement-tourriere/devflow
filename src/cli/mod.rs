@@ -208,6 +208,10 @@ pub struct Ctx {
     /// `-C` was given: a command devflow starts runs in `cwd`.
     pub chdir: bool,
     warnings: RefCell<Vec<String>>,
+    /// The checkout a command resolved as its target (`up feature` from the
+    /// main checkout targets `feature`'s). Remedies that act on "the
+    /// workspace" name this directory, never the caller's own.
+    target: RefCell<Option<PathBuf>>,
 }
 
 impl Ctx {
@@ -239,6 +243,11 @@ impl Ctx {
         } else {
             output::note(format!("warning: {}", redact::text(&message)));
         }
+    }
+
+    /// Record the checkout the command resolved as its target.
+    pub fn target_is(&self, workspace: &Path) {
+        *self.target.borrow_mut() = Some(workspace.to_path_buf());
     }
 
     pub(crate) fn take_warnings(&self) -> Vec<String> {
@@ -281,6 +290,7 @@ fn context(cli: &Cli) -> Result<Ctx> {
         cwd,
         chdir: cli.dir.is_some(),
         warnings: RefCell::new(Vec::new()),
+        target: RefCell::new(None),
     })
 }
 
@@ -289,12 +299,13 @@ fn context(cli: &Cli) -> Result<Ctx> {
 fn fail(ctx: Option<&Ctx>, json: bool, command: &str, error: &anyhow::Error) -> ExitCode {
     let message = format!("{error:#}");
     let mut remedies = remedy::remedies_of(error);
-    if let (Some(refusal), Some(ctx)) = (
-        error.downcast_ref::<devflow_core::processes::Refusal>(),
-        ctx,
-    ) {
-        // The commands of a refusal act on the workspace the command ran in.
-        remedies.extend(refusal.remedies(&ctx.cwd));
+    if let Some(refusal) = error.downcast_ref::<devflow_core::processes::Refusal>()
+        && let Some(target) = ctx.and_then(|ctx| ctx.target.borrow().clone())
+    {
+        // The remedies of a refusal act on the workspace the command resolved
+        // (`up feature` from the main checkout), not on the caller's directory;
+        // without one they would name a place nobody chose, so there are none.
+        remedies.extend(refusal.remedies(&target));
     }
     let hints = hints(error, &remedies);
     if json {

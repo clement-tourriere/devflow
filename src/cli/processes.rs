@@ -98,6 +98,7 @@ fn target(ctx: &Ctx, project: &Project, name: Option<&str>) -> Result<Workspace>
 pub fn up(ctx: &Ctx, args: UpArgs) -> Result<ExitCode> {
     let project = ctx.project()?;
     let workspace = target(ctx, &project, args.name.as_deref())?;
+    ctx.target_is(&workspace.path);
     // An unapproved pitchfork configuration is shown and asked about at the
     // terminal, like hooks are; the approval is of exactly what was shown.
     let approval = trust::resolve(ctx, &project, &workspace.path, true)?;
@@ -115,6 +116,7 @@ pub fn up(ctx: &Ctx, args: UpArgs) -> Result<ExitCode> {
 pub fn down(ctx: &Ctx, args: DownArgs) -> Result<ExitCode> {
     let project = ctx.project()?;
     let workspace = target(ctx, &project, args.name.as_deref())?;
+    ctx.target_is(&workspace.path);
     let options = StopOptions {
         timeout: Duration::from_secs(args.timeout.max(1)),
         force: args.force,
