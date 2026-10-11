@@ -33,12 +33,35 @@
 //! the values the old file had (the table moved, `engine` added, nothing else
 //! different) and the merged configuration must be valid. A file that has both
 //! `[postgres]` and a PostgreSQL service, a `[services.db]` that is not
-//! PostgreSQL, or a 0.x shape, is refused with a [`Problem`] and nothing is
-//! written.
-use super::{ConfigFiles, FileState, Target, file_name};
+//! PostgreSQL in either layer (the project file's cache must not become a
+//! database because a local overlay says `[postgres]`), or a 0.x shape, is
+//! refused with a [`Problem`] and nothing is written. When the key is taken by
+//! another engine devflow refuses rather than choosing another key: the data
+//! would survive (it follows the project's id), but the documentation, the
+//! refusal message and the host name all say `db`, and a second guess about
+//! what the person meant is theirs to make.
+//!
+//! # Previews hold no credentials
+//!
+//! `devflow.local.toml` is where a person puts `SESSION_KEY = "..."` or
+//! `password = "..."`, and a diff shows the lines around a change. The preview
+//! ([`FileMigration::preview`]) is therefore built from a masked copy of both
+//! texts: every value is masked by its *name* (the rules of `devflow env list`,
+//! [`masked_template`]) and by its content (the patterns of [`redact::text`]).
+//! The real text is kept in the crate for [`apply`] only; neither `Debug` nor
+//! the preview carries it.
+//!
+//! # Apply
+//!
+//! [`apply`] writes only if both layers are what [`plan`] read (the contents,
+//! their absence, and which file is the project file), checks the merged result
+//! again, and writes the project file and then the local one. If the second
+//! write fails the first is put back, and the error says what was written.
+use super::{ConfigFiles, FileState, Target, file_name, masked_template};
 use crate::config::{Config, LOCAL_CONFIG_FILE};
 use crate::error::ConfigChanged;
-use crate::propose::{DiffKind, FileChange, FilePreview, diff_lines};
+use crate::propose::{DiffKind, FileChange, FilePreview, diff_lines, sha256_hex};
+use crate::redact::{self, MASK};
 use crate::remedy::{Problem, Remedy, remedies_of};
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
@@ -49,17 +72,63 @@ use toml_edit::{DocumentMut, Item, Key, Table, Value};
 pub const SERVICE_KEY: &str = "db";
 
 /// The rewrite of one configuration file.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FileMigration {
     pub target: Target,
     pub path: PathBuf,
     /// The file as it is now, and its hash (what [`apply`] expects to find).
-    pub before: String,
+    /// May hold credentials: for [`apply`] only, never shown.
+    pub(crate) before: String,
     pub before_hash: String,
-    /// The file as it would be written.
-    pub after: String,
-    /// The changed lines, for showing the change.
+    /// The file as it would be written (credentials included, as `before`).
+    pub(crate) after: String,
+    /// The changed lines, for showing the change: masked (see the module
+    /// documentation).
     pub preview: FilePreview,
+}
+
+impl std::fmt::Debug for FileMigration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileMigration")
+            .field("target", &self.target)
+            .field("path", &self.path)
+            .field("before_hash", &self.before_hash)
+            .field("preview", &self.preview)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What [`plan`] saw of the two layers, which [`apply`] requires to still be
+/// true: absence counts, and so does which file is the project file
+/// (`devflow.toml` or `.devflow.toml`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Layers {
+    project_path: PathBuf,
+    project_hash: Option<String>,
+    local_path: PathBuf,
+    local_hash: Option<String>,
+}
+
+impl Layers {
+    fn of(files: &ConfigFiles) -> Self {
+        Self {
+            project_path: files.project.path.clone(),
+            project_hash: files.project.hash.clone(),
+            local_path: files.local.path.clone(),
+            local_hash: files.local.hash.clone(),
+        }
+    }
+
+    /// The first file that is not what it was.
+    fn changed(&self, now: &Layers) -> Option<PathBuf> {
+        if self.project_path != now.project_path || self.project_hash != now.project_hash {
+            Some(now.project_path.clone())
+        } else if self.local_hash != now.local_hash {
+            Some(now.local_path.clone())
+        } else {
+            None
+        }
+    }
 }
 
 /// What [`apply`] would write.
@@ -72,6 +141,7 @@ pub struct Migration {
     pub files: Vec<FileMigration>,
     /// Things worth telling the person before they accept.
     pub notes: Vec<String>,
+    layers: Layers,
 }
 
 /// Whether a configuration file of the project in `root` still has the
@@ -142,6 +212,22 @@ pub fn plan(root: &Path) -> Result<Migration> {
         .map(|(_, key)| key.clone())
         .unwrap_or_else(|| SERVICE_KEY.to_string());
 
+    // The key must not belong to another engine in either layer: the local
+    // file's overlay is read on top of the project file's service.
+    if let Some((engine, file)) = taken_by_other_engine(&docs, &service_key) {
+        return Err(not_automatic(
+            format!(
+                "services.{} already exists in {} and is not the PostgreSQL service \
+                 (engine {}); migrating would turn it into one. Rename or remove that \
+                 service first",
+                crate::diag::key_label(&service_key),
+                file_name(&file),
+                engine.as_deref().unwrap_or("unset"),
+            ),
+            &files,
+        ));
+    }
+
     let mut notes = Vec::new();
     // The project file carries `engine`; the local file only when the project
     // file, as it will be, has no PostgreSQL service for it to overlay.
@@ -178,20 +264,11 @@ pub fn plan(root: &Path) -> Result<Migration> {
         moved.push((target, state, after));
     }
     // And the merged result must be a valid configuration.
-    let text_of = |target: Target| -> Option<String> {
-        match moved.iter().find(|(t, _, _)| *t == target) {
-            Some((_, _, after)) => Some(after.clone()),
-            None => files.file(target).text.clone(),
-        }
-    };
-    let project_text = text_of(Target::Project).unwrap_or_default();
-    let local_text = text_of(Target::Local);
-    if let Err(error) = Config::parse_layers(
-        &project_text,
-        &file_name(&files.project.path),
-        local_text.as_deref(),
-        LOCAL_CONFIG_FILE,
-    ) {
+    let replacements: Vec<(Target, &str)> = moved
+        .iter()
+        .map(|(target, _, after)| (*target, after.as_str()))
+        .collect();
+    if let Err(error) = check_merged(&files, &replacements) {
         return Err(not_automatic(
             format!("the configuration would still not be valid after the change: {error:#}"),
             &files,
@@ -202,7 +279,16 @@ pub fn plan(root: &Path) -> Result<Migration> {
     let mut out = Vec::new();
     for (target, state, after) in moved {
         let before = state.text.clone().unwrap_or_default();
-        let diff = diff_lines(&before, &after, 2);
+        // The preview is built from masked copies; the real texts stay for apply.
+        let shown_before = masked_text(&before);
+        let shown_after = masked_text(&after);
+        let diff: Vec<_> = diff_lines(&shown_before, &shown_after, 2)
+            .into_iter()
+            .map(|mut line| {
+                line.text = redact::text(&line.text);
+                line
+            })
+            .collect();
         let count = |kind| diff.iter().filter(|l| l.kind == kind).count();
         out.push(FileMigration {
             target,
@@ -211,7 +297,7 @@ pub fn plan(root: &Path) -> Result<Migration> {
             preview: FilePreview {
                 file: file_name(&state.path),
                 change: FileChange::Modified,
-                after: after.clone(),
+                after: shown_after,
                 added: count(DiffKind::Added),
                 removed: count(DiffKind::Removed),
                 diff,
@@ -236,23 +322,26 @@ pub fn plan(root: &Path) -> Result<Migration> {
         service_key,
         files: out,
         notes,
+        layers: Layers::of(&files),
     })
 }
 
-/// Write the files of `migration`. Each is replaced only if it still holds
-/// what [`plan`] read (otherwise the error is [`ConfigChanged`] and that file
-/// is left alone), the project file first: if the second write fails, the
-/// project is migrated and a new [`plan`] finds only what is left.
+/// Write the files of `migration`. Nothing is written unless both layers are
+/// still what [`plan`] read (a file that changed, appeared or disappeared, or
+/// a different project file name, is [`ConfigChanged`]) and the merged result
+/// is valid. The project file is written first; if the second write fails the
+/// first is put back (unless it was changed meanwhile) and the error says what
+/// was written and what was not.
 ///
 /// Returns the paths written.
 pub fn apply(migration: &Migration) -> Result<Vec<PathBuf>> {
     let go = || -> Result<Vec<PathBuf>> {
         let current = ConfigFiles::read(&migration.root)?;
+        if let Some(path) = migration.layers.changed(&Layers::of(&current)) {
+            return Err(ConfigChanged::new(path).into());
+        }
         for file in &migration.files {
             let state = current.file(file.target);
-            if state.hash.as_deref() != Some(file.before_hash.as_str()) {
-                return Err(ConfigChanged::new(state.path.clone()).into());
-            }
             if std::fs::symlink_metadata(&state.path).is_ok_and(|m| m.file_type().is_symlink()) {
                 bail!(
                     "{} is a symbolic link; devflow will not rewrite it",
@@ -260,12 +349,29 @@ pub fn apply(migration: &Migration) -> Result<Vec<PathBuf>> {
                 );
             }
         }
-        let mut written = Vec::new();
-        for file in &migration.files {
-            super::write_unless_changed(&file.path, &file.after, Some(&file.before_hash))?;
-            written.push(file.path.clone());
+        // The same check as the plan's, on what is on disk now.
+        let replacements: Vec<(Target, &str)> = migration
+            .files
+            .iter()
+            .map(|file| (file.target, file.after.as_str()))
+            .collect();
+        if let Err(error) = check_merged(&current, &replacements) {
+            return Err(not_automatic(
+                format!("the configuration would still not be valid after the change: {error:#}"),
+                &current,
+            )
+            .context_remedies(&error));
         }
-        Ok(written)
+        let mut written: Vec<&FileMigration> = Vec::new();
+        for file in &migration.files {
+            if let Err(error) =
+                super::write_unless_changed(&file.path, &file.after, Some(&file.before_hash))
+            {
+                return Err(undo(error, file, &written));
+            }
+            written.push(file);
+        }
+        Ok(written.iter().map(|file| file.path.clone()).collect())
     };
     match git2::Repository::open(&migration.root) {
         Ok(repo) => {
@@ -273,6 +379,38 @@ pub fn apply(migration: &Migration) -> Result<Vec<PathBuf>> {
         }
         Err(_) => go(),
     }
+}
+
+/// `failed` could not be written: put back the `written` files that are still
+/// what this migration wrote, and say how it ended.
+fn undo(error: anyhow::Error, failed: &FileMigration, written: &[&FileMigration]) -> anyhow::Error {
+    let name = file_name(&failed.path);
+    if written.is_empty() {
+        return error.context(format!("{name} was not written; nothing was changed"));
+    }
+    let mut restored = Vec::new();
+    let mut stuck = Vec::new();
+    for file in written.iter().rev() {
+        let wrote = sha256_hex(&file.after);
+        match super::write_unless_changed(&file.path, &file.before, Some(&wrote)) {
+            Ok(()) => restored.push(file_name(&file.path)),
+            Err(_) => stuck.push(file_name(&file.path)),
+        }
+    }
+    let message = if stuck.is_empty() {
+        format!(
+            "{name} could not be written, so {} was put back as it was; nothing was changed",
+            restored.join(", ")
+        )
+    } else {
+        format!(
+            "{name} could not be written and {} was already migrated and could not be put \
+             back (it changed meanwhile or cannot be written); run the migration again or \
+             finish by hand",
+            stuck.join(", ")
+        )
+    };
+    error.context(message)
 }
 
 /// [`plan`] and [`apply`] in one step.
@@ -283,6 +421,117 @@ pub fn migrate(root: &Path) -> Result<Migration> {
 }
 
 // -- the rewrite --------------------------------------------------------------
+
+/// The merged configuration with `replacements` in place of the layers' texts,
+/// parsed the way [`Config::load`] reads it.
+fn check_merged(files: &ConfigFiles, replacements: &[(Target, &str)]) -> Result<()> {
+    let text_of = |target: Target| -> Option<String> {
+        match replacements.iter().find(|(t, _)| *t == target) {
+            Some((_, text)) => Some((*text).to_string()),
+            None => files.file(target).text.clone(),
+        }
+    };
+    let project_text = text_of(Target::Project).unwrap_or_default();
+    let local_text = text_of(Target::Local);
+    Config::parse_layers(
+        &project_text,
+        &file_name(&files.project.path),
+        local_text.as_deref(),
+        LOCAL_CONFIG_FILE,
+    )
+    .map(|_| ())
+}
+
+/// `Some((engine, file))` when `services.<key>` exists in a layer and the
+/// engine it has once the layers are merged (the local file's wins) is not
+/// `postgres`; `file` is the layer that decides the engine, or the first one
+/// that has the key.
+fn taken_by_other_engine(
+    docs: &[(Target, &FileState, DocumentMut)],
+    key: &str,
+) -> Option<(Option<String>, PathBuf)> {
+    let mut found: Option<(Option<String>, PathBuf)> = None;
+    for (_, state, doc) in docs {
+        let Some(entry) = doc
+            .get("services")
+            .and_then(Item::as_table_like)
+            .and_then(|services| services.get(key))
+            .and_then(Item::as_table_like)
+        else {
+            continue;
+        };
+        let engine = entry.get("engine").and_then(Item::as_str).map(String::from);
+        found = match (found, engine) {
+            (None, engine) => Some((engine, state.path.clone())),
+            (Some(_), Some(engine)) => Some((Some(engine), state.path.clone())),
+            (Some(previous), None) => Some(previous),
+        };
+    }
+    found.filter(|(engine, _)| engine.as_deref() != Some("postgres"))
+}
+
+// -- the masked copy -----------------------------------------------------------
+
+/// `text` with every value that may be a credential replaced by [`MASK`],
+/// for showing. TOML-aware: a value is judged by the name of its key, as
+/// `devflow env list` does ([`masked_template`]), and by its content.
+fn masked_text(text: &str) -> String {
+    match text.parse::<DocumentMut>() {
+        Ok(mut doc) => {
+            for (key, item) in doc.iter_mut() {
+                mask_item(item, &key);
+            }
+            doc.to_string()
+        }
+        Err(_) => redact::text(text),
+    }
+}
+
+fn mask_item(item: &mut Item, key: &str) {
+    match item {
+        Item::Table(table) => {
+            for (name, entry) in table.iter_mut() {
+                mask_item(entry, &name);
+            }
+        }
+        Item::ArrayOfTables(tables) => {
+            for table in tables.iter_mut() {
+                for (name, entry) in table.iter_mut() {
+                    mask_item(entry, &name);
+                }
+            }
+        }
+        Item::Value(value) => mask_value(value, key),
+        Item::None => {}
+    }
+}
+
+fn mask_value(value: &mut Value, key: &str) {
+    let masked = match value {
+        Value::Array(array) => {
+            for element in array.iter_mut() {
+                mask_value(element, key);
+            }
+            return;
+        }
+        Value::InlineTable(table) => {
+            for (name, entry) in table.iter_mut() {
+                mask_value(entry, &name);
+            }
+            return;
+        }
+        Value::String(text) => masked_template(key, text.value()),
+        // A number or a date under a secret name (`PIN = 1234`).
+        _ if redact::is_secret_variable(key) => MASK.to_string(),
+        _ => return,
+    };
+    if value.as_str() != Some(masked.as_str()) {
+        let decor = value.decor().clone();
+        let mut replacement = Value::from(masked);
+        *replacement.decor_mut() = decor;
+        *value = replacement;
+    }
+}
 
 /// The keys of `doc`'s `[services.*]` tables whose engine is `postgres`.
 fn postgres_services(doc: &DocumentMut) -> Vec<String> {

@@ -331,3 +331,177 @@ fn a_symbolic_link_is_not_rewritten() {
     assert!(format!("{error:#}").contains("symbolic link"), "{error:#}");
     assert_eq!(std::fs::read_to_string(&real).unwrap(), PRE_RELEASE);
 }
+
+// -- review fixes ------------------------------------------------------------
+
+fn shown(migration: &Migration) -> String {
+    let mut out = String::new();
+    for file in &migration.files {
+        for line in &file.preview.diff {
+            out.push_str(&line.text);
+            out.push('\n');
+        }
+        out.push_str(&file.preview.after);
+        out.push_str(&format!("{file:?}"));
+    }
+    out
+}
+
+#[test]
+fn a_preview_never_shows_a_credential_of_the_context() {
+    // The credentials sit right before the table, so the diff's context has them.
+    let local = "\
+[env]
+KEEP = \"${PGHOST}\" # fine
+CACHE_URL = \"postgres://app:urlpass-xyz@h/db\"
+DB_PASS = 'hunter2-db'
+SESSION_KEY = \"s3cr3t-session\"
+[postgres]
+port = 5544
+";
+    let project_text = format!("[project]\nname = \"p\"\nid = \"{ID}\"\n");
+    let dir = project(&[
+        ("devflow.toml", &project_text),
+        ("devflow.local.toml", local),
+    ]);
+    let migration = plan(dir.path()).unwrap();
+    let text = shown(&migration);
+    for secret in ["s3cr3t-session", "hunter2-db", "urlpass-xyz"] {
+        assert!(!text.contains(secret), "{secret} leaked:\n{text}");
+    }
+    // The change itself is still readable.
+    let diff = &migration.files[0].preview.diff;
+    assert!(
+        diff.iter()
+            .any(|l| l.kind == DiffKind::Removed && l.text == "[postgres]")
+    );
+    assert!(diff.iter().any(|l| l.text.contains("SESSION_KEY")));
+    // What is applied is the real text.
+    apply(&migration).unwrap();
+    let written = read(&dir, "devflow.local.toml");
+    assert!(written.contains("s3cr3t-session") && written.contains("hunter2-db"));
+    assert!(written.contains("[services.db]"));
+}
+
+#[test]
+fn a_service_of_another_engine_in_the_project_file_is_not_turned_into_postgres() {
+    let project_text =
+        format!("[project]\nname = \"p\"\nid = \"{ID}\"\n\n[services.db]\nengine = \"valkey\"\n");
+    let local = "[postgres]\nmode = \"managed\"\n";
+    let dir = project(&[
+        ("devflow.toml", &project_text),
+        ("devflow.local.toml", local),
+    ]);
+    let refused = problem(plan(dir.path()).unwrap_err());
+    assert!(
+        refused.message.contains("already exists") && refused.message.contains("valkey"),
+        "{}",
+        refused.message
+    );
+    assert_eq!(read(&dir, "devflow.toml"), project_text);
+    assert_eq!(read(&dir, "devflow.local.toml"), local);
+
+    // And the other way round: the local file's service wins the merge.
+    let project_pg = format!("[project]\nname = \"p\"\nid = \"{ID}\"\n\n[postgres]\nport = 1\n");
+    let local_other = "[services.db]\nengine = \"redis\"\n";
+    let dir = project(&[
+        ("devflow.toml", &project_pg),
+        ("devflow.local.toml", local_other),
+    ]);
+    assert!(
+        problem(plan(dir.path()).unwrap_err())
+            .message
+            .contains("redis")
+    );
+}
+
+#[test]
+fn a_local_file_created_after_the_plan_stops_the_apply() {
+    let dir = project(&[("devflow.toml", PRE_RELEASE)]);
+    let migration = plan(dir.path()).unwrap();
+    assert_eq!(migration.files.len(), 1);
+    let local = "[postgres]\nport = 5544\n";
+    std::fs::write(dir.path().join("devflow.local.toml"), local).unwrap();
+    let error = apply(&migration).unwrap_err();
+    let changed = error
+        .downcast_ref::<ConfigChanged>()
+        .expect("ConfigChanged");
+    assert!(changed.path.ends_with("devflow.local.toml"));
+    assert_eq!(read(&dir, "devflow.toml"), PRE_RELEASE);
+    assert_eq!(read(&dir, "devflow.local.toml"), local);
+}
+
+#[test]
+fn a_different_project_file_after_the_plan_stops_the_apply() {
+    let dir = project(&[(".devflow.toml", PRE_RELEASE)]);
+    let migration = plan(dir.path()).unwrap();
+    std::fs::write(dir.path().join("devflow.toml"), "[project]\nname = \"x\"\n").unwrap();
+    let error = apply(&migration).unwrap_err();
+    assert!(error.downcast_ref::<ConfigChanged>().is_some(), "{error:#}");
+    assert_eq!(read(&dir, ".devflow.toml"), PRE_RELEASE);
+}
+
+#[test]
+fn a_failed_second_write_puts_the_first_file_back() {
+    let dir = project(&[
+        ("devflow.toml", PRE_RELEASE),
+        ("devflow.local.toml", "[postgres]\nport = 5544\n"),
+    ]);
+    let migration = plan(dir.path()).unwrap();
+    assert_eq!(migration.files.len(), 2);
+    // A save lands in the local file just before it is written.
+    let local_path = dir.path().join("devflow.local.toml");
+    let edited = "[postgres]\nport = 5544\n# edited meanwhile\n";
+    let calls = std::cell::Cell::new(0);
+    let _guard = super::super::seams::install(super::super::seams::Hooks {
+        before_write: Some(Box::new({
+            let local_path = local_path.clone();
+            move || {
+                calls.set(calls.get() + 1);
+                if calls.get() == 2 {
+                    std::fs::write(&local_path, edited).unwrap();
+                }
+            }
+        })),
+        ..Default::default()
+    });
+    let error = apply(&migration).unwrap_err();
+    let report = format!("{error:#}");
+    assert!(error.downcast_ref::<ConfigChanged>().is_some(), "{report}");
+    assert!(
+        report.contains("devflow.toml was put back") && report.contains("nothing was changed"),
+        "{report}"
+    );
+    assert_eq!(read(&dir, "devflow.toml"), PRE_RELEASE);
+    assert_eq!(read(&dir, "devflow.local.toml"), edited);
+}
+
+#[test]
+fn a_first_file_changed_after_it_was_written_is_reported_not_overwritten() {
+    let dir = project(&[
+        ("devflow.toml", PRE_RELEASE),
+        ("devflow.local.toml", "[postgres]\nport = 5544\n"),
+    ]);
+    let migration = plan(dir.path()).unwrap();
+    let project_path = dir.path().join("devflow.toml");
+    let local_path = dir.path().join("devflow.local.toml");
+    let calls = std::cell::Cell::new(0);
+    let _guard = super::super::seams::install(super::super::seams::Hooks {
+        before_write: Some(Box::new(move || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                // Both files change: the second write fails and the first
+                // cannot be put back without losing the newer text.
+                std::fs::write(&project_path, "# newer\n").unwrap();
+                std::fs::write(&local_path, "# newer too\n").unwrap();
+            }
+        })),
+        ..Default::default()
+    });
+    let report = format!("{:#}", apply(&migration).unwrap_err());
+    assert!(
+        report.contains("devflow.toml was already migrated"),
+        "{report}"
+    );
+    assert_eq!(read(&dir, "devflow.toml"), "# newer\n");
+}
