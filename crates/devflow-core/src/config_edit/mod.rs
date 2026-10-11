@@ -55,6 +55,7 @@
 mod env;
 mod hooks;
 mod mask;
+pub mod migrate;
 #[cfg(test)]
 mod tests;
 mod text;

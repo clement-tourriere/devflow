@@ -1,7 +1,7 @@
 //! `devflow.toml` schema, loading with the machine-local overlay, raw-text
 //! editing with concurrent-edit detection, and 0.x detection.
 use crate::diag::{Seg, key_label};
-use crate::error::NotInitialized;
+use crate::error::{ConfigShape, NotInitialized, ShapeKind};
 use crate::hooks::{HookCommand, HookPhase};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -1161,7 +1161,11 @@ impl Config {
             Some(path) => path,
             None => {
                 if let Some(legacy) = legacy_file(root) {
-                    bail!(legacy_message(&legacy));
+                    return Err(shape_error(
+                        ShapeKind::Legacy,
+                        &legacy,
+                        legacy_message(&legacy),
+                    ));
                 }
                 return Err(not_initialized(root));
             }
@@ -1192,6 +1196,32 @@ impl Config {
         };
         let config = Self::from_value(value, Path::new(&label))?;
         Ok((config, path))
+    }
+
+    /// The `[project]` id and name of the project file in `root`, read without
+    /// judging the rest of the file: a project whose configuration is refused
+    /// (an earlier build's `[postgres]`, say) still has an identity. The error
+    /// is [`NotInitialized`] without a project file.
+    pub fn read_identity(root: &Path) -> Result<(uuid::Uuid, String)> {
+        let path = Self::find_file(root).ok_or_else(|| not_initialized(root))?;
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        let table = parse_table(&text, &path)?;
+        let project = table.get("project").and_then(toml::Value::as_table);
+        let id = project
+            .and_then(|p| p.get("id"))
+            .and_then(toml::Value::as_str)
+            .and_then(|id| uuid::Uuid::parse_str(id).ok())
+            .filter(|id| !id.is_nil());
+        let name = project
+            .and_then(|p| p.get("name"))
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty());
+        match (id, name) {
+            (Some(id), Some(name)) => Ok((id, name.to_string())),
+            _ => bail!("{} has no valid [project] id and name", path.display()),
+        }
     }
 
     /// Parse a single document (no overlay); used to validate editor text.
@@ -1602,24 +1632,40 @@ fn check_shape(value: &toml::Table, path: &Path) -> Result<()> {
     if !legacy.is_empty() {
         let current = current_shapes(value);
         if current.is_empty() {
-            bail!(legacy_message(path));
+            return Err(shape_error(ShapeKind::Legacy, path, legacy_message(path)));
         }
-        bail!(
-            "{} mixes devflow 1.0 keys ({}) with 0.x keys ({}); keep one format. \
-             See {MIGRATION_GUIDE}",
-            path.display(),
-            current.join(", "),
-            legacy.join(", ")
-        );
+        return Err(shape_error(
+            ShapeKind::Mixed,
+            path,
+            format!(
+                "{} mixes devflow 1.0 keys ({}) with 0.x keys ({}); keep one format. \
+                 See {MIGRATION_GUIDE}",
+                path.display(),
+                current.join(", "),
+                legacy.join(", ")
+            ),
+        ));
     }
     if value.contains_key("postgres") {
-        bail!(
-            "{}: `[postgres]` is now `[services.db]` with `engine = \"postgres\"` \
-             (see docs/MIGRATING.md)",
-            path.display()
-        );
+        return Err(shape_error(
+            ShapeKind::PreRelease,
+            path,
+            format!(
+                "{}: `[postgres]` is now `[services.db]` with `engine = \"postgres\"` \
+                 (see docs/MIGRATING.md)",
+                path.display()
+            ),
+        ));
     }
     Ok(())
+}
+
+fn shape_error(kind: ShapeKind, path: &Path, message: String) -> anyhow::Error {
+    anyhow::Error::new(ConfigShape {
+        kind,
+        path: path.to_path_buf(),
+        message,
+    })
 }
 
 /// Remove `services` from `value` and read each entry on its own. Keys, the
@@ -1803,7 +1849,14 @@ mod tests {
         let error = Config::load(dir.path()).unwrap_err();
         let typed = error.downcast_ref::<NotInitialized>().expect("typed");
         assert_eq!(typed.root, dir.path());
-        assert!(error.to_string().contains("devflow init"), "{error}");
+        // The message says what is wrong; the way out is a remedy.
+        assert!(!error.to_string().contains("devflow init"), "{error}");
+        assert_eq!(
+            crate::remedy::remedies_of(&error),
+            vec![crate::remedy::Remedy::Init {
+                root: dir.path().to_path_buf()
+            }]
+        );
         let error = ConfigDocument::open(dir.path()).unwrap_err();
         assert!(error.downcast_ref::<NotInitialized>().is_some());
 

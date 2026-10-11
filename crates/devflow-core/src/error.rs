@@ -2,6 +2,11 @@
 //! "initialize" button, report `in_progress`). They travel inside
 //! `anyhow::Error`; match them with `error.downcast_ref::<T>()` instead of
 //! inspecting message text.
+//!
+//! A message says what is wrong, in words that make sense in any frontend. What
+//! a person can do about it is a [`Remedy`](crate::remedy::Remedy), which each
+//! frontend renders its own way (the CLI as a command, the desktop app as a
+//! button); [`crate::remedy::remedies_of`] reads them off an error.
 use std::path::PathBuf;
 
 /// The checkout has no `devflow.toml`.
@@ -12,15 +17,41 @@ pub struct NotInitialized {
 
 impl std::fmt::Display for NotInitialized {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "no devflow.toml in {}; run `devflow init` first",
-            self.root.display()
-        )
+        write!(f, "no devflow.toml in {}", self.root.display())
     }
 }
 
 impl std::error::Error for NotInitialized {}
+
+/// Which refused shape a configuration file has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShapeKind {
+    /// The top-level `[postgres]` table of an earlier 1.0 build: devflow can
+    /// rewrite it (see [`crate::config_edit::migrate`]).
+    PreRelease,
+    /// A devflow 0.x configuration: never adopted, never rewritten.
+    Legacy,
+    /// 1.0 keys mixed with 0.x keys.
+    Mixed,
+}
+
+/// A configuration file has a shape devflow 1.0 refuses. `path` is the file
+/// that has it (the project file, `devflow.local.toml` or a 0.x file).
+#[derive(Debug, Clone)]
+pub struct ConfigShape {
+    pub kind: ShapeKind,
+    pub path: PathBuf,
+    pub message: String,
+}
+
+impl std::fmt::Display for ConfigShape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ConfigShape {}
 
 /// What holds a workspace's lock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -1,6 +1,7 @@
 //! Machine-local list of known projects, for the GUI and `devflow list --all`.
 //! Removing an entry never touches the project or its data.
 use crate::project::Project;
+use crate::remedy::{Problem, Remedy};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -67,6 +68,9 @@ fn add_locked(project: &Project) -> Result<()> {
     write(&file)
 }
 
+/// Forget the project whose main checkout is `root`. Only the entry goes: the
+/// folder, the repository and the data are not touched. Returns whether there
+/// was an entry.
 pub fn remove(root: &Path) -> Result<bool> {
     with_lock(|| remove_locked(root))
 }
@@ -80,4 +84,86 @@ fn remove_locked(root: &Path) -> Result<bool> {
         write(&file)?;
     }
     Ok(removed)
+}
+
+/// The entry named by `selector`: a project id, or the path of its main
+/// checkout (as registered, or resolved when the folder exists).
+pub fn find(selector: &str) -> Result<Entry> {
+    let entries = read()?.projects;
+    let by_id = uuid::Uuid::parse_str(selector.trim()).ok();
+    let path = Path::new(selector);
+    let resolved = path.canonicalize().ok();
+    entries
+        .into_iter()
+        .find(|entry| {
+            by_id == Some(entry.id)
+                || entry.root == path
+                || resolved
+                    .as_ref()
+                    .is_some_and(|resolved| entry.root == *resolved)
+        })
+        .ok_or_else(|| {
+            Problem::new("no registered project has that id or folder")
+                .with(Remedy::Retry)
+                .into_error()
+        })
+}
+
+/// Forget every project whose folder no longer exists (it is gone, not merely
+/// unreadable). Returns the entries removed.
+pub fn prune_missing() -> Result<Vec<Entry>> {
+    with_lock(|| {
+        let mut file = read()?;
+        let (missing, kept): (Vec<Entry>, Vec<Entry>) = file.projects.into_iter().partition(|e| {
+            matches!(
+                std::fs::metadata(&e.root),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            )
+        });
+        if !missing.is_empty() {
+            file.projects = kept;
+            write(&file)?;
+        }
+        Ok(missing)
+    })
+}
+
+/// Point the registered project `id` at the folder it moved to.
+///
+/// `new_root` may be any folder of the repository; the entry gets its main
+/// checkout. The folder must be that project: its `devflow.toml` has the same
+/// project id (read without judging the rest of the file, so a project that
+/// needs its configuration migrated can still be found again). The name is
+/// refreshed from the file. Nothing on disk changes.
+pub fn relocate(id: uuid::Uuid, new_root: &Path) -> Result<Entry> {
+    let root = crate::project::main_checkout(new_root)?;
+    let (found, name) = crate::config::Config::read_identity(&root)?;
+    if found != id {
+        return Err(Problem::new(format!(
+            "{} holds the devflow project '{name}', not the one being located",
+            root.display()
+        ))
+        .into_error());
+    }
+    with_lock(|| {
+        let mut file = read()?;
+        let Some(position) = file.projects.iter().position(|e| e.id == id) else {
+            return Err(Problem::new("that project is no longer in the list")
+                .with(Remedy::Retry)
+                .into_error());
+        };
+        if let Some(other) = file.projects.iter().find(|e| e.root == root && e.id != id) {
+            return Err(Problem::new(format!(
+                "{} is already listed as '{}'",
+                root.display(),
+                other.name
+            ))
+            .into_error());
+        }
+        let entry = Entry { id, name, root };
+        file.projects[position] = entry.clone();
+        file.projects.sort_by(|a, b| a.name.cmp(&b.name));
+        write(&file)?;
+        Ok(entry)
+    })
 }
