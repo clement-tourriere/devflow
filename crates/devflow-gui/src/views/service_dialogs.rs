@@ -699,6 +699,7 @@ pub fn open_drop_lost(
     state: &Entity<AppState>,
     target: ServiceTarget,
     branch: uuid::Uuid,
+    volume: String,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -713,9 +714,9 @@ pub fn open_drop_lost(
         lines,
         "Drop",
         move |window, cx| {
-            let (target, name) = (target.clone(), name.clone());
+            let (target, name, volume) = (target.clone(), name.clone(), volume.clone());
             state.update(cx, |s, cx| {
-                s.service_drop_lost(target, branch, name, window, cx)
+                s.service_drop_lost(target, branch, volume, name, window, cx)
             });
         },
     );

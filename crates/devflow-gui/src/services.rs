@@ -687,7 +687,13 @@ pub trait ServiceBackend: Send + Sync + 'static {
     fn drop_branch(&self, project: &Project, key: &str, branch: Uuid) -> Result<()>;
     /// Remove a branch a workspace owns but whose volume is gone (its data is
     /// lost), if core finds the volume still missing.
-    fn drop_lost_branch(&self, project: &Project, key: &str, branch: Uuid) -> Result<()>;
+    fn drop_lost_branch(
+        &self,
+        project: &Project,
+        key: &str,
+        branch: Uuid,
+        volume: &str,
+    ) -> Result<()>;
     /// Remove everything recorded for a service the configuration no longer has.
     fn forget(&self, project: &Project, key: &str) -> Result<Vec<String>>;
 }
@@ -819,10 +825,18 @@ impl ServiceBackend for CoreServices {
         workspace::drop_orphan(project, key, branch)
     }
 
-    fn drop_lost_branch(&self, project: &Project, key: &str, branch: Uuid) -> Result<()> {
-        // Core reads the files again and asks Docker whether the volume is
-        // still missing; a branch whose data is there is kept.
-        workspace::drop_lost_branch(project, key, branch)
+    fn drop_lost_branch(
+        &self,
+        project: &Project,
+        key: &str,
+        branch: Uuid,
+        volume: &str,
+    ) -> Result<()> {
+        // Core reads the files again, takes the branch's lock, reads the record
+        // under it and asks Docker whether the volume it names is still
+        // missing; a branch whose data is there, or whose volume was replaced,
+        // is kept.
+        workspace::drop_lost_branch(project, key, branch, volume)
     }
 
     fn forget(&self, project: &Project, key: &str) -> Result<Vec<String>> {

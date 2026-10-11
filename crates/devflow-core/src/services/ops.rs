@@ -81,6 +81,28 @@ impl Service {
         self.drop_branch(id)
     }
 
+    /// [`Service::remove_branch`] for a caller that must decide on the branch
+    /// as it is *now*: the branch's resource lock is taken first, its record is
+    /// read again under it, and `check` sees that record before anything is
+    /// removed; the lock is kept through the removal. A change that was
+    /// made meanwhile (a new volume for the branch) is therefore seen by
+    /// `check`, or waits for the removal; it can never be undone by it.
+    pub fn remove_branch_if(
+        &self,
+        id: Uuid,
+        check: impl FnOnce(&BranchRecord) -> Result<()>,
+    ) -> Result<()> {
+        self.recover_touching(&[id])?;
+        let _held = self.hold(&[id])?;
+        let record = self.require_branch(id)?;
+        anyhow::ensure!(
+            record.state != RecordState::Creating,
+            "branch {id} is still being created"
+        );
+        check(&record)?;
+        self.drop_branch(id)
+    }
+
     /// Remove one snapshot version.
     pub fn remove_snapshot(&self, name: &str, version: u32) -> Result<SnapshotRecord> {
         let snapshot = self.find_snapshot(name, Some(version))?;
@@ -351,5 +373,96 @@ mod tests {
                 .join("other_cache.attempt.devflow-resolved.lock")
                 .exists()
         );
+    }
+
+    /// A branch record of `svc` that names `volume`.
+    fn seed_branch(svc: &Service, volume: &str) -> Uuid {
+        let id = Uuid::new_v4();
+        let mut record = BranchRecord::for_test(id);
+        record.volume = volume.into();
+        svc.store
+            .update(|c| {
+                c.service_mut(&svc.key, Engine::Valkey)?
+                    .branches
+                    .push(record);
+                Ok(())
+            })
+            .unwrap();
+        id
+    }
+
+    #[test]
+    fn a_guarded_removal_checks_the_record_while_it_holds_the_branch_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service_in(dir.path());
+        let id = seed_branch(&svc, "v1");
+        let held_during_check = std::cell::Cell::new(false);
+        let error = svc
+            .remove_branch_if(id, |record| {
+                assert_eq!(record.volume, "v1");
+                // Anyone else wanting the branch (a reset, a start) has to wait.
+                held_during_check.set(
+                    locks::acquire(&svc.lock_dir(), &svc.key, &[id], Duration::ZERO)
+                        .unwrap()
+                        .is_none(),
+                );
+                anyhow::bail!("not this one")
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("not this one"), "{error}");
+        assert!(
+            held_during_check.get(),
+            "the lock was taken before the check"
+        );
+        // A refusal removes nothing and frees the lock.
+        assert!(svc.branch(id).unwrap().is_some());
+        assert!(
+            locks::acquire(&svc.lock_dir(), &svc.key, &[id], Duration::ZERO)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_volume_replaced_while_the_cleanup_waited_is_seen_and_the_replacement_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service_in(dir.path());
+        // The cleanup was offered for "v1", whose volume is missing.
+        let id = seed_branch(&svc, "v1");
+        // A reset is replacing it: it holds the branch's lock, and records the
+        // new volume before it lets go.
+        let reset = locks::acquire(&svc.lock_dir(), &svc.key, &[id], Duration::ZERO)
+            .unwrap()
+            .expect("free");
+        let cleanup = svc.clone();
+        let key = svc.key.clone();
+        let waiter = std::thread::spawn(move || {
+            cleanup.remove_branch_if(id, |record| {
+                crate::services::workspace::confirm_lost(&key, id, Some(record), "v1", |_| {
+                    Ok(false)
+                })
+            })
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!waiter.is_finished(), "the cleanup waits for the reset");
+        svc.store
+            .update(|c| {
+                c.service_mut(&svc.key, Engine::Valkey)?
+                    .branch_mut(id)
+                    .unwrap()
+                    .volume = "v2".into();
+                Ok(())
+            })
+            .unwrap();
+        drop(reset);
+        let error = waiter.join().unwrap().unwrap_err().to_string();
+        assert!(
+            error.contains("different volume") && error.contains("Nothing was dropped"),
+            "{error}"
+        );
+        // The healthy replacement is untouched.
+        let kept = svc.branch(id).unwrap().expect("still recorded");
+        assert_eq!(kept.volume, "v2");
+        assert_eq!(kept.state, RecordState::Ready);
     }
 }

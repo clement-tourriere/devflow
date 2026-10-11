@@ -1633,6 +1633,25 @@ enum PhaseResult {
     Failed(String),
 }
 
+/// The error of a phase that failed: the cause, under a message that says which
+/// phase and where the workspace is kept. Its remedies are the cause's own
+/// first (start the database, drop the lost branch, …) and then running setup
+/// again, so that the retry never hides what the cause says to do
+/// ([`Problem::caused_by`]: `remedies_of` reads the outermost layer only).
+fn failed_phase(workspace: &Workspace, phase: Phase, cause: anyhow::Error) -> anyhow::Error {
+    let problem = Problem::new(format!(
+        "{} failed; '{}' is kept at {}",
+        phase.as_str(),
+        workspace.name,
+        workspace.path.display()
+    ))
+    .with(Remedy::Setup {
+        workspace: workspace.path.clone(),
+    })
+    .caused_by(&cause);
+    cause.context(problem)
+}
+
 fn complete(receipt: &Receipt, phase: Phase) -> bool {
     let record = receipt.phase(phase);
     match record.state {
@@ -1753,17 +1772,7 @@ impl<'a> Runner<'a> {
                 }
                 Err(error) => {
                     self.record(phase, PhaseState::Failed, Some(format!("{error:#}")))?;
-                    return Err(error.context(
-                        Problem::new(format!(
-                            "{} failed; '{}' is kept at {}",
-                            phase.as_str(),
-                            self.workspace.name,
-                            self.workspace.path.display()
-                        ))
-                        .with(Remedy::Setup {
-                            workspace: self.workspace.path.clone(),
-                        }),
-                    ));
+                    return Err(failed_phase(&self.workspace, phase, error));
                 }
             }
         }
@@ -2863,8 +2872,20 @@ fn load_receipt(project: &Project, workspace: &Workspace) -> Result<Option<Recei
         return Ok(None);
     };
     let mut receipt = check_project(project, workspace, receipt)?;
-    receipt.reopen(&project.config);
+    reopen_invalidated(project, &mut receipt);
     Ok(Some(receipt))
+}
+
+/// Reopen the phases that what changed since the workspace was set up
+/// invalidates: a service added or changed in the configuration
+/// ([`Receipt::reopen`]), and a bound branch the catalog no longer has (a lost
+/// branch that was dropped), which would otherwise leave a ready workspace
+/// with a connection that leads nowhere. Returns whether anything changed.
+fn reopen_invalidated(project: &Project, receipt: &mut Receipt) -> bool {
+    let mut changed = receipt.reopen(&project.config);
+    let lost = services::workspace::lost_bindings(project, receipt);
+    changed |= receipt.reopen_lost_branches(&lost);
+    changed
 }
 
 /// [`load_receipt`] for a caller that holds the workspace's receipt lock: a
@@ -2883,7 +2904,7 @@ fn load_receipt_locked(
     else {
         return Ok(None);
     };
-    if receipt.reopen(&project.config) {
+    if reopen_invalidated(project, &mut receipt) {
         receipt.save(&workspace.git_dir)?;
     }
     Ok(Some(receipt))
@@ -3808,5 +3829,179 @@ mod tests {
         unbound.services.clear();
         let error = shown.verify(&workspace, "cache", &unbound).unwrap_err();
         assert!(error.to_string().contains("no longer bound"), "{error}");
+    }
+
+    #[test]
+    fn a_failed_phase_keeps_the_causes_remedies_before_the_retry() {
+        let workspace = Workspace {
+            name: "feature".into(),
+            branch: Some("feature".into()),
+            path: PathBuf::from("/work/feature"),
+            git_dir: PathBuf::from("/repo/.git/worktrees/feature"),
+            is_default: false,
+            locked: false,
+            missing: false,
+            head: None,
+            fingerprint: None,
+        };
+        let setup = Remedy::Setup {
+            workspace: workspace.path.clone(),
+        };
+        let start = Remedy::StartDatabase {
+            root: PathBuf::from("/work/shop"),
+        };
+        let cause = Problem::new("the managed PostgreSQL server is not running")
+            .with(start.clone())
+            .with(setup.clone())
+            .into_error();
+        let error = failed_phase(&workspace, Phase::Services, cause);
+        assert!(
+            error.to_string().starts_with("services failed;"),
+            "{error:#}"
+        );
+        // The cause's fix is not hidden by the retry, and the retry is there once.
+        assert_eq!(
+            crate::remedy::remedies_of(&error),
+            [start.clone(), setup.clone()]
+        );
+        // A cause with no remedies of its own leaves just the retry.
+        let plain = failed_phase(&workspace, Phase::Hooks, anyhow::anyhow!("boom"));
+        assert_eq!(
+            crate::remedy::remedies_of(&plain),
+            std::slice::from_ref(&setup)
+        );
+        // A lost branch's own remedy (drop it) comes first as well.
+        let drop = Remedy::DropLostBranch {
+            root: PathBuf::from("/work/shop"),
+            key: "cache".into(),
+            branch: uuid::Uuid::nil(),
+            volume: "v".into(),
+        };
+        let lost = failed_phase(
+            &workspace,
+            Phase::Services,
+            Problem::new("volume v no longer exists")
+                .with(drop.clone())
+                .into_error(),
+        );
+        assert_eq!(crate::remedy::remedies_of(&lost), [drop, setup]);
+    }
+
+    /// A ready workspace bound to a valkey branch, in a project whose catalog
+    /// file holds (or does not hold) that branch.
+    fn bound_to_cache(
+        with_branch: bool,
+    ) -> (crate::worktree::testutil::TestRepo, Workspace, uuid::Uuid) {
+        use crate::services::catalog::{BranchRecord, Catalog, ServiceCatalog, VERSION};
+        let config = format!(
+            "{}\n[services.cache]\nengine = \"valkey\"\n",
+            crate::Config::template("shop", uuid::Uuid::new_v4(), None)
+        );
+        let t = crate::worktree::testutil::repo(Some(&config));
+        let ws = crate::worktree::create(&t.project, "feature", None).unwrap();
+        let branch = uuid::Uuid::new_v4();
+        let mut receipt = Receipt::new(t.project.id(), "feature", None);
+        receipt.services.insert(
+            "cache".into(),
+            ServiceBinding::container(
+                Engine::Valkey,
+                branch,
+                "redis://127.0.0.1:1".into(),
+                None,
+                "empty".into(),
+                receipt::CloneReport {
+                    method: None,
+                    captured_at: None,
+                    allocated_bytes: None,
+                    source_downtime_ms: None,
+                },
+                t.project.config.service_generation("cache"),
+            ),
+        );
+        for phase in Phase::ALL {
+            receipt.set_phase(phase, PhaseState::Done, None);
+        }
+        receipt.save(&ws.git_dir).unwrap();
+        let mut records = ServiceCatalog::new(Engine::Valkey);
+        if with_branch {
+            records.branches.push(BranchRecord::for_test(branch));
+        }
+        let catalog = Catalog {
+            version: VERSION,
+            project_id: t.project.id(),
+            docker: "daemon".into(),
+            services: [("cache".to_string(), records)].into(),
+        };
+        let path = services::catalog::Store::path_for(t.project.id()).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+        (t, ws, branch)
+    }
+
+    #[test]
+    fn setup_reopens_a_ready_workspace_whose_bound_branch_is_gone_from_the_catalog() {
+        let (t, ws, _) = bound_to_cache(true);
+        // The branch is there: ready, and nothing is reopened.
+        let lock = acquire(&ws.git_dir).unwrap().unwrap();
+        let receipt = load_receipt_locked(&t.project, &ws, &lock)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.status(), Status::Ready);
+        drop(lock);
+
+        // The lost branch is dropped: its record is gone from the catalog.
+        let (t, ws, _) = bound_to_cache(false);
+        // What a person sees (nothing is written) is a workspace that needs
+        // attention, with setup as the way on.
+        let seen = load_receipt(&t.project, &ws).unwrap().unwrap();
+        assert_eq!(seen.status(), Status::NeedsAttention);
+        assert_eq!(
+            remedies_for(&t.project, &ws.path, Some(&seen), false),
+            [Remedy::Setup {
+                workspace: ws.path.clone()
+            }]
+        );
+        assert_eq!(
+            Receipt::load(&ws.git_dir).unwrap().unwrap().status(),
+            Status::Ready,
+            "reading does not write"
+        );
+        // Setup reopens services, env and hooks under the receipt lock, so the
+        // runner gives the workspace a new branch instead of skipping them.
+        let lock = acquire(&ws.git_dir).unwrap().unwrap();
+        let receipt = load_receipt_locked(&t.project, &ws, &lock)
+            .unwrap()
+            .unwrap();
+        for phase in [Phase::Services, Phase::Env, Phase::Hooks] {
+            assert!(!complete(&receipt, phase), "{phase:?} runs again");
+            assert!(receipt.phase(phase).required_skip);
+        }
+        assert!(complete(&receipt, Phase::Payload), "unrelated phases stay");
+        let on_disk = Receipt::load(&ws.git_dir).unwrap().unwrap();
+        assert_eq!(on_disk.status(), Status::NeedsAttention);
+        // The binding is still the old one until services replaces it, and
+        // asking again changes nothing.
+        assert!(!reopen_invalidated(&t.project, &mut on_disk.clone()));
+        drop(lock);
+    }
+
+    #[test]
+    fn a_lost_branch_does_not_reopen_what_someone_asked_to_skip_or_prove_nothing_without_a_catalog()
+    {
+        let (t, ws, _) = bound_to_cache(false);
+        // `--no-db` is a request that is kept.
+        let mut receipt = Receipt::load(&ws.git_dir).unwrap().unwrap();
+        receipt.skip_deliberate(Phase::Services, receipt::SKIP_NO_DB.into());
+        receipt.save(&ws.git_dir).unwrap();
+        let seen = load_receipt(&t.project, &ws).unwrap().unwrap();
+        assert!(seen.phase(Phase::Services).deliberate);
+        assert!(!seen.phase(Phase::Services).required_skip);
+        assert!(!complete(&seen, Phase::Env), "env still follows the branch");
+
+        // No catalog file proves nothing: nothing is reopened.
+        let (t, ws, _) = bound_to_cache(true);
+        std::fs::remove_file(services::catalog::Store::path_for(t.project.id()).unwrap()).unwrap();
+        let seen = load_receipt(&t.project, &ws).unwrap().unwrap();
+        assert_eq!(seen.status(), Status::Ready);
     }
 }

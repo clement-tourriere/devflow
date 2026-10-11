@@ -57,6 +57,12 @@ pub enum ServiceCommand {
         /// Branch id: a UUID or a unique prefix of at least 8 hex characters
         /// (see `devflow service NAME list`)
         id: devflow_core::ids::IdRef,
+        /// Only if the branch's volume is gone (its data is lost): core takes
+        /// the branch's lock, reads the record again and removes it only while
+        /// the volume it names is still missing, so a branch that was replaced
+        /// or whose data is there is kept
+        #[arg(long)]
+        lost: bool,
     },
     /// Remove everything recorded for a service the configuration no longer has
     Forget,
@@ -171,7 +177,7 @@ pub fn run(ctx: &Ctx, args: ServiceArgs) -> Result<ExitCode> {
             snapshot(ctx, command, &project, name, action)
         }
         ServiceCommand::Reset(reset_args) => reset(ctx, command, &project, name, reset_args),
-        ServiceCommand::Drop { id } => drop_branch(ctx, command, &project, name, id),
+        ServiceCommand::Drop { id, lost } => drop_branch(ctx, command, &project, name, id, lost),
     }
 }
 
@@ -858,10 +864,21 @@ fn drop_branch(
     project: &Project,
     name: Option<&str>,
     id: devflow_core::ids::IdRef,
+    lost: bool,
 ) -> Result<ExitCode> {
     let svc = select(project, name)?;
     let id = svc.resolve_branch(&id)?;
-    svc.remove_branch(id)?;
+    if lost {
+        // The volume the record names now is what the guarded removal expects
+        // to find missing; core reads the record again under the lock.
+        let volume = svc
+            .branch(id)?
+            .map(|record| record.volume)
+            .with_context(|| format!("service '{}' has no branch {id}", svc.key))?;
+        workspace::drop_lost_branch(project, &svc.key, id, &volume)?;
+    } else {
+        svc.remove_branch(id)?;
+    }
     if ctx.json {
         output::emit(ctx, command, &json!({ "service": svc.key, "dropped": id }))?;
     } else {

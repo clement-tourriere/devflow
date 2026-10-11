@@ -86,12 +86,16 @@ pub enum Remedy {
     },
     /// Remove the branch `branch` of service `key`, which a workspace owns but
     /// whose volume is gone (its data is lost, so the branch can only be
-    /// dropped and made again by setup). Core checks that the volume is
-    /// missing; an orphan is [`Remedy::DropServiceBranch`]'s.
+    /// dropped and made again by setup). `volume` is the volume the record
+    /// named when the data was found missing: core takes the branch's lock,
+    /// reads the record again and drops it only if it still names that volume
+    /// and the volume is still missing. An orphan is
+    /// [`Remedy::DropServiceBranch`]'s.
     DropLostBranch {
         root: PathBuf,
         key: String,
         branch: Uuid,
+        volume: String,
     },
     /// Finish PostgreSQL work that was interrupted (branches, scratch
     /// databases).
@@ -260,10 +264,13 @@ impl Remedy {
             Remedy::ForgetService { key, .. } => {
                 Some(format!("devflow service {} forget", word(key)))
             }
-            Remedy::DropServiceBranch { key, branch, .. }
-            | Remedy::DropLostBranch { key, branch, .. } => {
+            Remedy::DropServiceBranch { key, branch, .. } => {
                 Some(format!("devflow service {} drop {branch}", word(key)))
             }
+            Remedy::DropLostBranch { key, branch, .. } => Some(format!(
+                "devflow service {} drop {branch} --lost",
+                word(key)
+            )),
             Remedy::ReconcileDatabases { .. } => Some("devflow db reconcile".to_string()),
             Remedy::DropOrphanDatabases { .. } => {
                 Some("devflow db reconcile --drop-orphans".to_string())
@@ -407,6 +414,21 @@ impl Problem {
         self
     }
 
+    /// Put the remedies of `cause` first, ahead of the ones added so far: for
+    /// a problem that is the outer layer of a failure (`cause.context(problem)`),
+    /// which would otherwise hide what the cause says to do. Without repeats.
+    #[must_use]
+    pub fn caused_by(mut self, cause: &anyhow::Error) -> Self {
+        let mut remedies = remedies_of(cause);
+        for own in std::mem::take(&mut self.remedies) {
+            if !remedies.contains(&own) {
+                remedies.push(own);
+            }
+        }
+        self.remedies = remedies;
+        self
+    }
+
     /// This problem as an `anyhow` error.
     pub fn into_error(self) -> anyhow::Error {
         anyhow::Error::new(self)
@@ -421,20 +443,15 @@ impl std::fmt::Display for Problem {
 
 impl std::error::Error for Problem {}
 
-/// The remedies for an error: those of a [`Problem`] in its chain, or the ones
-/// core knows for the typed errors it raised before this module existed (a
-/// missing `devflow.toml`, a configuration shape it refuses). Empty for an
-/// error nobody knows a fix for; the wording of a message never decides.
+/// The remedies for an error: those of the outermost [`Problem`] in its chain
+/// (only that one is found through `anyhow`'s context layers, so a layer that
+/// wraps a cause carries the cause's remedies itself: [`Problem::caused_by`]),
+/// or the ones core knows for the typed errors it raised before this module
+/// existed (a missing `devflow.toml`, a configuration shape it refuses). Empty
+/// for an error nobody knows a fix for; the wording of a message never decides.
 pub fn remedies_of(error: &anyhow::Error) -> Vec<Remedy> {
     if let Some(problem) = error.downcast_ref::<Problem>() {
         return problem.remedies.clone();
-    }
-    if let Some(stale) = error.downcast_ref::<crate::error::StalePlan>()
-        && !stale.root.as_os_str().is_empty()
-    {
-        return vec![Remedy::Init {
-            root: stale.root.clone(),
-        }];
     }
     if let Some(stale) = error.downcast_ref::<crate::error::StalePlan>()
         && !stale.root.as_os_str().is_empty()
@@ -604,6 +621,7 @@ mod tests {
                 root: "/p".into(),
                 key: "cache".into(),
                 branch: Uuid::nil(),
+                volume: "v".into(),
             },
             Remedy::ReconcileDatabases { root: "/p".into() },
             Remedy::DropOrphanDatabases { root: "/p".into() },
@@ -687,6 +705,36 @@ mod tests {
             root: "/tmp/x".into(),
         };
         assert_eq!(plain.command().unwrap(), "devflow project forget /tmp/x");
+    }
+
+    #[test]
+    fn dropping_a_lost_branch_is_the_guarded_operation_not_the_unconditional_drop() {
+        let id: Uuid = "105a6201-aaaa-4bbb-8ccc-0123456789ab".parse().unwrap();
+        let lost = Remedy::DropLostBranch {
+            root: "/p".into(),
+            key: "cache".into(),
+            branch: id,
+            volume: "devflow-v1".into(),
+        };
+        let orphan = Remedy::DropServiceBranch {
+            root: "/p".into(),
+            key: "cache".into(),
+            branch: id,
+        };
+        // `drop ID` removes any branch it is given; `--lost` only one whose
+        // volume core finds missing under the branch's lock.
+        assert_eq!(
+            lost.command().unwrap(),
+            format!("devflow service cache drop {id} --lost")
+        );
+        assert_eq!(
+            orphan.command().unwrap(),
+            format!("devflow service cache drop {id}")
+        );
+        assert!(lost.hint().unwrap().contains("--lost"));
+        let json = serde_json::to_value(lost.describe()).unwrap();
+        assert_eq!(json["volume"], "devflow-v1");
+        assert_eq!(json["kind"], "drop_lost_branch");
     }
 
     #[test]

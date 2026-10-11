@@ -427,6 +427,7 @@ impl Service {
                         root: self.root.clone(),
                         key: self.key.clone(),
                         branch: id,
+                        volume: record.volume.clone(),
                     })
                     .into_error()
             })?;

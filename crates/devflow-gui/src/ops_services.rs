@@ -283,6 +283,7 @@ impl AppState {
         &mut self,
         target: ServiceTarget,
         branch: Uuid,
+        volume: String,
         label: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -296,7 +297,7 @@ impl AppState {
             cx,
             move |project, backend, progress| {
                 progress.output(&format!("Removing what is left of {label}…"));
-                backend.drop_lost_branch(project, &service, branch)?;
+                backend.drop_lost_branch(project, &service, branch, &volume)?;
                 Ok(Done {
                     summary: format!("Dropped {label} from {service}. Set the workspace up again to give it new data."),
                     ..Done::default()

@@ -231,11 +231,16 @@ pub fn run_scoped(state: &Entity<AppState>, remedy: &Remedy, window: &mut Window
             };
             service_dialogs::open_drop(state, target, orphan, window, cx);
         }
-        Remedy::DropLostBranch { root, key, branch } => {
+        Remedy::DropLostBranch {
+            root,
+            key,
+            branch,
+            volume,
+        } => {
             let Some(target) = service_target(state, root, key, cx) else {
                 return refuse(window, cx, remedy, not_open);
             };
-            service_dialogs::open_drop_lost(state, target, *branch, window, cx);
+            service_dialogs::open_drop_lost(state, target, *branch, volume.clone(), window, cx);
         }
         Remedy::ReconcileDatabases { root } => {
             let root = root.clone();

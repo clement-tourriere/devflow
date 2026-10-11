@@ -1351,8 +1351,14 @@ impl ServiceBackend for FakeServices {
         Ok(())
     }
 
-    fn drop_lost_branch(&self, _: &Project, key: &str, branch: Uuid) -> anyhow::Result<()> {
-        self.record(format!("drop-lost {key} {branch}"));
+    fn drop_lost_branch(
+        &self,
+        _: &Project,
+        key: &str,
+        branch: Uuid,
+        volume: &str,
+    ) -> anyhow::Result<()> {
+        self.record(format!("drop-lost {key} {branch} {volume}"));
         Ok(())
     }
 
@@ -2295,6 +2301,7 @@ fn a_branch_whose_volume_is_gone_is_dropped_by_its_own_confirmed_operation(
         root: root.clone(),
         key: "cache".into(),
         branch: ids.feature,
+        volume: "volume-of-feature".into(),
     };
     assert!(lost.destructive());
     let run = |cx: &mut TestAppContext| {
@@ -2312,8 +2319,10 @@ fn a_branch_whose_volume_is_gone_is_dropped_by_its_own_confirmed_operation(
     run(cx);
     click(cx, h, "confirm");
     wait(cx, "the branch was dropped", |_| {
-        fake.calls()
-            .contains(&format!("drop-lost cache {}", ids.feature))
+        fake.calls().contains(&format!(
+            "drop-lost cache {} volume-of-feature",
+            ids.feature
+        ))
     });
     wait(cx, "the job finished", |cx| {
         cx.read_entity(&h.state, |s, _| s.busy().is_none())

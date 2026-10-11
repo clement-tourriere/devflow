@@ -1192,6 +1192,52 @@ fn a_missing_volume_is_lost_data_never_an_empty_server_in_its_place() {
 
 #[test]
 #[ignore = "needs Docker, valkey/valkey:8-alpine and debian:stable-slim"]
+fn a_lost_branch_is_dropped_only_while_the_volume_it_was_judged_by_is_missing() {
+    use devflow_core::services::workspace::drop_lost_branch;
+    let fx = Fixture::valkey();
+    let svc = fx.service();
+    let root = fx.root_branch(&svc);
+    let volume = root.volume.clone();
+
+    // The data is there: nothing is dropped, however it is asked.
+    let error = format!(
+        "{:#}",
+        drop_lost_branch(&fx.project, "cache", root.id, &volume).unwrap_err()
+    );
+    assert!(error.contains("not lost"), "{error}");
+    assert!(svc.branch(root.id).unwrap().is_some());
+
+    // Someone removes the container and the volume by hand.
+    docker::run(&["rm", "--force", root.container_id.as_deref().unwrap()]).unwrap();
+    docker::run(&["volume", "rm", &volume]).unwrap();
+
+    // Judged by another volume (the record was replaced since), it is kept.
+    let error = format!(
+        "{:#}",
+        drop_lost_branch(&fx.project, "cache", root.id, "devflow-some-other-volume").unwrap_err()
+    );
+    assert!(error.contains("different volume"), "{error}");
+    assert!(svc.branch(root.id).unwrap().is_some());
+
+    // The CLI spelling does the same, and drops it once the volume is gone.
+    let out = devflow(
+        &fx,
+        &[
+            "--json",
+            "service",
+            "cache",
+            "drop",
+            &root.id.to_string(),
+            "--lost",
+        ],
+    );
+    let doc = json_of(&out);
+    assert_eq!(doc["dropped"], root.id.to_string(), "{doc}");
+    assert!(svc.branch(root.id).unwrap().is_none());
+}
+
+#[test]
+#[ignore = "needs Docker, valkey/valkey:8-alpine and debian:stable-slim"]
 fn killing_the_coordinator_mid_clone_is_recovered_without_touching_the_source() {
     let fx = Fixture::valkey();
     let svc = fx.service();

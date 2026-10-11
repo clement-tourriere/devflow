@@ -746,6 +746,39 @@ impl Receipt {
         changed
     }
 
+    /// Reopen what a branch that no longer exists invalidates: the `services`
+    /// phase (a new branch has to be provisioned) and, with it, `env` and
+    /// `hooks`, each only if it is complete. `lost` are the keys of the
+    /// services whose bound branch is gone from the catalog (for example
+    /// dropped because its volume was lost). A skip someone asked for is
+    /// kept; calling it again changes nothing. Returns whether anything
+    /// changed.
+    pub fn reopen_lost_branches(&mut self, lost: &[String]) -> bool {
+        if lost.is_empty() {
+            return false;
+        }
+        let which = lost.join(", ");
+        let mut changed = self.reopen_phase(
+            Phase::Services,
+            format!(
+                "the branch bound for {which} no longer exists; setup has to run again to \
+                 give the workspace a new one"
+            ),
+        );
+        changed |= self.reopen_phase(
+            Phase::Env,
+            format!(
+                ".devflow/env still points at the branch of {which}, which no longer exists; \
+                 setup has to run again"
+            ),
+        );
+        changed |= self.reopen_phase(
+            Phase::Hooks,
+            "setup hooks run again after the workspace got a new branch".into(),
+        );
+        changed
+    }
+
     /// Record that the removal of every service `config` no longer has was
     /// applied: the environment has just been written without them. Their
     /// bindings (and provenance) stay in the receipt, marked

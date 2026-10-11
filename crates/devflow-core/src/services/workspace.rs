@@ -52,6 +52,38 @@ pub fn bound_workspace(project: &Project, key: &str, branch: Uuid) -> Option<std
     found
 }
 
+/// The keys of the container services whose branch `receipt` binds but the
+/// catalog no longer has (removed, being removed or never completed), as the
+/// catalog file says: no Docker. Empty when the catalog cannot be read or does
+/// not exist (it proves nothing), and for a binding of a service the
+/// configuration no longer has. Setup uses it to give such a workspace a new
+/// branch instead of keeping a connection that leads nowhere.
+pub(crate) fn lost_bindings(project: &Project, receipt: &Receipt) -> Vec<String> {
+    let Ok(path) = super::catalog::Store::path_for(project.id()) else {
+        return Vec::new();
+    };
+    let Ok(Some(catalog)) = super::catalog::read_file(&path) else {
+        return Vec::new();
+    };
+    project
+        .config
+        .containers()
+        .filter_map(|(key, engine, _)| {
+            let id = binding(receipt, key, engine)
+                .filter(|b| !b.orphaned)
+                .and_then(|b| b.branch_id)?;
+            let present = catalog
+                .services
+                .get(key)
+                .and_then(|records| records.branch(id))
+                .is_some_and(|record| {
+                    matches!(record.state, RecordState::Ready | RecordState::Creating)
+                });
+            (!present).then(|| key.to_string())
+        })
+        .collect()
+}
+
 /// What a `--data-from` request means for container service `svc`: the
 /// identity it resolves to in the service's catalog and the label recorded
 /// in the receipt. A missing source is an error naming the service, never an
@@ -387,29 +419,44 @@ pub fn drop_orphan(project: &Project, key: &str, branch: Uuid) -> Result<()> {
 /// to be), but its data is lost, so the only way on is to drop the record, the
 /// container and what is left, and set the workspace up again.
 ///
-/// The project is read again from disk (same identity), the branch must be a
-/// ready record of the service, and Docker must say that its volume does not
-/// exist: a branch whose data is there is never dropped by this. The removal
-/// is by recorded identity, as `devflow service NAME drop ID` does it.
-pub fn drop_lost_branch(project: &Project, key: &str, branch: Uuid) -> Result<()> {
-    let fresh = fresh(project)?;
-    let svc = Service::open(&fresh, key)?;
-    let record = svc.branch(branch)?;
-    let present = match &record {
-        Some(record) => super::docker::inspect_volume(&record.volume)?.is_some(),
-        None => false,
-    };
-    confirm_lost(key, branch, record.as_ref(), present)?;
-    svc.remove_branch(branch)
+/// `volume` is the volume the caller saw the record name when it decided the
+/// data was lost. The project is read again from disk (same identity), then the
+/// branch's resource lock is taken and the record read *again under it*: it
+/// must be a ready record of the service naming that same volume, and Docker
+/// must say that volume does not exist. A branch whose data is there, or
+/// whose volume was replaced since (a concurrent reset), is never dropped by
+/// this; the lock is held through the removal, which is by recorded identity,
+/// as `devflow service NAME drop ID` does it.
+pub fn drop_lost_branch(project: &Project, key: &str, branch: Uuid, volume: &str) -> Result<()> {
+    drop_lost_with(project, key, branch, volume, |name| {
+        Ok(super::docker::inspect_volume(name)?.is_some())
+    })
 }
 
-/// The record of `branch` is a ready one and its volume is missing; anything
-/// else is an error that says why nothing was dropped.
-fn confirm_lost(
+fn drop_lost_with(
+    project: &Project,
+    key: &str,
+    branch: Uuid,
+    volume: &str,
+    volume_present: impl FnOnce(&str) -> Result<bool>,
+) -> Result<()> {
+    let fresh = fresh(project)?;
+    let svc = Service::open(&fresh, key)?;
+    svc.remove_branch_if(branch, |record| {
+        confirm_lost(key, branch, Some(record), volume, volume_present)
+    })
+}
+
+/// The record of `branch` is a ready one that still names `expected` as its
+/// volume, and that volume is missing (`volume_present` asks, only once the
+/// first two hold); anything else is an error that says why nothing was
+/// dropped.
+pub(crate) fn confirm_lost(
     key: &str,
     branch: Uuid,
     record: Option<&super::catalog::BranchRecord>,
-    volume_present: bool,
+    expected: &str,
+    volume_present: impl FnOnce(&str) -> Result<bool>,
 ) -> Result<()> {
     let record = record.with_context(|| {
         format!("the catalog of service '{key}' has no branch {branch}; nothing was dropped")
@@ -420,8 +467,15 @@ fn confirm_lost(
         record.state
     );
     ensure!(
-        !volume_present,
-        "the volume of branch {branch} of service '{key}' exists, so its data is not lost;          start the branch instead. Nothing was dropped"
+        record.volume == expected,
+        "branch {branch} of service '{key}' has a different volume now ({}, not {expected}): it \
+         was changed since you looked, so its data may not be lost. Nothing was dropped",
+        record.volume
+    );
+    ensure!(
+        !volume_present(&record.volume)?,
+        "the volume of branch {branch} of service '{key}' exists, so its data is not lost; \
+         start the branch instead. Nothing was dropped"
     );
     Ok(())
 }
@@ -749,34 +803,57 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_is_dropped_as_lost_only_with_a_ready_record_and_no_volume() {
+    fn a_branch_is_dropped_as_lost_only_with_a_ready_record_the_same_volume_and_no_volume() {
         let (_dir, project, path, branch, _) = owned_branch();
         let catalog = crate::services::catalog::read_file(&path).unwrap().unwrap();
         let record = catalog.services["cache"].branch(branch).unwrap().clone();
+        let volume = record.volume.clone();
+        let present = |yes: bool| move |_: &str| Ok(yes);
         // The data is there: starting is the remedy, not dropping.
-        let error = confirm_lost("cache", branch, Some(&record), true)
+        let error = confirm_lost("cache", branch, Some(&record), &volume, present(true))
             .unwrap_err()
             .to_string();
         assert!(error.contains("not lost") && error.contains("Nothing was dropped"));
         // Gone, and a workspace owns the branch: this is the recovery (an
         // orphan check would refuse it).
-        confirm_lost("cache", branch, Some(&record), false).unwrap();
+        confirm_lost("cache", branch, Some(&record), &volume, present(false)).unwrap();
         let error = confirm_orphan(&project, &path, "cache", branch)
             .unwrap_err()
             .to_string();
         assert!(error.contains("not an orphan any more"), "{error}");
+        // The record names another volume than the one found missing (a reset
+        // gave the branch a new one): Docker is not even asked, because the
+        // answer for the old name says nothing about the new data.
+        let mut replaced = record.clone();
+        replaced.volume = "v-replacement".into();
+        let error = confirm_lost("cache", branch, Some(&replaced), &volume, |_| {
+            panic!("the replacement's volume must not be judged by the old name")
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("different volume") && error.contains("Nothing was dropped"),
+            "{error}"
+        );
         // Not in the catalog, or not ready.
-        assert!(confirm_lost("cache", branch, None, false).is_err());
+        assert!(confirm_lost("cache", branch, None, &volume, present(false)).is_err());
         let mut creating = record.clone();
         creating.state = RecordState::Creating;
-        assert!(confirm_lost("cache", branch, Some(&creating), false).is_err());
-        // The loaded project is checked again before Docker is asked.
+        assert!(confirm_lost("cache", branch, Some(&creating), &volume, present(false)).is_err());
+        // Whether Docker could be asked at all is the caller's problem.
+        let error = confirm_lost("cache", branch, Some(&record), &volume, |_| {
+            anyhow::bail!("docker is not running")
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("docker is not running"), "{error}");
+        // The loaded project is checked again before anything else.
         std::fs::write(
             project.root.join("devflow.toml"),
             toml(Uuid::new_v4(), "[services.cache]\nengine = \"valkey\"\n"),
         )
         .unwrap();
-        let error = drop_lost_branch(&project, "cache", branch)
+        let error = drop_lost_branch(&project, "cache", branch, &volume)
             .unwrap_err()
             .to_string();
         assert!(error.contains("nothing was removed"), "{error}");
