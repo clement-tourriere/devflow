@@ -5,7 +5,8 @@ use devflow_core::db::DataSource;
 use devflow_core::error::{Busy, Protected};
 use devflow_core::receipt::{DataBinding, Phase, PhaseState, Receipt, ServiceBinding, Status};
 use devflow_core::setup::{
-    self, CreateRequest, NoProgress, Progress, RemoveOptions, SetupOptions, SetupOutcome,
+    self, CreateRequest, EnvFileProblem, NoProgress, Progress, RemoveOptions, Repair, SetupOptions,
+    SetupOutcome,
 };
 use devflow_core::worktree::{self, Workspace};
 use devflow_core::{Project, cow, env_file, trust};
@@ -208,6 +209,7 @@ fn create(project: &Project, name: &str, options: SetupOptions) -> anyhow::Resul
         CreateRequest {
             name: name.into(),
             from: None,
+            base: None,
             options,
         },
         &mut NoProgress,
@@ -254,6 +256,7 @@ fn create_clones_payload_writes_env_and_runs_trusted_hooks() {
         CreateRequest {
             name: "feature/a".into(),
             from: None,
+            base: None,
             options: SetupOptions::default(),
         },
         &mut rec,
@@ -393,6 +396,7 @@ fn create_from_another_workspace_copies_its_payload() {
         CreateRequest {
             name: "b".into(),
             from: Some("a".into()),
+            base: None,
             options: SetupOptions::default(),
         },
         &mut NoProgress,
@@ -413,6 +417,7 @@ fn create_from_another_workspace_copies_its_payload() {
             CreateRequest {
                 name: "c".into(),
                 from: Some("nope".into()),
+                base: None,
                 options: SetupOptions::default()
             },
             &mut NoProgress,
@@ -805,6 +810,10 @@ fn if_new_skips_a_ready_workspace_even_while_it_is_locked_but_not_an_unready_one
     }
     done.save(&w.git_dir).unwrap();
     assert_eq!(done.status(), Status::Ready);
+    // Its derived file is there, with the manifest: nothing to repair either.
+    setup::workspace_env(&t.project, &w, &done, false)
+        .write(&w.path)
+        .unwrap();
     let held = Receipt::try_lock(&w.git_dir).unwrap().unwrap();
     let if_new = |w: &Workspace| {
         setup::setup(
@@ -821,6 +830,12 @@ fn if_new_skips_a_ready_workspace_even_while_it_is_locked_but_not_an_unready_one
         "ready: nothing to do, whoever holds the lock"
     );
 
+    // Ready, but the derived file is gone: that is something to do, so the
+    // shortcut does not apply (busy while the lock is held, repaired after).
+    std::fs::remove_file(env_file::path(&w.path)).unwrap();
+    let error = if_new(&w).unwrap_err();
+    assert!(error.downcast_ref::<Busy>().is_some(), "{error:#}");
+
     // No receipt at all (a worktree another tool made): busy, not skipped.
     let raw = worktree::create(&t.project, "raw", None).unwrap();
     let held_raw = Receipt::try_lock(&raw.git_dir).unwrap().unwrap();
@@ -832,6 +847,13 @@ fn if_new_skips_a_ready_workspace_even_while_it_is_locked_but_not_an_unready_one
     );
     drop((held, held_raw));
     assert!(if_new(&raw).unwrap().is_some(), "free again: it is adopted");
+    let repaired = if_new(&w).unwrap().expect("the lost file is repaired");
+    assert_eq!(repaired.repaired, [Repair::EnvFile]);
+    assert!(env_file::path(&w.path).is_file());
+    assert!(
+        if_new(&w).unwrap().is_none(),
+        "and then there is nothing to do"
+    );
 }
 
 #[test]
@@ -1272,7 +1294,7 @@ fn a_changed_service_is_reapplied_by_the_next_switch() {
     );
 
     // A switch into the workspace completes the reopened phases.
-    let switched = setup::switch(&project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    let switched = setup::activate(&project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
     assert_eq!(switched.status, Status::Ready);
     let stored = receipt_of(&w);
     assert_eq!(
@@ -1388,7 +1410,7 @@ fn changing_extra_databases_reopens_services_and_a_url_only_attachment_says_it_h
     );
     // A URL the user attached names no branch devflow could add a database
     // to: setup completes, says so, and exports no scratch URL.
-    let switched = setup::switch(&project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    let switched = setup::activate(&project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
     assert_eq!(
         switched.status,
         Status::Ready,
@@ -1414,7 +1436,7 @@ fn changing_extra_databases_reopens_services_and_a_url_only_attachment_says_it_h
         setup::list(&project).unwrap()[1].status,
         Some(Status::NeedsAttention)
     );
-    let switched = setup::switch(&project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    let switched = setup::activate(&project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
     assert_eq!(switched.status, Status::Ready);
     assert!(switched.warnings.is_empty(), "{:?}", switched.warnings);
 }
@@ -1454,7 +1476,8 @@ fn deliberate_skips_survive_a_configuration_change() {
 
     let project = edit_config(&t, |text| text + SERVICE);
     let listed = setup::list(&project).unwrap();
-    // `--no-db`: nothing derived from services applies to it, so it stays ready.
+    // `--no-db`: no service applies to it, but it owns what the new service
+    // exports, so its environment (not its services) reopens.
     let status = |name: &str| {
         listed
             .iter()
@@ -1462,7 +1485,20 @@ fn deliberate_skips_survive_a_configuration_change() {
             .unwrap()
             .status
     };
-    assert_eq!(status("no-db"), Some(Status::Ready));
+    assert_eq!(status("no-db"), Some(Status::NeedsAttention));
+    let no_db_receipt = listed
+        .iter()
+        .find(|l| l.workspace.name == "no-db")
+        .unwrap()
+        .receipt
+        .clone()
+        .unwrap();
+    assert!(no_db_receipt.phase(Phase::Env).required_skip);
+    let services = no_db_receipt.phase(Phase::Services);
+    assert!(
+        services.deliberate && !services.required_skip,
+        "{services:?}"
+    );
     // `--no-hooks`: services and env reopen, the hooks skip is kept.
     assert_eq!(status("no-hooks"), Some(Status::NeedsAttention));
     let url = "postgres://dfl_x:pw@db.internal:6543/df_proj_x"; // kingfisher:ignore
@@ -1550,6 +1586,7 @@ fn env_recipes_and_presets_reach_the_env_file_and_hooks_with_secrets_masked() {
         CreateRequest {
             name: "w".into(),
             from: None,
+            base: None,
             options: attach_to(SECRET_URL),
         },
         &mut rec,
@@ -1873,7 +1910,7 @@ fn changing_the_env_section_reopens_env_and_hooks_until_setup_applies_it() {
 }
 
 #[test]
-fn a_no_db_workspace_picks_up_approved_env_changes_but_ignores_service_changes() {
+fn a_no_db_workspace_picks_up_env_changes_and_the_names_a_service_exports_but_skips_its_services() {
     let t = repo(
         &Hooks {
             setup: &["echo run >> .devflow/runs"],
@@ -1898,9 +1935,19 @@ fn a_no_db_workspace_picks_up_approved_env_changes_but_ignores_service_changes()
     let status = |project: &Project| setup::list(project).unwrap()[1].status;
     assert_eq!(status(&t.project), Some(Status::Ready));
 
-    // A service the workspace deliberately has no part in changes nothing.
+    // A service the workspace deliberately has no part in is not applied to
+    // it, but the workspace owns what it exports: the file must list that.
     let with_service = edit_config(&t, |text| format!("{text}{SERVICE}"));
-    assert_eq!(status(&with_service), Some(Status::Ready));
+    assert_eq!(status(&with_service), Some(Status::NeedsAttention));
+    let services = setup::list(&with_service).unwrap()[1]
+        .receipt
+        .as_ref()
+        .unwrap()
+        .phase(Phase::Services);
+    assert!(
+        services.deliberate && !services.required_skip,
+        "{services:?}"
+    );
 
     // An approved `[env]` change reopens the environment and the hooks, but
     // not the services the workspace skipped on request.
@@ -2052,6 +2099,7 @@ fn named_hook_tables_run_with_their_names_and_their_own_timeouts() {
         CreateRequest {
             name: "w".into(),
             from: None,
+            base: None,
             options: SetupOptions::default(),
         },
         &mut rec,
@@ -2401,7 +2449,32 @@ fn teardown_failure_blocks_removal_unless_forced() {
     let mut rec = Recorder::default();
     let error = setup::remove(&t.project, "stuck", RemoveOptions::default(), &mut rec).unwrap_err();
     assert!(error.to_string().contains("exit 5"), "{error:#}");
-    assert!(protection(&error).forceable, "--force removes it anyway");
+    // The hook ran before it failed, so this is no preflight refusal: the
+    // removal stopped part-way, and says what was done and what remains.
+    let partial = error
+        .downcast_ref::<devflow_core::error::PartialRemoval>()
+        .unwrap_or_else(|| panic!("not a partial removal: {error:#}"));
+    assert!(partial.forceable, "--force removes it anyway");
+    assert!(
+        partial.done.iter().any(|d| d.contains("teardown hooks")),
+        "{partial:?}"
+    );
+    assert!(
+        partial
+            .remains
+            .iter()
+            .any(|r| r.starts_with("the worktree"))
+            && partial.remains.iter().any(|r| r.contains("receipt")),
+        "{partial:?}"
+    );
+    assert!(
+        partial
+            .remedies
+            .iter()
+            .any(|r| matches!(r, devflow_core::remedy::Remedy::RemoveWorkspace { .. })),
+        "{:?}",
+        partial.remedies
+    );
     assert!(w.path.exists(), "removal was blocked");
     assert!(rec.lines.iter().any(|l| l == "cleaning"));
 
@@ -2542,9 +2615,9 @@ fn switch_runs_switch_hooks_each_time_but_only_when_trusted_and_ready() {
     let log = w.path.join(".devflow/switch.log");
 
     // Untrusted: a warning, not a failure.
-    let out = setup::switch(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    let out = setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
     assert_eq!(out.status, Status::Ready);
-    assert!(out.hooks.is_none());
+    assert!(out.switch_hooks.is_none());
     assert!(
         out.warnings.iter().any(|w| w.contains("not trusted")),
         "{:?}",
@@ -2554,15 +2627,20 @@ fn switch_runs_switch_hooks_each_time_but_only_when_trusted_and_ready() {
 
     trust::approve(&t.project).unwrap();
     for _ in 0..2 {
-        let out = setup::switch(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+        let out =
+            setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
         assert!(out.warnings.is_empty(), "{:?}", out.warnings);
-        assert!(out.hooks.unwrap().ok);
+        assert!(out.switch_hooks.unwrap().ok);
+        assert!(
+            out.hooks.is_none(),
+            "`hooks` is the setup run's, which did not run"
+        );
     }
     assert_eq!(
         std::fs::read_to_string(&log).unwrap(),
         "switched\nswitched\n"
     );
-    let out = setup::switch(
+    let out = setup::activate(
         &t.project,
         &w,
         SetupOptions {
@@ -2572,14 +2650,14 @@ fn switch_runs_switch_hooks_each_time_but_only_when_trusted_and_ready() {
         &mut NoProgress,
     )
     .unwrap();
-    assert!(out.hooks.is_none());
+    assert!(out.switch_hooks.is_none());
     assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 2);
 
     // A failing switch hook is a warning with the report attached.
     let mut failing = t.project.clone();
     failing.config.hooks.switch = vec!["exit 9".into()];
     trust::approve(&failing).unwrap();
-    let out = setup::switch(&failing, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    let out = setup::activate(&failing, &w, SetupOptions::default(), &mut NoProgress).unwrap();
     assert!(
         out.warnings
             .iter()
@@ -2587,7 +2665,7 @@ fn switch_runs_switch_hooks_each_time_but_only_when_trusted_and_ready() {
         "{:?}",
         out.warnings
     );
-    assert!(!out.hooks.unwrap().ok);
+    assert!(!out.switch_hooks.unwrap().ok);
     assert_eq!(
         out.status,
         Status::Ready,
@@ -2610,7 +2688,7 @@ fn switch_resumes_an_incomplete_setup_first() {
         .workspace;
     assert!(!w.path.join(".devflow/setup-ran").exists());
     trust::approve(&t.project).unwrap();
-    let out = setup::switch(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    let out = setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
     assert_eq!(out.status, Status::Ready);
     assert!(w.path.join(".devflow/setup-ran").exists());
     assert!(w.path.join(".devflow/switch-ran").exists());
@@ -2639,9 +2717,9 @@ fn trust_is_judged_by_the_target_workspaces_pitchfork_files_not_the_main_checkou
         .unwrap()
         .workspace;
     let log = w.path.join(".devflow/switch.log");
-    let switch = || setup::switch(&t.project, &w, SetupOptions::default(), &mut NoProgress);
+    let switch = || setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress);
     let out = switch().unwrap();
-    assert!(out.hooks.is_some(), "{:?}", out.warnings);
+    assert!(out.switch_hooks.is_some(), "{:?}", out.warnings);
     assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
 
     // The linked worktree's daemon changes (and is committed there).
@@ -2670,18 +2748,13 @@ fn trust_is_judged_by_the_target_workspaces_pitchfork_files_not_the_main_checkou
 
     // Switch hooks do not run in the worktree on the main checkout's approval.
     let out = switch().unwrap();
-    assert!(out.hooks.is_none());
+    assert!(out.switch_hooks.is_none());
     assert!(
         out.warnings.iter().any(|w| w.contains("not trusted")),
         "{:?}",
         out.warnings
     );
     assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
-    assert!(
-        setup::run_switch_hooks(&t.project, &w, &SetupOptions::default(), &mut NoProgress)
-            .unwrap()
-            .is_none()
-    );
     // Neither does teardown.
     let error = setup::remove(
         &t.project,
@@ -2705,7 +2778,7 @@ fn trust_is_judged_by_the_target_workspaces_pitchfork_files_not_the_main_checkou
     let reviewed = trust::scope_at(&t.project, &w.path);
     trust::approve_scope_at(&t.project, &w.path, &reviewed).unwrap();
     let out = switch().unwrap();
-    assert!(out.hooks.is_some(), "{:?}", out.warnings);
+    assert!(out.switch_hooks.is_some(), "{:?}", out.warnings);
     assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 2);
 }
 
@@ -2885,7 +2958,7 @@ fn switch_hooks_and_teardown_are_refused_on_an_approval_of_other_content() {
     .unwrap();
     commit_all(&git2::Repository::open(&w.path).unwrap(), "other daemon");
     let approval = Some(trust::Approval::of(&trust::scope(&t.project)));
-    let out = setup::switch(
+    let out = setup::activate(
         &t.project,
         &w,
         SetupOptions {
@@ -3337,6 +3410,7 @@ fn hook_output_and_logs_never_contain_the_database_password() {
         CreateRequest {
             name: "creds".into(),
             from: None,
+            base: None,
             options: SetupOptions {
                 database_url: Some("postgres://app:Sup3rSecretPw@localhost:5439/app".into()),
                 approval: Some(trust::Approval::of(&trust::scope(&t.project))),
@@ -3369,7 +3443,7 @@ fn hook_output_and_logs_never_contain_the_database_password() {
 }
 
 #[test]
-fn run_switch_hooks_runs_what_create_leaves_to_the_caller() {
+fn create_and_activate_enters_the_new_workspace_like_a_switch() {
     let t = repo(
         &Hooks {
             switch: &["touch .devflow/switch-ran"],
@@ -3378,50 +3452,51 @@ fn run_switch_hooks_runs_what_create_leaves_to_the_caller() {
         "",
     );
     let ran = |w: &Workspace| w.path.join(".devflow/switch-ran").exists();
-    // Untrusted: nothing runs, whatever the caller asks.
-    let out = create(&t.project, "first", SetupOptions::default()).unwrap();
-    assert!(out.hooks.is_none() && !ran(&out.workspace));
-    assert!(
-        setup::run_switch_hooks(
+    let enter = |name: &str, options: SetupOptions| {
+        setup::create_and_activate(
             &t.project,
-            &out.workspace,
-            &SetupOptions::default(),
-            &mut NoProgress
+            CreateRequest {
+                name: name.into(),
+                from: None,
+                base: None,
+                options,
+            },
+            &mut NoProgress,
         )
         .unwrap()
-        .is_none()
+    };
+    // Untrusted: nothing runs, and the outcome says why.
+    let out = enter("first", SetupOptions::default());
+    assert!(out.switch_hooks.is_none() && !ran(&out.workspace));
+    assert!(
+        out.warnings.iter().any(|w| w.contains("not trusted")),
+        "{:?}",
+        out.warnings
     );
-    assert!(!ran(&out.workspace));
+    assert!(out.receipt.last_active_at.is_some());
 
     trust::approve(&t.project).unwrap();
+    // Plain `create` is not an entry: no switch hooks, no activation record.
     let out = create(&t.project, "second", SetupOptions::default()).unwrap();
-    assert!(out.hooks.is_none(), "create does not run switch hooks");
-    assert!(!ran(&out.workspace));
-    let mut rec = Recorder::default();
-    let report =
-        setup::run_switch_hooks(&t.project, &out.workspace, &trusted(&t.project), &mut rec)
-            .unwrap()
-            .expect("trusted and ready");
+    assert!(out.switch_hooks.is_none() && !ran(&out.workspace));
+    assert!(out.receipt.last_active_at.is_none());
+
+    let out = enter("third", SetupOptions::default());
+    assert_eq!(out.status, Status::Ready);
+    let report = out.switch_hooks.expect("trusted and ready");
     assert!(report.ok && report.runs.len() == 1);
     assert!(ran(&out.workspace));
-    assert!(rec.lines.iter().any(|l| l.starts_with("$ touch")));
+    assert!(out.hooks.is_none(), "there are no setup hooks");
 
-    // --no-hooks, and a workspace devflow has not set up.
-    let skip = SetupOptions {
-        no_hooks: true,
-        ..Default::default()
-    };
-    assert!(
-        setup::run_switch_hooks(&t.project, &out.workspace, &skip, &mut NoProgress)
-            .unwrap()
-            .is_none()
+    // --no-hooks.
+    let out = enter(
+        "fourth",
+        SetupOptions {
+            no_hooks: true,
+            ..Default::default()
+        },
     );
-    let raw = worktree::create(&t.project, "raw", None).unwrap();
-    assert!(
-        setup::run_switch_hooks(&t.project, &raw, &trusted(&t.project), &mut NoProgress)
-            .unwrap()
-            .is_none()
-    );
+    assert!(out.switch_hooks.is_none() && !ran(&out.workspace));
 }
 
 #[test]
@@ -3574,13 +3649,16 @@ fn sourcing_one_workspaces_env_does_not_fork_another_workspace() {
     );
 
     let unchanged = |what: &str| {
-        assert_eq!(receipt_of(&b.workspace), b_receipt, "{what}");
+        // Entering a workspace records when, and nothing else.
+        let mut now = receipt_of(&b.workspace);
+        now.last_active_at = None;
+        assert_eq!(now, b_receipt, "{what}");
         assert_eq!(env_map(&b.workspace)["DATABASE_URL"], url, "{what}");
     };
     let mut rec = Recorder::default();
-    let out = setup::switch(&t.project, &b.workspace, SetupOptions::default(), &mut rec).unwrap();
+    let out = setup::activate(&t.project, &b.workspace, SetupOptions::default(), &mut rec).unwrap();
     assert_eq!(out.status, Status::Ready);
-    assert!(out.hooks.is_some(), "the switch hook ran");
+    assert!(out.switch_hooks.is_some(), "the switch hook ran");
     assert!(
         rec.phases.iter().all(|(_, s)| *s != PhaseState::Started),
         "no phase re-ran: {:?}",
@@ -3596,10 +3674,10 @@ fn sourcing_one_workspaces_env_does_not_fork_another_workspace() {
     assert_eq!(resumed.receipt.instance_id, b_receipt.instance_id);
     assert_eq!(resumed.receipt.services, b_receipt.services);
 
-    setup::run_switch_hooks(
+    setup::activate(
         &t.project,
         &b.workspace,
-        &trusted(&t.project),
+        trusted(&t.project),
         &mut NoProgress,
     )
     .unwrap();
@@ -3677,7 +3755,7 @@ fn devflow_trust_hooks_trusts_setup_switch_and_teardown_alike() {
     assert_eq!(out.status, Status::Ready, "{:?}", out.receipt.phases);
     assert!(out.workspace.path.join(".devflow/setup-ran").exists());
 
-    let out = setup::switch(
+    let out = setup::activate(
         &t.project,
         &out.workspace,
         SetupOptions::default(),
@@ -3685,7 +3763,7 @@ fn devflow_trust_hooks_trusts_setup_switch_and_teardown_alike() {
     )
     .unwrap();
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
-    assert!(out.hooks.unwrap().ok);
+    assert!(out.switch_hooks.unwrap().ok);
     assert!(out.workspace.path.join(".devflow/switch-ran").exists());
 
     let removed =
@@ -3877,7 +3955,8 @@ fn hooks_see_the_workspace_connection_not_inherited_libpq_variables() {
         "every connection-affecting variable is cleared, not just the common ones"
     );
 
-    // Without a database there is nothing to disagree with: the user's own
+    // A project with no PostgreSQL service and a workspace without a
+    // database: there is nothing to disagree with, the user's own
     // environment is left alone.
     let out = create(
         &t.project,
@@ -3900,6 +3979,516 @@ fn hooks_see_the_workspace_connection_not_inherited_libpq_variables() {
             .unwrap()
             .trim(),
         "disable|/inherited/ca.pem|/inherited/pgpass|99|inherited|/inherited/services|/inherited/etc"
+    );
+
+    // A project that has a PostgreSQL service owns its variables even in a
+    // `--no-db` workspace, which sets none of them: the caller's database is
+    // not this workspace's.
+    let t = repo(
+        &Hooks {
+            setup: &[
+                "echo \"${DATABASE_URL-unset}|${PGHOST-unset}|${PGPORT-unset}|${PGSERVICE-unset}|${PGPASSWORD-unset}\" > .devflow/seen",
+                "echo \"${PGSSLMODE-unset}|${PGSSLROOTCERT-unset}|${PGSYSCONFDIR-unset}\" > .devflow/seen-more",
+            ],
+            ..Default::default()
+        },
+        "[services.db]\nengine = \"postgres\"\nmode = \"external\"\n",
+    );
+    let out = create(
+        &t.project,
+        "nodb",
+        SetupOptions {
+            no_db: true,
+            approval: Some(trust::Approval::of(&trust::scope(&t.project))),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(out.status, Status::Ready, "{:?}", out.receipt.phases);
+    assert_eq!(
+        std::fs::read_to_string(out.workspace.path.join(".devflow/seen"))
+            .unwrap()
+            .trim(),
+        "unset|unset|unset|unset|unset"
+    );
+    assert_eq!(
+        std::fs::read_to_string(out.workspace.path.join(".devflow/seen-more"))
+            .unwrap()
+            .trim(),
+        "unset|unset|unset"
+    );
+}
+
+#[test]
+fn setup_names_the_copied_dotenv_files_that_set_what_the_workspace_owns() {
+    let t = plain();
+    // The main checkout's `.env` is copied into the new workspace.
+    std::fs::write(
+        t.root.join(".env"),
+        "DATABASE_URL=postgres://main:main-password-9@localhost/main\nPORT=3000\n", // kingfisher:ignore
+    )
+    .unwrap();
+    let out = create(
+        &t.project,
+        "w",
+        SetupOptions {
+            database_url: Some("postgres://app:other-pw-1@localhost/app".into()), // kingfisher:ignore
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let found: Vec<&String> = out
+        .warnings
+        .iter()
+        .filter(|w| w.starts_with(".env sets"))
+        .collect();
+    assert_eq!(found.len(), 1, "{:?}", out.warnings);
+    assert!(found[0].contains("DATABASE_URL"), "{}", found[0]);
+    assert!(!found[0].contains("PORT"), "{}", found[0]);
+    assert!(
+        !found[0].contains("main-password") && !found[0].contains("other-pw"),
+        "{}",
+        found[0]
+    );
+}
+
+// --- the names a workspace owns stay current ---------------------------------
+
+/// The names `.devflow/env` of `ws` lists as declared.
+fn declared_names(ws: &Workspace) -> std::collections::BTreeSet<String> {
+    env_file::read_contents(&ws.path)
+        .unwrap()
+        .declared
+        .expect("the file lists the names the workspace owns")
+}
+
+fn listed(project: &Project, name: &str) -> setup::WorkspaceStatus {
+    setup::list(project)
+        .unwrap()
+        .into_iter()
+        .find(|item| item.workspace.name == name)
+        .unwrap()
+}
+
+#[test]
+fn a_no_db_workspace_lists_a_service_that_comes_or_changes_the_variable_it_exports() {
+    let t = repo(&Hooks::default(), "");
+    let out = create(
+        &t.project,
+        "w",
+        SetupOptions {
+            no_db: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let w = out.workspace;
+    assert!(!declared_names(&w).contains("DATABASE_URL"));
+
+    // PostgreSQL comes. No service applies to the workspace (it has none by
+    // choice), but it now owns what the service exports: the file must say so,
+    // and a plain shell's `DATABASE_URL` must not reach a command through it.
+    let project = edit_config(&t, |text| text + SERVICE);
+    let item = listed(&project, "w");
+    assert_eq!(item.status, Some(Status::NeedsAttention));
+    let receipt = item.receipt.unwrap();
+    assert!(receipt.phase(Phase::Env).required_skip);
+    let services = receipt.phase(Phase::Services);
+    assert!(
+        services.deliberate && !services.required_skip,
+        "{services:?}"
+    );
+    let again = setup::setup(
+        &project,
+        &w,
+        SetupOptions::default(),
+        false,
+        false,
+        &mut NoProgress,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(again.status, Status::Ready, "{:?}", again.receipt.phases);
+    assert!(again.receipt.services.is_empty(), "still no database");
+    let declared = declared_names(&w);
+    assert!(declared.contains("DATABASE_URL") && declared.contains("PGHOST"));
+    let prepared = devflow_core::exec::prepare_root(&w.path).unwrap();
+    let mut command = std::process::Command::new("sh");
+    command
+        .args(["-c", "printf %s \"${DATABASE_URL-unset}\""])
+        .env("DATABASE_URL", "postgres://plain-shell/db");
+    prepared.apply(&mut command);
+    assert_eq!(
+        String::from_utf8(command.output().unwrap().stdout).unwrap(),
+        "unset"
+    );
+
+    // A service that exports another variable.
+    let project = edit_config(&t, |text| {
+        text + "\n[services.cache]\nengine = \"valkey\"\nenv = \"CACHE_URL\"\n"
+    });
+    assert_eq!(listed(&project, "w").status, Some(Status::NeedsAttention));
+    setup::setup(
+        &project,
+        &w,
+        SetupOptions::default(),
+        false,
+        false,
+        &mut NoProgress,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(declared_names(&w).contains("CACHE_URL"));
+    let project = edit_config(&t, |text| text.replace("CACHE_URL", "STORE_URL"));
+    assert_eq!(listed(&project, "w").status, Some(Status::NeedsAttention));
+    setup::setup(
+        &project,
+        &w,
+        SetupOptions::default(),
+        false,
+        false,
+        &mut NoProgress,
+    )
+    .unwrap()
+    .unwrap();
+    let declared = declared_names(&w);
+    assert!(declared.contains("STORE_URL") && !declared.contains("CACHE_URL"));
+    assert_eq!(listed(&project, "w").status, Some(Status::Ready));
+
+    // Exporting the same names is not a change to the file.
+    let project = edit_config(&t, |text| {
+        text.replace(
+            "engine = \"valkey\"",
+            "engine = \"valkey\"\nimage = \"valkey/valkey:9-alpine\"",
+        )
+    });
+    assert_eq!(listed(&project, "w").status, Some(Status::Ready));
+}
+
+/// The generation a `--no-db` workspace recorded before it covered the names
+/// the configuration declares (main's devflow, the first build that kept the
+/// manifest): a digest of the `[env]` section alone. Written out here because
+/// it is a fixed, old format.
+fn legacy_no_db_generation(config: &Config) -> String {
+    use sha2::{Digest, Sha256};
+    let json = serde_json::to_vec(&("env.v2.no-services", config.env.canonical())).unwrap();
+    Sha256::digest(json)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+#[test]
+fn an_upgraded_no_db_workspace_is_migrated_and_then_notices_a_service() {
+    let t = repo(
+        &Hooks {
+            setup: &["echo run >> .devflow/runs"],
+            ..Default::default()
+        },
+        "",
+    );
+    trust::approve(&t.project).unwrap();
+    let w = create(
+        &t.project,
+        "w",
+        SetupOptions {
+            no_db: true,
+            ..trusted(&t.project)
+        },
+    )
+    .unwrap()
+    .workspace;
+    let runs = |w: &Workspace| {
+        std::fs::read_to_string(w.path.join(".devflow/runs"))
+            .unwrap()
+            .lines()
+            .count()
+    };
+    assert_eq!(runs(&w), 1);
+    // The state an upgrade meets: the generation of an earlier devflow, which
+    // covered the `[env]` section alone, on a file that already has a manifest.
+    let mut receipt = receipt_of(&w);
+    receipt.env_generation = Some(legacy_no_db_generation(&t.project.config));
+    receipt.save(&w.git_dir).unwrap();
+    assert!(!env_file::lacks_manifest(&w.path));
+    assert!(!declared_names(&w).contains("DATABASE_URL"));
+
+    // PostgreSQL is added. The old generation cannot see it: no drift, the
+    // workspace reads ready, and no hook is reopened for it...
+    let project = edit_config(&t, |text| text + SERVICE);
+    let item = listed(&project, "w");
+    assert_eq!(item.status, Some(Status::Ready));
+    // ...but the list says the file is behind, and nothing short-circuits it.
+    assert_eq!(item.env_file, Some(EnvFileProblem::OldGeneration));
+    assert!(
+        !EnvFileProblem::OldGeneration
+            .describe()
+            .contains("`devflow"),
+        "a message names the file, never a command"
+    );
+    // A plain shell's database reaches a command through the file as it is.
+    let through_exec = |w: &Workspace| {
+        let prepared = devflow_core::exec::prepare_root(&w.path).unwrap();
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", "printf %s \"${DATABASE_URL-unset}\""])
+            .env("DATABASE_URL", "postgres://plain-shell/db");
+        prepared.apply(&mut command);
+        String::from_utf8(command.output().unwrap().stdout).unwrap()
+    };
+    assert_eq!(through_exec(&w), "postgres://plain-shell/db");
+
+    // `--if-new` does not leave it alone, and the repair runs no hook and
+    // provisions nothing: the file now lists what PostgreSQL gives the
+    // workspace, and the current generation is recorded.
+    let out = setup::setup(
+        &project,
+        &w,
+        SetupOptions::default(),
+        true,
+        false,
+        &mut NoProgress,
+    )
+    .unwrap()
+    .expect("the repair ran");
+    assert_eq!(out.repaired, [Repair::EnvFile]);
+    assert_eq!(out.status, Status::Ready, "{:?}", out.receipt.phases);
+    let declared = declared_names(&w);
+    assert!(declared.contains("DATABASE_URL") && declared.contains("PGHOST"));
+    assert_eq!(through_exec(&w), "unset");
+    assert_eq!(runs(&w), 1, "no hook ran again");
+    let receipt = receipt_of(&w);
+    assert!(receipt.services.is_empty(), "still no database");
+    assert!(receipt.phase(Phase::Services).deliberate);
+    assert!(!receipt.env_generation_is_legacy(&project.config));
+    let item = listed(&project, "w");
+    assert_eq!(item.status, Some(Status::Ready));
+    assert_eq!(item.env_file, None);
+
+    // Migrated, it notices the next change itself: a service that exports
+    // another variable reopens the environment, as for any new workspace.
+    let project = edit_config(&t, |text| {
+        text + "\n[services.cache]\nengine = \"valkey\"\nenv = \"CACHE_URL\"\n"
+    });
+    assert_eq!(listed(&project, "w").status, Some(Status::NeedsAttention));
+    setup::setup(
+        &project,
+        &w,
+        SetupOptions::default(),
+        false,
+        false,
+        &mut NoProgress,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(declared_names(&w).contains("CACHE_URL"));
+}
+
+#[test]
+fn a_workspace_entered_after_an_upgrade_is_migrated_too() {
+    // The same state, met by `activate` (the switch and the app's actions),
+    // which repairs before anything else.
+    let t = repo(&Hooks::default(), "");
+    let w = create(
+        &t.project,
+        "w",
+        SetupOptions {
+            no_db: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .workspace;
+    let mut receipt = receipt_of(&w);
+    receipt.env_generation = Some(legacy_no_db_generation(&t.project.config));
+    receipt.save(&w.git_dir).unwrap();
+    let project = edit_config(&t, |text| text + SERVICE);
+    let out = setup::activate(&project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    assert_eq!(out.repaired, [Repair::EnvFile]);
+    assert!(declared_names(&w).contains("DATABASE_URL"));
+    assert!(!receipt_of(&w).env_generation_is_legacy(&project.config));
+}
+
+/// A workspace set up with the recipe `APP_DB` that an "upgrade" meets: the
+/// receipt keeps no history of the names it exported and the file is the one an
+/// earlier devflow wrote, without the list of owned names. The recipe is
+/// removed before this devflow sets the workspace up for the first time.
+fn upgraded_workspace() -> (Repo, Project, Workspace) {
+    let t = repo(&Hooks::default(), "[env]\nAPP_DB = \"${DATABASE_URL}\"\n");
+    trust::approve(&t.project).unwrap();
+    let url = "postgres://app:pw@db.internal:6543/app"; // kingfisher:ignore
+    let out = create(
+        &t.project,
+        "w",
+        SetupOptions {
+            database_url: Some(url.into()),
+            ..trusted(&t.project)
+        },
+    )
+    .unwrap();
+    let w = out.workspace;
+    assert!(env_map(&w).contains_key("APP_DB"));
+    let mut receipt = Receipt::load(&w.git_dir).unwrap().unwrap();
+    receipt.exported.clear();
+    receipt.save(&w.git_dir).unwrap();
+    let vars = env_file::read(&w.path).unwrap();
+    env_file::write(&w.path, &vars).unwrap();
+    assert!(env_file::lacks_manifest(&w.path));
+    let project = edit_config(&t, |text| {
+        text.replace("[env]\nAPP_DB = \"${DATABASE_URL}\"\n", "")
+    });
+    (t, project, w)
+}
+
+#[test]
+fn an_upgrade_keeps_the_names_of_the_file_it_replaces() {
+    let (_t, project, w) = upgraded_workspace();
+    let again = setup::setup(
+        &project,
+        &w,
+        SetupOptions::default(),
+        false,
+        false,
+        &mut NoProgress,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(again.status, Status::Ready, "{:?}", again.receipt.phases);
+    // The new file no longer sets `APP_DB`, and still says it was this
+    // workspace's: the history was taken from the old file before it went.
+    let contents = env_file::read_contents(&w.path).unwrap();
+    assert!(!contents.vars.iter().any(|(name, _)| name == "APP_DB"));
+    assert!(contents.former.contains("APP_DB"), "{:?}", contents.former);
+    assert!(
+        Receipt::load(&w.git_dir)
+            .unwrap()
+            .unwrap()
+            .exported
+            .contains("APP_DB")
+    );
+    // A shell that still holds it is cleared of it by `devflow exec`.
+    let prepared = devflow_core::exec::prepare_root(&w.path).unwrap();
+    let mut command = std::process::Command::new("sh");
+    command
+        .args(["-c", "printf %s \"${APP_DB-unset}\""])
+        .env("APP_DB", "postgres://from-the-shell/db");
+    prepared.apply(&mut command);
+    assert_eq!(
+        String::from_utf8(command.output().unwrap().stdout).unwrap(),
+        "unset"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_replacement_that_cannot_be_published_leaves_the_old_file_and_its_names_in_the_receipt() {
+    use std::os::unix::fs::PermissionsExt;
+    // Where the permission bits do not bind, the write below cannot be made to
+    // fail.
+    // SAFETY: `geteuid` has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let (_t, project, w) = upgraded_workspace();
+    let dir = w.path.join(".devflow");
+    let old = std::fs::read(env_file::path(&w.path)).unwrap();
+    // The old file can be read, no file can be written beside it: the
+    // replacement is never published.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let failed = setup::setup(
+        &project,
+        &w,
+        SetupOptions::default(),
+        false,
+        false,
+        &mut NoProgress,
+    );
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(failed.is_err(), "the file could not be replaced");
+    assert_eq!(std::fs::read(env_file::path(&w.path)).unwrap(), old);
+    // The only record of the removed recipe was that file; the receipt has it
+    // now.
+    assert!(
+        Receipt::load(&w.git_dir)
+            .unwrap()
+            .unwrap()
+            .exported
+            .contains("APP_DB")
+    );
+}
+
+#[test]
+fn setup_rebuilds_a_file_without_the_manifest_from_the_receipt_and_runs_no_hook() {
+    // What the repair does for a ready workspace whose file an earlier
+    // devflow wrote (`env_file::lacks_manifest` is the one predicate): nothing
+    // else reopens the env phase, since the configuration is unchanged, and
+    // `devflow exec` refuses the file until it is written again.
+    let t = repo(
+        &Hooks {
+            setup: &["echo run >> .devflow/runs"],
+            ..Default::default()
+        },
+        "[env]\nAPP_DB = \"${DATABASE_URL}\"\n",
+    );
+    trust::approve(&t.project).unwrap();
+    let url = "postgres://app:pw@db.internal:6543/app"; // kingfisher:ignore
+    let out = create(
+        &t.project,
+        "w",
+        SetupOptions {
+            database_url: Some(url.into()),
+            ..trusted(&t.project)
+        },
+    )
+    .unwrap();
+    let w = out.workspace;
+    let runs = |w: &Workspace| {
+        std::fs::read_to_string(w.path.join(".devflow/runs"))
+            .unwrap()
+            .lines()
+            .count()
+    };
+    assert_eq!(runs(&w), 1);
+    // The file an earlier devflow wrote, and a receipt with no history.
+    let mut receipt = Receipt::load(&w.git_dir).unwrap().unwrap();
+    receipt.exported.clear();
+    receipt.save(&w.git_dir).unwrap();
+    let vars = env_file::read(&w.path).unwrap();
+    env_file::write(&w.path, &vars).unwrap();
+    assert!(env_file::lacks_manifest(&w.path));
+    let refused = devflow_core::exec::prepare_root(&w.path).unwrap_err();
+    assert_eq!(
+        devflow_core::remedy::remedies_of(&refused),
+        [devflow_core::remedy::Remedy::Setup {
+            workspace: w.path.clone()
+        }]
+    );
+    assert_eq!(listed(&t.project, "w").status, Some(Status::Ready));
+
+    // The remedy works: setup writes the file again from the receipt and the
+    // approved recipes, keeps the names the old file had, and runs no hook.
+    let again = setup::setup(
+        &t.project,
+        &w,
+        trusted(&t.project),
+        false,
+        false,
+        &mut NoProgress,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(again.status, Status::Ready);
+    assert!(!env_file::lacks_manifest(&w.path));
+    assert!(devflow_core::exec::prepare_root(&w.path).is_ok());
+    assert_eq!(runs(&w), 1, "no hook ran again");
+    assert_eq!(env_map(&w)["APP_DB"], url);
+    assert!(
+        Receipt::load(&w.git_dir)
+            .unwrap()
+            .unwrap()
+            .exported
+            .contains("APP_DB"),
+        "the names of the old file are the history"
     );
 }
 
@@ -3951,6 +4540,161 @@ fn managed_cleanup(project: &Project) -> Cleanup {
 
 const MANAGED: &str =
     "[services.db]\nengine = \"postgres\"\nmode = \"managed\"\nimage = \"postgres:18\"\n";
+
+#[test]
+#[ignore = "needs Docker and the postgres:18 image"]
+fn a_removal_drops_the_branch_recorded_before_its_creation_and_only_this_instances() {
+    use devflow_core::db::ResolvedSource;
+    use devflow_core::receipt::PendingBranch;
+    let t = repo(&Hooks::default(), MANAGED);
+    let _cleanup = managed_cleanup(&t.project);
+    // A workspace set up without data (so the server is not asked), whose
+    // receipt then says what a crash would have left: a branch begun for
+    // `db`, created on the server, credentials never recorded.
+    let crash = |name: &str,
+                 instance_of_branch: Option<uuid::Uuid>,
+                 service: &str,
+                 engine: Option<devflow_core::config::Engine>| {
+        let w = create(
+            &t.project,
+            name,
+            SetupOptions {
+                data_from: Some(DataSource::Empty),
+                no_db: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .workspace;
+        let mut receipt = receipt_of(&w);
+        let server = devflow_core::db::Server::for_project(&t.project)
+            .unwrap()
+            .unwrap();
+        server.up().unwrap();
+        let id = uuid::Uuid::new_v4();
+        server
+            .create_branch_with_id(
+                id,
+                name,
+                ResolvedSource::Empty,
+                instance_of_branch.or(Some(receipt.instance_id)),
+            )
+            .unwrap();
+        receipt.creating = Some(PendingBranch {
+            service: service.into(),
+            branch_id: id,
+            engine,
+        });
+        receipt.save(&w.git_dir).unwrap();
+        (w, server, id)
+    };
+
+    // Created for this instance: dropped, with the worktree.
+    let (w, server, id) = crash(
+        "crashed",
+        None,
+        "db",
+        Some(devflow_core::config::Engine::Postgres),
+    );
+    assert!(server.branch(id).unwrap().is_some());
+    let out = setup::remove(
+        &t.project,
+        "crashed",
+        RemoveOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(out.dropped_branch, Some(id), "{out:?}");
+    assert!(server.branch(id).unwrap().is_none(), "no branch leaked");
+    assert!(!w.path.exists());
+
+    // Created for another instance: not this workspace's to drop.
+    let (w, server, id) = crash(
+        "borrowed",
+        Some(uuid::Uuid::new_v4()),
+        "db",
+        Some(devflow_core::config::Engine::Postgres),
+    );
+    let out = setup::remove(
+        &t.project,
+        "borrowed",
+        RemoveOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(out.dropped_branch, None);
+    assert!(
+        out.warnings
+            .iter()
+            .any(|m| m.contains("created by another instance")),
+        "{:?}",
+        out.warnings
+    );
+    assert!(server.branch(id).unwrap().is_some(), "left alone");
+    assert!(!w.path.exists());
+
+    // Recorded but never created (the crash came before): nothing to drop,
+    // nothing to say.
+    let (w, server, _) = crash(
+        "early",
+        None,
+        "db",
+        Some(devflow_core::config::Engine::Postgres),
+    );
+    let never = uuid::Uuid::new_v4();
+    let mut receipt = receipt_of(&w);
+    receipt.creating = Some(PendingBranch {
+        service: "db".into(),
+        branch_id: never,
+        engine: Some(devflow_core::config::Engine::Postgres),
+    });
+    receipt.save(&w.git_dir).unwrap();
+    let out = setup::remove(
+        &t.project,
+        "early",
+        RemoveOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(out.dropped_branch, None);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(server.branch(never).unwrap().is_none());
+
+    // Recorded for a service the configuration does not have (it was renamed
+    // or removed since the crash): the project's one server is asked for the
+    // id, and the branch is still dropped.
+    let (w, server, id) = crash(
+        "renamed",
+        None,
+        "ghost",
+        Some(devflow_core::config::Engine::Postgres),
+    );
+    let out = setup::remove(
+        &t.project,
+        "renamed",
+        RemoveOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(out.dropped_branch, Some(id), "{out:?}");
+    assert!(server.branch(id).unwrap().is_none(), "no branch leaked");
+    assert!(!w.path.exists());
+
+    // A record from before the engine was written with it is looked for in
+    // every backend: the server has it.
+    let (w, server, id) = crash("older", None, "ghost", None);
+    let out = setup::remove(
+        &t.project,
+        "older",
+        RemoveOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(out.dropped_branch, Some(id), "{out:?}");
+    assert!(server.branch(id).unwrap().is_none(), "no branch leaked");
+    assert!(!w.path.exists());
+    server.down().unwrap();
+}
 
 #[test]
 #[ignore = "needs Docker and the postgres:18 image"]
@@ -4038,6 +4782,7 @@ fn renaming_a_service_never_reuses_its_orphaned_branch_and_recovery_is_by_record
     crashed.creating = Some(devflow_core::receipt::PendingBranch {
         service: "main".into(),
         branch_id: lost,
+        engine: Some(devflow_core::config::Engine::Postgres),
     });
     crashed.set_phase(Phase::Services, PhaseState::Started, None);
     crashed.save(&a_ws.git_dir).unwrap();
@@ -4075,6 +4820,7 @@ fn renaming_a_service_never_reuses_its_orphaned_branch_and_recovery_is_by_record
     other.creating = Some(devflow_core::receipt::PendingBranch {
         service: "db".into(),
         branch_id: lost,
+        engine: Some(devflow_core::config::Engine::Postgres),
     });
     other.set_phase(Phase::Services, PhaseState::Started, None);
     other.save(&a_ws.git_dir).unwrap();
@@ -4174,6 +4920,117 @@ fn a_changed_endpoint_setting_reaches_the_workspace_url_before_the_service_is_st
 
 #[test]
 #[ignore = "needs Docker and the postgres:18 image"]
+fn managed_postgres_non_interactive_runs_seed_from_the_configured_snapshot() {
+    let t = repo(
+        &Hooks::default(),
+        &format!("{MANAGED}\n[data]\nnoninteractive_from = \"snapshot:seed\"\n"),
+    );
+    let _cleanup = managed_cleanup(&t.project);
+    let connect = |url: &str| postgres::Client::connect(url, postgres::NoTls).unwrap();
+    let rows = |url: &str| -> i64 {
+        connect(url)
+            .query_one("SELECT count(*) FROM t", &[])
+            .unwrap()
+            .get(0)
+    };
+    let non_interactive = SetupOptions {
+        non_interactive: true,
+        ..Default::default()
+    };
+
+    // The data worth seeding from, snapshotted by name.
+    let a = create(
+        &t.project,
+        "a",
+        SetupOptions {
+            data_from: Some(DataSource::Empty),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(a.status, Status::Ready, "{:?}", a.receipt.phases);
+    let binding_a = binding(&a.receipt);
+    connect(&binding_a.url)
+        .batch_execute("CREATE TABLE t(x int); INSERT INTO t VALUES (1), (2), (3)")
+        .unwrap();
+    devflow_core::db::Server::for_project(&t.project)
+        .unwrap()
+        .unwrap()
+        .create_snapshot("seed", binding_a.branch_id.unwrap())
+        .unwrap();
+
+    // A non-interactive run without --data-from takes the snapshot.
+    let b = create(&t.project, "b", non_interactive.clone()).unwrap();
+    assert_eq!(b.status, Status::Ready, "{:?}", b.receipt.phases);
+    assert_eq!(binding(&b.receipt).source, "snapshot:seed@v1");
+    assert_eq!(rows(&binding(&b.receipt).url), 3);
+    assert!(b.warnings.is_empty(), "{:?}", b.warnings);
+
+    // --data-from wins.
+    let c = create(
+        &t.project,
+        "c",
+        SetupOptions {
+            data_from: Some(DataSource::Workspace { name: "a".into() }),
+            ..non_interactive.clone()
+        },
+    )
+    .unwrap();
+    assert_eq!(binding(&c.receipt).source, "workspace:a");
+
+    // A snapshot that does not exist never falls back to a live workspace:
+    // the service fails with remedies, and the default workspace's shared
+    // root branch is not created on the side.
+    let missing = edit_config(&t, |text| text.replace("snapshot:seed", "snapshot:nope"));
+    let error = create(&missing, "e", non_interactive.clone()).unwrap_err();
+    let kinds: Vec<_> = devflow_core::remedy::remedies_of(&error)
+        .iter()
+        .map(|r| r.kind())
+        .collect();
+    assert!(
+        kinds.contains(&"create_seed_snapshot") && kinds.contains(&"choose_data_source"),
+        "{kinds:?}: {error:#}"
+    );
+    assert!(format!("{error:#}").contains("'nope'"), "{error:#}");
+    assert!(
+        receipt_of(&ws(&missing, "e")).services.is_empty(),
+        "nothing was cloned for it"
+    );
+    assert!(
+        Receipt::load(&ws(&missing, "main").git_dir)
+            .unwrap()
+            .is_none_or(|receipt| receipt.services.is_empty()),
+        "the root branch of the default workspace was not created"
+    );
+
+    // The opt-in fallback starts the service empty, with a warning.
+    let empty = edit_config(&t, |text| {
+        text.replace(
+            "snapshot:nope\"\n",
+            "snapshot:nope\"\nnoninteractive_fallback = \"empty\"\n",
+        )
+    });
+    let f = create(&empty, "f", non_interactive.clone()).unwrap();
+    assert_eq!(f.status, Status::Ready, "{:?}", f.receipt.phases);
+    assert_eq!(binding(&f.receipt).source, "empty");
+    assert!(
+        f.warnings
+            .iter()
+            .any(|w| w.contains("'nope'") && w.contains("noninteractive_fallback")),
+        "{:?}",
+        f.warnings
+    );
+
+    // An interactive run does not seed: it clones the default workspace, whose
+    // root branch is created empty whoever asks first.
+    let d = create(&empty, "d", SetupOptions::default()).unwrap();
+    assert_eq!(binding(&d.receipt).source, "workspace:main");
+    let root = receipt_of(&ws(&empty, "main"));
+    assert_eq!(binding(&root).source, "empty");
+}
+
+#[test]
+#[ignore = "needs Docker and the postgres:18 image"]
 fn managed_postgres_create_clone_reset_and_remove() {
     let t = repo(
         &Hooks {
@@ -4264,6 +5121,37 @@ fn managed_postgres_create_clone_reset_and_remove() {
         .batch_execute("INSERT INTO t VALUES (2)")
         .unwrap();
     assert_eq!(count(&binding_a.url), 1, "a does not see b's write");
+
+    // Sessions the clone had to end on its source reach the outcome's
+    // warnings (and so the command line and the app).
+    let mut open_session = connect(&binding_a.url).unwrap();
+    open_session.batch_execute("SELECT 1").unwrap();
+    let c = create(
+        &t.project,
+        "feature/c",
+        SetupOptions {
+            data_from: Some(DataSource::Workspace {
+                name: "feature/a".into(),
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        c.warnings
+            .iter()
+            .any(|w| w.contains("session(s) on the source database")),
+        "{:?}",
+        c.warnings
+    );
+    drop(open_session);
+    setup::remove(
+        &t.project,
+        "feature/c",
+        RemoveOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
 
     // snapshot a, then reset b to it and back to its recorded source.
     let snap = setup::snapshot(&t.project, &a.workspace, "seed").unwrap();
@@ -4463,6 +5351,7 @@ fn managed_postgres_scratch_databases_reach_the_environment_and_follow_the_works
         CreateRequest {
             name: "a".into(),
             from: None,
+            base: None,
             options: SetupOptions {
                 data_from: Some(DataSource::Empty),
                 ..Default::default()
@@ -4856,6 +5745,115 @@ fn process_alive(pid: u32) -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
+}
+
+#[test]
+#[ignore = "needs pitchfork on PATH"]
+fn removing_a_workspace_whose_checkout_is_gone_never_stops_its_daemon_for_it() {
+    // The reproduction against a real pitchfork: autostart a daemon, delete
+    // the worktree, remove the workspace. It used to say "Removed" while the
+    // daemon (and its port) lived on and the receipt that named it was gone.
+    // Stopping it is not on offer: pitchfork 2.29/2.30 has no stop that skips
+    // the lifecycle hooks the supervisor runs from the daemon's recorded
+    // directory, so the removal is refused (`state_unknown`), and a forced one
+    // leaves it running and lists it.
+    use devflow_core::pitchfork::Pitchfork;
+    use devflow_core::processes::{self, StartOptions};
+    use std::sync::{Arc, Mutex};
+    let _one_at_a_time = PITCHFORK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    let base = init();
+    let pitchfork = Pitchfork::locate().expect(
+        "pitchfork is not on PATH; try `mise x pitchfork@2.29.0 -- cargo test -p devflow-core --test workspace -- --ignored pitchfork`",
+    );
+    let detection = pitchfork.detect();
+    assert!(detection.usable(), "{}", detection.summary());
+    // Only ever the isolated supervisor `init` set up, never the user's own.
+    let state_dir = PathBuf::from(std::env::var_os("PITCHFORK_STATE_DIR").expect("isolated state"));
+    assert!(state_dir.starts_with(base), "{}", state_dir.display());
+
+    let strays: Arc<Mutex<Vec<u32>>> = Arc::default();
+    let binary = pitchfork.path().to_path_buf();
+    let for_cleanup = strays.clone();
+    let _cleanup = Cleanup(Box::new(move || {
+        for pid in for_cleanup.lock().unwrap().iter() {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        let _ = std::process::Command::new(&binary)
+            .args(["supervisor", "stop"])
+            .output();
+    }));
+
+    let t = repo(&Hooks::default(), "");
+    std::fs::write(
+        t.root.join("pitchfork.toml"),
+        "[daemons.sleeper]\nrun = \"sleep 604\"\n",
+    )
+    .unwrap();
+    commit_all(
+        &git2::Repository::open(&t.root).unwrap(),
+        "add a pitchfork daemon",
+    );
+    let project = Project::open(&t.root).unwrap();
+    let made = create(&project, "gone", SetupOptions::default()).unwrap();
+    assert_eq!(made.status, Status::Ready, "{:?}", made.receipt.phases);
+    let workspace = made.workspace;
+    let scope = trust::scope_at(&project, &workspace.path);
+    trust::approve_scope_at(&project, &workspace.path, &scope).unwrap();
+    let report = processes::start_with(
+        Some(&pitchfork),
+        &project,
+        &workspace,
+        &StartOptions::default(),
+    )
+    .unwrap();
+    assert!(report.ok(), "{report:?}");
+    let ns = receipt_of(&workspace).slug();
+    let listed = pitchfork.list(&workspace.path).unwrap();
+    let sleeper = listed
+        .iter()
+        .find(|d| d.namespace == ns && d.name == "sleeper")
+        .unwrap_or_else(|| panic!("{listed:?}"));
+    let pid = sleeper.pid.expect("a running daemon has a pid");
+    strays.lock().unwrap().push(pid);
+    assert!(process_alive(pid));
+
+    // The worktree is deleted from under devflow.
+    std::fs::remove_dir_all(&workspace.path).unwrap();
+    assert!(ws(&project, "gone").missing);
+    let removal = |force: bool| RemoveOptions {
+        force,
+        pitchfork: Some(pitchfork.clone()),
+        ..RemoveOptions::default()
+    };
+    let error = setup::remove(&project, "gone", removal(false), &mut NoProgress).unwrap_err();
+    let refused = protection(&error);
+    assert!(refused.forceable, "{}", refused.reason);
+    assert!(
+        refused.reason.contains(&format!("{ns}/sleeper")),
+        "{}",
+        refused.reason
+    );
+    // Nothing happened: registered, the receipt records the start, the daemon runs.
+    assert!(ws(&project, "gone").missing);
+    assert!(process_alive(pid));
+
+    let out = setup::remove(&project, "gone", removal(true), &mut NoProgress).unwrap();
+    assert!(out.stopped_daemons.is_empty(), "{out:?}");
+    assert_eq!(
+        out.may_still_run,
+        Some(devflow_core::processes::MayStillRun {
+            namespace: Some(ns.clone()),
+            ids: vec![format!("{ns}/sleeper")],
+        })
+    );
+    assert!(
+        process_alive(pid),
+        "a forced removal does not stop it either"
+    );
+    assert!(worktree::find(&project, "gone").unwrap().is_none());
 }
 
 #[test]
@@ -5363,7 +6361,14 @@ fn a_hook_routed_through_devflow_exec_runs_whatever_mise_sets() {
         assert_ne!(expected, MAIN);
         assert_eq!(seen(&out.workspace), Some(expected), "{hook}");
         assert!(out.receipt.mise_check_skipped_at.is_none());
-        assert!(out.warnings.is_empty(), "{hook}: {:?}", out.warnings);
+        // The copied `.env` sets what the workspace owns (that is what mise
+        // loads here): setup says so, by name, and says nothing else.
+        assert_eq!(out.warnings.len(), 1, "{hook}: {:?}", out.warnings);
+        assert!(
+            out.warnings[0].starts_with(".env sets COMPOSE_PROJECT_NAME"),
+            "{hook}: {:?}",
+            out.warnings
+        );
     }
 }
 
@@ -5628,6 +6633,473 @@ fn a_missing_mise_stops_only_the_setup_hooks_that_run_it() {
     }
 }
 
+// --- switch and teardown hooks get the gate setup hooks have ---------------------------
+
+const DELIVERS: &str = "[env]\n_.file = \".devflow/env\"\n";
+/// mise loads the main checkout's `.env` after `.devflow/env`, so it wins.
+const OVERRIDES: &str = "[env]\n_.file = [\".devflow/env\", \".env\"]\n";
+const SWITCHED: &str =
+    "printf %s \"$COMPOSE_PROJECT_NAME\" > \"$DEVFLOW_WORKSPACE_PATH/.devflow/switched\"\n";
+const TORN_DOWN: &str =
+    "printf %s \"$COMPOSE_PROJECT_NAME\" > \"$DEVFLOW_WORKSPACE_PATH/../torn-down\"\n";
+
+/// A project whose switch and teardown hooks both go through mise, the main
+/// checkout's own `COMPOSE_PROJECT_NAME` in a `.env` that mise can load.
+fn project_with_mise_hooks(mise: &str) -> Repo {
+    let t = repo(
+        &Hooks {
+            switch: &["mise exec -- sh switched.sh"],
+            teardown: &["mise exec -- sh torn-down.sh"],
+            ..Default::default()
+        },
+        "",
+    );
+    std::fs::write(
+        t.root.join(".env"),
+        format!("COMPOSE_PROJECT_NAME={MAIN}\n"),
+    )
+    .unwrap();
+    trust::approve(&t.project).unwrap();
+    commit_mise(
+        &t,
+        mise,
+        &[("switched.sh", SWITCHED), ("torn-down.sh", TORN_DOWN)],
+    );
+    t
+}
+
+fn switch_here(t: &Repo, w: &Workspace) -> SetupOutcome {
+    setup::activate(&t.project, w, no_db(&t.project), &mut NoProgress).unwrap()
+}
+
+#[test]
+fn switch_hooks_that_mise_would_not_hand_the_workspace_do_not_run() {
+    const NAME: &str = "switch_hooks_that_mise_would_not_hand_the_workspace_do_not_run";
+    if !with_real_mise(NAME) {
+        return;
+    }
+    let t = project_with_mise_hooks(OVERRIDES);
+    let w = create(&t.project, "w", no_db(&t.project))
+        .unwrap()
+        .workspace;
+    let out = switch_here(&t, &w);
+    assert!(out.switch_hooks.is_none(), "no hook ran");
+    assert_eq!(
+        std::fs::read_to_string(w.path.join(".devflow/switched")).ok(),
+        None
+    );
+    let said = out.warnings.join("\n");
+    assert!(
+        said.contains("switch hooks were not run")
+            && said.contains("switch hook #1")
+            && said.contains("would not get the workspace's variables"),
+        "{said}"
+    );
+    // A reason says what is wrong; the way on is the remedy below.
+    assert!(
+        !said.contains("devflow exec") && !said.contains("mise exec"),
+        "{said}"
+    );
+    assert!(!said.contains(MAIN), "names, never values: {said}");
+    assert!(
+        out.remedies
+            .iter()
+            .any(|r| matches!(r, devflow_core::remedy::Remedy::OpenFile { .. })),
+        "{:?}",
+        out.remedies
+    );
+    // Setup itself was fine: the switch happened, the workspace is ready.
+    assert_eq!(out.status, Status::Ready);
+
+    // The escape hatch the setup hooks have: asked to skip, they run, and it is said.
+    let out = setup::activate(
+        &t.project,
+        &w,
+        SetupOptions {
+            skip_mise_check: true,
+            ..no_db(&t.project)
+        },
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert!(out.switch_hooks.is_some());
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("skipped on request")),
+        "{:?}",
+        out.warnings
+    );
+}
+
+#[test]
+fn switch_hooks_that_mise_hands_the_workspace_run() {
+    const NAME: &str = "switch_hooks_that_mise_hands_the_workspace_run";
+    if !with_real_mise(NAME) {
+        return;
+    }
+    let t = project_with_mise_hooks(DELIVERS);
+    let w = create(&t.project, "w", no_db(&t.project))
+        .unwrap()
+        .workspace;
+    let out = switch_here(&t, &w);
+    assert!(out.switch_hooks.is_some(), "{:?}", out.warnings);
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert_eq!(
+        std::fs::read_to_string(w.path.join(".devflow/switched")).unwrap(),
+        env_map(&w)["COMPOSE_PROJECT_NAME"]
+    );
+}
+
+#[test]
+fn teardown_hooks_that_mise_would_not_hand_the_workspace_refuse_the_removal_before_any_effect() {
+    const NAME: &str = "teardown_hooks_that_mise_would_not_hand_the_workspace_refuse_the_removal_before_any_effect";
+    if !with_real_mise(NAME) {
+        return;
+    }
+    let t = project_with_mise_hooks(OVERRIDES);
+    let w = create(&t.project, "w", no_db(&t.project))
+        .unwrap()
+        .workspace;
+    let torn_down = w.path.parent().unwrap().join("torn-down");
+
+    let error =
+        setup::remove(&t.project, "w", RemoveOptions::default(), &mut NoProgress).unwrap_err();
+    let protected = error
+        .downcast_ref::<Protected>()
+        .unwrap_or_else(|| panic!("{error:#}"));
+    assert!(protected.forceable);
+    assert!(
+        protected.reason.contains("teardown hooks were not run")
+            && protected.reason.contains("teardown hook #1")
+            && protected
+                .reason
+                .contains("would not get the workspace's variables"),
+        "{}",
+        protected.reason
+    );
+    assert!(
+        !protected.reason.contains("devflow exec") && !protected.reason.contains("--force"),
+        "no command line: {}",
+        protected.reason
+    );
+    assert!(!protected.reason.contains(MAIN), "{}", protected.reason);
+    assert!(
+        protected
+            .remedies
+            .iter()
+            .any(|r| matches!(r, devflow_core::remedy::Remedy::OpenFile { .. })),
+        "{:?}",
+        protected.remedies
+    );
+    // Before any effect.
+    assert!(w.path.is_dir() && !torn_down.exists());
+    assert!(worktree::find(&t.project, "w").unwrap().is_some());
+
+    // Forced, the hooks are left out (they would run against the wrong
+    // database), and it is said.
+    let out = setup::remove(
+        &t.project,
+        "w",
+        RemoveOptions {
+            force: true,
+            ..Default::default()
+        },
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert!(
+        out.warnings
+            .iter()
+            .any(|m| m.contains("teardown hooks were skipped")),
+        "{:?}",
+        out.warnings
+    );
+    assert!(out.hooks.is_none());
+    assert!(!torn_down.exists());
+    assert!(!w.path.exists());
+}
+
+#[test]
+fn teardown_hooks_are_checked_when_the_generated_file_is_gone() {
+    // The hooks' environment is built from the receipt, so a removal after
+    // `.devflow/` was cleaned still runs approved teardown hooks through mise
+    // with whatever mise does to it: the gate looks at that environment, not
+    // at the file.
+    const NAME: &str = "teardown_hooks_are_checked_when_the_generated_file_is_gone";
+    if !with_real_mise(NAME) {
+        return;
+    }
+    let t = project_with_mise_hooks(OVERRIDES);
+    let w = create(&t.project, "w", no_db(&t.project))
+        .unwrap()
+        .workspace;
+    std::fs::remove_dir_all(w.path.join(".devflow")).unwrap();
+    let torn_down = w.path.parent().unwrap().join("torn-down");
+
+    let error =
+        setup::remove(&t.project, "w", RemoveOptions::default(), &mut NoProgress).unwrap_err();
+    let protected = error
+        .downcast_ref::<Protected>()
+        .unwrap_or_else(|| panic!("{error:#}"));
+    assert!(protected.forceable);
+    assert!(
+        protected.reason.contains("teardown hook #1")
+            && protected
+                .reason
+                .contains("would not get the workspace's variables"),
+        "{}",
+        protected.reason
+    );
+    assert!(w.path.is_dir() && !torn_down.exists(), "before any effect");
+
+    // Forced: removed without running them, and it says so.
+    let out = setup::remove(
+        &t.project,
+        "w",
+        RemoveOptions {
+            force: true,
+            ..Default::default()
+        },
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert!(
+        out.warnings
+            .iter()
+            .any(|m| m.contains("teardown hooks were skipped")),
+        "{:?}",
+        out.warnings
+    );
+    assert!(!torn_down.exists() && !w.path.exists());
+}
+
+#[test]
+fn teardown_hooks_that_mise_hands_the_workspace_run_on_removal() {
+    const NAME: &str = "teardown_hooks_that_mise_hands_the_workspace_run_on_removal";
+    if !with_real_mise(NAME) {
+        return;
+    }
+    let t = project_with_mise_hooks(DELIVERS);
+    let w = create(&t.project, "w", no_db(&t.project))
+        .unwrap()
+        .workspace;
+    let expected = env_map(&w)["COMPOSE_PROJECT_NAME"].clone();
+    let torn_down = w.path.parent().unwrap().join("torn-down");
+    let out = setup::remove(&t.project, "w", RemoveOptions::default(), &mut NoProgress).unwrap();
+    assert!(
+        out.hooks.is_some() && out.warnings.is_empty(),
+        "{:?}",
+        out.warnings
+    );
+    assert_eq!(std::fs::read_to_string(torn_down).unwrap(), expected);
+}
+
+// --- a removal accounts for every branch the receipt names ---------------------------
+
+const UNREACHABLE_SERVER: &str = "[services.db]\nengine = \"postgres\"\nmode = \"external\"\n\
+     admin_url = \"postgres://prov:pw@127.0.0.1:1/postgres\"\n";
+
+/// A workspace of a project whose server cannot be reached, set up without
+/// data, with its receipt as a crash would have left it: a branch recorded as
+/// about to be created for `service`, never bound. A teardown hook proves
+/// whether anything ran.
+fn crashed_creation(
+    extra: &str,
+    service: &str,
+    engine: Option<devflow_core::config::Engine>,
+) -> (Repo, Workspace, uuid::Uuid) {
+    let t = repo(
+        &Hooks {
+            teardown: &["touch ../teardown-ran"],
+            ..Default::default()
+        },
+        extra,
+    );
+    trust::approve(&t.project).unwrap();
+    let w = create(&t.project, "w", no_db(&t.project))
+        .unwrap()
+        .workspace;
+    let id = uuid::Uuid::new_v4();
+    let mut receipt = receipt_of(&w);
+    receipt.creating = Some(devflow_core::receipt::PendingBranch {
+        service: service.into(),
+        branch_id: id,
+        engine,
+    });
+    receipt.save(&w.git_dir).unwrap();
+    (t, w, id)
+}
+
+#[test]
+fn a_branch_recorded_before_its_creation_stops_the_removal_when_it_cannot_be_looked_for() {
+    // `remove` planned its drops from the bindings alone: a crash between the
+    // creation and the binding, then a removal, leaked the branch for good.
+    let (t, w, id) = crashed_creation(
+        UNREACHABLE_SERVER,
+        "db",
+        Some(devflow_core::config::Engine::Postgres),
+    );
+    let ran = w.path.parent().unwrap().join("teardown-ran");
+    for force in [false, true] {
+        let error = setup::remove(
+            &t.project,
+            "w",
+            RemoveOptions {
+                force,
+                ..Default::default()
+            },
+            &mut NoProgress,
+        )
+        .unwrap_err();
+        let protected = error
+            .downcast_ref::<Protected>()
+            .unwrap_or_else(|| panic!("{error:#}"));
+        // The receipt dies with the worktree and would take the only name of
+        // the branch with it: `force` does not accept that.
+        assert!(!protected.forceable, "force={force}: {}", protected.reason);
+        assert!(
+            protected.reason.contains(&id.to_string())
+                && protected
+                    .reason
+                    .contains("cannot reach the database server")
+                && protected.reason.contains("service 'db'"),
+            "{}",
+            protected.reason
+        );
+        let kinds: Vec<&str> = protected
+            .remedies
+            .iter()
+            .map(devflow_core::remedy::Remedy::kind)
+            .collect();
+        assert_eq!(kinds, ["setup", "reconcile_databases"], "{kinds:?}");
+        // Before any effect: no teardown, the worktree and its receipt are there.
+        assert!(!ran.exists() && w.path.is_dir());
+        assert_eq!(
+            receipt_of(&w).creating.map(|p| p.branch_id),
+            Some(id),
+            "the receipt still names the branch"
+        );
+    }
+}
+
+#[test]
+fn keeping_the_data_removes_the_workspace_without_looking_for_a_pending_branch() {
+    let (t, w, _) = crashed_creation(
+        UNREACHABLE_SERVER,
+        "db",
+        Some(devflow_core::config::Engine::Postgres),
+    );
+    let out = setup::remove(
+        &t.project,
+        "w",
+        RemoveOptions {
+            keep_data: true,
+            ..Default::default()
+        },
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(out.dropped_branch, None);
+    assert!(!w.path.exists());
+}
+
+#[test]
+fn a_pending_branch_of_a_service_the_configuration_dropped_cannot_be_placed() {
+    // Nothing in the configuration or the receipt says which backend holds the
+    // branch, no container service of that name is recorded, and the project
+    // has no postgres service to ask: it cannot be ruled out, so it is not
+    // forgotten (not even by force).
+    let (t, w, id) = crashed_creation("", "ghost", None);
+    for force in [false, true] {
+        let error = setup::remove(
+            &t.project,
+            "w",
+            RemoveOptions {
+                force,
+                ..Default::default()
+            },
+            &mut NoProgress,
+        )
+        .unwrap_err();
+        let protected = error
+            .downcast_ref::<Protected>()
+            .unwrap_or_else(|| panic!("{error:#}"));
+        assert!(!protected.forceable, "force={force}");
+        assert!(
+            protected.reason.contains(&id.to_string()),
+            "{}",
+            protected.reason
+        );
+        assert!(
+            protected
+                .remedies
+                .iter()
+                .any(|r| matches!(r, devflow_core::remedy::Remedy::Setup { .. })),
+            "{:?}",
+            protected.remedies
+        );
+        assert!(w.path.is_dir());
+    }
+    // Keeping the data is the person's own decision about it.
+    setup::remove(
+        &t.project,
+        "w",
+        RemoveOptions {
+            keep_data: true,
+            ..Default::default()
+        },
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert!(!w.path.exists());
+}
+
+#[test]
+fn an_owned_binding_of_a_service_the_project_dropped_stops_the_removal() {
+    // The postgres service left the configuration but its branch is still on a
+    // server nobody can ask any more.
+    let t = repo(&Hooks::default(), "");
+    let w = create(&t.project, "w", no_db(&t.project))
+        .unwrap()
+        .workspace;
+    let mut receipt = receipt_of(&w);
+    let id = uuid::Uuid::new_v4();
+    receipt.services.insert(
+        "old".into(),
+        ServiceBinding::postgres(
+            DataBinding {
+                branch_id: Some(id),
+                database: "df_x".into(),
+                role: "dfl_x".into(),
+                url: "postgres://dfl_x:pw@127.0.0.1:1/df_x".into(), // kingfisher:ignore
+                source: "empty".into(),
+                owned: true,
+            },
+            None,
+        ),
+    );
+    receipt.save(&w.git_dir).unwrap();
+    let error =
+        setup::remove(&t.project, "w", RemoveOptions::default(), &mut NoProgress).unwrap_err();
+    let protected = error
+        .downcast_ref::<Protected>()
+        .unwrap_or_else(|| panic!("{error:#}"));
+    assert!(protected.forceable);
+    assert!(
+        protected.reason.contains("no postgres service any more"),
+        "{}",
+        protected.reason
+    );
+    assert!(w.path.is_dir());
+    // An attachment (not owned) is never dropped, so nothing needs the server.
+    let mut receipt = receipt_of(&w);
+    receipt.services.get_mut("old").unwrap().owned = false;
+    receipt.save(&w.git_dir).unwrap();
+    setup::remove(&t.project, "w", RemoveOptions::default(), &mut NoProgress).unwrap();
+    assert!(!w.path.exists());
+}
+
 // --- the identity a reset is shown with ---------------------------------------
 
 #[test]
@@ -5778,4 +7250,1249 @@ fn a_reset_source_is_an_identity_and_a_name_that_moved_is_refused() {
     }
     .verify_source(&target, "cache", now.source)
     .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Activation: one entry for the command line and the app
+
+/// Move the checkout of `workspace` to a new branch `branch` (what `git switch
+/// -c` does inside the worktree).
+fn switch_checkout_to(workspace: &Workspace, branch: &str) {
+    let repo = git2::Repository::open(&workspace.path).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch(branch, &head, false).unwrap();
+    repo.set_head(&format!("refs/heads/{branch}")).unwrap();
+}
+
+/// A project with setup hooks that count their runs (in the directory above
+/// the repository, so a cleaned checkout does not reset the count), already
+/// trusted. A linked worktree is two levels below it.
+fn counted_setup() -> Repo {
+    let t = repo(
+        &Hooks {
+            setup: &["echo ran >> ../../setup-count"],
+            ..Default::default()
+        },
+        "",
+    );
+    trust::approve(&t.project).unwrap();
+    t
+}
+
+fn setup_runs(t: &Repo) -> usize {
+    std::fs::read_to_string(t.root.parent().unwrap().join("setup-count"))
+        .map(|text| text.lines().count())
+        .unwrap_or(0)
+}
+
+#[test]
+fn setup_rebuilds_a_cleaned_checkouts_env_file_without_hooks_or_new_data() {
+    let t = counted_setup();
+    let w = create(&t.project, "clean", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    let (before, receipt) = (env_map(&w), receipt_of(&w));
+    assert_eq!(setup_runs(&t), 1);
+
+    // `git clean -fdx` takes the generated directory with it.
+    std::fs::remove_dir_all(w.path.join(".devflow")).unwrap();
+    assert!(devflow_core::exec::prepare(&w.path).is_err());
+
+    let out = setup::setup(
+        &t.project,
+        &w,
+        SetupOptions::default(),
+        false,
+        false,
+        &mut NoProgress,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(out.status, Status::Ready, "{:?}", out.receipt.phases);
+    assert_eq!(out.repaired, [Repair::EnvFile]);
+    assert_eq!(out.notes().len(), 1, "{:?}", out.notes());
+    assert_eq!(
+        env_map(&w),
+        before,
+        "the same variables, credentials included"
+    );
+    assert!(devflow_core::exec::prepare(&w.path).is_ok());
+    assert_eq!(setup_runs(&t), 1, "no hook ran again");
+    let after = receipt_of(&w);
+    assert_eq!(after.instance_id, receipt.instance_id);
+    assert_eq!(after.services, receipt.services, "nothing was provisioned");
+    assert_eq!(after.phase(Phase::Hooks), receipt.phase(Phase::Hooks));
+
+    // Nothing is missing now: nothing to repair, and nothing else changes.
+    let out = setup::setup(
+        &t.project,
+        &w,
+        SetupOptions::default(),
+        false,
+        false,
+        &mut NoProgress,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(out.repaired.is_empty());
+    assert_eq!(setup_runs(&t), 1);
+}
+
+#[test]
+fn activation_rebuilds_an_env_file_that_is_missing_or_unreadable() {
+    let t = counted_setup();
+    let w = create(&t.project, "repair", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    let before = env_map(&w);
+    let env_path = env_file::path(&w.path);
+
+    for damage in ["missing", "not text"] {
+        match damage {
+            "missing" => std::fs::remove_file(&env_path).unwrap(),
+            _ => std::fs::write(&env_path, [0xff, 0xfe, 0x00, 0x80]).unwrap(),
+        }
+        let mut rec = Recorder::default();
+        let out = setup::activate(&t.project, &w, SetupOptions::default(), &mut rec).unwrap();
+        assert_eq!(out.status, Status::Ready, "{damage}");
+        assert_eq!(out.repaired, [Repair::EnvFile], "{damage}");
+        assert_eq!(env_map(&w), before, "{damage}");
+        assert_eq!(setup_runs(&t), 1, "{damage}: no hook ran again");
+        assert!(
+            rec.phases
+                .iter()
+                .all(|(phase, _)| matches!(phase, Phase::Env)),
+            "{damage}: only the env phase ran: {:?}",
+            rec.phases
+        );
+    }
+
+    // The outcome says so in JSON as well.
+    std::fs::remove_file(&env_path).unwrap();
+    let out = setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    let json = serde_json::to_value(&out).unwrap();
+    assert_eq!(json["repaired"], serde_json::json!(["env_file"]));
+    assert_eq!(json["first_setup"], serde_json::json!(false));
+}
+
+#[test]
+fn a_repaired_env_file_is_not_written_with_recipes_nobody_approved() {
+    let t = repo(&Hooks::default(), "[env]\nGREETING = \"hello\"\n");
+    trust::approve(&t.project).unwrap();
+    let w = create(&t.project, "recipes", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    assert_eq!(env_map(&w)["GREETING"], "hello");
+
+    // The approval is gone by the time the file is rebuilt (here: the
+    // recipes changed, so what was reviewed no longer applies).
+    let project = edit_config(&t, |text| text.replace("hello", "changed"));
+    std::fs::remove_file(env_file::path(&w.path)).unwrap();
+    let out = setup::activate(&project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    assert_eq!(out.status, Status::NeedsAttention);
+    assert!(
+        !env_map(&w).contains_key("GREETING"),
+        "unapproved recipes are not applied by a repair either"
+    );
+    assert!(
+        out.remedies
+            .iter()
+            .any(|r| matches!(r, devflow_core::remedy::Remedy::Trust { .. })),
+        "{:?}",
+        out.remedies
+    );
+}
+
+#[test]
+fn activation_writes_devflows_pitchfork_namespace_file_again() {
+    let t = repo(&Hooks::default(), "");
+    std::fs::write(
+        t.root.join("pitchfork.toml"),
+        "[daemons.api]\nrun = \"bun run dev\"\n",
+    )
+    .unwrap();
+    commit_all(&git2::Repository::open(&t.root).unwrap(), "add a daemon");
+    let project = Project::open(&t.root).unwrap();
+    trust::approve(&project).unwrap();
+    let w = create(&project, "daemons", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    let file = w.path.join("pitchfork.local.toml");
+    let written = std::fs::read_to_string(&file).unwrap();
+
+    std::fs::remove_file(&file).unwrap();
+    let out = setup::activate(&project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    assert_eq!(out.repaired, [Repair::PitchforkNamespace]);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), written);
+
+    // A file somebody else wrote is reported, never replaced.
+    std::fs::write(&file, "# mine\n").unwrap();
+    let out = setup::activate(&project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    assert!(out.repaired.is_empty());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "# mine\n");
+}
+
+#[test]
+fn a_checkout_on_another_branch_is_still_its_workspace() {
+    let t = counted_setup();
+    let w = create(&t.project, "feature/a", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    let id = receipt_of(&w).instance_id;
+    switch_checkout_to(&w, "other");
+
+    // Both names find the checkout, under the name it was created with.
+    for name in ["feature/a", "other"] {
+        let found = worktree::find(&t.project, name).unwrap().expect(name);
+        assert_eq!(
+            (found.path.clone(), found.name.as_str()),
+            (w.path.clone(), "feature/a")
+        );
+        assert_eq!(found.branch.as_deref(), Some("other"));
+    }
+    assert!(worktree::find(&t.project, "feature/b").unwrap().is_none());
+
+    // The listing says what the checkout holds.
+    let listed = setup::list(&t.project).unwrap();
+    let item = listed.iter().find(|i| i.workspace.path == w.path).unwrap();
+    assert_eq!(item.workspace.name, "feature/a");
+    let drift = item.drift.as_ref().expect("drift");
+    assert_eq!(
+        (drift.workspace.as_str(), drift.branch.as_deref()),
+        ("feature/a", Some("other"))
+    );
+    assert!(listed.iter().filter(|i| i.drift.is_some()).count() == 1);
+
+    // Entering it keeps its identity: the variables, the receipt, the data.
+    std::fs::remove_file(env_file::path(&w.path)).unwrap();
+    let out = setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    assert_eq!(out.status, Status::Ready);
+    assert_eq!(out.workspace.name, "feature/a");
+    assert_eq!(out.workspace.branch.as_deref(), Some("other"));
+    assert_eq!(
+        out.drift.as_ref().map(|d| d.describe()).as_deref(),
+        Some("now on branch other; its data still belongs to workspace feature/a")
+    );
+    assert!(
+        out.notes()
+            .iter()
+            .any(|n| n.contains("its data still belongs to workspace feature/a"))
+    );
+    let vars = env_map(&w);
+    assert_eq!(vars["DEVFLOW_WORKSPACE"], "feature/a");
+    assert_eq!(vars["DEVFLOW_WORKSPACE_ID"], id.to_string());
+    let receipt = receipt_of(&w);
+    assert_eq!(
+        (receipt.workspace.as_str(), receipt.instance_id),
+        ("feature/a", id)
+    );
+
+    // Back on its own branch, nothing is reported.
+    let repo = git2::Repository::open(&w.path).unwrap();
+    repo.set_head("refs/heads/feature/a").unwrap();
+    let out = setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    assert!(out.drift.is_none());
+    assert!(
+        setup::list(&t.project)
+            .unwrap()
+            .iter()
+            .all(|i| i.drift.is_none())
+    );
+}
+
+#[test]
+fn a_name_that_means_two_checkouts_is_refused_with_their_paths_and_never_guessed() {
+    let t = plain();
+    let a = create(&t.project, "feature/a", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    let b = create(&t.project, "feature/b", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    // `a` leaves its branch, and `b` takes it.
+    switch_checkout_to(&a, "other");
+    git2::Repository::open(&b.path)
+        .unwrap()
+        .set_head("refs/heads/feature/a")
+        .unwrap();
+
+    // `feature/a` is a's receipt name and b's branch: it is both, and that is
+    // an error naming both, whatever order a lookup might have tried.
+    let error = worktree::find(&t.project, "feature/a").unwrap_err();
+    let remedies = devflow_core::remedy::remedies_of(&error);
+    let Some(devflow_core::remedy::Remedy::UsePath { name, candidates }) = remedies.first() else {
+        panic!("not the typed problem: {error:#}");
+    };
+    assert_eq!(name, "feature/a");
+    let mut listed = candidates.clone();
+    listed.sort();
+    let mut both = vec![a.path.clone(), b.path.clone()];
+    both.sort();
+    assert_eq!(listed, both);
+    let text = format!("{error:#}");
+    assert!(
+        text.contains(&a.path.display().to_string())
+            && text.contains(&b.path.display().to_string()),
+        "{text}"
+    );
+    assert!(
+        text.contains("now on branch other") && text.contains("workspace feature/b"),
+        "{text}"
+    );
+
+    // Nothing that acts on a name picks one. A removal does nothing at all.
+    let error = setup::remove(
+        &t.project,
+        "feature/a",
+        RemoveOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("names more than one workspace"),
+        "{error:#}"
+    );
+    assert!(a.path.exists() && b.path.exists());
+    assert!(
+        Receipt::load(&a.git_dir).unwrap().is_some()
+            && Receipt::load(&b.git_dir).unwrap().is_some()
+    );
+
+    // Names that mean one checkout still work, and so does a path.
+    let by = |name: &str| worktree::find(&t.project, name).unwrap().map(|w| w.path);
+    assert_eq!(by("other"), Some(a.path.clone()));
+    assert_eq!(by("feature/b"), Some(b.path.clone()));
+    assert_eq!(by(a.path.to_str().unwrap()), Some(a.path.clone()));
+    assert_eq!(by(b.path.to_str().unwrap()), Some(b.path.clone()));
+
+    // Removing by path is the remedy, and acts on that checkout alone.
+    setup::remove(
+        &t.project,
+        a.path.to_str().unwrap(),
+        RemoveOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert!(!a.path.exists() && b.path.exists());
+    // With a gone, the name is b's branch and nothing else.
+    assert_eq!(by("feature/a"), Some(b.path.clone()));
+}
+
+#[test]
+fn one_checkout_matching_a_name_in_several_ways_is_not_ambiguous() {
+    let t = plain();
+    // Branch `feature/a`, receipt name `feature/a`, Git's worktree id
+    // `feature-a` and the path: all the same checkout.
+    let a = create(&t.project, "feature/a", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    for name in [
+        "feature/a",
+        a.git_dir.file_name().unwrap().to_str().unwrap(),
+        a.path.to_str().unwrap(),
+    ] {
+        let found = worktree::find(&t.project, name).unwrap().expect(name);
+        assert_eq!(found.path, a.path, "{name}");
+    }
+}
+
+#[test]
+fn activation_records_when_the_workspace_was_entered_and_setup_does_not() {
+    let t = plain();
+    let w = create(&t.project, "seen", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    assert!(receipt_of(&w).last_active_at.is_none());
+    setup::setup(
+        &t.project,
+        &w,
+        SetupOptions::default(),
+        false,
+        false,
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert!(
+        receipt_of(&w).last_active_at.is_none(),
+        "setup is not an entry"
+    );
+
+    let before = chrono::Utc::now();
+    let out = setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    let recorded = receipt_of(&w).last_active_at.expect("recorded");
+    assert!(recorded >= before);
+    assert_eq!(out.receipt.last_active_at, Some(recorded));
+    assert_eq!(receipt_of(&w).updated_at, out.receipt.updated_at);
+}
+
+#[test]
+fn the_first_activation_of_the_main_checkout_says_it_sets_up_there() {
+    let t = repo(
+        &Hooks {
+            // The main checkout is one level below the directory it counts in.
+            setup: &["echo ran >> ../setup-count"],
+            ..Default::default()
+        },
+        "",
+    );
+    trust::approve(&t.project).unwrap();
+    let main = ws(&t.project, "main");
+    assert!(receipt_of_opt(&main).is_none());
+
+    let mut rec = Recorder::default();
+    let out = setup::activate(&t.project, &main, SetupOptions::default(), &mut rec).unwrap();
+    assert!(out.first_setup);
+    assert_eq!(setup_runs(&t), 1, "the hooks ran in the main checkout");
+    let notice = rec
+        .lines
+        .iter()
+        .find(|l| l.contains("main checkout"))
+        .expect("a notice");
+    assert!(notice.contains("setup hooks included"), "{notice}");
+    assert!(
+        notice.contains(&main.path.display().to_string()),
+        "{notice}"
+    );
+    assert_eq!(
+        serde_json::to_value(&out).unwrap()["first_setup"],
+        serde_json::json!(true)
+    );
+
+    // Entering it again is not a first setup.
+    let mut rec = Recorder::default();
+    let out = setup::activate(&t.project, &main, SetupOptions::default(), &mut rec).unwrap();
+    assert!(!out.first_setup && rec.lines.is_empty(), "{:?}", rec.lines);
+    assert_eq!(setup_runs(&t), 1);
+
+    // A linked workspace never says it: it is not the main checkout.
+    let mut rec = Recorder::default();
+    let created = setup::create_and_activate(
+        &t.project,
+        CreateRequest {
+            name: "linked".into(),
+            from: None,
+            base: None,
+            options: SetupOptions::default(),
+        },
+        &mut rec,
+    )
+    .unwrap();
+    assert!(!created.first_setup);
+    assert!(rec.lines.iter().all(|l| !l.contains("main checkout")));
+}
+
+fn receipt_of_opt(ws: &Workspace) -> Option<Receipt> {
+    Receipt::load(&ws.git_dir).unwrap()
+}
+
+/// A hook that stays until the test lets go of it, to look at the workspace
+/// while its switch hooks run.
+fn parked_switch_hook() -> Repo {
+    repo(
+        &Hooks {
+            switch: &[
+                "touch .devflow/parked; while [ ! -f .devflow/release ]; do sleep 0.05; done",
+            ],
+            ..Default::default()
+        },
+        "",
+    )
+}
+
+#[test]
+fn switch_hooks_run_under_the_receipt_lock_so_nothing_else_sets_the_workspace_up() {
+    let t = parked_switch_hook();
+    trust::approve(&t.project).unwrap();
+    let w = create(&t.project, "held", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    let (parked, release) = (
+        w.path.join(".devflow/parked"),
+        w.path.join(".devflow/release"),
+    );
+
+    std::thread::scope(|scope| {
+        let entering = scope
+            .spawn(|| setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !parked.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the hook never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // The hook is running: the workspace is busy, and a second setup or
+        // activation gets the typed error instead of running alongside. The
+        // entry holds both locks (the process lock first: it ends by starting
+        // the workspace's daemons).
+        assert!(Receipt::is_locked(&w.git_dir));
+        assert!(
+            Receipt::try_process_lock(&w.git_dir).unwrap().is_none(),
+            "the process lock is held too"
+        );
+        let busy = setup::setup(
+            &t.project,
+            &w,
+            SetupOptions::default(),
+            false,
+            false,
+            &mut NoProgress,
+        )
+        .unwrap_err();
+        assert!(busy.downcast_ref::<Busy>().is_some(), "{busy:#}");
+        let busy =
+            setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap_err();
+        assert!(busy.downcast_ref::<Busy>().is_some(), "{busy:#}");
+        let listed = setup::list(&t.project).unwrap();
+        assert!(
+            listed
+                .iter()
+                .find(|i| i.workspace.path == w.path)
+                .unwrap()
+                .busy
+        );
+
+        std::fs::write(&release, "").unwrap();
+        let out = entering.join().unwrap().unwrap();
+        assert!(out.switch_hooks.unwrap().ok);
+    });
+    assert!(!Receipt::is_locked(&w.git_dir), "released afterwards");
+    assert!(Receipt::try_process_lock(&w.git_dir).unwrap().is_some());
+}
+
+#[test]
+fn a_devflow_started_by_a_hook_gets_busy_at_once_instead_of_waiting_for_its_parent() {
+    const NAME: &str =
+        "a_devflow_started_by_a_hook_gets_busy_at_once_instead_of_waiting_for_its_parent";
+    if !in_child(NAME, &[("DEVFLOW_SETUP_ACTIVE", "1")]) {
+        return;
+    }
+    let t = plain();
+    let w = create(&t.project, "child", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    let enter = || setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress);
+    let set_up = || {
+        setup::setup(
+            &t.project,
+            &w,
+            SetupOptions::default(),
+            false,
+            false,
+            &mut NoProgress,
+        )
+    };
+    let quickly_busy = |what: &str, run: &dyn Fn() -> anyhow::Result<()>| {
+        let started = std::time::Instant::now();
+        let error = run().unwrap_err();
+        assert!(error.downcast_ref::<Busy>().is_some(), "{what}: {error:#}");
+        // An ordinary caller waits a quarter of a second for a receipt lock
+        // and two seconds for a process lock, in case they are about to be
+        // released; a child of the lock's holder never waits.
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(150),
+            "{what} waited {:?}",
+            started.elapsed()
+        );
+    };
+
+    // The parent holds the receipt lock (setup, repair, switch hooks) ...
+    let receipt_lock = Receipt::try_lock(&w.git_dir)
+        .unwrap()
+        .expect("the parent's receipt lock");
+    quickly_busy("an entry", &|| enter().map(|_| ()));
+    quickly_busy("a setup", &|| set_up().map(|_| ()));
+    drop(receipt_lock);
+
+    // ... or only the process lock (an entry takes it first) ...
+    let process_lock = devflow_core::processes::process_lock(&w).unwrap();
+    quickly_busy("an entry, for the process lock", &|| enter().map(|_| ()));
+    quickly_busy("a start, for the process lock", &|| {
+        devflow_core::processes::process_lock(&w).map(|_| ())
+    });
+    drop(process_lock);
+
+    // ... and a nested devflow finds both free once the parent is done.
+    assert!(enter().is_ok());
+}
+
+#[test]
+fn a_real_configuration_change_still_reopens_the_hooks_when_the_file_was_lost_too() {
+    let t = repo(
+        &Hooks {
+            setup: &["echo ran >> ../../setup-count"],
+            ..Default::default()
+        },
+        "[env]\nGREETING = \"hello\"\n",
+    );
+    trust::approve(&t.project).unwrap();
+    let w = create(&t.project, "both", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    assert_eq!(setup_runs(&t), 1);
+
+    // A lost file alone: repaired, no hook.
+    std::fs::remove_file(env_file::path(&w.path)).unwrap();
+    setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    assert_eq!(setup_runs(&t), 1);
+
+    // The file is lost and the configuration changed (and was approved): the
+    // change reopens env and hooks, as it does for any workspace, and the
+    // hooks run again.
+    let project = edit_config(&t, |text| text.replace("hello", "changed"));
+    trust::approve(&project).unwrap();
+    std::fs::remove_file(env_file::path(&w.path)).unwrap();
+    let out = setup::activate(&project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    assert_eq!(out.status, Status::Ready, "{:?}", out.receipt.phases);
+    assert_eq!(setup_runs(&t), 2, "the changed configuration ran the hooks");
+    assert_eq!(env_map(&w)["GREETING"], "changed");
+    assert!(
+        out.repaired.is_empty(),
+        "the env phase was reopened by the change, which is setup, not repair: {:?}",
+        out.repaired
+    );
+}
+
+#[test]
+fn a_service_skipped_on_request_stays_out_of_a_rebuilt_file() {
+    // With presets and recipes that would derive variables from the connection.
+    let t = repo(&Hooks::default(), &format!("{SERVICE}{RECIPES}"));
+    trust::approve(&t.project).unwrap();
+    let w = create(
+        &t.project,
+        "no-db",
+        SetupOptions {
+            no_db: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .workspace;
+    assert!(!env_map(&w).contains_key("DATABASE_URL"));
+
+    // A binding an earlier setup left behind does not turn the skip around:
+    // the file is written without the service, whoever writes it.
+    let mut receipt = receipt_of(&w);
+    receipt.services.insert(
+        "db".into(),
+        ServiceBinding::postgres(
+            DataBinding {
+                branch_id: None,
+                database: "left".into(),
+                role: "left".into(),
+                url: "postgres://left:pw@db.internal:5432/left".into(), // kingfisher:ignore
+                source: "url".into(),
+                owned: false,
+            },
+            None,
+        ),
+    );
+    receipt.save(&w.git_dir).unwrap();
+    assert!(
+        !setup::env_vars(&t.project, &w, &receipt)
+            .iter()
+            .any(|(name, _)| name == "DATABASE_URL" || name == "PGUSER")
+    );
+    // Not through the presets and recipes either: an approved preset or a
+    // recipe that reads the connection exports nothing from the left-over
+    // binding, now or when the file is written again.
+    let exported = |vars: &[(String, String)]| -> Vec<String> {
+        vars.iter()
+            .map(|(name, _)| name.clone())
+            .filter(|name| {
+                name.starts_with("DB_")
+                    || ["DIRECT_URL", "AUTH", "PLAIN", "DATABASE_URL"].contains(&name.as_str())
+                    || name.starts_with("PG")
+            })
+            .collect()
+    };
+    let env = setup::workspace_env(&t.project, &w, &receipt, true);
+    assert_eq!(exported(&env.vars), Vec::<String>::new(), "{:?}", env.vars);
+    assert!(
+        env.warnings.iter().any(|w| w.contains("presets")),
+        "the presets are said to be left out: {:?}",
+        env.warnings
+    );
+    std::fs::remove_file(env_file::path(&w.path)).unwrap();
+    let out = setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    assert_eq!(out.repaired, [Repair::EnvFile]);
+    let written = env_file::read(&w.path).unwrap();
+    assert_eq!(exported(&written), Vec::<String>::new(), "{written:?}");
+    assert!(env_map(&w).contains_key("DEVFLOW_WORKSPACE"));
+    assert!(
+        !std::fs::read_to_string(env_file::path(&w.path))
+            .unwrap()
+            .contains("left:pw"),
+        "the left-over binding's connection is nowhere in the file"
+    );
+}
+
+#[test]
+fn the_list_says_a_derived_file_is_missing_until_the_workspace_is_entered_again() {
+    let t = plain();
+    let w = create(&t.project, "noted", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    let item = |t: &Repo| {
+        setup::list(&t.project)
+            .unwrap()
+            .into_iter()
+            .find(|i| i.workspace.path == w.path)
+            .unwrap()
+    };
+    assert_eq!(item(&t).env_file, None);
+    assert!(item(&t).remedies(&t.project).is_empty());
+
+    std::fs::remove_file(env_file::path(&w.path)).unwrap();
+    let listed = item(&t);
+    assert_eq!(listed.env_file, Some(EnvFileProblem::Missing));
+    assert_eq!(
+        listed.status,
+        Some(Status::Ready),
+        "the status is the receipt's"
+    );
+    assert!(
+        !EnvFileProblem::Missing.describe().contains("devflow "),
+        "a message names the file, never a command"
+    );
+    assert_eq!(
+        listed.remedies(&t.project),
+        [devflow_core::remedy::Remedy::Setup {
+            workspace: w.path.clone()
+        }]
+    );
+    assert_eq!(
+        serde_json::to_value(&listed).unwrap()["env_file"],
+        serde_json::json!("missing")
+    );
+
+    std::fs::write(env_file::path(&w.path), [0xff, 0xfe]).unwrap();
+    assert_eq!(item(&t).env_file, Some(EnvFileProblem::Unreadable));
+
+    setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    assert_eq!(item(&t).env_file, None);
+    // A workspace that is not set up has nothing derived to miss.
+    let raw = worktree::create(&t.project, "raw", None).unwrap();
+    let listed = setup::list(&t.project).unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .find(|i| i.workspace.path == raw.path)
+            .unwrap()
+            .env_file,
+        None
+    );
+}
+
+#[test]
+fn entering_a_workspace_with_autostart_hands_its_process_lock_to_the_start() {
+    let t = repo(&Hooks::default(), "[pitchfork]\nautostart = true\n");
+    std::fs::write(
+        t.root.join("pitchfork.toml"),
+        "[daemons.api]\nrun = \"bun run dev\"\n",
+    )
+    .unwrap();
+    commit_all(&git2::Repository::open(&t.root).unwrap(), "add a daemon");
+    let project = Project::open(&t.root).unwrap();
+    trust::approve(&project).unwrap();
+    let w = create(&project, "daemons", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    let out = setup::activate(
+        &project,
+        &w,
+        SetupOptions {
+            pitchfork: Some(quiet_pitchfork()),
+            ..Default::default()
+        },
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(out.status, Status::Ready);
+    let started = out.autostart.expect("autostart was asked for");
+    // Whatever the start came to (this fake has no mise to deliver the
+    // variables), it was not stopped by the entry's own locks.
+    assert!(
+        !started
+            .skipped
+            .as_deref()
+            .unwrap_or_default()
+            .contains("another devflow operation"),
+        "{started:?}"
+    );
+    assert!(!Receipt::is_locked(&w.git_dir));
+    assert!(Receipt::try_process_lock(&w.git_dir).unwrap().is_some());
+}
+
+#[test]
+#[ignore = "needs Docker and the postgres:18 image"]
+fn managed_postgres_a_rebuilt_env_file_follows_the_endpoint_that_works_now() {
+    let t = repo(&Hooks::default(), MANAGED);
+    let _cleanup = managed_cleanup(&t.project);
+    let w = create(
+        &t.project,
+        "w",
+        SetupOptions {
+            data_from: Some(DataSource::Empty),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(w.status, Status::Ready, "{:?}", w.receipt.phases);
+    let good = binding(&w.receipt);
+    let port = devflow_core::db::Server::for_project(&t.project)
+        .unwrap()
+        .unwrap()
+        .app_endpoint()
+        .unwrap()
+        .1;
+
+    // The server came back on another port since the receipt was written, and
+    // the derived file is gone: the file is written with the port that works
+    // now, not the recorded one, and nothing else about the binding changes.
+    let mut stale = receipt_of(&w.workspace);
+    let stale_url = good.url.replace(&format!(":{port}/"), ":9/");
+    stale.services.get_mut("db").unwrap().url = stale_url.clone();
+    stale.save(&w.workspace.git_dir).unwrap();
+    std::fs::remove_file(env_file::path(&w.workspace.path)).unwrap();
+
+    let out = setup::activate(
+        &t.project,
+        &w.workspace,
+        SetupOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(out.repaired, [Repair::EnvFile]);
+    assert_eq!(env_map(&w.workspace)["DATABASE_URL"], good.url);
+    assert_eq!(receipt_of(&w.workspace).services["db"].url, good.url);
+    assert_eq!(binding(&out.receipt).branch_id, good.branch_id);
+    assert_ne!(stale_url, good.url);
+}
+
+#[test]
+fn a_file_an_earlier_devflow_wrote_without_the_manifest_is_rebuilt_before_the_switch_hooks() {
+    let t = repo(
+        &Hooks {
+            setup: &["echo ran >> ../../setup-count"],
+            switch: &["touch .devflow/switched"],
+            ..Default::default()
+        },
+        "",
+    );
+    trust::approve(&t.project).unwrap();
+    let w = create(&t.project, "legacy", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    assert!(!env_file::lacks_manifest(&w.path));
+    let before = env_map(&w);
+    let exported_before = receipt_of(&w).exported.clone();
+
+    // A file as an earlier devflow wrote it: the variables, no manifest.
+    env_file::write(&w.path, &before.clone().into_iter().collect::<Vec<_>>()).unwrap();
+    assert!(env_file::lacks_manifest(&w.path));
+    // The list says so, and the status is still the receipt's.
+    let listed = setup::list(&t.project)
+        .unwrap()
+        .into_iter()
+        .find(|i| i.workspace.path == w.path)
+        .unwrap();
+    assert_eq!(listed.env_file, Some(EnvFileProblem::NoManifest));
+    assert_eq!(listed.status, Some(Status::Ready));
+    assert!(
+        !EnvFileProblem::NoManifest.describe().contains("`devflow"),
+        "a message names the file, never a command"
+    );
+    // `--if-new` does not skip it either.
+    assert!(
+        setup::setup(
+            &t.project,
+            &w,
+            SetupOptions::default(),
+            true,
+            false,
+            &mut NoProgress
+        )
+        .unwrap()
+        .is_some_and(|out| out.repaired == [Repair::EnvFile])
+    );
+    assert!(!env_file::lacks_manifest(&w.path));
+
+    // Entering it: rebuilt first, so the switch hooks (which refuse a file
+    // without the manifest) run in the same entry. No setup hook runs again.
+    env_file::write(&w.path, &before.clone().into_iter().collect::<Vec<_>>()).unwrap();
+    let runs = setup_runs(&t);
+    let out = setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    assert_eq!(out.status, Status::Ready, "{:?}", out.receipt.phases);
+    assert_eq!(out.repaired, [Repair::EnvFile]);
+    assert!(out.switch_hooks.is_some_and(|report| report.ok));
+    assert!(w.path.join(".devflow/switched").is_file());
+    assert_eq!(setup_runs(&t), runs, "no setup hook ran again");
+    assert!(!env_file::lacks_manifest(&w.path));
+    assert_eq!(env_map(&w), before, "the same variables");
+
+    // Written through the env phase's writer: the manifest lists what the
+    // configuration declares, and the receipt keeps the names it exported.
+    let contents = env_file::read_contents(&w.path).unwrap();
+    let declared = contents.declared.expect("a manifest");
+    assert!(declared.contains("DEVFLOW_WORKSPACE") && declared.contains("COMPOSE_PROJECT_NAME"));
+    let exported = receipt_of(&w).exported;
+    assert!(exported.is_superset(&exported_before));
+    assert!(exported.contains("DEVFLOW_WORKSPACE"), "{exported:?}");
+}
+
+#[test]
+fn resuming_a_creation_checks_the_base_against_the_existing_branch() {
+    let t = plain();
+    let first = create(&t.project, "x", SetupOptions::default()).unwrap();
+    let git = git2::Repository::open(&t.root).unwrap();
+    let at_creation = git
+        .find_branch("x", git2::BranchType::Local)
+        .unwrap()
+        .get()
+        .peel_to_commit()
+        .unwrap();
+    // Setup of `x` did not finish.
+    let mut unfinished = receipt_of(&first.workspace);
+    unfinished.set_phase(Phase::Hooks, PhaseState::Pending, None);
+    unfinished.save(&first.workspace.git_dir).unwrap();
+
+    // Another commit B on the default branch.
+    std::fs::write(t.root.join("later.txt"), "later").unwrap();
+    let mut index = git.index().unwrap();
+    index.add_path(std::path::Path::new("later.txt")).unwrap();
+    index.write().unwrap();
+    let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+    let parent = git.head().unwrap().peel_to_commit().unwrap();
+    let later = git
+        .commit(Some("HEAD"), &sig, &sig, "later", &tree, &[&parent])
+        .unwrap();
+
+    let request = |base: &str| CreateRequest {
+        name: "x".into(),
+        from: None,
+        base: Some(base.into()),
+        options: SetupOptions::default(),
+    };
+    let error =
+        setup::create(&t.project, request(&later.to_string()), &mut NoProgress).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("already exists at"),
+        "{error:#}"
+    );
+    assert_eq!(
+        receipt_of(&first.workspace).phase(Phase::Hooks).state,
+        PhaseState::Pending,
+        "nothing was resumed"
+    );
+    let error = setup::create(&t.project, request("no-such-ref"), &mut NoProgress).unwrap_err();
+    assert!(format!("{error:#}").contains("no-such-ref"), "{error:#}");
+    assert_eq!(
+        receipt_of(&first.workspace).phase(Phase::Hooks).state,
+        PhaseState::Pending
+    );
+
+    // The commit the branch is at resumes it.
+    let resumed = setup::create(
+        &t.project,
+        request(&at_creation.id().to_string()),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(resumed.receipt.instance_id, first.receipt.instance_id);
+    assert_eq!(resumed.status, Status::Ready);
+}
+
+/// Workspace `feature/a` moved to branch `other`, and workspace `feature/b`
+/// took its old branch: `feature/a` now names both checkouts.
+fn two_checkouts_named_feature_a(t: &Repo) -> (Workspace, Workspace) {
+    let a = create(&t.project, "feature/a", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    let b = create(&t.project, "feature/b", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    switch_checkout_to(&a, "other");
+    git2::Repository::open(&b.path)
+        .unwrap()
+        .set_head("refs/heads/feature/a")
+        .unwrap();
+    assert!(worktree::find(&t.project, "feature/a").is_err());
+    (a, b)
+}
+
+#[test]
+fn a_workspace_made_from_a_path_keeps_that_source_while_its_name_is_ambiguous() {
+    let t = plain();
+    let (a, b) = two_checkouts_named_feature_a(&t);
+    // A has a payload of its own, B another: the new workspace must get A's.
+    std::fs::write(a.path.join(".env"), "FROM=a\n").unwrap();
+    std::fs::write(b.path.join(".env"), "FROM=b\n").unwrap();
+    let a_id = receipt_of(&a).instance_id;
+
+    let out = setup::create_and_activate(
+        &t.project,
+        CreateRequest {
+            name: "child".into(),
+            from: Some(a.path.display().to_string()),
+            base: None,
+            options: SetupOptions::default(),
+        },
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(out.status, Status::Ready, "{:?}", out.receipt.phases);
+    assert_eq!(
+        std::fs::read_to_string(out.workspace.path.join(".env")).unwrap(),
+        "FROM=a\n",
+        "the payload came from the checkout that was named by its path"
+    );
+    // What is kept is the checkout and its incarnation, not the ambiguous name.
+    assert_eq!(out.receipt.code_source_path.as_ref(), Some(&a.path));
+    assert_eq!(out.receipt.code_source_instance, Some(a_id));
+    assert_eq!(
+        env_map(&out.workspace)["DEVFLOW_SOURCE_PATH"],
+        a.path.display().to_string()
+    );
+
+    // Later runs find the same source without resolving the name again.
+    std::fs::remove_file(env_file::path(&out.workspace.path)).unwrap();
+    let again = setup::activate(
+        &t.project,
+        &out.workspace,
+        SetupOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(again.repaired, [Repair::EnvFile]);
+    assert_eq!(
+        env_map(&out.workspace)["DEVFLOW_SOURCE_PATH"],
+        a.path.display().to_string()
+    );
+
+    // A checkout recreated at the source's place is another incarnation: the
+    // recorded source is gone, and the default workspace is the fallback.
+    let mut moved = receipt_of(&a);
+    moved.instance_id = uuid::Uuid::new_v4();
+    moved.save(&a.git_dir).unwrap();
+    let again = setup::activate(
+        &t.project,
+        &out.workspace,
+        SetupOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(again.status, Status::Ready);
+    std::fs::remove_file(env_file::path(&out.workspace.path)).unwrap();
+    setup::activate(
+        &t.project,
+        &out.workspace,
+        SetupOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(
+        env_map(&out.workspace)["DEVFLOW_SOURCE_PATH"],
+        t.root.display().to_string(),
+        "another incarnation is not the source"
+    );
+}
+
+#[test]
+#[ignore = "needs Docker and the postgres:18 image"]
+fn managed_postgres_a_workspace_made_from_a_path_takes_that_workspaces_data() {
+    let t = repo(&Hooks::default(), MANAGED);
+    let _cleanup = managed_cleanup(&t.project);
+    let (a, b) = two_checkouts_named_feature_a(&t);
+    let connect = |url: &str| postgres::Client::connect(url, postgres::NoTls);
+    for (ws, marker) in [(&a, "a"), (&b, "b")] {
+        let url = binding(&receipt_of(ws)).url;
+        connect(&url)
+            .unwrap()
+            .batch_execute(&format!(
+                "CREATE TABLE who(x text); INSERT INTO who VALUES ('{marker}')"
+            ))
+            .unwrap();
+    }
+    // No `--data-from`: the data follows the code source, which was chosen by
+    // its path; the name is not looked up again.
+    let out = create_from(&t, "child", &a.path);
+    assert_eq!(out.status, Status::Ready, "{:?}", out.receipt.phases);
+    let who: String = connect(&binding(&out.receipt).url)
+        .unwrap()
+        .query_one("SELECT x FROM who", &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(who, "a");
+    assert_eq!(binding(&out.receipt).source, "workspace:feature/a");
+    // An explicit `--data-from` by an ambiguous name is refused, and by path
+    // it works and is labelled with the workspace's name.
+    let error = create(
+        &t.project,
+        "refused",
+        SetupOptions {
+            data_from: Some(DataSource::Workspace {
+                name: "feature/a".into(),
+            }),
+            ..Default::default()
+        },
+    );
+    assert!(error.is_err());
+    let out = create(
+        &t.project,
+        "by-path",
+        SetupOptions {
+            data_from: Some(DataSource::Workspace {
+                name: b.path.display().to_string(),
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(binding(&out.receipt).source, "workspace:feature/b");
+}
+
+fn create_from(t: &Repo, name: &str, from: &Path) -> SetupOutcome {
+    setup::create(
+        &t.project,
+        CreateRequest {
+            name: name.into(),
+            from: Some(from.display().to_string()),
+            base: None,
+            options: SetupOptions::default(),
+        },
+        &mut NoProgress,
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_deleted_checkout_is_found_and_removed_by_the_path_it_is_registered_under() {
+    let t = plain();
+    let (a, b) = two_checkouts_named_feature_a(&t);
+    // The checkout `feature/a` also names, deleted behind devflow's back.
+    std::fs::remove_dir_all(&b.path).unwrap();
+    assert!(!b.path.exists());
+
+    // A path needs no directory to name a registered checkout, so the
+    // ambiguity remedy can pick it, and so can a removal.
+    let by_path = worktree::find(&t.project, b.path.to_str().unwrap())
+        .unwrap()
+        .expect("the registration is found by its path");
+    assert!(by_path.missing);
+    assert_eq!(by_path.path, b.path);
+    assert_eq!(
+        by_path.name, "feature/b",
+        "under the name it was created with"
+    );
+    let named = worktree::find(&t.project, "feature/a").unwrap_err();
+    assert!(
+        format!("{named:#}").contains(&b.path.display().to_string()),
+        "the missing candidate is listed too: {named:#}"
+    );
+
+    setup::remove(
+        &t.project,
+        b.path.to_str().unwrap(),
+        RemoveOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert!(
+        worktree::find(&t.project, b.path.to_str().unwrap())
+            .unwrap()
+            .is_none()
+    );
+    assert!(a.path.exists(), "the other checkout was not touched");
+    // With the deleted one gone, the name means the one that is left.
+    assert_eq!(
+        worktree::find(&t.project, "feature/a")
+            .unwrap()
+            .unwrap()
+            .path,
+        a.path
+    );
+}
+
+#[test]
+fn detaching_the_head_of_a_workspace_named_like_its_directory_is_drift() {
+    let t = plain();
+    // `scratch` has no slash: the workspace and its directory share a name.
+    let w = create(&t.project, "scratch", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    assert_eq!(
+        w.path.file_name().and_then(|n| n.to_str()),
+        Some("scratch"),
+        "the directory is named like the workspace"
+    );
+    assert!(!receipt_of(&w).adopted_detached);
+    let repo = git2::Repository::open(&w.path).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap().id();
+    repo.set_head_detached(head).unwrap();
+
+    let listed = setup::list(&t.project)
+        .unwrap()
+        .into_iter()
+        .find(|i| i.workspace.path == w.path)
+        .unwrap();
+    let drift = listed.drift.expect("a detached HEAD is drift");
+    assert_eq!((drift.workspace.as_str(), drift.branch), ("scratch", None));
+    let out = setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    assert!(
+        out.drift
+            .as_ref()
+            .is_some_and(|d| d.describe().contains("detached HEAD")),
+        "{:?}",
+        out.drift
+    );
+    assert_eq!(out.workspace.name, "scratch");
+}
+
+#[test]
+fn a_worktree_adopted_while_detached_records_it_and_shows_no_drift_until_it_moves() {
+    let t = plain();
+    let raw = worktree::create(&t.project, "raw", None).unwrap();
+    let repo = git2::Repository::open(&raw.path).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap().id();
+    repo.set_head_detached(head).unwrap();
+
+    let out = setup::setup(
+        &t.project,
+        &worktree::list(&t.project)
+            .unwrap()
+            .into_iter()
+            .find(|w| w.path == raw.path)
+            .unwrap(),
+        SetupOptions::default(),
+        false,
+        false,
+        &mut NoProgress,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(out.receipt.adopted_detached);
+    assert!(out.drift.is_none(), "detached is what it was adopted with");
+    assert!(
+        setup::list(&t.project)
+            .unwrap()
+            .iter()
+            .all(|i| i.drift.is_none())
+    );
+
+    // On a branch now: that is a move.
+    repo.branch("topic", &repo.find_commit(head).unwrap(), false)
+        .unwrap();
+    repo.set_head("refs/heads/topic").unwrap();
+    let listed = setup::list(&t.project)
+        .unwrap()
+        .into_iter()
+        .find(|i| i.workspace.path == raw.path)
+        .unwrap();
+    assert_eq!(
+        listed.drift.map(|d| d.branch),
+        Some(Some("topic".to_string()))
+    );
 }

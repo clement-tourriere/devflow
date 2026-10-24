@@ -508,6 +508,7 @@ mod tests {
                 instance_id: None,
                 status: RecordStatus::Failed,
                 cow: CowCapability::Unknown,
+                clone_strategy: None,
                 error: Some(format!("failed: {URL}")),
                 created_at: Utc::now(),
                 size_bytes: None,

@@ -654,7 +654,9 @@ fn container_services_in_the_configuration_count_as_well() {
         "devflow exec -- bun run dev --port $PORT --strictPort"
     );
     assert!(plan.item("mise:env-file").is_some(), "{:?}", ids(&plan));
-    // The same repository without the service is left as it was.
+    // The same repository without the service needs no mise wiring; its
+    // daemon still runs through `devflow exec` because it has `mise = true`
+    // (see `a_daemon_with_mise_true_always_runs_through_devflow_exec`).
     repo.write(
         "devflow.toml",
         "[project]\nname = \"shop\"\nid = \"0b3c9d2e-7f4a-4c1e-9a52-6d1f3b8e2a40\"\n",
@@ -662,7 +664,7 @@ fn container_services_in_the_configuration_count_as_well() {
     let plan = repo.plan();
     assert_eq!(
         item(&plan, "daemon:web").value["run"],
-        "bun run dev --port $PORT --strictPort"
+        "devflow exec -- bun run dev --port $PORT --strictPort"
     );
     assert!(plan.item("mise:env-file").is_none(), "{:?}", ids(&plan));
 }
@@ -683,13 +685,78 @@ fn env_content_alone_gets_the_workspace_environment() {
 }
 
 #[test]
-fn a_project_without_services_or_env_keeps_its_daemon_unwrapped() {
+fn a_project_without_services_or_env_and_without_mise_keeps_its_daemon_unwrapped() {
+    let plan = vite_project("services: {}\n", false).plan();
+    let web = item(&plan, "daemon:web");
+    assert_eq!(web.value["run"], "bun run dev --port $PORT --strictPort");
+    assert_eq!(web.value["mise"], false);
+    assert!(plan.item("mise:env-file").is_none(), "{:?}", ids(&plan));
+}
+
+/// `devflow up` refuses a daemon with `mise = true` that is not wholly
+/// `devflow exec -- CMD` unless mise loads `.devflow/env`, and `.devflow/env`
+/// always exists (it carries the workspace's identity), so the proposal for a
+/// project with mise has to pass: it is wrapped even when the project exports
+/// no service or `[env]`, and no mise wiring is asked for.
+#[test]
+fn a_daemon_with_mise_true_always_runs_through_devflow_exec() {
     let plan = vite_project("services: {}\n", true).plan();
+    let web = item(&plan, "daemon:web");
     assert_eq!(
-        item(&plan, "daemon:web").value["run"],
-        "bun run dev --port $PORT --strictPort"
+        web.value["run"],
+        "devflow exec -- bun run dev --port $PORT --strictPort"
+    );
+    assert_eq!(web.value["mise"], true);
+    assert!(
+        web.risks.iter().any(|r| r.contains("devflow exec")),
+        "{:?}",
+        web.risks
     );
     assert!(plan.item("mise:env-file").is_none(), "{:?}", ids(&plan));
+    // The patch says the same: `run` and `mise` go together.
+    let sets: Vec<String> = web
+        .patch
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            crate::propose::PatchOp::Set { path, value, .. } => {
+                Some(format!("{} = {value}", path.join(".")))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        sets.contains(&"daemons.web.mise = true".to_string()),
+        "{sets:?}"
+    );
+}
+
+/// A mise task cannot be wrapped in `devflow exec`; without anything exported
+/// there is no mise wiring either, so `mise = true` would be a daemon `up`
+/// refuses. The task runs mise itself and needs no flag.
+#[test]
+fn a_mise_task_daemon_gets_mise_true_only_when_the_wiring_is_proposed_for_it() {
+    let files = [(
+        "mise.toml",
+        "[tools]\nnode = \"22\"\n\n[tasks.dev]\nrun = \"vite\"\n",
+    )];
+    let plan = Repo::new(&files).plan();
+    let dev = item(&plan, "daemon:dev");
+    assert_eq!(dev.value["run"], "mise run dev");
+    assert_eq!(dev.value["mise"], false, "{:?}", dev.value);
+    assert!(plan.item("mise:env-file").is_none(), "{:?}", ids(&plan));
+
+    // With a service to export, the wiring is proposed and the task relies on it.
+    let repo = Repo::new(&[files[0], ("compose.yaml", one("cache", "redis:7").as_str())]);
+    let plan = repo.plan();
+    let dev = item(&plan, "daemon:dev");
+    assert_eq!(dev.value["run"], "mise run dev");
+    assert_eq!(dev.value["mise"], true);
+    assert!(
+        dev.depends_on.contains(&"mise:env-file".to_string()),
+        "{:?}",
+        dev.depends_on
+    );
 }
 
 // -- branch or compose is decided at selection ----------------------------------

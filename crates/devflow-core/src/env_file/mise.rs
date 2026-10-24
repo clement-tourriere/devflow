@@ -18,6 +18,7 @@
 //!
 //! Only key names ever leave this module; no value is returned, logged or put
 //! in an error, because the variables hold credentials.
+use crate::env_owner::ChildEnv;
 use crate::hooks::HookPhase;
 use serde::Serialize;
 use std::ffi::OsString;
@@ -53,6 +54,10 @@ pub enum MiseDelivery {
     /// mise removes these variables (`[env] NAME = false`) although the file
     /// sets them.
     Removed { keys: Vec<String> },
+    /// mise sets these variables although the workspace owns them and sets no
+    /// value for them (a `--no-db` workspace has no `DATABASE_URL`): the
+    /// cleanup of the inherited environment is undone inside mise.
+    Reintroduced { keys: Vec<String> },
     /// mise resolves none of the checked variables: it does not load
     /// `.devflow/env` at all.
     NotLoaded,
@@ -72,6 +77,7 @@ impl MiseDelivery {
             Self::Delivered => "delivered",
             Self::Overridden { .. } => "overridden",
             Self::Removed { .. } => "removed",
+            Self::Reintroduced { .. } => "reintroduced",
             Self::NotLoaded => "not_loaded",
             Self::Untrusted { .. } => "untrusted",
             Self::Unavailable => "unavailable",
@@ -100,6 +106,12 @@ impl MiseDelivery {
             Self::Removed { keys } => format!(
                 "mise removes {} although .devflow/env sets it (an `[env]` entry set to \
                  `false`?); check mise.toml, mise.local.toml and global mise config",
+                key_list(keys)
+            ),
+            Self::Reintroduced { keys } => format!(
+                "mise sets {} although this workspace owns it and sets no value for it; check \
+                 `[env]` keys, `_.file`/`_.source` entries, mise.local.toml, environment-specific \
+                 files and global mise config",
                 key_list(keys)
             ),
             Self::NotLoaded => "mise does not load .devflow/env: none of its variables resolve \
@@ -284,17 +296,34 @@ const PROBE_MARKER: &[u8] = b"devflow-probe\0";
 /// could answer for configuration that has changed since.
 const PROBE_FLAGS: [&str; 2] = ["--no-deps", "--fresh-env"];
 
-/// Ask mise what a hook's command would receive, and compare it with the
-/// variables devflow gives that hook.
+/// The shared gate: ask mise what a command would receive and compare it
+/// with what the workspace's environment says it must receive.
 ///
 /// Runs `mise exec -- sh -c PROBE …` in `worktree` with exactly the
-/// environment a hook of `phase` gets (the inherited one without Git's and
-/// libpq's variables, `vars` on top, `MISE_ENV` among them if devflow sets it)
-/// and reads the value each variable of `vars` has in the process mise starts.
-/// A variable that is not there was removed by mise's configuration, one with
-/// another value was overridden, whichever way mise did it: `[env]` keys, a
-/// later `_.file`, `mise.local.toml`, an environment-specific file, `conf.d`,
-/// a parent or the global configuration. The result names keys only.
+/// environment a hook of `phase` gets (the inherited one without Git's context
+/// and without the names the workspace owns, the workspace's variables on top,
+/// `MISE_ENV` among them if devflow sets it: [`ChildEnv`], the function the
+/// hook is started with) and reads what the process mise starts has of **every
+/// name the workspace owns**:
+///
+/// - a variable the workspace sets must have its value. One that is not there
+///   was removed by mise's configuration ([`MiseDelivery::Removed`]), one with
+///   another value was overridden ([`MiseDelivery::Overridden`]);
+/// - a name the workspace owns and sets no value for ([`ChildEnv::absent`]: a
+///   `--no-db` workspace's `DATABASE_URL`, a removed recipe's variable, the
+///   source workspace's names) must be absent. One that is there was brought
+///   back by mise ([`MiseDelivery::Reintroduced`]). Names the caller keeps
+///   (`--inherit`, `DEVFLOW_INHERIT`) are not expected either way.
+///
+/// Whichever way mise does it: `[env]` keys, a later `_.file`,
+/// `mise.local.toml`, an environment-specific file, `conf.d`, a parent or the
+/// global configuration. The result names keys only.
+///
+/// Every place that lets a command run through mise on devflow's word uses
+/// this one function (setup, switch and teardown hooks through
+/// [`crate::setup::mise_gate`], the start of daemons that run with
+/// `mise = true`, `doctor`), so they all ask the same question of the same
+/// environment.
 ///
 /// This stands for a command run from the worktree root as `mise exec -- …`.
 /// It cannot stand for a `cd` ahead of mise, a task (whose own `env` comes
@@ -313,21 +342,23 @@ const PROBE_FLAGS: [&str; 2] = ["--no-deps", "--fresh-env"];
 /// refuses ends the check as [`MiseDelivery::Untrusted`], still untrusted.
 pub fn check_command_env(
     worktree: &Path,
-    vars: &[(String, String)],
+    env: &ChildEnv,
     phase: HookPhase,
     timeout: Duration,
     mise: &MiseCommand,
 ) -> MiseDelivery {
-    let trust = check_mise_trust(worktree, vars, phase, timeout, mise);
+    let trust = check_mise_trust(worktree, env, phase, timeout, mise);
     if !trust.is_delivered() {
         return trust;
     }
-    let expected: std::collections::BTreeMap<&str, &str> = vars
+    let expected: std::collections::BTreeMap<&str, &str> = env
+        .vars()
         .iter()
         .filter(|(key, _)| plain_name(key))
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
-    if expected.is_empty() {
+    let absent: Vec<&str> = env.absent().filter(|name| plain_name(name)).collect();
+    if expected.is_empty() && absent.is_empty() {
         return MiseDelivery::Delivered;
     }
     let ask = |flags: bool| {
@@ -336,14 +367,20 @@ pub fn check_command_env(
             args.extend(PROBE_FLAGS.map(OsString::from));
         }
         args.extend(["--", "sh", "-c", PROBE, "sh"].map(OsString::from));
-        args.extend(expected.keys().map(OsString::from));
+        args.extend(
+            expected
+                .keys()
+                .copied()
+                .chain(absent.iter().copied())
+                .map(OsString::from),
+        );
         run_invocation(
             worktree,
             timeout,
             mise,
             &Invocation {
                 args,
-                hook_env: Some((phase, vars)),
+                hook_env: Some((phase, env)),
                 forced_env: &FORCED_ENV,
             },
         )
@@ -376,18 +413,49 @@ pub fn check_command_env(
             Some(_) => different.push((*key).to_string()),
         }
     }
-    if different.is_empty() && removed.is_empty() {
+    let reintroduced: Vec<String> = absent
+        .iter()
+        .filter(|name| seen.contains_key(**name))
+        .map(|name| (*name).to_string())
+        .collect();
+    if different.is_empty() && removed.is_empty() && reintroduced.is_empty() {
         MiseDelivery::Delivered
-    } else if different.is_empty() {
+    } else if different.is_empty() && reintroduced.is_empty() {
         MiseDelivery::Removed {
             keys: sorted_keys(removed),
         }
+    } else if different.is_empty() && removed.is_empty() {
+        MiseDelivery::Reintroduced {
+            keys: sorted_keys(reintroduced),
+        }
     } else {
         different.extend(removed);
+        different.extend(reintroduced);
         MiseDelivery::Overridden {
             keys: sorted_keys(different),
         }
     }
+}
+
+/// [`check_command_env`] for the workspace whose worktree root is `worktree`,
+/// with the environment read from its `.devflow/env` alone (no project, no
+/// receipt, no server): what the start of a daemon that runs with
+/// `mise = true` asks before it relies on mise.
+///
+/// The answer is the same one the hooks get, because the environment is the
+/// same function of the same file. A typed problem when the file has no
+/// manifest of owned names (written by an earlier devflow: the remedy is to set
+/// the workspace up) or when the process's environment names a workspace that
+/// cannot be resolved (the remedy is `clear_inherited`); neither is a state of
+/// mise, so neither is a [`MiseDelivery`].
+pub fn check_workspace_env(
+    worktree: &Path,
+    phase: HookPhase,
+    timeout: Duration,
+    mise: &MiseCommand,
+) -> anyhow::Result<MiseDelivery> {
+    let env = ChildEnv::from_file(worktree)?;
+    Ok(check_command_env(worktree, &env, phase, timeout, mise))
 }
 
 /// Variables the checks set whatever the hook gets: no tool is installed.
@@ -406,7 +474,7 @@ const FORCED_ENV: [(&str, &str); 2] = [("MISE_AUTO_INSTALL", "0"), ("MISE_EXEC_A
 /// otherwise. devflow never trusts a configuration for the person.
 pub fn check_mise_trust(
     worktree: &Path,
-    vars: &[(String, String)],
+    env: &ChildEnv,
     phase: HookPhase,
     timeout: Duration,
     mise: &MiseCommand,
@@ -417,7 +485,7 @@ pub fn check_mise_trust(
         mise,
         &Invocation {
             args: vec!["env".into(), "--json".into()],
-            hook_env: Some((phase, vars)),
+            hook_env: Some((phase, env)),
             forced_env: &FORCED_ENV,
         },
     );
@@ -544,8 +612,10 @@ struct Invocation<'a> {
     /// The arguments after `leading_args`.
     args: Vec<OsString>,
     /// The environment a hook of this phase gets, on top of `MiseCommand`'s:
-    /// the inherited one minus Git's and libpq's, plus these variables.
-    hook_env: Option<(HookPhase, &'a [(String, String)])>,
+    /// the inherited one minus Git's context and the names the workspace owns
+    /// ([`ChildEnv`], the same function the hook itself is started with), plus
+    /// the workspace's variables.
+    hook_env: Option<(HookPhase, &'a ChildEnv)>,
     /// Variables the question needs whatever the hook gets.
     forced_env: &'a [(&'a str, &'a str)],
 }
@@ -588,8 +658,8 @@ fn run_invocation(
     for (name, value) in &mise.envs {
         command.env(name, value);
     }
-    if let Some((phase, vars)) = invocation.hook_env {
-        crate::hooks::apply_env(&mut command, phase, vars);
+    if let Some((phase, env)) = invocation.hook_env {
+        crate::hooks::apply_env(&mut command, phase, env);
     }
     for (name, value) in invocation.forced_env {
         command.env(name, value);
@@ -1225,7 +1295,7 @@ mod runtime {
     fn probe_at(dir: &Path, vars: &[(String, String)], command: &MiseCommand) -> MiseDelivery {
         check_command_env(
             &dir.join("worktree"),
-            vars,
+            &ChildEnv::plain(vars.to_vec()),
             HookPhase::Setup,
             Duration::from_secs(10),
             command,
@@ -1286,6 +1356,156 @@ mod runtime {
         assert_eq!(
             probe_at(dir.path(), &[], &exec_stand_in(dir.path(), "false")),
             MiseDelivery::Delivered
+        );
+    }
+
+    #[test]
+    fn the_probe_gets_the_environment_a_hook_gets_names_the_workspace_owns_included() {
+        let dir = tempfile::tempdir().unwrap();
+        worktree_with_env(dir.path());
+        let seen = dir.path().join("seen");
+        let mut command = exec_stand_in(
+            dir.path(),
+            "printf '%s|%s|%s|%s' \"${REDIS_URL-unset}\" \"${DATABASE_URL-unset}\" \
+             \"${DEVFLOW_SETUP_ACTIVE-unset}\" \"${KEPT-unset}\" > \"$SEEN\"",
+        );
+        // What the probe inherits: a name the workspace owns without setting
+        // it, and one it does not own.
+        for (name, value) in [
+            ("SEEN", seen.as_os_str().to_owned()),
+            ("REDIS_URL", "redis://elsewhere".into()),
+            ("KEPT", "the caller's".into()),
+        ] {
+            command.envs.push((name.into(), value));
+        }
+        let env = ChildEnv::standalone(
+            probe_vars(&[("DATABASE_URL", DB)]),
+            &["DATABASE_URL", "REDIS_URL"]
+                .iter()
+                .map(|n| n.to_string())
+                .collect(),
+        );
+        let delivery = check_command_env(
+            &dir.path().join("worktree"),
+            &env,
+            HookPhase::Setup,
+            Duration::from_secs(10),
+            &command,
+        );
+        assert_eq!(delivery, MiseDelivery::Delivered);
+        // The same environment `hooks::apply_env` gives a hook.
+        assert_eq!(
+            std::fs::read_to_string(&seen).unwrap(),
+            format!("unset|{DB}|1|the caller's")
+        );
+    }
+
+    #[test]
+    fn the_probe_verifies_absence_too_and_respects_what_the_caller_keeps() {
+        let dir = tempfile::tempdir().unwrap();
+        worktree_with_env(dir.path());
+        // A `--no-db` workspace: it owns `DATABASE_URL` and `PGHOST`, sets
+        // neither, and sets `DEVFLOW_WORKSPACE`.
+        let env = || {
+            ChildEnv::standalone(
+                probe_vars(&[("DEVFLOW_WORKSPACE", "w")]),
+                &["DEVFLOW_WORKSPACE", "DATABASE_URL", "PGHOST"]
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect(),
+            )
+        };
+        let ask = |env: &ChildEnv, body: &str| {
+            check_command_env(
+                &dir.path().join("worktree"),
+                env,
+                HookPhase::Setup,
+                Duration::from_secs(10),
+                &exec_stand_in(dir.path(), body),
+            )
+        };
+        assert_eq!(ask(&env(), "true"), MiseDelivery::Delivered);
+        // mise sets a name the workspace owns and has no value for.
+        let brought_back = ask(
+            &env(),
+            &format!("DATABASE_URL='{MAIN_DB}'; export DATABASE_URL"),
+        );
+        assert_eq!(
+            brought_back,
+            MiseDelivery::Reintroduced {
+                keys: vec!["DATABASE_URL".into()]
+            }
+        );
+        assert_eq!(brought_back.state(), "reintroduced");
+        let text = format!("{brought_back:?} {}", brought_back.describe());
+        assert!(
+            text.contains("DATABASE_URL") && !text.contains("main-password"),
+            "{text}"
+        );
+        // A name the caller keeps is not expected either way.
+        assert_eq!(
+            ask(
+                &env().keeping(["DATABASE_URL".to_string()]),
+                &format!("DATABASE_URL='{MAIN_DB}'; export DATABASE_URL")
+            ),
+            MiseDelivery::Delivered
+        );
+        // Together with an overridden value, everything is named.
+        let both = ask(
+            &env(),
+            "DATABASE_URL=x; export DATABASE_URL; DEVFLOW_WORKSPACE=other; export DEVFLOW_WORKSPACE",
+        );
+        assert_eq!(
+            both,
+            MiseDelivery::Overridden {
+                keys: vec!["DATABASE_URL".into(), "DEVFLOW_WORKSPACE".into()]
+            }
+        );
+        // A workspace with nothing to check is delivered without asking mise.
+        let nothing = ChildEnv::standalone(Vec::new(), &Default::default());
+        assert_eq!(ask(&nothing, "false"), MiseDelivery::Delivered);
+    }
+
+    #[test]
+    fn the_workspace_gate_reads_the_environment_from_the_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("worktree");
+        std::fs::create_dir_all(&root).unwrap();
+        let ask = |body: &str| {
+            check_workspace_env(
+                &root,
+                HookPhase::Setup,
+                Duration::from_secs(10),
+                &exec_stand_in(dir.path(), body),
+            )
+        };
+        // An earlier devflow's file has no list of owned names: no verdict,
+        // a typed problem with setup as the remedy.
+        super::super::write(&root, &[("DATABASE_URL".to_string(), DB.to_string())]).unwrap();
+        let error = ask("true").unwrap_err();
+        assert_eq!(
+            crate::remedy::remedies_of(&error),
+            [crate::remedy::Remedy::Setup {
+                workspace: root.clone()
+            }]
+        );
+        // A `--no-db` file: it owns `DATABASE_URL` and sets only its identity.
+        super::super::write_owned(
+            &root,
+            &[("DEVFLOW_WORKSPACE".to_string(), "w".to_string())],
+            &["DEVFLOW_WORKSPACE", "DATABASE_URL"]
+                .iter()
+                .map(|n| n.to_string())
+                .collect(),
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(ask("true").unwrap(), MiseDelivery::Delivered);
+        assert_eq!(
+            ask(&format!("DATABASE_URL='{MAIN_DB}'; export DATABASE_URL")).unwrap(),
+            MiseDelivery::Reintroduced {
+                keys: vec!["DATABASE_URL".into()]
+            }
         );
     }
 
@@ -1356,7 +1576,7 @@ mod runtime {
         let started = Instant::now();
         let result = check_command_env(
             &dir.path().join("worktree"),
-            &vars,
+            &ChildEnv::plain(vars.clone()),
             HookPhase::Setup,
             Duration::from_millis(300),
             &hanging,
@@ -1381,7 +1601,7 @@ mod runtime {
         fn probe_with(&self, vars: &[(String, String)]) -> MiseDelivery {
             check_command_env(
                 &self.root,
-                vars,
+                &ChildEnv::plain(vars.to_vec()),
                 HookPhase::Setup,
                 Duration::from_secs(60),
                 &self.command,
@@ -1399,7 +1619,11 @@ mod runtime {
             for (name, value) in &self.command.envs {
                 command.env(name, value);
             }
-            crate::hooks::apply_env(&mut command, HookPhase::Setup, &self.vars());
+            crate::hooks::apply_env(
+                &mut command,
+                HookPhase::Setup,
+                &ChildEnv::plain(self.vars()),
+            );
             String::from_utf8(command.output().unwrap().stdout).unwrap()
         }
     }

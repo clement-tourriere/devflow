@@ -12,6 +12,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+mod isolation;
 mod mise;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -85,9 +86,11 @@ impl Check {
 /// git, docker/compose (managed mode), server reachability and version,
 /// file_copy_method, CoW capability, worktree-directory CoW, hook trust,
 /// Git hook state, pitchfork/mise presence, workspaces needing attention, and
-/// whether mise hands the current workspace its own `.devflow/env` variables.
-/// Without a project only the environment checks run. Trust is judged for the
-/// main checkout; see [`run_in`] for the workspace a command was started in.
+/// whether mise hands the current workspace its own `.devflow/env` variables
+/// and whether the process environment carries another workspace's
+/// (`isolation`, `dotenv`). Without a project only the environment checks run.
+/// Trust is judged for the main checkout; see [`run_in`] for the workspace a
+/// command was started in.
 pub fn run(project: Option<&Project>) -> Vec<Check> {
     run_in(
         project,
@@ -126,6 +129,7 @@ pub fn run_in(project: Option<&Project>, cwd: &Path) -> Vec<Check> {
     if let Some(project) = project {
         checks.extend(workspaces(project));
         checks.extend(mise::checks(project));
+        checks.extend(isolation::checks(project, cwd));
     }
     checks
 }
@@ -146,40 +150,94 @@ fn git() -> Vec<Check> {
     )]
 }
 
+/// What the `docker` client answered, before the daemon is asked.
+enum DockerClient {
+    /// No `docker` on `PATH`.
+    Missing,
+    /// `docker` runs but has no compose plugin.
+    NoCompose,
+    /// The compose version.
+    Compose(String),
+}
+
+/// How long the client and the daemon get to answer; a hung daemon is a
+/// failed check, not a stuck `doctor`.
+const DOCKER_PROBE: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn docker(needed: bool) -> Vec<Check> {
-    let output = Command::new("docker")
+    let mut compose = Command::new("docker");
+    compose
         .args(["compose", "version", "--short"])
-        .stdin(Stdio::null())
-        .output();
-    match output {
-        Ok(out) if out.status.success() => vec![Check::ok(
-            "docker",
-            format!(
-                "docker compose {}",
-                String::from_utf8_lossy(&out.stdout).trim()
-            ),
-        )],
-        found => {
-            let detail = match found {
-                Ok(_) => "`docker compose` is not available",
-                Err(_) => "`docker` was not found on PATH",
-            };
-            let hint = "install Docker (or OrbStack) with the compose plugin";
-            vec![if needed {
-                Check::fail(
-                    "docker",
-                    format!("{detail}; managed PostgreSQL and the container services need it"),
-                    hint,
-                )
-            } else {
-                Check::warn(
-                    "docker",
-                    format!("{detail} (only needed for managed PostgreSQL and container services)"),
-                    hint,
-                )
-            }]
+        .stdin(Stdio::null());
+    let client = match crate::subprocess::run(compose, DOCKER_PROBE) {
+        Ok(out) if out.ok => DockerClient::Compose(out.stdout.trim().to_string()),
+        Ok(_) => DockerClient::NoCompose,
+        Err(_) => DockerClient::Missing,
+    };
+    let daemon = matches!(client, DockerClient::Compose(_)).then(|| {
+        let mut info = Command::new("docker");
+        info.args(["info", "--format", "{{.ID}}"])
+            .stdin(Stdio::null());
+        match crate::subprocess::run(info, DOCKER_PROBE) {
+            Ok(out) if out.ok => Ok(()),
+            Ok(out) if out.timed_out => Err(format!(
+                "no answer within {} seconds",
+                DOCKER_PROBE.as_secs()
+            )),
+            Ok(out) => Err(crate::redact::text(
+                out.message.as_deref().unwrap_or("`docker info` failed"),
+            )),
+            Err(e) => Err(crate::redact::text(&format!("{e:#}"))),
         }
-    }
+    });
+    docker_checks(needed, client, daemon)
+}
+
+/// The docker check: the client and compose plugin found, and the daemon
+/// answering. A missing piece fails when the project needs Docker and warns
+/// otherwise.
+fn docker_checks(
+    needed: bool,
+    client: DockerClient,
+    daemon: Option<Result<(), String>>,
+) -> Vec<Check> {
+    let (detail, hint) = match (client, daemon) {
+        (DockerClient::Compose(version), Some(Ok(()))) => {
+            return vec![Check::ok(
+                "docker",
+                format!("docker compose {version}; the daemon answers"),
+            )];
+        }
+        (DockerClient::Compose(version), Some(Err(why))) => (
+            format!("docker client found (compose {version}), daemon not reachable: {why}"),
+            "start Docker (or OrbStack), or select the Docker context that is running",
+        ),
+        (DockerClient::Compose(version), None) => (
+            format!("docker compose {version}; the daemon was not asked"),
+            "start Docker (or OrbStack)",
+        ),
+        (DockerClient::NoCompose, _) => (
+            "`docker compose` is not available".to_string(),
+            "install Docker (or OrbStack) with the compose plugin",
+        ),
+        (DockerClient::Missing, _) => (
+            "`docker` was not found on PATH".to_string(),
+            "install Docker (or OrbStack) with the compose plugin",
+        ),
+    };
+    vec![if needed {
+        Check::fail(
+            "docker",
+            format!("{detail}; managed PostgreSQL and the container services need it"),
+            hint,
+        )
+    } else {
+        Check::warn(
+            "docker",
+            format!("{detail} (only needed for managed PostgreSQL and container services)"),
+            hint,
+        )
+    }]
 }
 
 fn project_config(project: &Project) -> Vec<Check> {
@@ -988,6 +1046,36 @@ mod tests {
             check.detail
         );
         assert!(!check.detail.contains("hunter2"), "{}", check.detail);
+    }
+
+    #[test]
+    fn a_docker_client_without_a_daemon_fails_when_docker_is_needed_and_warns_otherwise() {
+        let down = || Some(Err("Cannot connect to the Docker daemon".to_string()));
+        let compose = || DockerClient::Compose("2.40.0".into());
+        let needed = docker_checks(true, compose(), down());
+        assert_eq!(needed[0].status, CheckStatus::Fail);
+        assert!(
+            needed[0].detail.contains("daemon not reachable")
+                && needed[0].detail.contains("Cannot connect"),
+            "{:?}",
+            needed[0]
+        );
+        let optional = docker_checks(false, compose(), down());
+        assert_eq!(optional[0].status, CheckStatus::Warn);
+        assert!(optional[0].detail.contains("daemon not reachable"));
+        // Reachable: fine whatever the project needs; no client: same rule.
+        assert_eq!(
+            docker_checks(true, compose(), Some(Ok(())))[0].status,
+            CheckStatus::Ok
+        );
+        assert_eq!(
+            docker_checks(true, DockerClient::Missing, None)[0].status,
+            CheckStatus::Fail
+        );
+        assert_eq!(
+            docker_checks(false, DockerClient::NoCompose, None)[0].status,
+            CheckStatus::Warn
+        );
     }
 
     fn find<'a>(checks: &'a [Check], name: &str) -> Vec<&'a Check> {

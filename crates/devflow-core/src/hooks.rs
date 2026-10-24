@@ -1,5 +1,6 @@
 //! Running hook commands: `sh -c` per command, one process group each, a
 //! timeout that escalates TERM → KILL, and output teed to a log file.
+use crate::env_owner::ChildEnv;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Write};
@@ -116,7 +117,8 @@ impl HookReport {
 }
 
 /// Run `commands` in order with `sh -c` in `cwd`, with `env` added to the
-/// inherited environment and `DEVFLOW_SETUP_ACTIVE=1`. Stops at the first
+/// inherited environment (after the names it owns were taken out of it, see
+/// [`crate::env_owner`]) and `DEVFLOW_SETUP_ACTIVE=1`. Stops at the first
 /// failure. Each command gets its own process group and is killed (TERM, then
 /// KILL) when it exceeds its own `timeout`. Output lines go to `output` and to
 /// `<log_dir>/<timestamp>-<phase>.log`; a named command is announced with its
@@ -130,7 +132,7 @@ pub fn run(
     phase: HookPhase,
     commands: &[HookCommand],
     cwd: &Path,
-    env: &[(String, String)],
+    env: &ChildEnv,
     known_secrets: &[String],
     log_dir: &Path,
     output: &mut dyn FnMut(&str),
@@ -151,7 +153,7 @@ pub fn run(
         phase.as_str()
     ));
     let mut log = open_log(&log_path)?;
-    let mut secrets = secrets(env);
+    let mut secrets = secrets(env.vars());
     secrets.extend(known_secrets.iter().filter(|s| !s.is_empty()).cloned());
     let mut secrets = with_line_fragments(secrets);
     secrets.sort();
@@ -279,22 +281,18 @@ fn emit(log: &mut std::fs::File, output: &mut dyn FnMut(&str), secrets: &[String
 }
 
 /// Hook processes inherit our environment minus Git's hook context; the
-/// generated variables are applied on top. A workspace with a database also
-/// loses every inherited libpq variable that selects or authenticates a
-/// connection ([`crate::conn::libpq_env_vars`]) first: the generated set only
-/// names what the URL specifies, and an inherited `PGPORT`, `PGSERVICE` or
-/// `PGSSLROOTCERT` would otherwise silently redirect a hook's `psql`.
-pub(crate) fn apply_env(cmd: &mut Command, phase: HookPhase, env: &[(String, String)]) {
+/// workspace's variables are applied on top. Every name the workspace owns
+/// ([`ChildEnv`]) is taken out of the inherited environment first, whether the
+/// workspace sets a value for it or not: a `--no-db` workspace has no
+/// `DATABASE_URL`, and must not get the one of the workspace the caller is in;
+/// an inherited `PGPORT`, `PGSERVICE` or `PGSSLROOTCERT` would otherwise
+/// silently redirect a hook's `psql`. Execution controls are never touched.
+pub(crate) fn apply_env(cmd: &mut Command, phase: HookPhase, env: &ChildEnv) {
     for var in GIT_CONTEXT {
         cmd.env_remove(var);
     }
-    if env.iter().any(|(key, _)| key == "DATABASE_URL") {
-        for var in crate::conn::libpq_env_vars() {
-            cmd.env_remove(var);
-        }
-    }
-    cmd.envs(env.iter().map(|(k, v)| (k, v)))
-        .env("DEVFLOW_SETUP_ACTIVE", "1")
+    env.apply(cmd);
+    cmd.env("DEVFLOW_SETUP_ACTIVE", "1")
         .env("DEVFLOW_PHASE", phase.as_str());
     if let Some(path) = crate::paths::devflow_program().ok().and_then(|program| {
         path_with_devflow(&program, &std::env::var_os("PATH").unwrap_or_default())
@@ -324,7 +322,7 @@ fn run_one(
     phase: HookPhase,
     entry: &HookCommand,
     cwd: &Path,
-    env: &[(String, String)],
+    env: &ChildEnv,
     secrets: &[String],
     log: &mut std::fs::File,
     output: &mut dyn FnMut(&str),
@@ -511,10 +509,11 @@ mod tests {
         env: &[(&str, &str)],
         known_secrets: &[&str],
     ) -> Run {
-        let env: Vec<(String, String)> = env
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
+        let env = ChildEnv::plain(
+            env.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        );
         let known: Vec<String> = known_secrets.iter().map(|s| s.to_string()).collect();
         let mut lines = Vec::new();
         let report = run(
@@ -771,7 +770,7 @@ mod tests {
             HookPhase::Teardown,
             &[HookCommand::new("true", Duration::from_secs(1))],
             &dir.path().join("missing"),
-            &[],
+            &ChildEnv::plain(Vec::new()),
             &[],
             &dir.path().join("logs"),
             &mut |l| lines.push(l.to_string()),
@@ -860,10 +859,11 @@ mod tests {
     #[test]
     fn a_workspace_with_a_database_clears_inherited_libpq_variables() {
         let env_of = |env: &[(&str, &str)]| {
-            let env: Vec<(String, String)> = env
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect();
+            let env = ChildEnv::plain(
+                env.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            );
             let mut cmd = Command::new("sh");
             apply_env(&mut cmd, HookPhase::Setup, &env);
             cmd.get_envs()
@@ -887,8 +887,8 @@ mod tests {
             assert_eq!(with_db[inherited], None, "{inherited} must be cleared");
         }
         assert_eq!(with_db["GIT_DIR"], None);
-        // Without a database there is nothing to disagree with: the user's
-        // environment is left alone.
+        // A file with no manifest and no database owns nothing beyond the
+        // identity names: the user's environment is left alone.
         let without_db = env_of(&[("DEVFLOW_WORKSPACE", "w")]);
         assert!(!without_db.contains_key("PGPORT"));
         assert!(without_db.contains_key("GIT_DIR"));

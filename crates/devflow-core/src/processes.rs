@@ -55,7 +55,9 @@ pub const PROCESS_LOCK_WAIT: Duration = Duration::from_secs(2);
 /// The process lock of `workspace`: the proof, for everything below that
 /// records, starts, stops or replaces, that no other devflow operation is doing
 /// any of that to the same workspace. Waits [`PROCESS_LOCK_WAIT`], then fails
-/// with [`Busy`] (`downcast_ref::<Busy>()`).
+/// with [`Busy`] (`downcast_ref::<Busy>()`). A devflow that a hook started
+/// ([`receipt::started_by_a_hook`](crate::receipt::started_by_a_hook)) never
+/// waits: the run that started the hook may be holding the lock.
 pub fn process_lock(workspace: &Workspace) -> Result<ProcessLock> {
     anyhow::ensure!(
         workspace.git_dir.is_dir(),
@@ -63,7 +65,12 @@ pub fn process_lock(workspace: &Workspace) -> Result<ProcessLock> {
         workspace.name,
         workspace.git_dir.display()
     );
-    Receipt::process_lock_waiting(&workspace.git_dir, PROCESS_LOCK_WAIT)?
+    let wait = if crate::receipt::started_by_a_hook() {
+        Duration::ZERO
+    } else {
+        PROCESS_LOCK_WAIT
+    };
+    Receipt::process_lock_waiting(&workspace.git_dir, wait)?
         .ok_or_else(|| anyhow::Error::new(Busy::processes(&workspace.name)))
 }
 
@@ -647,6 +654,18 @@ pub enum Refusal {
         daemons: Vec<String>,
         delivery: crate::env_file::MiseDelivery,
     },
+    /// The same daemons, but the environment they would be given cannot be
+    /// established at all: `.devflow/env` was written by an earlier devflow
+    /// (it has no list of the names the workspace owns), or the process's
+    /// environment names a workspace that cannot be resolved. Neither is a
+    /// state of mise, so neither is a [`Refusal::MiseDelivery`].
+    WorkspaceEnv {
+        daemons: Vec<String>,
+        /// What is wrong, without a value.
+        detail: String,
+        /// What can be done about it, as the problem carries it.
+        remedies: Vec<crate::remedy::Remedy>,
+    },
     /// `setup --new-instance` would replace the identity the workspace's
     /// daemons run under while pitchfork lists them as active: they would keep
     /// running in a namespace nothing of the workspace names any more.
@@ -671,6 +690,7 @@ impl Refusal {
             Refusal::ForeignNamespace { .. } => "foreign_namespace",
             Refusal::StateUnknown { .. } => "state_unknown",
             Refusal::MiseDelivery { .. } => "mise_delivery",
+            Refusal::WorkspaceEnv { .. } => "workspace_env",
             Refusal::DaemonsRunning { .. } => "daemons_running",
         }
     }
@@ -777,6 +797,14 @@ impl std::fmt::Display for Refusal {
                 daemons.join(", "),
                 delivery.describe()
             ),
+            Refusal::WorkspaceEnv {
+                daemons, detail, ..
+            } => write!(
+                f,
+                "{} get the workspace's variables through mise, and which they are cannot be \
+                 established: {detail}",
+                daemons.join(", ")
+            ),
             Refusal::DaemonsRunning { ids } => write!(
                 f,
                 "this workspace's pitchfork daemons ({}) are running under the identity a new                  instance would replace; they would keep running in a namespace devflow no longer                  owns and could not stop",
@@ -828,8 +856,14 @@ impl Refusal {
                     .to_string()
             }
             Refusal::MiseDelivery { .. } => {
-                "check the doctor results for the workspace, fix the mise configuration, then \
-                 start again"
+                "run the daemon's command through `devflow exec` (run = \"devflow exec -- \
+                 COMMAND\"), which sets the workspace's variables after mise, or fix the mise \
+                 configuration (the doctor checks for the workspace say how), then start again"
+                    .to_string()
+            }
+            Refusal::WorkspaceEnv { .. } => {
+                "set the workspace up again so `.devflow/env` is written by this devflow, or \
+                 start from a shell that does not carry another workspace's variables"
                     .to_string()
             }
             Refusal::DaemonsRunning { .. } => {
@@ -856,6 +890,7 @@ impl Refusal {
             Refusal::NotApproved { .. } => vec![Remedy::Trust {
                 workspace: workspace.to_path_buf(),
             }],
+            Refusal::WorkspaceEnv { remedies, .. } => remedies.clone(),
             _ => Vec::new(),
         }
     }
@@ -1248,15 +1283,21 @@ fn runs_under_mise_with(processes: &ProcessesScope, name: &str, env: Option<&str
 }
 
 /// Checks that need a process of their own, so they run when a start is
-/// actually asked for and not each time a gate is merely shown (the status of
-/// a workspace is read on every refresh).
+/// actually asked for and when `ps` judges whether one would be, but not at
+/// every other place a gate is merely shown.
 ///
 /// Daemons with `mise = true` get `.devflow/env` only through mise: before
-/// starting any of them, mise must resolve every variable of the workspace's
-/// `.devflow/env` as devflow wrote it (`env_file::check_mise_delivery`, the
-/// check setup makes before its first hook). Anything else (overridden, not
-/// loaded, untrusted, mise missing, the check failing) refuses, since those
-/// daemons would otherwise talk to whatever database mise hands them.
+/// starting any of them, mise must hand them the workspace's variables as
+/// devflow wrote them and none it owns without a value ([`mise_delivery`]: the
+/// shared gate the hooks are checked by, then what mise resolves on its own).
+/// Anything else (overridden, removed, reintroduced, not loaded, untrusted,
+/// mise missing, the check failing) refuses, since those daemons would
+/// otherwise talk to whatever database mise hands them. A daemon
+/// whose `run` is wholly `devflow exec -- CMD` needs no check: devflow sets
+/// the variables after mise.
+///
+/// `ps` runs the same two steps ([`mise_users`], [`mise_delivery`]), so its
+/// `can_start` is what `up` would answer.
 fn pre_start_checks(
     workspace: &Workspace,
     scope: &Scope,
@@ -1264,24 +1305,85 @@ fn pre_start_checks(
     only: &[String],
     mise: &crate::env_file::MiseCommand,
 ) -> Result<(), Refusal> {
-    let wanted = wanted_daemons(&configured(scope), namespace, only)?;
-    let daemons = mise_daemons(scope, &wanted);
+    let daemons = mise_users(scope, namespace, only)?;
     if daemons.is_empty() {
         return Ok(());
+    }
+    delivered(daemons, mise_delivery(workspace, mise))
+}
+
+/// The daemons a start of `only` (everything when empty) would run that rely
+/// on mise for the workspace's variables.
+fn mise_users(scope: &Scope, namespace: &str, only: &[String]) -> Result<Vec<String>, Refusal> {
+    let wanted = wanted_daemons(&configured(scope), namespace, only)?;
+    Ok(mise_daemons(scope, &wanted))
+}
+
+/// The environment of a daemon could not be established (see
+/// [`Refusal::WorkspaceEnv`]).
+#[derive(Debug, Clone)]
+struct EnvProblem {
+    detail: String,
+    remedies: Vec<crate::remedy::Remedy>,
+}
+
+/// What mise does to the workspace's variables for a daemon that relies on it.
+///
+/// Two questions, asked in this order:
+///
+/// 1. The shared gate ([`crate::env_file::check_workspace_env`], the function
+///    setup, switch and teardown hooks and `doctor` ask through): with the
+///    environment `.devflow/env` says the workspace has (every name it owns
+///    out of the inherited environment, its own variables on top), does a
+///    process mise starts see every value as devflow set it and none of the
+///    names the workspace owns and sets no value for? A file without the
+///    list of owned names, or an environment that names a workspace that
+///    cannot be resolved, is an [`EnvProblem`], not a state of mise.
+/// 2. A daemon that is not wholly `devflow exec -- CMD` is started by
+///    pitchfork with pitchfork's own environment, not that one: devflow's
+///    variables reach it only if mise loads `.devflow/env` itself
+///    (`check_mise_delivery`, what mise resolves on its own).
+fn mise_delivery(
+    workspace: &Workspace,
+    mise: &crate::env_file::MiseCommand,
+) -> Result<crate::env_file::MiseDelivery, EnvProblem> {
+    // A daemon starts when the workspace is active, as a switch hook does.
+    let shared = crate::env_file::check_workspace_env(
+        &workspace.path,
+        crate::hooks::HookPhase::Switch,
+        crate::env_file::DEFAULT_MISE_TIMEOUT,
+        mise,
+    )
+    .map_err(|error| EnvProblem {
+        detail: format!("{error:#}"),
+        remedies: crate::remedy::remedies_of(&error),
+    })?;
+    if !shared.is_delivered() {
+        return Ok(shared);
     }
     let keys: Vec<String> = crate::env_file::read(&workspace.path)
         .map(|vars| vars.into_iter().map(|(key, _)| key).collect())
         .unwrap_or_default();
-    let delivery = crate::env_file::check_mise_delivery_with(
+    Ok(crate::env_file::check_mise_delivery_with(
         &workspace.path,
         &keys,
         crate::env_file::DEFAULT_MISE_TIMEOUT,
         mise,
-    );
-    if delivery.is_delivered() {
-        Ok(())
-    } else {
-        Err(Refusal::MiseDelivery { daemons, delivery })
+    ))
+}
+
+fn delivered(
+    daemons: Vec<String>,
+    delivery: Result<crate::env_file::MiseDelivery, EnvProblem>,
+) -> Result<(), Refusal> {
+    match delivery {
+        Ok(delivery) if delivery.is_delivered() => Ok(()),
+        Ok(delivery) => Err(Refusal::MiseDelivery { daemons, delivery }),
+        Err(problem) => Err(Refusal::WorkspaceEnv {
+            daemons,
+            detail: problem.detail,
+            remedies: problem.remedies,
+        }),
     }
 }
 
@@ -1523,7 +1625,8 @@ pub fn probe(pitchfork: Option<&Pitchfork>) -> Result<String, String> {
 }
 
 /// The processes of `workspace`, read from pitchfork now (`pitchfork` is the
-/// one on `PATH`).
+/// one on `PATH`). The gates are what a start would answer, the mise delivery
+/// check included (see [`status_from_checked`]).
 pub fn status(project: &Project, workspace: &Workspace) -> ProcessStatus {
     status_with(Pitchfork::locate().as_ref(), project, workspace)
 }
@@ -1534,6 +1637,22 @@ pub fn status_with(
     project: &Project,
     workspace: &Workspace,
 ) -> ProcessStatus {
+    status_with_mise(
+        pitchfork,
+        project,
+        workspace,
+        &crate::env_file::MiseCommand::default(),
+    )
+}
+
+/// [`status_with`] that asks `mise` (a stand-in, in tests) for the delivery
+/// check.
+pub fn status_with_mise(
+    pitchfork: Option<&Pitchfork>,
+    project: &Project,
+    workspace: &Workspace,
+    mise: &crate::env_file::MiseCommand,
+) -> ProcessStatus {
     let probed = probe(pitchfork);
     let snapshot = match (&probed, pitchfork) {
         (Ok(_), Some(pitchfork)) if !workspace.missing => {
@@ -1541,7 +1660,7 @@ pub fn status_with(
         }
         _ => Snapshot::default(),
     };
-    status_from(&probed, &snapshot, project, workspace)
+    status_from_checked(&probed, &snapshot, project, workspace, mise)
 }
 
 /// The processes of every workspace of the project, asking pitchfork once.
@@ -1550,6 +1669,21 @@ pub fn status_all(
     project: &Project,
     workspaces: &[Workspace],
 ) -> Vec<ProcessStatus> {
+    status_all_with_mise(
+        pitchfork,
+        project,
+        workspaces,
+        &crate::env_file::MiseCommand::default(),
+    )
+}
+
+/// [`status_all`] that asks `mise` for the delivery check.
+pub fn status_all_with_mise(
+    pitchfork: Option<&Pitchfork>,
+    project: &Project,
+    workspaces: &[Workspace],
+    mise: &crate::env_file::MiseCommand,
+) -> Vec<ProcessStatus> {
     let probed = probe(pitchfork);
     let snapshot = match (&probed, pitchfork) {
         (Ok(_), Some(pitchfork)) => Snapshot::read(pitchfork, &project.root),
@@ -1557,16 +1691,43 @@ pub fn status_all(
     };
     workspaces
         .iter()
-        .map(|workspace| status_from(&probed, &snapshot, project, workspace))
+        .map(|workspace| status_from_checked(&probed, &snapshot, project, workspace, mise))
         .collect()
 }
 
-/// Compose a workspace's status from a snapshot of pitchfork.
+/// Compose a workspace's status from a snapshot of pitchfork, without the
+/// checks that need a process of their own: the gates are the ones a start
+/// would apply before asking mise whether it hands `.devflow/env` to the
+/// daemons that rely on it. A report that only needs the daemons uses this.
 pub fn status_from(
     probed: &Result<String, String>,
     snapshot: &Snapshot,
     project: &Project,
     workspace: &Workspace,
+) -> ProcessStatus {
+    compose(probed, snapshot, project, workspace, None)
+}
+
+/// [`status_from`] whose gates also include the mise delivery check a start
+/// makes (asked at most once, and only when everything else allows a start and
+/// a daemon relies on mise), so `can_start` and each daemon's `startable` are
+/// what `up` would answer.
+pub fn status_from_checked(
+    probed: &Result<String, String>,
+    snapshot: &Snapshot,
+    project: &Project,
+    workspace: &Workspace,
+    mise: &crate::env_file::MiseCommand,
+) -> ProcessStatus {
+    compose(probed, snapshot, project, workspace, Some(mise))
+}
+
+fn compose(
+    probed: &Result<String, String>,
+    snapshot: &Snapshot,
+    project: &Project,
+    workspace: &Workspace,
+    mise: Option<&crate::env_file::MiseCommand>,
 ) -> ProcessStatus {
     let scope = trust::scope_at(project, &workspace.path);
     let declared = configured(&scope);
@@ -1648,8 +1809,23 @@ pub fn status_from(
         &namespace,
         foreign.as_deref(),
     );
+    // mise's answer, asked once and only when a start would otherwise be
+    // allowed (the status of a workspace is read on every refresh).
+    let mut delivery: Option<Result<crate::env_file::MiseDelivery, EnvProblem>> = None;
+    let mut mise_allows = |only: &[String], namespace: &str| -> Result<(), Refusal> {
+        let Some(mise) = mise else {
+            return Ok(());
+        };
+        let daemons = mise_users(&scope, namespace, only)?;
+        if daemons.is_empty() {
+            return Ok(());
+        }
+        let found = delivery.get_or_insert_with(|| mise_delivery(workspace, mise));
+        delivered(daemons, found.clone())
+    };
     let all_startable = if installed {
-        check_start(project, workspace, &scope, &[], None, true).map(|_| ())
+        check_start(project, workspace, &scope, &[], None, true)
+            .and_then(|namespace| mise_allows(&[], &namespace))
     } else {
         Err(Refusal::NotInstalled {
             detail: probed.clone().err().unwrap_or_default(),
@@ -1661,30 +1837,25 @@ pub fn status_from(
             && match &all_startable {
                 Ok(()) => true,
                 // Starting everything is refused because of a daemon's
-                // triggers or dependencies, but each daemon is judged on its
-                // own closure: one that depends on nothing outside the
-                // workspace and starts on its own with nothing is fine by name.
-                Err(Refusal::AutonomousTriggers { .. } | Refusal::ExternalDependency { .. }) => {
-                    check_start(
-                        project,
-                        workspace,
-                        &scope,
-                        std::slice::from_ref(&daemon.name),
-                        None,
-                        true,
-                    )
-                    .is_ok()
+                // triggers, dependencies or mise, but each daemon is judged on
+                // its own closure: one that depends on nothing outside the
+                // workspace, starts on its own with nothing and does not rely
+                // on a mise that fails is fine by name.
+                Err(
+                    Refusal::AutonomousTriggers { .. }
+                    | Refusal::ExternalDependency { .. }
+                    | Refusal::MiseDelivery { .. }
+                    | Refusal::WorkspaceEnv { .. },
+                ) => {
+                    let only = std::slice::from_ref(&daemon.name);
+                    check_start(project, workspace, &scope, only, None, true)
+                        .and_then(|namespace| mise_allows(only, &namespace))
+                        .is_ok()
                 }
                 Err(_) => false,
             };
     }
-    let gate_start = if installed {
-        Gate::of(all_startable)
-    } else {
-        Gate::of(Err(Refusal::NotInstalled {
-            detail: probed.clone().err().unwrap_or_default(),
-        }))
-    };
+    let gate_start = Gate::of(all_startable);
     let gate_stop = if installed {
         Gate::of(check_stop(project, workspace, &scope, None, true))
     } else {
@@ -2329,6 +2500,20 @@ fn stop_locked(
     run_stop(pitchfork, project, workspace, &plan, options, Some(lock))
 }
 
+/// Daemons a removal that went on without knowing could not rule out: the
+/// namespace devflow assigned to the workspace and the ids that may still run
+/// under it. The workspace's receipt, which could name them again, goes with
+/// the worktree, so this is what is left of that knowledge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MayStillRun {
+    /// The namespace devflow assigned; `None` when the receipt could not be
+    /// read, so that not even that is known.
+    pub namespace: Option<String>,
+    /// The full `namespace/name` ids that may still be active (recorded
+    /// starts and declared daemons); empty when they cannot be listed.
+    pub ids: Vec<String>,
+}
+
 /// What a stop is going to do, decided before anything is stopped.
 #[derive(Debug, Clone)]
 pub struct StopPlan {
@@ -2340,6 +2525,9 @@ pub struct StopPlan {
     pub namespace: Option<String>,
     /// What the plan itself has to say (a state that could not be read).
     pub warnings: Vec<String>,
+    /// Set when the plan goes on without knowing what runs (a forced removal
+    /// over a state that could not be read): the daemons that may still run.
+    pub may_run: Option<MayStillRun>,
 }
 
 /// Ask pitchfork what runs in the workspace's assigned namespace. Queries
@@ -2356,6 +2544,19 @@ fn plan_stop(
     workspace: &Workspace,
     force: bool,
 ) -> Result<StopPlan, Refusal> {
+    plan_stop_from(pitchfork, project, workspace, &workspace.path, force)
+}
+
+/// [`plan_stop`] asking pitchfork from `dir`: the workspace's own directory,
+/// or, for a checkout that is gone, a directory that exists (ids carry their
+/// namespace, so no configuration is needed to name a daemon).
+fn plan_stop_from(
+    pitchfork: &Pitchfork,
+    project: &Project,
+    workspace: &Workspace,
+    dir: &Path,
+    force: bool,
+) -> Result<StopPlan, Refusal> {
     let mut warnings = Vec::new();
     // The daemons of this workspace are the ones in the namespace devflow
     // assigned to it. A workspace devflow never set up has none.
@@ -2366,11 +2567,12 @@ fn plan_stop(
                 active: Vec::new(),
                 namespace: None,
                 warnings,
+                may_run: None,
             });
         }
         Err(refusal) => return Err(refusal),
     };
-    let snapshot = Snapshot::read(pitchfork, &workspace.path);
+    let snapshot = Snapshot::read(pitchfork, dir);
     // A listing that failed, or one that cannot show nothing of the namespace
     // runs (a state devflow does not know is not "stopped"), is unknown.
     let problem = snapshot.error.clone().or_else(|| {
@@ -2385,15 +2587,37 @@ fn plan_stop(
                 hint: None,
             });
         }
-        let declared = configured(&trust::scope_at(project, &workspace.path));
+        // The daemons the workspace's files declare; for a checkout that is
+        // gone, the ones devflow recorded starting.
+        let (ids, what) = if workspace.missing {
+            let recorded = recorded_start(project, workspace, &assigned);
+            (
+                recorded.map(|record| record.ids).unwrap_or_default(),
+                "the daemons devflow recorded starting",
+            )
+        } else {
+            let declared = configured(&trust::scope_at(project, &workspace.path));
+            (
+                qualified_ids(&assigned, declared.into_iter().map(|d| d.name).collect()),
+                "the daemons the workspace declares",
+            )
+        };
         warnings.push(format!(
-            "could not read what pitchfork runs ({error}); asked it to stop the daemons the \
-             workspace declares without being able to tell which of them ran"
+            "could not read what pitchfork runs ({error}); asked it to stop {what} without \
+             being able to tell which of them ran"
         ));
+        // Whatever the stop does, the namespace stays unresolved until a
+        // listing that could be read shows nothing of it running, even when no
+        // id is known to ask about.
+        let may_run = MayStillRun {
+            namespace: Some(assigned.clone()),
+            ids: ids.clone(),
+        };
         return Ok(StopPlan {
-            active: qualified_ids(&assigned, declared.into_iter().map(|d| d.name).collect()),
+            active: ids,
             namespace: Some(assigned),
             warnings,
+            may_run: Some(may_run),
         });
     }
     if snapshot.supervisor_up == Some(false) {
@@ -2409,6 +2633,7 @@ fn plan_stop(
         active,
         namespace: Some(assigned),
         warnings,
+        may_run: None,
     })
 }
 
@@ -2511,12 +2736,17 @@ fn supervisor_down(
     let Some(record) = recorded_start(project, workspace, &assigned) else {
         return Ok(StopPlan {
             active: Vec::new(),
-            namespace: Some(assigned),
             warnings: vec![
                 "pitchfork's supervisor is down; devflow started no daemons here, but processes \
                  started outside devflow can't be checked"
                     .to_string(),
             ],
+            // Nothing could be listed, so nothing is ruled out.
+            may_run: Some(MayStillRun {
+                namespace: Some(assigned.clone()),
+                ids: Vec::new(),
+            }),
+            namespace: Some(assigned),
         });
     };
     let detail = supervisor_down_detail(&record);
@@ -2533,10 +2763,14 @@ fn supervisor_down(
     }
     Ok(StopPlan {
         active: Vec::new(),
-        namespace: Some(assigned),
         warnings: vec![format!(
             "daemons of this workspace may still be running and were not stopped: {detail}"
         )],
+        may_run: Some(MayStillRun {
+            namespace: Some(assigned.clone()),
+            ids: record.ids,
+        }),
+        namespace: Some(assigned),
     })
 }
 
@@ -2681,7 +2915,34 @@ pub fn autostart_with(
     if !project.config.pitchfork.autostart || !uses_pitchfork(&workspace.path) {
         return None;
     }
-    Some(match start_with(pitchfork, project, workspace, options) {
+    Some(autostarted(start_with(
+        pitchfork, project, workspace, options,
+    )))
+}
+
+/// [`autostart_with`] by a caller that already holds the workspace's process
+/// lock (entering a workspace keeps it from the first look at the receipt
+/// until the daemons are up). The receipt lock must have been released: a
+/// start records its intent in the receipt under it.
+pub fn autostart_locked(
+    pitchfork: Option<&Pitchfork>,
+    project: &Project,
+    workspace: &Workspace,
+    options: &StartOptions,
+    lock: &ProcessLock,
+) -> Option<Autostart> {
+    if !project.config.pitchfork.autostart || !uses_pitchfork(&workspace.path) {
+        return None;
+    }
+    Some(autostarted(
+        detected(pitchfork)
+            .map_err(Into::into)
+            .and_then(|pitchfork| start_locked(&pitchfork, project, workspace, options, lock)),
+    ))
+}
+
+fn autostarted(started: Result<ProcessReport>) -> Autostart {
+    match started {
         Ok(report) => Autostart {
             report: Some(report),
             skipped: None,
@@ -2692,7 +2953,7 @@ pub fn autostart_with(
             skipped: Some(format!("{error:#}")),
             refusal: error.downcast_ref::<Refusal>().cloned(),
         },
-    })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2828,6 +3089,40 @@ pub struct RemovalStop {
     plan: StopPlan,
 }
 
+/// An empty directory of our own to ask pitchfork from, removed when dropped.
+/// What is asked of a workspace whose checkout is gone is asked from here:
+/// there is no worktree to run in, and the project's directory would have
+/// pitchfork read a configuration. (A query runs no lifecycle hook; a stop does,
+/// from the configuration at the directory the daemon was started from, whoever
+/// asks, which is why a gone checkout's daemons are never stopped: see
+/// [`plan_gone`].)
+#[derive(Debug)]
+pub struct NeutralDir(PathBuf);
+
+impl NeutralDir {
+    fn create() -> std::io::Result<NeutralDir> {
+        let path = std::env::temp_dir().join(format!("devflow-pitchfork-{}", uuid::Uuid::new_v4()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+        }
+        #[cfg(not(unix))]
+        std::fs::create_dir(&path)?;
+        Ok(NeutralDir(path))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for NeutralDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.0);
+    }
+}
+
 impl RemovalStop {
     pub fn daemons(&self) -> &[String] {
         &self.plan.active
@@ -2842,6 +3137,13 @@ impl RemovalStop {
 /// pitchfork.toml must not make everyone without pitchfork pass `--force`), but
 /// a workspace that has devflow's namespace file or a recorded start carries a
 /// warning that its daemons could not be checked.
+///
+/// A workspace whose checkout is gone (deleted, or on a drive that is not
+/// connected) is planned from its receipt alone: the namespace devflow assigned
+/// (`df-<project8>-<instance8>`) and the ids it recorded starting name the
+/// daemons, pitchfork is asked from the project's folder, and they are stopped
+/// by full id ([`plan_gone`]). Its files are not there to approve, to carry an
+/// `on_stop`, or to name another namespace.
 ///
 /// Refuses, with a [`Refusal::StateUnknown`], when the state of the daemons
 /// cannot be read, and that includes a pitchfork on `PATH` that cannot be
@@ -2862,7 +3164,8 @@ pub fn plan_removal(
     workspace: &Workspace,
     force: bool,
 ) -> Result<Option<RemovalStop>, Refusal> {
-    if workspace.missing {
+    // (A Git directory that is not there has no receipt and no namespace.)
+    if workspace.missing && !workspace.git_dir.is_dir() {
         return Ok(None);
     }
     let lock = lock_for_removal(workspace)?;
@@ -2888,10 +3191,10 @@ pub fn plan_removal_locked(
     _lock: &ProcessLock,
 ) -> Result<Option<RemovalStop>, Refusal> {
     if workspace.missing {
-        return Ok(None);
+        return plan_gone(pitchfork, project, workspace, force);
     }
     let Some(located) = pitchfork else {
-        return Ok(without_pitchfork(project, workspace));
+        return without_pitchfork(project, workspace, force);
     };
     // Without a pitchfork file there is nothing that gives the workspace a
     // namespace, so no daemon can be attributed to it.
@@ -2906,13 +3209,6 @@ pub fn plan_removal_locked(
     ) {
         return Ok(None);
     }
-    let left_running = |why: &Refusal| StopPlan {
-        active: Vec::new(),
-        namespace: None,
-        warnings: vec![format!(
-            "daemons of this workspace may still be running and were not stopped: {why}"
-        )],
-    };
     // One that is on `PATH` but cannot be asked is another matter: the
     // workspace has pitchfork files and a namespace, daemons may run under it,
     // and a shim that does not run (`--version` exits 1) or a build without a
@@ -2929,14 +3225,20 @@ pub fn plan_removal_locked(
         }
         return Ok(Some(RemovalStop {
             pitchfork: Some(located.clone()),
-            plan: left_running(&unknown),
+            plan: left_running(&unknown, may_run(project, workspace)),
         }));
     }
     let pitchfork = located.clone();
     let plan = match plan_stop(&pitchfork, project, workspace, force) {
         Ok(plan) => plan,
         // The receipt cannot be read: no namespace to look for.
-        Err(refusal @ Refusal::NotReady { .. }) if force => left_running(&refusal),
+        Err(refusal @ Refusal::NotReady { .. }) if force => left_running(
+            &refusal,
+            MayStillRun {
+                namespace: None,
+                ids: Vec::new(),
+            },
+        ),
         Err(refusal) => return Err(refusal),
     };
     if !plan.active.is_empty() {
@@ -2948,7 +3250,7 @@ pub fn plan_removal_locked(
             Err(refusal @ Refusal::ForeignNamespace { .. }) if force => {
                 return Ok(Some(RemovalStop {
                     pitchfork: Some(pitchfork),
-                    plan: left_running(&refusal),
+                    plan: left_running(&refusal, may_run(project, workspace)),
                 }));
             }
             Err(refusal) => return Err(refusal),
@@ -2963,19 +3265,256 @@ pub fn plan_removal_locked(
     }))
 }
 
-/// No pitchfork on `PATH`: devflow has nothing to ask, and a project that
-/// commits a pitchfork.toml for those who use pitchfork must not make everyone
-/// else pass `--force` (which also overrides the other protections) to remove a
-/// workspace, so the removal proceeds. But a workspace that devflow gave a
-/// namespace file, or whose daemons it recorded starting, may have daemons
-/// somewhere that this machine's pitchfork cannot be asked about: that is said.
-fn without_pitchfork(project: &Project, workspace: &Workspace) -> Option<RemovalStop> {
-    let receipt = setup::receipt(project, workspace).ok()??;
-    let namespace_file = namespace_of(&workspace.path).source == NamespaceSource::Devflow;
-    if !namespace_file && receipt.processes.is_none() {
-        return None;
+/// What a forced removal says when it goes on without knowing: nothing is
+/// stopped, and `may_run` lists what could not be ruled out.
+fn left_running(why: &Refusal, may_run: MayStillRun) -> StopPlan {
+    StopPlan {
+        active: Vec::new(),
+        namespace: None,
+        warnings: vec![format!(
+            "daemons of this workspace may still be running and were not stopped: {why}"
+        )],
+        may_run: Some(may_run),
     }
-    Some(RemovalStop {
+}
+
+/// The namespace devflow assigned to `workspace` and the ids that may run in
+/// it: the ones recorded as started and, while the checkout is there, the ones
+/// its files declare. What a removal that cannot check leaves the person with.
+fn may_run(project: &Project, workspace: &Workspace) -> MayStillRun {
+    let Ok(namespace) = assigned_namespace(project, workspace) else {
+        return MayStillRun {
+            namespace: None,
+            ids: Vec::new(),
+        };
+    };
+    let mut ids: BTreeSet<String> = recorded_start(project, workspace, &namespace)
+        .map(|record| record.ids)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    if !workspace.missing {
+        let declared = configured(&trust::scope_at(project, &workspace.path));
+        ids.extend(qualified_ids(
+            &namespace,
+            declared.into_iter().map(|d| d.name).collect(),
+        ));
+    }
+    MayStillRun {
+        namespace: Some(namespace),
+        ids: ids.into_iter().collect(),
+    }
+}
+
+/// The daemons of a workspace whose checkout is gone. Nothing in its directory
+/// can be read, so what is known comes from the receipt, which lives in the Git
+/// directory that outlives the checkout: the namespace devflow assigned, and the
+/// ids it recorded starting. pitchfork is asked what runs under that namespace
+/// (a query, from an empty directory of our own: [`NeutralDir`]).
+///
+/// Nothing is ever stopped here. The ids establish whose daemons these are; they
+/// are not an approval to run anyone's lifecycle hooks, and a stop makes the
+/// supervisor run `on_stop` and `on_exit` itself, from the configuration at the
+/// directory the daemon was started from (its recorded `watch_base_dir`, else
+/// its `dir`, which may be outside the missing checkout and still hold a
+/// configuration), whoever asks and from wherever. pitchfork 2.29.0 and 2.30.1
+/// (`src/supervisor/lifecycle.rs`, `src/supervisor/hooks.rs`) have no flag, request
+/// field, setting or environment variable that stops without them, so there is
+/// no stop path devflow can verify to be safe. Daemons found running, or a state
+/// that cannot be read, are therefore [`Refusal::StateUnknown`] (forceable, the
+/// receipt stays); a forced removal leaves them running and lists the namespace
+/// and ids in `may_still_run`. Only a listing that was read and shows nothing of
+/// the namespace running lets a removal go on without a word.
+///
+/// There is a reason to ask when devflow recorded a start or the project uses
+/// pitchfork at all. With recorded starts and no pitchfork on `PATH` the
+/// removal is refused the same way.
+fn plan_gone(
+    pitchfork: Option<&Pitchfork>,
+    project: &Project,
+    workspace: &Workspace,
+    force: bool,
+) -> Result<Option<RemovalStop>, Refusal> {
+    // Without its Git directory there is no receipt, hence no namespace.
+    if !workspace.git_dir.is_dir() {
+        return Ok(None);
+    }
+    let assigned = match assigned_namespace(project, workspace) {
+        Ok(assigned) => assigned,
+        // devflow never set it up: it started nothing here.
+        Err(Refusal::NotReady { status, .. }) if status == "not_set_up" => return Ok(None),
+        // The receipt cannot be read: no namespace to look for.
+        Err(refusal) if force => {
+            return Ok(Some(RemovalStop {
+                pitchfork: pitchfork.cloned(),
+                plan: left_running(
+                    &refusal,
+                    MayStillRun {
+                        namespace: None,
+                        ids: Vec::new(),
+                    },
+                ),
+            }));
+        }
+        Err(refusal) => return Err(refusal),
+    };
+    let recorded = recorded_start(project, workspace, &assigned);
+    // (Whatever the receipt records, under whatever namespace, is what devflow
+    // started and cannot check without pitchfork.)
+    let recorded_any = setup::receipt(project, workspace)
+        .ok()
+        .flatten()
+        .and_then(|receipt| receipt.processes);
+    if recorded.is_none() && recorded_any.is_none() && !touches_pitchfork(&project.root) {
+        return Ok(None);
+    }
+    let unknown = |detail: String| Refusal::StateUnknown {
+        detail,
+        hint: Some(GONE_HINT.to_string()),
+    };
+    let Some(located) = pitchfork else {
+        return without_pitchfork_for(recorded_any, &assigned, force);
+    };
+    let detection = located.detect_cached();
+    if !detection.usable() {
+        let refusal = unknown(detection.summary());
+        if !force {
+            return Err(refusal);
+        }
+        return Ok(Some(RemovalStop {
+            pitchfork: Some(located.clone()),
+            plan: left_running(&refusal, may_run(project, workspace)),
+        }));
+    }
+    let dir = NeutralDir::create().map_err(|error| {
+        unknown(format!(
+            "cannot make a directory to ask pitchfork from: {error}"
+        ))
+    })?;
+    let plan = match plan_stop_from(located, project, workspace, dir.path(), force) {
+        Ok(plan) => plan,
+        // (The generic advice is about stopping them, which is not on offer.)
+        Err(Refusal::StateUnknown { detail, .. }) => return Err(unknown(detail)),
+        Err(refusal) => return Err(refusal),
+    };
+    // Whatever the plan wanted to stop, nothing is: see above.
+    let active = plan.active.clone();
+    let mut plan = StopPlan {
+        active: Vec::new(),
+        ..plan
+    };
+    if plan.may_run.is_none() && !active.is_empty() {
+        // Listed running, so the state is known; it is the stop that is not on
+        // offer.
+        let refusal = unknown(format!(
+            "pitchfork lists {} running, and stopping them makes pitchfork run their lifecycle \
+             hooks (on_stop, on_exit) from the configuration at the directory they were started \
+             from, which devflow cannot read or ask anyone to approve now that the checkout is \
+             gone",
+            active.join(", ")
+        ));
+        if !force {
+            return Err(refusal);
+        }
+        let mut ids: BTreeSet<String> = active.into_iter().collect();
+        ids.extend(recorded.into_iter().flat_map(|record| record.ids));
+        plan.warnings.push(format!(
+            "daemons of this workspace may still be running and were not stopped: {refusal}"
+        ));
+        plan.may_run = Some(MayStillRun {
+            namespace: Some(assigned),
+            ids: ids.into_iter().collect(),
+        });
+        return Ok(Some(RemovalStop {
+            pitchfork: Some(located.clone()),
+            plan,
+        }));
+    }
+    if plan.warnings.is_empty() && plan.may_run.is_none() {
+        // A listing that was read shows nothing of the namespace running.
+        return Ok(None);
+    }
+    Ok(Some(RemovalStop {
+        pitchfork: Some(located.clone()),
+        plan,
+    }))
+}
+
+/// What to do when the daemons of a workspace whose checkout is gone run, or
+/// cannot be seen.
+const GONE_HINT: &str = "devflow does not stop the daemons of a workspace whose checkout is gone, \
+     because pitchfork would run their lifecycle hooks from a configuration nobody approved: \
+     stop them yourself with pitchfork, or go on without knowing by forcing the removal, which \
+     leaves them running and lists them in its result";
+
+/// No pitchfork on `PATH` for a workspace whose checkout is gone: with recorded
+/// starts, devflow cannot check what it started, which is
+/// [`Refusal::StateUnknown`] (forceable; the forced removal says so and lists
+/// the ids); without any, nothing is known to be out there.
+fn without_pitchfork_for(
+    recorded: Option<ProcessRecord>,
+    assigned: &str,
+    force: bool,
+) -> Result<Option<RemovalStop>, Refusal> {
+    let Some(record) = recorded else {
+        return Ok(None);
+    };
+    let detail = format!(
+        "pitchfork isn't on PATH, so devflow cannot check the daemons it recorded starting for \
+         this workspace ({})",
+        record.ids.join(", ")
+    );
+    if !force {
+        return Err(Refusal::StateUnknown {
+            detail,
+            hint: Some(
+                "put pitchfork on PATH so the daemons can be checked, or go on without knowing \
+                 by forcing the removal, which leaves them running and lists them in its result"
+                    .to_string(),
+            ),
+        });
+    }
+    Ok(Some(RemovalStop {
+        pitchfork: None,
+        plan: StopPlan {
+            active: Vec::new(),
+            namespace: None,
+            warnings: vec![format!(
+                "pitchfork isn't on PATH, so devflow couldn't check the daemons of this \
+                 workspace ({}); any that are running were not stopped",
+                record.ids.join(", ")
+            )],
+            may_run: Some(MayStillRun {
+                namespace: Some(assigned.to_string()),
+                ids: record.ids,
+            }),
+        },
+    }))
+}
+
+/// No pitchfork on `PATH`: devflow has nothing to ask. A project that commits a
+/// pitchfork.toml for those who use pitchfork must not make everyone else pass
+/// `--force` (which also overrides the other protections) to remove a
+/// workspace, so the removal proceeds with a warning when all devflow knows is
+/// that it gave the workspace a namespace file. But daemons devflow *recorded
+/// starting* may be out there, and it cannot check them: that is
+/// [`Refusal::StateUnknown`], forceable, and the forced removal lists them.
+fn without_pitchfork(
+    project: &Project,
+    workspace: &Workspace,
+    force: bool,
+) -> Result<Option<RemovalStop>, Refusal> {
+    let Some(receipt) = setup::receipt(project, workspace).ok().flatten() else {
+        return Ok(None);
+    };
+    if receipt.processes.is_some() {
+        return without_pitchfork_for(receipt.processes.clone(), &receipt.slug(), force);
+    }
+    let namespace_file = namespace_of(&workspace.path).source == NamespaceSource::Devflow;
+    if !namespace_file {
+        return Ok(None);
+    }
+    Ok(Some(RemovalStop {
         pitchfork: None,
         plan: StopPlan {
             active: Vec::new(),
@@ -2985,9 +3524,55 @@ fn without_pitchfork(project: &Project, workspace: &Workspace) -> Option<Removal
                  that are running were not stopped"
                     .to_string(),
             ],
+            may_run: Some(may_run(project, workspace)),
         },
-    })
+    }))
 }
+
+/// What a removal's stop did.
+#[derive(Debug, Clone, Default)]
+pub struct RemovalStopped {
+    /// The ids stopped.
+    pub stopped: Vec<String>,
+    pub warnings: Vec<String>,
+    /// Daemons the removal went on without being able to rule out (set only
+    /// when it had to go on without knowing, forced or because pitchfork could
+    /// not be asked at all).
+    pub may_still_run: Option<MayStillRun>,
+}
+
+/// A removal's stop that was asked of pitchfork and did not end as it should:
+/// some daemons may be stopped and others not, or the state afterwards could
+/// not be read. The removal stops there (unless forced), with the stop's report
+/// kept, so that it can say what was done and what remains instead of calling
+/// itself a refusal.
+#[derive(Debug, Clone)]
+pub struct StopFailed {
+    /// Why, in one sentence.
+    pub cause: String,
+    /// The ids that read as stopped afterwards.
+    pub stopped: Vec<String>,
+    /// The ids still running, or whose state could not be read.
+    pub remaining: Vec<String>,
+    /// What pitchfork reported after the stop.
+    pub report: ProcessReport,
+}
+
+impl StopFailed {
+    /// The stop changed something, or its result is unknown: not a refusal
+    /// that came before any effect.
+    pub fn partial(&self) -> bool {
+        !self.stopped.is_empty() || self.report.state_error.is_some()
+    }
+}
+
+impl std::fmt::Display for StopFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.cause)
+    }
+}
+
+impl std::error::Error for StopFailed {}
 
 /// Stop what [`plan_removal`] planned, after looking at the files again: a
 /// configuration changed since the plan (a new `on_stop`, another namespace) is
@@ -2996,7 +3581,8 @@ fn without_pitchfork(project: &Project, workspace: &Workspace) -> Option<Removal
 ///
 /// Removal needs the stop to be seen to work: pitchfork succeeded, the state
 /// could be read back, and none of the workspace's daemons is active. Anything
-/// else is an error, unless `force`, which goes on with a warning.
+/// else is an error ([`StopFailed`] once pitchfork was asked), unless `force`,
+/// which goes on with a warning.
 ///
 /// [`stop_for_removal_locked`] under a process lock taken here.
 pub fn stop_for_removal(
@@ -3010,6 +3596,7 @@ pub fn stop_for_removal(
     }
     let lock = process_lock(workspace)?;
     stop_for_removal_locked(project, workspace, stop, force, &lock)
+        .map(|stopped| (stopped.stopped, stopped.warnings))
 }
 
 /// [`stop_for_removal`] by a caller that holds the workspace's process lock
@@ -3021,13 +3608,18 @@ pub fn stop_for_removal_locked(
     stop: &RemovalStop,
     force: bool,
     _lock: &ProcessLock,
-) -> Result<(Vec<String>, Vec<String>)> {
+) -> Result<RemovalStopped> {
+    let nothing = || RemovalStopped {
+        stopped: Vec::new(),
+        warnings: stop.plan.warnings.clone(),
+        may_still_run: stop.plan.may_run.clone(),
+    };
     if stop.plan.active.is_empty() {
         // Nothing was asked of pitchfork (only a note to pass on).
-        return Ok((Vec::new(), stop.plan.warnings.clone()));
+        return Ok(nothing());
     }
     let Some(pitchfork) = &stop.pitchfork else {
-        return Ok((Vec::new(), stop.plan.warnings.clone()));
+        return Ok(nothing());
     };
     let report = match run_stop(
         pitchfork,
@@ -3045,18 +3637,20 @@ pub fn stop_for_removal_locked(
         Ok(report) => report,
         Err(error) => {
             return match error.downcast_ref::<Refusal>() {
-                Some(refusal @ Refusal::ForeignNamespace { .. }) if force => Ok((
-                    Vec::new(),
-                    vec![format!(
-                        "daemons of this workspace may still be running and were not stopped: \
-                         {refusal}"
-                    )],
-                )),
+                Some(refusal @ Refusal::ForeignNamespace { .. }) if force => {
+                    let left = left_running(refusal, may_run(project, workspace));
+                    Ok(RemovalStopped {
+                        stopped: Vec::new(),
+                        warnings: left.warnings,
+                        may_still_run: left.may_run,
+                    })
+                }
                 _ => Err(error),
             };
         }
     };
     let mut warnings = report.warnings.clone();
+    let mut may_still_run = None;
     if !report.ok() {
         let still: Vec<&str> = report
             .daemons
@@ -3076,15 +3670,55 @@ pub fn stop_for_removal_locked(
             ),
             (None, None) => format!("{} still running", still.join(", ")),
         };
-        anyhow::ensure!(
-            force,
-            "could not stop the workspace's pitchfork daemons: {why}"
-        );
+        // What was asked, what reads as stopped now, and what is seen running.
+        let active_now: BTreeSet<&str> = report
+            .daemons
+            .iter()
+            .filter(|d| d.is_active())
+            .filter_map(|d| d.id.as_deref())
+            .collect();
+        let listed: BTreeSet<&str> = report
+            .daemons
+            .iter()
+            .filter_map(|d| d.id.as_deref())
+            .collect();
+        let stopped: Vec<String> = stop
+            .plan
+            .active
+            .iter()
+            .filter(|id| listed.contains(id.as_str()) && !active_now.contains(id.as_str()))
+            .cloned()
+            .collect();
+        let remaining: Vec<String> = stop
+            .plan
+            .active
+            .iter()
+            .filter(|id| !stopped.contains(id))
+            .cloned()
+            .collect();
+        if !force {
+            return Err(anyhow::Error::new(StopFailed {
+                cause: format!("could not stop the workspace's pitchfork daemons: {why}"),
+                stopped,
+                remaining,
+                report,
+            }));
+        }
         warnings.push(format!(
             "could not stop every pitchfork daemon, or could not see that they stopped: {why}"
         ));
+        let mut ids: BTreeSet<String> = stop.plan.active.iter().cloned().collect();
+        ids.extend(active_now.iter().map(|id| id.to_string()));
+        may_still_run = Some(MayStillRun {
+            namespace: stop.plan.namespace.clone(),
+            ids: ids.into_iter().collect(),
+        });
     }
-    Ok((stop.plan.active.clone(), warnings))
+    Ok(RemovalStopped {
+        stopped: stop.plan.active.clone(),
+        warnings,
+        may_still_run,
+    })
 }
 
 /// The detection used when only the version matters.

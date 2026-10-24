@@ -88,6 +88,12 @@ impl FailureKind {
             Self::Protected {
                 forceable: protected.forceable,
             }
+        } else if let Some(partial) = error.downcast_ref::<devflow_core::error::PartialRemoval>() {
+            // A removal that stopped part-way: forcing goes on past the cause
+            // where force can, as for a protection.
+            Self::Protected {
+                forceable: partial.forceable,
+            }
         } else if error.downcast_ref::<NotInitialized>().is_some() {
             Self::NotInitialized
         } else if error.downcast_ref::<Busy>().is_some() {
@@ -167,10 +173,32 @@ pub struct Done {
     pub summary: String,
     pub warnings: Vec<String>,
     pub needs_attention: bool,
-    pub select_workspace: Option<String>,
+    /// The checkout of the workspace to select once the job is done.
+    pub select_workspace: Option<PathBuf>,
     /// What this did to a workspace's processes, so the view can keep or
     /// clear a refusal.
     pub process: Option<ProcessNote>,
+    /// How the services of a workspace stood once it was entered, so the
+    /// detail can show them (and a start that failed, with its remedy).
+    pub entered: Option<Box<Entered>>,
+}
+
+/// How a workspace's container services stood when it was last entered
+/// (created, switched to, set up).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entered {
+    /// The workspace's directory.
+    pub path: PathBuf,
+    pub services: Vec<EnteredService>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnteredService {
+    pub key: String,
+    pub engine: String,
+    pub state: setup::ServiceRun,
+    /// Why it did not start (masked when the job finishes).
+    pub reason: Option<String>,
 }
 
 /// The outcome of asking core to start a workspace's processes.
@@ -197,6 +225,11 @@ impl Done {
         self.summary = redact::text(&self.summary);
         for warning in &mut self.warnings {
             *warning = redact::text(warning);
+        }
+        if let Some(entered) = &mut self.entered {
+            for service in &mut entered.services {
+                service.reason = service.reason.as_deref().map(redact::text);
+            }
         }
         self
     }

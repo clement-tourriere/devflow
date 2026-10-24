@@ -358,12 +358,19 @@ fn local_edits_go_to_the_local_file_and_say_what_that_means() {
     assert_eq!(doc["file"], "devflow.local.toml");
     assert_eq!(doc["target"], "local");
     let notes = doc["notes"].as_array().unwrap();
-    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes.len(), 2, "{notes:?}");
     assert!(
         notes[0]
             .as_str()
             .unwrap()
             .contains("copied from devflow.toml")
+    );
+    // The new file is kept out of Git, and the edit says so.
+    assert!(notes[1].as_str().unwrap().contains("info/exclude"));
+    let exclude = std::fs::read_to_string(env.repo.join(".git/info/exclude")).unwrap();
+    assert!(
+        exclude.lines().any(|l| l == "/devflow.local.toml"),
+        "{exclude}"
     );
     assert_eq!(
         env.local(),

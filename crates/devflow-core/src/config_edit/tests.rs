@@ -961,9 +961,14 @@ fn local_edits_create_the_local_file_and_copy_the_committed_list_first() {
     assert!(!fixture.path(Target::Local).exists());
     let applied = fixture.ok(Target::Local, add(HookPhase::Setup, "echo mine"));
     assert_eq!(applied.target, Target::Local);
-    assert_eq!(applied.notes.len(), 1);
+    assert_eq!(applied.notes.len(), 2);
     assert!(
         applied.notes[0].contains("copied from devflow.toml"),
+        "{:?}",
+        applied.notes
+    );
+    assert!(
+        applied.notes[1].contains("info/exclude"),
         "{:?}",
         applied.notes
     );
@@ -1411,4 +1416,137 @@ fn a_missing_hook_is_reported_without_repeating_what_was_asked() {
         )
         .unwrap_err();
     assert!(format!("{error:#}").contains("position 5"), "{error:#}");
+}
+
+fn exclude_text(fixture: &Fixture) -> String {
+    std::fs::read_to_string(fixture.root.join(".git/info/exclude")).unwrap_or_default()
+}
+
+#[test]
+fn a_new_local_file_is_listed_in_the_git_exclude_file_and_the_edit_says_so() {
+    let fixture = Fixture::new("");
+    let edit = Edit::SetEnv {
+        key: "API_TOKEN".into(),
+        value: "abc123".into(),
+    };
+    let applied = fixture.ok(Target::Local, edit);
+    assert!(
+        exclude_text(&fixture)
+            .lines()
+            .any(|line| line == "/devflow.local.toml"),
+        "{}",
+        exclude_text(&fixture)
+    );
+    assert!(
+        applied
+            .notes
+            .iter()
+            .any(|note| note.contains("info/exclude")),
+        "{:?}",
+        applied.notes
+    );
+    // Not the value, and a second edit neither repeats the line nor the note.
+    assert!(!applied.notes.iter().any(|note| note.contains("abc123")));
+    let again = fixture.ok(
+        Target::Local,
+        Edit::SetEnv {
+            key: "OTHER".into(),
+            value: "x".into(),
+        },
+    );
+    assert_eq!(
+        exclude_text(&fixture).matches("devflow.local.toml").count(),
+        1
+    );
+    assert!(
+        again
+            .notes
+            .iter()
+            .all(|note| !note.contains("info/exclude"))
+    );
+}
+
+#[test]
+fn a_local_file_git_already_ignores_is_not_listed_again() {
+    let fixture = Fixture::new("");
+    std::fs::write(fixture.root.join(".gitignore"), "devflow.local.toml\n").unwrap();
+    let applied = fixture.ok(
+        Target::Local,
+        Edit::SetEnv {
+            key: "K".into(),
+            value: "v".into(),
+        },
+    );
+    assert!(!exclude_text(&fixture).contains("devflow.local.toml"));
+    assert!(applied.notes.iter().all(|note| !note.contains("exclude")));
+}
+
+#[test]
+fn the_exclude_file_keeps_what_it_has_and_a_project_file_edit_leaves_it_alone() {
+    let fixture = Fixture::new("");
+    fixture.ok(
+        Target::Project,
+        Edit::SetEnv {
+            key: "K".into(),
+            value: "${DATABASE_URL}".into(),
+        },
+    );
+    assert!(!exclude_text(&fixture).contains("devflow.local.toml"));
+    let info = fixture.root.join(".git/info");
+    std::fs::create_dir_all(&info).unwrap();
+    std::fs::write(info.join("exclude"), "*.log").unwrap();
+    fixture.ok(
+        Target::Local,
+        Edit::SetEnv {
+            key: "K".into(),
+            value: "v".into(),
+        },
+    );
+    assert_eq!(exclude_text(&fixture), "*.log\n/devflow.local.toml\n");
+}
+
+#[test]
+fn an_exclude_file_with_non_utf8_patterns_is_appended_to_not_rewritten() {
+    let fixture = Fixture::new("");
+    let info = fixture.root.join(".git/info");
+    std::fs::create_dir_all(&info).unwrap();
+    // A latin-1 pattern, no final newline: Git accepts it.
+    let before: &[u8] = b"caf\xe9.txt\n*.log";
+    std::fs::write(info.join("exclude"), before).unwrap();
+    let applied = fixture.ok(
+        Target::Local,
+        Edit::SetEnv {
+            key: "K".into(),
+            value: "v".into(),
+        },
+    );
+    let mut expected = before.to_vec();
+    expected.extend_from_slice(b"\n/devflow.local.toml\n");
+    assert_eq!(std::fs::read(info.join("exclude")).unwrap(), expected);
+    assert!(applied.notes.iter().any(|note| note.contains("listed in")));
+}
+
+#[test]
+fn an_exclude_file_that_cannot_be_read_is_left_alone_and_the_edit_says_so() {
+    let fixture = Fixture::new("");
+    // A directory where the file should be: reading fails, and that is not "empty".
+    let exclude = fixture.root.join(".git/info/exclude");
+    let _ = std::fs::remove_file(&exclude);
+    std::fs::create_dir_all(&exclude).unwrap();
+    let applied = fixture.ok(
+        Target::Local,
+        Edit::SetEnv {
+            key: "K".into(),
+            value: "v".into(),
+        },
+    );
+    assert!(exclude.is_dir());
+    assert!(
+        applied
+            .notes
+            .iter()
+            .any(|note| note.contains("could not be updated")),
+        "{:?}",
+        applied.notes
+    );
 }

@@ -28,7 +28,9 @@ fn mise(t: &TestRepo, exec_body: &str, env_json: &str) -> MiseCommand {
 }
 
 fn with_env_file(t: &TestRepo) {
-    env_file::write(&t.root, &[("DATABASE_URL".to_string(), OWN.to_string())]).unwrap();
+    let vars = [("DATABASE_URL".to_string(), OWN.to_string())];
+    let owned = crate::env_owner::declared_for(&t.project.config, &vars);
+    env_file::write_owned(&t.root, &vars, &owned, &Default::default()).unwrap();
 }
 
 fn project_with_setup(t: &TestRepo, hooks: &[&str]) -> Project {

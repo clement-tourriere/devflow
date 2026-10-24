@@ -303,7 +303,7 @@ fn dynamic_entries(state: &AppState) -> Vec<Entry> {
         return entries;
     };
     let busy = state.busy().is_some();
-    let workspace = model.selected_workspace.clone();
+    let workspace = model.selected_status().map(|w| w.workspace.name.clone());
     let detail = workspace
         .as_deref()
         .map(|name| SharedString::from(shown(name)));

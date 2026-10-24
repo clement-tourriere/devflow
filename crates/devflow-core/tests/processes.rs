@@ -36,6 +36,33 @@ fn init() {
     });
 }
 
+/// A stand-in `mise`: `env --json` prints `json` (what mise resolves on its
+/// own) and `exec … -- CMD` runs `CMD` with the environment it was started in
+/// (a mise that changes nothing, which is what the hook-style check sees). The
+/// stand-in's own calls are appended to `log` when given.
+fn stand_in_mise(json: &str, log: Option<&Path>) -> MiseCommand {
+    let script = r#"json=$1; log=$2; shift 2
+[ -n "$log" ] && echo "$1" >> "$log"
+case "$1" in
+  env) printf '%s
+' "$json" ;;
+  exec) shift; while [ "$1" != -- ]; do shift; done; shift; exec "$@" ;;
+  *) exit 64 ;;
+esac"#;
+    MiseCommand {
+        program: "sh".into(),
+        leading_args: vec![
+            "-c".into(),
+            script.into(),
+            "mise".into(),
+            json.into(),
+            log.map(|log| log.as_os_str().to_owned())
+                .unwrap_or_default(),
+        ],
+        ..MiseCommand::default()
+    }
+}
+
 /// A directory with the fake `pitchfork` and its state files.
 struct Fake {
     dir: tempfile::TempDir,
@@ -66,16 +93,7 @@ impl Fake {
             .into_iter()
             .map(|(key, value)| (key, Value::String(value)))
             .collect();
-        let file = self
-            .dir
-            .path()
-            .join(format!("mise-env-{}.json", ws.name.replace('/', "-")));
-        std::fs::write(&file, serde_json::to_string(&vars).unwrap()).unwrap();
-        MiseCommand {
-            program: "sh".into(),
-            leading_args: vec!["-c".into(), "cat \"$0\"".into(), file.into()],
-            ..MiseCommand::default()
-        }
+        stand_in_mise(&serde_json::to_string(&vars).unwrap(), None)
     }
 
     /// Default start options, with [`Fake::mise_for`] as mise.
@@ -191,6 +209,7 @@ fn create(project: &Project, name: &str) -> SetupOutcome {
         CreateRequest {
             name: name.into(),
             from: None,
+            base: None,
             options: SetupOptions::default(),
         },
         &mut NoProgress,
@@ -431,6 +450,7 @@ fn the_namespace_is_written_during_setup_with_identity_only() {
         CreateRequest {
             name: "feature/a".into(),
             from: None,
+            base: None,
             options: SetupOptions::default(),
         },
         &mut NoProgress,
@@ -1345,11 +1365,7 @@ fn daemons_under_mise_start_only_when_mise_hands_them_the_workspace() {
             other => panic!("not the mise refusal: {other:?}"),
         }
     };
-    let printing = |json: String| MiseCommand {
-        program: "sh".into(),
-        leading_args: vec!["-c".into(), format!("echo '{json}'").into()],
-        ..MiseCommand::default()
-    };
+    let printing = |json: String| stand_in_mise(&json, None);
     // mise does not load .devflow/env at all.
     let delivery = refused(printing("{}".into()));
     assert_eq!(delivery.state(), "not_loaded", "{delivery:?}");
@@ -1393,11 +1409,7 @@ fn a_general_mise_setting_in_another_layer_still_puts_the_daemon_under_mise() {
     )
     .unwrap();
     approve_workspace(&t, &ws);
-    let nothing_loaded = MiseCommand {
-        program: "sh".into(),
-        leading_args: vec!["-c".into(), "echo '{}'".into()],
-        ..MiseCommand::default()
-    };
+    let nothing_loaded = stand_in_mise("{}", None);
     let attempt = |mise: MiseCommand| {
         processes::start_with(
             Some(&fake.pitchfork()),
@@ -1472,11 +1484,7 @@ fn a_daemon_run_through_devflow_exec_needs_no_mise_delivery() {
     );
     let ws = ready(&t, "feature", true);
     // mise hands it nothing; devflow exec applies .devflow/env after mise.
-    let nothing = MiseCommand {
-        program: "sh".into(),
-        leading_args: vec!["-c".into(), "echo '{}'".into()],
-        ..MiseCommand::default()
-    };
+    let nothing = stand_in_mise("{}", None);
     let report = processes::start_with(
         Some(&fake.pitchfork()),
         &t.project,
@@ -1512,11 +1520,7 @@ fn web_running(run: &str, extra: &str) -> String {
 fn mentioning_devflow_exec_is_not_wrapping_the_daemon() {
     let fake = Fake::new();
     // mise hands the daemon nothing of .devflow/env.
-    let nothing = MiseCommand {
-        program: "sh".into(),
-        leading_args: vec!["-c".into(), "echo '{}'".into()],
-        ..MiseCommand::default()
-    };
+    let nothing = stand_in_mise("{}", None);
     let attempt = |t: &Repo, ws: &Workspace| {
         processes::start_with(
             Some(&fake.pitchfork()),
@@ -3475,7 +3479,9 @@ fn a_removal_without_pitchfork_proceeds_and_says_it_could_not_check() {
         "{warnings:?}"
     );
 
-    // A recorded start is enough, without devflow's namespace file.
+    // A recorded start is more than that: devflow cannot check what it
+    // started, which is `state_unknown` and needs a force, without devflow's
+    // namespace file too.
     std::fs::remove_file(ws.path.join(processes::LOCAL_FILE)).unwrap();
     assert!(
         processes::plan_removal(None, &t.project, &ws, false)
@@ -3498,8 +3504,12 @@ fn a_removal_without_pitchfork_proceeds_and_says_it_could_not_check() {
     )
     .unwrap();
     drop(process_lock);
+    assert!(matches!(
+        processes::plan_removal(None, &t.project, &ws, false),
+        Err(Refusal::StateUnknown { .. })
+    ));
     assert!(
-        processes::plan_removal(None, &t.project, &ws, false)
+        processes::plan_removal(None, &t.project, &ws, true)
             .unwrap()
             .is_some()
     );
@@ -3599,6 +3609,70 @@ fn autostart_starts_an_approved_ready_workspace_and_explains_every_refusal() {
                 timeout: Duration::from_secs(5),
                 ..fake.start_options(&plain_ws)
             },
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn autostart_under_the_process_lock_the_caller_holds_does_not_ask_for_it_again() {
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "[pitchfork]\nautostart = true\n");
+    let ws = ready(&t, "feature", true);
+    // Entering a workspace keeps its process lock from the first look at the
+    // receipt to the start; the start is given the lock, not left to take it.
+    let lock = processes::process_lock(&ws).unwrap();
+    let outcome = processes::autostart_locked(
+        Some(&fake.pitchfork()),
+        &t.project,
+        &ws,
+        &fake.start_options(&ws),
+        &lock,
+    )
+    .unwrap();
+    assert!(
+        outcome.report.as_ref().is_some_and(|r| r.ran),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        fake.mutations(),
+        [format!("start -q {}/web", namespace_of(&t, &ws))]
+    );
+    // The lock is still the caller's: nothing else can start meanwhile.
+    assert!(
+        devflow_core::receipt::Receipt::try_process_lock(&ws.git_dir)
+            .unwrap()
+            .is_none()
+    );
+    // Without it, the same start waits for the lock and is refused as busy.
+    let busy = processes::autostart_with(
+        Some(&fake.pitchfork()),
+        &t.project,
+        &ws,
+        &StartOptions {
+            timeout: Duration::from_secs(5),
+            ..fake.start_options(&ws)
+        },
+    )
+    .unwrap();
+    assert!(
+        busy.skipped
+            .as_deref()
+            .is_some_and(|why| why.contains("another devflow operation")),
+        "{busy:?}"
+    );
+    drop(lock);
+    // A project without autostart, or without pitchfork files, starts nothing.
+    let plain = repo(None, "[pitchfork]\nautostart = true\n");
+    let plain_ws = ready(&plain, "p", false);
+    let plain_lock = processes::process_lock(&plain_ws).unwrap();
+    assert!(
+        processes::autostart_locked(
+            Some(&fake.pitchfork()),
+            &plain.project,
+            &plain_ws,
+            &fake.start_options(&plain_ws),
+            &plain_lock,
         )
         .is_none()
     );
@@ -4765,4 +4839,811 @@ fn a_receipt_that_cannot_be_read_makes_the_observation_incomplete() {
     let raw = worktree::create(&t.project, "raw", None).unwrap();
     let status = processes::status_with(Some(&fake.pitchfork()), &t.project, &raw);
     assert!(status.observation.is_complete(), "{:?}", status.observation);
+}
+
+// --- ps and up agree ----------------------------------------------------------
+
+/// A stand-in mise that hands nothing over (it resolves `{}`) and logs each
+/// call: the delivery check `up` makes fails against it.
+fn mise_loading_nothing(fake: &Fake) -> (MiseCommand, PathBuf) {
+    let log = fake.dir.path().join("mise-calls.log");
+    (stand_in_mise("{}", Some(&log)), log)
+}
+
+#[test]
+fn ps_says_what_up_would_about_a_daemon_mise_does_not_hand_the_workspace() {
+    // The reproduced disagreement: a daemon `init` proposed before it wrapped
+    // them (`mise = true`, not through `devflow exec`) in a project without
+    // services: `up` refused it while `ps` said `can_start.allowed`.
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "feature", true);
+    let (nothing, _) = mise_loading_nothing(&fake);
+
+    let status = processes::status_with_mise(Some(&fake.pitchfork()), &t.project, &ws, &nothing);
+    assert!(!status.can_start.allowed, "{:?}", status.can_start);
+    let error = processes::start_with(
+        Some(&fake.pitchfork()),
+        &t.project,
+        &ws,
+        &StartOptions {
+            mise: nothing.clone(),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap_err();
+    // The same refusal, not just the same verdict.
+    assert_eq!(status.can_start.refusal.as_ref(), Some(refusal(&error)));
+    assert!(
+        matches!(&status.can_start.refusal, Some(Refusal::MiseDelivery { daemons, .. }) if daemons == &["web"]),
+        "{:?}",
+        status.can_start
+    );
+    assert!(
+        status.daemons.iter().all(|d| !d.startable),
+        "{:?}",
+        status.daemons
+    );
+    assert!(fake.mutations().is_empty(), "{:?}", fake.mutations());
+
+    // With mise handing over `.devflow/env`, both allow it.
+    let delivering = fake.mise_for(&ws);
+    let status = processes::status_with_mise(Some(&fake.pitchfork()), &t.project, &ws, &delivering);
+    assert!(status.can_start.allowed, "{:?}", status.can_start);
+    assert!(status.daemons.iter().all(|d| d.startable));
+    assert!(start(&t, &fake, &ws).unwrap().ran);
+
+    // `status_all` (the CLI's `ps` and the app) asks the same question.
+    let all = processes::status_all_with_mise(
+        Some(&fake.pitchfork()),
+        &t.project,
+        std::slice::from_ref(&ws),
+        &nothing,
+    );
+    assert!(!all[0].can_start.allowed, "{:?}", all[0].can_start);
+}
+
+#[test]
+fn ps_asks_mise_only_when_a_daemon_relies_on_it_and_nothing_else_refuses() {
+    let fake = Fake::new();
+    let (nothing, log) = mise_loading_nothing(&fake);
+    // `web` relies on mise, `worker` does not, `wrapped` sets its variables
+    // itself through `devflow exec`.
+    let t = repo(
+        Some(
+            "[daemons.web]\nrun = \"bun run dev\"\nmise = true\n\
+             [daemons.worker]\nrun = \"bun run work\"\n\
+             [daemons.wrapped]\nrun = \"devflow exec -- bun run wrapped\"\nmise = true\n",
+        ),
+        "",
+    );
+    let ws = ready(&t, "feature", true);
+    let status = processes::status_with_mise(Some(&fake.pitchfork()), &t.project, &ws, &nothing);
+    // Starting everything includes `web`.
+    assert!(
+        matches!(&status.can_start.refusal, Some(Refusal::MiseDelivery { daemons, .. }) if daemons == &["web"]),
+        "{:?}",
+        status.can_start
+    );
+    // Each daemon is judged on its own closure.
+    let startable = |name: &str| {
+        status
+            .daemons
+            .iter()
+            .find(|d| d.name == name)
+            .unwrap_or_else(|| panic!("{:?}", status.daemons))
+            .startable
+    };
+    assert!(!startable("web"));
+    assert!(startable("worker"));
+    assert!(
+        startable("wrapped"),
+        "devflow exec sets the variables after mise"
+    );
+    // One round of questions to mise for all of that: whether it trusts the
+    // configuration, what a process it starts sees (the shared gate), and what
+    // it resolves on its own (a daemon not wrapped in `devflow exec` gets
+    // `.devflow/env` from mise alone).
+    let asked = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        asked.lines().collect::<Vec<_>>(),
+        ["env", "exec", "env"],
+        "{asked}"
+    );
+
+    // A refusal that comes first is reported without asking mise at all.
+    let unapproved = ready(&t, "other", false);
+    // (Approval is by the digest of what the workspace runs: change it.)
+    std::fs::write(
+        unapproved.path.join("pitchfork.toml"),
+        "[daemons.web]\nrun = \"bun run other\"\nmise = true\n",
+    )
+    .unwrap();
+    let before = asked.lines().count();
+    let status =
+        processes::status_with_mise(Some(&fake.pitchfork()), &t.project, &unapproved, &nothing);
+    assert!(
+        matches!(status.can_start.refusal, Some(Refusal::NotApproved { .. })),
+        "{:?}",
+        status.can_start
+    );
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap().lines().count(),
+        before,
+        "mise was not asked"
+    );
+}
+
+// --- removal of a workspace whose checkout is gone --------------------------------
+
+#[test]
+fn a_gone_checkout_whose_supervisor_is_down_does_not_authorize_removal() {
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "feature", true);
+    let ns = started_by_devflow(&t, &fake, &ws);
+    std::fs::remove_dir_all(&ws.path).unwrap();
+    fake.set("supervisor_down", "1");
+    fake.clear_calls();
+    let error = setup::remove(
+        &t.project,
+        "feature",
+        removal_options(&fake, false),
+        &mut NoProgress,
+    )
+    .unwrap_err();
+    let protected = error
+        .downcast_ref::<devflow_core::error::Protected>()
+        .unwrap_or_else(|| panic!("{error:#}"));
+    assert!(protected.forceable);
+    assert!(
+        protected.reason.contains("supervisor is down"),
+        "{}",
+        protected.reason
+    );
+    assert!(worktree::find(&t.project, "feature").unwrap().is_some());
+    let out = setup::remove(
+        &t.project,
+        "feature",
+        removal_options(&fake, true),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("may still be running")),
+        "{:?}",
+        out.warnings
+    );
+    assert_eq!(
+        out.may_still_run,
+        Some(processes::MayStillRun {
+            namespace: Some(ns.clone()),
+            ids: vec![format!("{ns}/web")],
+        }),
+        "{out:?}"
+    );
+    assert!(fake.mutations().is_empty(), "nothing could be asked");
+}
+
+#[test]
+fn a_gone_checkout_with_nothing_running_is_removed_without_stopping_anything() {
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "feature", true);
+    let ns = started_by_devflow(&t, &fake, &ws);
+    // It stopped on its own since.
+    fake.json(
+        "list.json",
+        &json!([
+            listed(&ns, "web", "stopped", None, None),
+            listed("df-other-ns", "web", "running", Some(1), None),
+        ]),
+    );
+    std::fs::remove_dir_all(&ws.path).unwrap();
+    fake.clear_calls();
+    let out = setup::remove(
+        &t.project,
+        "feature",
+        removal_options(&fake, false),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert!(out.stopped_daemons.is_empty());
+    assert!(fake.mutations().is_empty());
+    assert!(worktree::find(&t.project, "feature").unwrap().is_none());
+
+    // A project that does not use pitchfork and recorded no start is not
+    // asked about at all.
+    let fake = Fake::new();
+    let plain = repo(None, "");
+    let ws = ready(&plain, "second", false);
+    std::fs::remove_dir_all(&ws.path).unwrap();
+    setup::remove(
+        &plain.project,
+        "second",
+        removal_options(&fake, false),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+}
+
+#[test]
+fn a_gone_checkouts_running_daemons_are_never_stopped_and_stop_the_removal() {
+    // The reproduction was a removal that said "Removed" while pitchfork ran
+    // the daemon. Stopping it is not on offer either: a stop makes the
+    // supervisor run `on_stop` from the configuration at the directory the
+    // daemon was started from, which nobody approved once the checkout is gone.
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "feature", true);
+    let ns = started_by_devflow(&t, &fake, &ws);
+    // Another workspace's daemon of the same name is not in the way.
+    fake.json(
+        "list.json",
+        &json!([
+            listed(&ns, "web", "running", Some(4242), Some(3000)),
+            listed("df-other-ns", "web", "running", Some(1), Some(3001)),
+        ]),
+    );
+    std::fs::remove_dir_all(&ws.path).unwrap();
+    fake.clear_calls();
+
+    // `prune` agrees: this registration owns daemons, so it is not forgotten.
+    let candidates = worktree::prune_candidates(&t.project).unwrap();
+    assert!(
+        candidates
+            .iter()
+            .any(|c| c.name == "feature" && c.data.iter().any(|d| d.contains("daemons"))),
+        "{candidates:?}"
+    );
+
+    let error = setup::remove(
+        &t.project,
+        "feature",
+        removal_options(&fake, false),
+        &mut NoProgress,
+    )
+    .unwrap_err();
+    let protected = error
+        .downcast_ref::<devflow_core::error::Protected>()
+        .unwrap_or_else(|| panic!("{error:#}"));
+    assert!(protected.forceable, "{}", protected.reason);
+    assert!(
+        protected.reason.contains(&format!("{ns}/web"))
+            && protected.reason.contains("lifecycle hooks"),
+        "{}",
+        protected.reason
+    );
+    assert!(
+        !protected.reason.contains("df-other-ns"),
+        "only this workspace's: {}",
+        protected.reason
+    );
+    // Before any effect: registered, the receipt still records the start.
+    let still = worktree::find(&t.project, "feature").unwrap().unwrap();
+    assert!(still.missing);
+    assert_eq!(recorded_ids(&t, &still), Some(vec![format!("{ns}/web")]));
+    assert!(fake.mutations().is_empty(), "{:?}", fake.mutations());
+
+    // Forced: removed, nothing stopped, and what may still run is listed.
+    let out = setup::remove(
+        &t.project,
+        "feature",
+        removal_options(&fake, true),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert!(out.stopped_daemons.is_empty(), "{out:?}");
+    assert!(fake.mutations().is_empty(), "{:?}", fake.mutations());
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("may still be running and were not stopped")),
+        "{:?}",
+        out.warnings
+    );
+    assert_eq!(
+        out.may_still_run,
+        Some(processes::MayStillRun {
+            namespace: Some(ns.clone()),
+            ids: vec![format!("{ns}/web")],
+        }),
+        "{out:?}"
+    );
+    assert!(worktree::find(&t.project, "feature").unwrap().is_none());
+
+    // What was asked was asked from an empty directory of devflow's own, which
+    // is gone again: not the missing worktree, and not the project's (whose
+    // pitchfork configuration pitchfork would read).
+    let asked = fake.calls();
+    assert!(!asked.is_empty());
+    for (cwd, args, _) in &asked {
+        let cwd = Path::new(cwd);
+        assert!(
+            cwd.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("devflow-pitchfork-")),
+            "{args}: {cwd:?}"
+        );
+        assert!(!cwd.starts_with(&t.root) && !cwd.starts_with(&ws.path));
+        assert!(!cwd.exists(), "removed after the removal");
+    }
+}
+
+#[test]
+fn a_gone_checkout_whose_daemons_cannot_be_seen_is_state_unknown_and_keeps_its_receipt() {
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "feature", true);
+    let ns = started_by_devflow(&t, &fake, &ws);
+    std::fs::remove_dir_all(&ws.path).unwrap();
+    fake.set("list_fail", "1");
+    fake.clear_calls();
+
+    let error = setup::remove(
+        &t.project,
+        "feature",
+        removal_options(&fake, false),
+        &mut NoProgress,
+    )
+    .unwrap_err();
+    let protected = error
+        .downcast_ref::<devflow_core::error::Protected>()
+        .unwrap_or_else(|| panic!("{error:#}"));
+    assert!(protected.forceable, "{}", protected.reason);
+    assert!(
+        protected.reason.contains("cannot tell what pitchfork runs"),
+        "{}",
+        protected.reason
+    );
+    // Before any effect: registered, receipt there, nothing stopped.
+    let still = worktree::find(&t.project, "feature").unwrap().unwrap();
+    assert!(still.missing);
+    assert_eq!(recorded_ids(&t, &still), Some(vec![format!("{ns}/web")]));
+    assert!(fake.mutations().is_empty(), "{:?}", fake.mutations());
+
+    // Forced, it says it could not see, stops nothing, and lists what it
+    // recorded.
+    let out = setup::remove(
+        &t.project,
+        "feature",
+        removal_options(&fake, true),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert!(fake.mutations().is_empty(), "{:?}", fake.mutations());
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("could not read what pitchfork runs")),
+        "{:?}",
+        out.warnings
+    );
+    assert_eq!(
+        out.may_still_run,
+        Some(processes::MayStillRun {
+            namespace: Some(ns.clone()),
+            ids: vec![format!("{ns}/web")],
+        }),
+        "{out:?}"
+    );
+    assert!(worktree::find(&t.project, "feature").unwrap().is_none());
+}
+
+#[test]
+fn a_forced_removal_keeps_the_namespace_unresolved_when_no_id_is_known() {
+    // Daemons started by hand in the worktree (devflow recorded nothing) and a
+    // listing that fails: no id to list, but the namespace stays in the result
+    // until a listing that was read shows nothing running.
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "feature", true);
+    let ns = namespace_of(&t, &ws);
+    assert_eq!(recorded_ids(&t, &ws), None);
+    std::fs::remove_dir_all(&ws.path).unwrap();
+    fake.set("list_fail", "1");
+    assert!(
+        setup::remove(
+            &t.project,
+            "feature",
+            removal_options(&fake, false),
+            &mut NoProgress,
+        )
+        .is_err()
+    );
+    let out = setup::remove(
+        &t.project,
+        "feature",
+        removal_options(&fake, true),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(
+        out.may_still_run,
+        Some(processes::MayStillRun {
+            namespace: Some(ns.clone()),
+            ids: Vec::new(),
+        }),
+        "{out:?}"
+    );
+    assert!(fake.mutations().is_empty());
+
+    // The same for a supervisor that is down and a start devflow never made:
+    // nothing could be listed, so nothing is ruled out.
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "second", true);
+    let ns = namespace_of(&t, &ws);
+    fake.set("supervisor_down", "1");
+    let out = setup::remove(
+        &t.project,
+        "second",
+        removal_options(&fake, false),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(
+        out.may_still_run,
+        Some(processes::MayStillRun {
+            namespace: Some(ns),
+            ids: Vec::new(),
+        }),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn a_gone_checkout_is_found_by_its_namespace_even_without_a_recorded_start() {
+    // Started by hand with pitchfork in the worktree (the namespace file is
+    // devflow's), so the receipt has no record; the namespace still names it,
+    // and what runs under it is not stopped either.
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "feature", true);
+    let ns = running_fixture(&t, &fake, &ws);
+    assert_eq!(recorded_ids(&t, &ws), None);
+    std::fs::remove_dir_all(&ws.path).unwrap();
+    fake.clear_calls();
+    let error = setup::remove(
+        &t.project,
+        "feature",
+        removal_options(&fake, false),
+        &mut NoProgress,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .downcast_ref::<devflow_core::error::Protected>()
+            .is_some_and(|p| p.forceable && p.reason.contains(&format!("{ns}/web"))),
+        "{error:#}"
+    );
+    let out = setup::remove(
+        &t.project,
+        "feature",
+        removal_options(&fake, true),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert!(fake.mutations().is_empty(), "{:?}", fake.mutations());
+    assert_eq!(
+        out.may_still_run.map(|m| m.ids),
+        Some(vec![format!("{ns}/web")])
+    );
+}
+
+#[test]
+fn a_missing_pitchfork_is_state_unknown_when_devflow_recorded_a_start() {
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "feature", true);
+    let ns = started_by_devflow(&t, &fake, &ws);
+    // The workspace is there: a recorded start cannot be checked.
+    let error = processes::plan_removal(None, &t.project, &ws, false).unwrap_err();
+    let Refusal::StateUnknown { detail, .. } = &error else {
+        panic!("{error:?}");
+    };
+    assert!(
+        detail.contains("pitchfork isn't on PATH") && detail.contains(&format!("{ns}/web")),
+        "{detail}"
+    );
+    // Forced, it goes on with the warning and lists the ids.
+    let stop = processes::plan_removal(None, &t.project, &ws, true)
+        .unwrap()
+        .expect("a warning");
+    let lock = processes::process_lock(&ws).unwrap();
+    let result = processes::stop_for_removal_locked(&t.project, &ws, &stop, true, &lock).unwrap();
+    drop(lock);
+    assert!(result.stopped.is_empty());
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("pitchfork isn't on PATH")),
+        "{:?}",
+        result.warnings
+    );
+    assert_eq!(
+        result.may_still_run,
+        Some(processes::MayStillRun {
+            namespace: Some(ns.clone()),
+            ids: vec![format!("{ns}/web")],
+        })
+    );
+
+    // A checkout that is gone is no different.
+    std::fs::remove_dir_all(&ws.path).unwrap();
+    let gone = worktree::find(&t.project, "feature").unwrap().unwrap();
+    assert!(gone.missing);
+    assert!(
+        matches!(
+            processes::plan_removal(None, &t.project, &gone, false),
+            Err(Refusal::StateUnknown { .. })
+        ),
+        "a recorded start cannot be checked without pitchfork"
+    );
+    let stop = processes::plan_removal(None, &t.project, &gone, true)
+        .unwrap()
+        .expect("a warning");
+    assert!(stop.daemons().is_empty());
+    let lock = processes::process_lock(&gone).unwrap();
+    let result = processes::stop_for_removal_locked(&t.project, &gone, &stop, true, &lock).unwrap();
+    assert!(
+        result
+            .may_still_run
+            .is_some_and(|m| m.ids.iter().any(|id| id.ends_with("/web"))),
+        "the ids that may still run are listed"
+    );
+}
+
+#[test]
+fn a_stop_that_ended_half_way_is_a_partial_removal_that_keeps_the_report() {
+    let fake = Fake::new();
+    let t = repo(
+        Some("[daemons.web]\nrun = \"a\"\n[daemons.worker]\nrun = \"b\"\n"),
+        "",
+    );
+    let ws = ready(&t, "feature", true);
+    let ns = namespace_of(&t, &ws);
+    fake.json(
+        "list.json",
+        &json!([
+            listed(&ns, "web", "running", Some(1), None),
+            listed(&ns, "worker", "running", Some(2), None),
+        ]),
+    );
+    // `web` stopped, `worker` did not, and pitchfork said so.
+    fake.json(
+        "after_stop.json",
+        &json!([
+            listed(&ns, "web", "stopped", None, None),
+            listed(&ns, "worker", "running", Some(2), None),
+        ]),
+    );
+    fake.set("stop_fail", "could not stop worker");
+    let error = setup::remove(
+        &t.project,
+        "feature",
+        removal_options(&fake, false),
+        &mut NoProgress,
+    )
+    .unwrap_err();
+    let partial = error
+        .downcast_ref::<devflow_core::error::PartialRemoval>()
+        .unwrap_or_else(|| panic!("a partial removal, not a refusal: {error:#}"));
+    assert!(partial.forceable);
+    assert_eq!(
+        partial.done,
+        [format!("stopped the pitchfork daemon {ns}/web")]
+    );
+    assert!(
+        partial
+            .remains
+            .iter()
+            .any(|r| r.contains(&format!("{ns}/worker")) && r.contains("still runs")),
+        "{partial:?}"
+    );
+    assert!(
+        partial
+            .remains
+            .iter()
+            .any(|r| r.starts_with("the worktree")),
+        "{partial:?}"
+    );
+    let report = partial.stop_report.as_ref().expect("the stop report");
+    assert!(
+        report
+            .daemons
+            .iter()
+            .any(|d| d.name == "worker" && d.is_active()),
+        "{report:?}"
+    );
+    assert!(ws.path.exists(), "the worktree is still there");
+
+    // The verification failing after the stops is a partial removal too.
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "second", true);
+    let ns = running_fixture(&t, &fake, &ws);
+    fake.set("list_fails_after_stop", "1");
+    let error = setup::remove(
+        &t.project,
+        "second",
+        removal_options(&fake, false),
+        &mut NoProgress,
+    )
+    .unwrap_err();
+    let partial = error
+        .downcast_ref::<devflow_core::error::PartialRemoval>()
+        .unwrap_or_else(|| panic!("{error:#}"));
+    assert!(
+        partial
+            .remains
+            .iter()
+            .any(|r| r.contains(&format!("{ns}/web")) && r.contains("not known")),
+        "{partial:?}"
+    );
+    assert!(partial.stop_report.as_ref().unwrap().state_error.is_some());
+}
+
+#[test]
+fn a_forced_removal_over_a_state_it_cannot_read_lists_what_may_still_run() {
+    // Not only a checkout that is gone: any forced removal that goes on
+    // without knowing leaves the namespace and the ids behind in its result.
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "feature", true);
+    let ns = namespace_of(&t, &ws);
+    fake.set("list_fail", "1");
+    let error = setup::remove(
+        &t.project,
+        "feature",
+        removal_options(&fake, false),
+        &mut NoProgress,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .downcast_ref::<devflow_core::error::Protected>()
+            .is_some_and(|p| p.forceable),
+        "{error:#}"
+    );
+    let out = setup::remove(
+        &t.project,
+        "feature",
+        removal_options(&fake, true),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(
+        out.may_still_run,
+        Some(processes::MayStillRun {
+            namespace: Some(ns.clone()),
+            ids: vec![format!("{ns}/web")],
+        }),
+        "{out:?}"
+    );
+    assert!(!ws.path.exists());
+    // And a removal that could tell says nothing of the kind.
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "second", true);
+    let ns = namespace_of(&t, &ws);
+    fake.json(
+        "list.json",
+        &json!([listed(&ns, "web", "stopped", None, None)]),
+    );
+    let out = setup::remove(
+        &t.project,
+        "second",
+        removal_options(&fake, true),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(out.may_still_run, None);
+}
+
+// --- the daemon start gate is the shared one --------------------------------------
+
+#[test]
+fn a_daemon_start_asks_the_shared_gate_what_a_process_mise_starts_would_see() {
+    // The environment `.devflow/env` describes is given to the process mise
+    // starts, as to a hook; here mise changes one of its values, which the
+    // check of what mise resolves on its own (`env --json`) does not see.
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "feature", true);
+    let vars: serde_json::Map<String, Value> = env_file::read(&ws.path)
+        .unwrap()
+        .into_iter()
+        .map(|(key, value)| (key, Value::String(value)))
+        .collect();
+    let json = serde_json::to_string(&vars).unwrap();
+    let script = r#"json=$1; shift
+case "$1" in
+  env) printf '%s\n' "$json" ;;
+  exec) shift; while [ "$1" != -- ]; do shift; done; shift; DEVFLOW_PROJECT=somebody-else; export DEVFLOW_PROJECT; exec "$@" ;;
+  *) exit 64 ;;
+esac"#;
+    let overriding = MiseCommand {
+        program: "sh".into(),
+        leading_args: vec!["-c".into(), script.into(), "mise".into(), json.into()],
+        ..MiseCommand::default()
+    };
+    let status = processes::status_with_mise(Some(&fake.pitchfork()), &t.project, &ws, &overriding);
+    let Some(Refusal::MiseDelivery { delivery, .. }) = &status.can_start.refusal else {
+        panic!("{:?}", status.can_start);
+    };
+    assert_eq!(
+        *delivery,
+        env_file::MiseDelivery::Overridden {
+            keys: vec!["DEVFLOW_PROJECT".into()]
+        }
+    );
+    let error = processes::start_with(
+        Some(&fake.pitchfork()),
+        &t.project,
+        &ws,
+        &StartOptions {
+            mise: overriding,
+            ..StartOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(status.can_start.refusal.as_ref(), Some(refusal(&error)));
+    assert!(fake.mutations().is_empty());
+}
+
+#[test]
+fn an_env_file_the_gate_cannot_read_is_a_typed_problem_with_its_remedy() {
+    let fake = Fake::new();
+    let t = repo(Some(WEB), "");
+    let ws = ready(&t, "feature", true);
+    let mise = fake.mise_for(&ws);
+    // A `.devflow/env` written by an earlier devflow: no list of owned names.
+    let file = env_file::path(&ws.path);
+    let text = std::fs::read_to_string(&file).unwrap();
+    let legacy: String = text
+        .lines()
+        .filter(|line| {
+            !line.starts_with("# devflow-owns") && !line.starts_with("# devflow-formerly")
+        })
+        .map(|line| format!("{line}\n"))
+        .collect();
+    assert_ne!(legacy, text, "the file had a manifest");
+    std::fs::write(&file, legacy).unwrap();
+    let status = processes::status_with_mise(Some(&fake.pitchfork()), &t.project, &ws, &mise);
+    let Some(Refusal::WorkspaceEnv {
+        daemons, remedies, ..
+    }) = &status.can_start.refusal
+    else {
+        panic!("{:?}", status.can_start);
+    };
+    assert_eq!(daemons, &["web"]);
+    assert!(
+        remedies
+            .iter()
+            .any(|r| matches!(r, devflow_core::remedy::Remedy::Setup { .. })),
+        "{remedies:?}"
+    );
+    assert_eq!(
+        status.can_start.refusal.as_ref().unwrap().code(),
+        "workspace_env"
+    );
+    assert!(status.daemons.iter().all(|d| !d.startable));
+    let error = processes::start_with(
+        Some(&fake.pitchfork()),
+        &t.project,
+        &ws,
+        &StartOptions {
+            mise,
+            ..StartOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(status.can_start.refusal.as_ref(), Some(refusal(&error)));
+    // The refusal offers what the problem carries, for the workspace asked.
+    assert!(!refusal(&error).remedies(&ws.path).is_empty());
+    assert!(fake.mutations().is_empty());
 }

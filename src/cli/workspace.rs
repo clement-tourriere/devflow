@@ -4,15 +4,14 @@ use super::{Ctx, EXIT_ATTENTION, ProjectInfo, shell, trust};
 use anyhow::{Result, anyhow, bail};
 use clap::{Args, Subcommand};
 use devflow_core::db::DataSource;
-use devflow_core::error::{Busy, Protected};
+use devflow_core::error::{Busy, PartialRemoval, Protected};
 use devflow_core::health::{self, ProjectProblem};
-use devflow_core::hooks::HookReport;
 use devflow_core::pitchfork::Pitchfork;
-use devflow_core::processes::{self as core_processes, Autostart};
 use devflow_core::receipt::{Phase, PhaseState, Receipt, Status};
 use devflow_core::remedy::Remedy;
 use devflow_core::setup::{
-    self, CreateRequest, RemoveOptions, RemoveOutcome, SetupOptions, SetupOutcome, WorkspaceStatus,
+    self, CreateRequest, RemoveOptions, RemoveOutcome, ServiceRun, SetupOptions, SetupOutcome,
+    WorkspaceStatus,
 };
 use devflow_core::worktree::{self, Workspace};
 use devflow_core::{Project, githook, redact, registry};
@@ -29,9 +28,12 @@ pub struct SwitchArgs {
     /// Create the workspace
     #[arg(short = 'c', long)]
     pub create: bool,
-    /// Code origin for a new workspace (default: the default workspace)
+    /// Code origin for a new workspace: where payloads and data come from (default: the default workspace)
     #[arg(long, value_name = "WS", requires = "create")]
     pub from: Option<String>,
+    /// Where a new branch starts: a branch, tag, commit or remote branch such as origin/NAME, which NAME then tracks (default: the remote branch of that name if there is one, else the HEAD of --from or of the default workspace)
+    #[arg(long, value_name = "REF", requires = "create")]
+    pub base: Option<String>,
     /// Data origin: a workspace, snapshot:NAME[@vN], branch:ID or empty
     #[arg(long, value_name = "SRC")]
     pub data_from: Option<DataSource>,
@@ -123,22 +125,25 @@ pub fn switch(ctx: &Ctx, args: SwitchArgs) -> Result<ExitCode> {
         no_db: args.no_db,
         no_hooks: args.no_hooks,
         skip_mise_check: args.skip_mise_check,
+        non_interactive: !ctx.interactive(),
         ..SetupOptions::default()
     };
     let mut printer =
         Printer::new(ctx).announcing_database(!project.config.services.is_empty() && !args.no_db);
-    let (outcome, created, switch_hooks) = if args.create {
+    let (outcome, created) = if args.create {
         // A workspace that does not exist yet is judged by the one it is made from.
-        let source = trust::target_of(&project, args.from.as_deref());
+        let source = trust::target_of(&project, args.from.as_deref())?;
         let relevant = trust::governs_setup(&project, !args.no_hooks)
             || (!args.no_hooks && !project.config.hooks.switch.is_empty());
         options.approval = trust::resolve(ctx, &project, &source, relevant)?;
         let mut request = CreateRequest {
             name: args.name,
             from: args.from,
+            base: args.base,
             options: options.clone(),
         };
-        let mut outcome = match setup::create(&project, request.clone(), &mut printer) {
+        let mut outcome = match setup::create_and_activate(&project, request.clone(), &mut printer)
+        {
             Ok(outcome) => outcome,
             Err(error) => return in_progress(ctx, "switch", &project, None, error),
         };
@@ -154,16 +159,13 @@ pub fn switch(ctx: &Ctx, args: SwitchArgs) -> Result<ExitCode> {
             options.approval = trust::resolve(ctx, &project, &outcome.workspace.path, true)?;
             if options.approval.is_some() {
                 request.options = options.clone();
-                outcome = match setup::create(&project, request, &mut printer) {
+                outcome = match setup::create_and_activate(&project, request, &mut printer) {
                     Ok(outcome) => outcome,
                     Err(error) => return in_progress(ctx, "switch", &project, None, error),
                 };
             }
         }
-        // Entering the new workspace is a switch too: its switch hooks run once
-        // setup has finished.
-        let hooks = first_entry_hooks(&project, &mut outcome, &options, &mut printer)?;
-        (outcome, true, hooks)
+        (outcome, true)
     } else {
         let workspace = worktree::find(&project, &args.name)?.ok_or_else(|| {
             anyhow!(
@@ -173,71 +175,18 @@ pub fn switch(ctx: &Ctx, args: SwitchArgs) -> Result<ExitCode> {
         })?;
         let relevant = switch_needs_trust(&project, &workspace, args.no_hooks);
         options.approval = trust::resolve(ctx, &project, &workspace.path, relevant)?;
-        match setup::switch(&project, &workspace, options, &mut printer) {
-            Ok(outcome) => (outcome, false, None),
+        match setup::activate(&project, &workspace, options, &mut printer) {
+            Ok(outcome) => (outcome, false),
             Err(error) => return in_progress(ctx, "switch", &project, Some(&workspace), error),
         }
     };
-    // Process state is reported apart from readiness: a start that fails or
-    // is refused never changes the workspace's status or this command's exit code.
-    let started = autostart_after(&project, &outcome);
-    let code = report(
-        ctx,
-        "switch",
-        &project,
-        &outcome,
-        created,
-        switch_hooks.as_ref(),
-        started.as_ref(),
-    )?;
+    // Setup, the switch hooks and `[pitchfork] autostart` all ran in core; the
+    // outcome reports each apart from readiness, which alone sets the exit code.
+    let code = report(ctx, "switch", &project, &outcome, created)?;
     if !ctx.json {
         hand_off(&outcome.workspace.path);
     }
     Ok(code)
-}
-
-/// `[pitchfork] autostart`: start the daemons of a workspace that is `ready`.
-/// `None` when the project does not ask for it.
-fn autostart_after(project: &Project, outcome: &SetupOutcome) -> Option<Autostart> {
-    if outcome.status != Status::Ready {
-        return None;
-    }
-    core_processes::autostart(
-        Pitchfork::locate().as_ref(),
-        project,
-        &outcome.workspace,
-        core_processes::DEFAULT_START_TIMEOUT,
-    )
-}
-
-/// Run the switch hooks of a freshly created workspace once it is ready: the
-/// first entry is a switch too. A failing hook is a warning, like in
-/// `setup::switch`, because the workspace exists; so is a skipped one.
-fn first_entry_hooks(
-    project: &Project,
-    outcome: &mut SetupOutcome,
-    options: &SetupOptions,
-    printer: &mut Printer,
-) -> Result<Option<HookReport>> {
-    if project.config.hooks.switch.is_empty() || options.no_hooks {
-        return Ok(None);
-    }
-    if outcome.status != Status::Ready {
-        outcome
-            .warnings
-            .push("switch hooks were not run: the workspace is not ready".into());
-        return Ok(None);
-    }
-    let report = setup::run_switch_hooks(project, &outcome.workspace, options, printer)?;
-    match report.as_ref().map(HookReport::failure) {
-        Some(Some(failure)) => outcome.warnings.push(failure),
-        Some(None) => {}
-        None => outcome.warnings.push(
-            "switch hooks were not run: hooks are not trusted; review them with `devflow trust`"
-                .into(),
-        ),
-    }
-    Ok(report)
 }
 
 /// `Busy` is not a failure: another devflow process is setting the workspace
@@ -434,7 +383,19 @@ fn workspace_table(ctx: &Ctx, items: &[WorkspaceStatus]) -> String {
             ]
         })
         .collect();
-    output::table(&["  NAME", "BRANCH", "STATUS", "DATABASE", "PATH"], &rows)
+    let mut text = output::table(&["  NAME", "BRANCH", "STATUS", "DATABASE", "PATH"], &rows);
+    // A checkout on another branch than the workspace was created for, and a
+    // derived file that went missing: said under the table, not in a column.
+    for item in items {
+        let notes = [
+            item.drift.as_ref().map(|drift| drift.describe()),
+            item.env_file.map(|problem| problem.describe().to_string()),
+        ];
+        for note in notes.into_iter().flatten() {
+            text.push_str(&format!("\n  ! {}: {note}", item.workspace.name));
+        }
+    }
+    text
 }
 
 fn status_label(item: &WorkspaceStatus) -> String {
@@ -505,6 +466,7 @@ pub fn setup(ctx: &Ctx, args: SetupArgs) -> Result<ExitCode> {
             trust::governs_setup(&project, true),
         )?,
         skip_mise_check: args.skip_mise_check,
+        non_interactive: !ctx.interactive(),
         ..SetupOptions::default()
     };
     let mut printer = Printer::new(ctx).announcing_database(provisions);
@@ -520,17 +482,11 @@ pub fn setup(ctx: &Ctx, args: SetupArgs) -> Result<ExitCode> {
         Err(error) => return in_progress(ctx, "setup", &project, Some(&workspace), error),
     };
     match outcome {
-        Some(outcome) => {
-            let started = autostart_after(&project, &outcome);
-            report(
-                ctx,
-                "setup",
-                &project,
-                &outcome,
-                false,
-                None,
-                started.as_ref(),
-            )
+        Some(mut outcome) => {
+            // Process state is reported apart from readiness: a start that
+            // fails or is refused never changes the status or the exit code.
+            setup::autostart(&project, &mut outcome, Pitchfork::locate().as_ref());
+            report(ctx, "setup", &project, &outcome, false)
         }
         None => {
             if ctx.json {
@@ -564,6 +520,8 @@ fn setup_from_git_hook(ctx: &Ctx, args: SetupArgs) -> ExitCode {
         let options = SetupOptions {
             data_from: args.data_from,
             database_url: args.database_url,
+            // Git runs the hook: nobody can be asked.
+            non_interactive: true,
             ..SetupOptions::default()
         };
         setup::setup(
@@ -612,8 +570,6 @@ fn report(
     project: &Project,
     outcome: &SetupOutcome,
     created: bool,
-    switch_hooks: Option<&HookReport>,
-    processes: Option<&Autostart>,
 ) -> Result<ExitCode> {
     if ctx.json {
         #[derive(Serialize)]
@@ -622,13 +578,10 @@ fn report(
             created: bool,
             skipped: bool,
             path: &'a Path,
-            /// Switch hooks run on entering a newly created workspace; they are
-            /// reported apart from `hooks`, which holds the setup run.
-            #[serde(skip_serializing_if = "Option::is_none")]
-            switch_hooks: Option<&'a HookReport>,
-            /// What `[pitchfork] autostart` did, apart from `status`.
-            #[serde(skip_serializing_if = "Option::is_none")]
-            processes: Option<&'a Autostart>,
+            /// `hooks` is the setup run's, `switch_hooks` the hooks that ran
+            /// on entering the workspace, `processes` what `[pitchfork]
+            /// autostart` did, `services_state` how each container service
+            /// stands: all apart from `status`.
             #[serde(flatten)]
             outcome: &'a SetupOutcome,
         }
@@ -637,14 +590,12 @@ fn report(
             created,
             skipped: false,
             path: &outcome.workspace.path,
-            switch_hooks,
-            processes,
             outcome,
         };
         output::emit(ctx, command, &doc)?;
     } else {
         print_summary(outcome);
-        if let Some(autostart) = processes {
+        if let Some(autostart) = &outcome.autostart {
             for line in super::processes::autostart_lines(autostart, Palette::stderr()) {
                 note(line);
             }
@@ -669,6 +620,46 @@ fn summary_lines(outcome: &SetupOutcome, palette: Palette) -> Vec<String> {
         .iter()
         .map(|warning| format!("warning: {}", redact::text(warning)))
         .collect();
+    // What was repaired, and the branch the checkout holds when it is not the
+    // one the workspace was created for.
+    lines.extend(outcome.repaired.iter().map(|repair| {
+        format!(
+            "{} {:<11} {}",
+            palette.green("✓"),
+            "repaired",
+            repair.describe()
+        )
+    }));
+    if let Some(drift) = &outcome.drift {
+        lines.push(format!(
+            "{} {}: {}",
+            palette.yellow("!"),
+            workspace.name,
+            drift.describe()
+        ));
+    }
+    // The services that had to be started, and the ones that could not.
+    for service in &outcome.services_state {
+        match service.state {
+            ServiceRun::Started => lines.push(format!(
+                "{} {:<11} {} started",
+                palette.green("✓"),
+                "services",
+                service.key
+            )),
+            ServiceRun::Failed => lines.extend(
+                outcome
+                    .remedies
+                    .iter()
+                    .filter(|remedy| {
+                        matches!(remedy, Remedy::StartService { key, .. } if *key == service.key)
+                    })
+                    .filter_map(Remedy::hint)
+                    .map(|hint| format!("  hint: {}", redact::text(&hint))),
+            ),
+            ServiceRun::Running => {}
+        }
+    }
     match outcome.status {
         Status::Ready => {
             lines.push(format!(
@@ -742,7 +733,7 @@ pub fn remove(ctx: &Ctx, args: RemoveArgs) -> Result<ExitCode> {
         approval: trust::resolve(
             ctx,
             &project,
-            &trust::target_of(&project, Some(&args.name)),
+            &trust::target_of(&project, Some(&args.name))?,
             !project.config.hooks.teardown.is_empty(),
         )?,
         cwd: Some(ctx.cwd.clone()),
@@ -750,6 +741,17 @@ pub fn remove(ctx: &Ctx, args: RemoveArgs) -> Result<ExitCode> {
         // The user named the workspace on the command line just now.
         expect: None,
     };
+    // A hint to run this again with `--force` repeats what decides what is
+    // removed: left out, the forced run would remove the worktree and keep
+    // the branch or the data the person asked to delete.
+    let mut repeated = Vec::new();
+    if args.delete_branch {
+        repeated.push("--delete-branch");
+    }
+    if args.keep_data {
+        repeated.push("--keep-data");
+    }
+    ctx.forced_rerun_keeps(&repeated);
     let mut printer = Printer::new(ctx);
     let outcome = match setup::remove(&project, &args.name, options.clone(), &mut printer) {
         Ok(outcome) => outcome,
@@ -757,8 +759,18 @@ pub fn remove(ctx: &Ctx, args: RemoveArgs) -> Result<ExitCode> {
         // a protection `--force` can override; everyone else gets the error and
         // its hint.
         Err(error) if !options.force && ctx.interactive() => {
-            match error.downcast_ref::<Protected>() {
-                Some(protected) if protected.forceable && confirm_forced_removal(protected)? => {
+            // (A removal that stopped part-way asks too: forcing goes on past
+            // what stopped it, where force can.)
+            let forceable = match (
+                error.downcast_ref::<Protected>(),
+                error.downcast_ref::<PartialRemoval>(),
+            ) {
+                (Some(protected), _) if protected.forceable => Some(protected.reason.clone()),
+                (_, Some(partial)) if partial.forceable => Some(partial.to_string()),
+                _ => None,
+            };
+            match forceable {
+                Some(reason) if confirm_forced_removal(&reason, args.delete_branch)? => {
                     options.force = true;
                     setup::remove(&project, &args.name, options, &mut printer)?
                 }
@@ -784,6 +796,21 @@ pub fn remove(ctx: &Ctx, args: RemoveArgs) -> Result<ExitCode> {
     for warning in &outcome.warnings {
         note(format!("warning: {}", redact::text(warning)));
     }
+    // What nothing records any more: the receipt went with the worktree.
+    if let Some(may) = &outcome.may_still_run {
+        note(format!(
+            "warning: pitchfork daemons of this workspace may still be running{}{}",
+            may.namespace
+                .as_deref()
+                .map(|namespace| format!(" under the namespace {namespace}"))
+                .unwrap_or_default(),
+            if may.ids.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", may.ids.join(", "))
+            }
+        ));
+    }
     let palette = Palette::stdout();
     say(format!(
         "{} Removed {} ({})",
@@ -805,15 +832,24 @@ pub fn remove(ctx: &Ctx, args: RemoveArgs) -> Result<ExitCode> {
     }
     if outcome.deleted_branch {
         say("  deleted the Git branch");
+    } else if args.delete_branch {
+        // (The reason is among the warnings above.)
+        say("  kept the Git branch");
     }
     Ok(ExitCode::SUCCESS)
 }
 
 /// Ask whether to remove a workspace despite a protection `--force` overrides.
-fn confirm_forced_removal(protected: &Protected) -> Result<bool> {
+fn confirm_forced_removal(reason: &str, delete_branch: bool) -> Result<bool> {
     let prompt = format!(
-        "{}. Remove it anyway?",
-        protected.reason.trim_end_matches('.')
+        "{}. Remove it{} anyway?",
+        reason.trim_end_matches('.'),
+        // Saying yes goes on with what was asked, the branch included.
+        if delete_branch {
+            " and delete its branch"
+        } else {
+            ""
+        }
     );
     match inquire::Confirm::new(&prompt).with_default(false).prompt() {
         Ok(answer) => Ok(answer),
@@ -1058,10 +1094,17 @@ mod tests {
             status: receipt.status(),
             receipt,
             payload: Vec::new(),
+            branch_start: None,
             hooks: None,
             warnings: vec!["could not clone x".into()],
             remedies,
             approval_differs: false,
+            drift: None,
+            repaired: Vec::new(),
+            first_setup: false,
+            services_state: Vec::new(),
+            switch_hooks: None,
+            autostart: None,
         }
     }
 

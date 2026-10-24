@@ -215,6 +215,11 @@ pub struct Ctx {
     /// main checkout targets `feature`'s). Remedies that act on "the
     /// workspace" name this directory, never the caller's own.
     target: RefCell<Option<PathBuf>>,
+    /// The options of the command that change what it does and that a hint to
+    /// run it again with `--force` must keep (`remove` with `--delete-branch`:
+    /// without it the forced run would remove the worktree and silently keep
+    /// the branch).
+    forced_rerun: RefCell<Vec<&'static str>>,
 }
 
 impl Ctx {
@@ -246,6 +251,12 @@ impl Ctx {
         } else {
             output::note(format!("warning: {}", redact::text(&message)));
         }
+    }
+
+    /// Record the options a hint to run the command again with `--force` has
+    /// to repeat.
+    pub fn forced_rerun_keeps(&self, flags: &[&'static str]) {
+        *self.forced_rerun.borrow_mut() = flags.to_vec();
     }
 
     /// Record the checkout the command resolved as its target.
@@ -294,6 +305,7 @@ fn context(cli: &Cli) -> Result<Ctx> {
         chdir: cli.dir.is_some(),
         warnings: RefCell::new(Vec::new()),
         target: RefCell::new(None),
+        forced_rerun: RefCell::new(Vec::new()),
     })
 }
 
@@ -310,7 +322,8 @@ fn fail(ctx: Option<&Ctx>, json: bool, command: &str, error: &anyhow::Error) -> 
         // without one they would name a place nobody chose, so there are none.
         remedies.extend(refusal.remedies(&target));
     }
-    let hints = hints(error, &remedies);
+    let kept = ctx.map(|ctx| ctx.forced_rerun.borrow().clone());
+    let hints = hints(error, &remedies, kept.as_deref().unwrap_or_default());
     if json {
         let warnings = ctx.map(Ctx::take_warnings).unwrap_or_default();
         output::emit_error(warnings, command, &message, hints.first(), &remedies);
@@ -325,7 +338,9 @@ fn fail(ctx: Option<&Ctx>, json: bool, command: &str, error: &anyhow::Error) -> 
 /// What the person can do about a failure, chosen from the error's type: the
 /// remedies core attached to it (or knows for it) and the CLI-specific
 /// refusals. The first line is also the JSON document's `hint`.
-fn hints(error: &anyhow::Error, remedies: &[Remedy]) -> Vec<String> {
+///
+/// `kept` are the options of the failed command that its forced rerun repeats.
+fn hints(error: &anyhow::Error, remedies: &[Remedy], kept: &[&str]) -> Vec<String> {
     let mut hints: Vec<String> = Vec::new();
     if let Some(refusal) = error.downcast_ref::<devflow_core::processes::Refusal>() {
         // What only the command line has: its options and sibling commands.
@@ -351,9 +366,21 @@ fn hints(error: &anyhow::Error, remedies: &[Remedy]) -> Vec<String> {
     if let Some(protected) = error.downcast_ref::<Protected>()
         && protected.forceable
     {
+        let flags: String = kept.iter().map(|flag| format!(" {flag}")).collect();
         hints.push(format!(
-            "run `devflow remove {} --force` to override this protection",
+            "run `devflow remove {} --force{flags}` to override this protection",
             protected.workspace
+        ));
+    }
+    // A removal that stopped part-way: running it again converges, and forcing
+    // goes on past the cause when force can.
+    if let Some(partial) = error.downcast_ref::<devflow_core::error::PartialRemoval>()
+        && partial.forceable
+    {
+        let flags: String = kept.iter().map(|flag| format!(" {flag}")).collect();
+        hints.push(format!(
+            "run `devflow remove {} --force{flags}` to go on past it",
+            partial.workspace
         ));
     }
     hints.extend(remedies.iter().filter_map(Remedy::hint));
@@ -566,7 +593,7 @@ mod tests {
 
     #[test]
     fn hints_follow_the_error_type() {
-        let hint = |error: &anyhow::Error| hints(error, &remedy::remedies_of(error));
+        let hint = |error: &anyhow::Error| hints(error, &remedy::remedies_of(error), &[]);
         let missing = anyhow::Error::new(devflow_core::error::NotInitialized {
             root: PathBuf::from("/repo"),
         })
@@ -585,6 +612,19 @@ mod tests {
         };
         assert!(hint(&protected(true))[0].contains("devflow remove feature/a --force"));
         assert!(hint(&protected(false)).is_empty());
+        // The forced rerun repeats the options that decide what it removes: a
+        // refusal about the branch must not lead to a run that keeps it.
+        let error = protected(true);
+        let rerun = hints(
+            &error,
+            &remedy::remedies_of(&error),
+            &["--delete-branch", "--keep-data"],
+        );
+        assert_eq!(
+            rerun[0],
+            "run `devflow remove feature/a --force --delete-branch --keep-data` to override \
+             this protection"
+        );
         // The wording of a message never decides.
         assert!(hint(&anyhow::anyhow!("run `devflow init` first")).is_empty());
 

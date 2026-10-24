@@ -6,6 +6,13 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main]
+  # Runs the installer smoke test against a published release.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published release tag the installer smoke test installs (for example v1.0.0)
+        required: true
+        type: string
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -138,6 +145,56 @@ jobs:
       - name: Run database integration tests (requires Docker)
         run: cargo test --locked -p devflow-core --test db_postgres -- --ignored --test-threads=1
 
+  # Valkey/Redis and MySQL containers, their clones, snapshots and recovery. The
+  # tests label what they create and remove it themselves; timeouts bound a
+  # hung Docker call so the job fails instead of waiting for the runner limit.
+  # ext4 cannot share blocks: like the PostgreSQL job, these must not assert
+  # `verified` CoW (DEVFLOW_EXPECT_COW stays unset).
+  docker-services-tests:
+    name: Docker service tests (${{ matrix.suite }})
+    needs: secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: Valkey/Redis
+            test: services_docker
+            images: valkey/valkey:8-alpine redis:8-alpine debian:stable-slim
+          - suite: MySQL
+            test: services_mysql_docker
+            images: mysql:8.4 debian:stable-slim
+    env:
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mold linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Pull images
+        run: |
+          for image in ${{ matrix.images }}; do
+            docker pull "$image"
+          done
+
+      - name: Run ${{ matrix.suite }} integration tests (requires Docker)
+        timeout-minutes: 20
+        run: >-
+          timeout --kill-after=30s 18m
+          cargo test --locked -p devflow --test ${{ matrix.test }}
+          -- --ignored --test-threads=1
+
   # macOS runs the CLI and core tests (APFS clonefile paths) and is the only
   # place the GPUI desktop app is built. GitHub's macOS runners have no Docker,
   # so the database tests stay on Linux.
@@ -213,6 +270,8 @@ jobs:
           shellcheck
           scripts/install.sh
           scripts/kingfisher.sh
+          scripts/smoke-test.sh
+          scripts/bench-workspaces.sh
           examples/agent-task.sh
 
       - name: Install latest release
@@ -237,6 +296,7 @@ jobs:
       - secrets
       - build-and-test
       - docker-tests
+      - docker-services-tests
       - macos
     runs-on: ${{ matrix.os }}
     env:
@@ -332,28 +392,62 @@ jobs:
             dist/${{ matrix.artifact_name }}.pem
           body_path: release-notes.md
 
+  # Installs the published artifact with scripts/install.sh into a temporary
+  # directory and runs the quick start in a scratch repository: the version
+  # equals the tag, then init, switch -c, list and remove. After the release
+  # job on a tag; by hand (workflow_dispatch) against a published release, whose
+  # tag is required: "latest" is not accepted, so the version check always has
+  # something to compare with.
+  #
+  # `release` is a matrix job: needs.release.result is "success" only when every
+  # leg (Linux amd64, Linux arm64, macOS) has finished, uploads included, so a
+  # tag run never starts before all the artifacts are there. A manual run has no
+  # such guarantee, so the first step checks the release holds every asset.
   verify-install:
-    name: Verify install script
-    if: startsWith(github.ref, 'refs/tags/v')
+    name: Verify install script (${{ matrix.os }})
+    if: >-
+      !cancelled() && (
+        (startsWith(github.ref, 'refs/tags/v') && needs.release.result == 'success')
+        || github.event_name == 'workflow_dispatch'
+      )
     needs: release
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    env:
+      DEVFLOW_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install just-released version
-        run: DEVFLOW_VERSION="${{ github.ref_name }}" sh scripts/install.sh
-
-      - name: Verify installed version matches tag
+      - name: Require an explicit release tag
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
-          installed="$(devflow --version | awk '{print $2}')"
-          expected="${GITHUB_REF_NAME#v}"
-          if [ "$installed" != "$expected" ]; then
-            echo "Installed version '$installed' does not match tag '$expected'" >&2
-            exit 1
-          fi
-          devflow --version
+          case "$DEVFLOW_VERSION" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "the release tag must look like v1.2.3, got '$DEVFLOW_VERSION'" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Check the release holds every artifact
+        run: |
+          assets="$(gh release view "$DEVFLOW_VERSION" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          for asset in devflow-linux-amd64 devflow-linux-arm64 devflow-macos-arm64; do
+            for name in "$asset" "$asset.sha256"; do
+              if ! printf '%s\n' "$assets" | grep -Fxq "$name"; then
+                echo "release $DEVFLOW_VERSION has no asset $name" >&2
+                exit 1
+              fi
+            done
+          done
+
+      - name: Install the published release into a temporary directory
+        run: |
+          DEVFLOW_INSTALL_DIR="$RUNNER_TEMP/devflow-bin" sh scripts/install.sh
+
+      - name: Version equals the tag, then the quick start
+        run: sh scripts/smoke-test.sh "$RUNNER_TEMP/devflow-bin/devflow" "$DEVFLOW_VERSION"

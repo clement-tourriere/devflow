@@ -387,7 +387,7 @@ impl AppState {
 
     /// Select a project, and in it `workspace` when given. A project that was
     /// not selected is unfolded in the sidebar, so its workspaces show.
-    fn select_project_at(&mut self, id: Uuid, workspace: Option<String>, cx: &mut Context<Self>) {
+    fn select_project_at(&mut self, id: Uuid, workspace: Option<PathBuf>, cx: &mut Context<Self>) {
         self.page = Page::Project;
         if self
             .pending_new_workspace
@@ -400,8 +400,8 @@ impl AppState {
             .current()
             .is_some_and(|m| m.key.project == id)
         {
-            if let Some(name) = workspace {
-                self.select_workspace(name, cx);
+            if let Some(path) = workspace {
+                self.select_workspace(path, cx);
             }
             cx.notify();
             return;
@@ -444,9 +444,9 @@ impl AppState {
 
     /// Show one workspace of a project: select the project, go to the
     /// Workspaces tab and select the workspace's row.
-    pub fn open_workspace(&mut self, project: Uuid, name: String, cx: &mut Context<Self>) {
+    pub fn open_workspace(&mut self, project: Uuid, path: PathBuf, cx: &mut Context<Self>) {
         self.tab = Tab::Workspaces;
-        self.select_project_at(project, Some(name), cx);
+        self.select_project_at(project, Some(path), cx);
     }
 
     /// Show a tab of the selected project.
@@ -504,14 +504,15 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn select_workspace(&mut self, name: String, cx: &mut Context<Self>) {
+    /// Select the workspace whose checkout is at `path`.
+    pub fn select_workspace(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let Some(model) = self.selection.current_mut() else {
             return;
         };
-        if model.selected_workspace.as_deref() == Some(&name) {
+        if model.selected_workspace.as_deref() == Some(path.as_path()) {
             return;
         }
-        model.selected_workspace = Some(name);
+        model.selected_workspace = Some(path);
         model.logs = Default::default();
         // Both belong to the workspace that was selected before.
         model.pitchfork.status = None;

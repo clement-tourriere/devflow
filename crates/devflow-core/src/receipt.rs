@@ -24,7 +24,7 @@ use crate::config::{Config, Engine};
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 pub const VERSION: u32 = 2;
@@ -386,11 +386,32 @@ impl Drift {
 }
 
 /// [`Config::env_generation`] with no service in it: the `[env]` recipes and
-/// presets alone.
+/// presets, and the names the configuration declares
+/// ([`crate::env_owner::declared_names`]). A workspace without services still
+/// owns the variables its services would export (a `--no-db` workspace owns
+/// `DATABASE_URL`), so adding PostgreSQL, or changing the variable a service
+/// exports, changes what `.devflow/env` must list even though no service
+/// applies to the workspace.
 fn env_generation_without_services(config: &Config) -> String {
+    digest(&(
+        "env.v3.no-services",
+        config.env.canonical(),
+        crate::env_owner::declared_names(config),
+    ))
+}
+
+/// The generation a `--no-db` workspace recorded before it covered the
+/// declared names. It still reads as current, so that no workspace is reopened
+/// (and no hook run again) only because devflow learned to record them; its
+/// file has no manifest anyway and is written again by the repair of such
+/// files.
+fn legacy_env_generation_without_services(config: &Config) -> String {
+    digest(&("env.v2.no-services", config.env.canonical()))
+}
+
+fn digest(value: &impl Serialize) -> String {
     use sha2::{Digest, Sha256};
-    let json =
-        serde_json::to_vec(&("env.v2.no-services", config.env.canonical())).unwrap_or_default();
+    let json = serde_json::to_vec(value).unwrap_or_default();
     Sha256::digest(json)
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -407,6 +428,13 @@ pub struct PendingBranch {
     pub service: String,
     /// The branch id the server was asked to create.
     pub branch_id: uuid::Uuid,
+    /// The backend the creation was begun on (PostgreSQL, or a container
+    /// engine), recorded with the intent. The service's configuration can
+    /// change before a removal (`db` becomes a Valkey service), so it is not
+    /// where to look for the branch; a record from before this field has none,
+    /// and is looked for in every backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<Engine>,
 }
 
 /// Daemons devflow started for a workspace and has not seen stop.
@@ -435,6 +463,20 @@ pub struct Receipt {
     /// Workspace the code (and payloads) came from; `None` for adopted checkouts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_source: Option<String>,
+    /// The checkout `code_source` resolved to when the workspace was created,
+    /// and the instance its receipt had. A name can mean two checkouts (one
+    /// that moved to another branch and one that took its old one), so the
+    /// source is found again by this, never by the name, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_source_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_source_instance: Option<uuid::Uuid>,
+    /// The workspace was an existing worktree devflow adopted while its HEAD
+    /// was detached, so it is named after its directory and a detached HEAD is
+    /// what it is meant to hold. A workspace without it that has a detached
+    /// HEAD now has moved off the branch it was created for.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adopted_detached: bool,
     /// Requested data source, recorded before provisioning so a retry uses the same one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_source: Option<String>,
@@ -473,6 +515,13 @@ pub struct Receipt {
     /// was last written under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_generation: Option<String>,
+    /// Every variable `.devflow/env` has exported for this workspace, kept
+    /// after the configuration stops declaring it (a removed recipe, a dropped
+    /// service). `.devflow/env` lists the ones it no longer declares as
+    /// former names, so a shell that still holds one of them is cleared of it
+    /// even after the file was written again.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub exported: BTreeSet<String>,
     #[serde(default)]
     pub phases: BTreeMap<String, PhaseRecord>,
     /// What the payload phase did with each `worktree.copy` path (how it was
@@ -491,6 +540,12 @@ pub struct Receipt {
     pub processes: Option<ProcessRecord>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// When the workspace was last activated (`devflow switch`, the app's
+    /// actions on it): the last time somebody entered it, as opposed to
+    /// `updated_at`, which any write moves. Absent for a workspace that has
+    /// not been activated since this was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_active_at: Option<DateTime<Utc>>,
 }
 
 impl Receipt {
@@ -504,6 +559,9 @@ impl Receipt {
             project_id,
             workspace: workspace.to_string(),
             code_source,
+            code_source_path: None,
+            code_source_instance: None,
+            adopted_detached: false,
             data_source: None,
             data_source_id: None,
             service_sources: BTreeMap::new(),
@@ -512,6 +570,7 @@ impl Receipt {
             creating: None,
             unmapped: None,
             env_generation: None,
+            exported: BTreeSet::new(),
             phases: Default::default(),
             payload: Vec::new(),
             hooks_digest: None,
@@ -519,6 +578,7 @@ impl Receipt {
             processes: None,
             created_at: now,
             updated_at: now,
+            last_active_at: None,
         }
     }
 
@@ -656,7 +716,9 @@ impl Receipt {
             // not a change to the file.
             env: self.env_generation.as_deref().is_some_and(|written| {
                 written != config.env_generation()
-                    && !(skipped && written == env_generation_without_services(config))
+                    && !(skipped
+                        && (written == env_generation_without_services(config)
+                            || written == legacy_env_generation_without_services(config)))
             }),
             ..Drift::default()
         };
@@ -690,10 +752,34 @@ impl Receipt {
         drift
     }
 
-    /// The services phase was skipped on request (`--no-db`).
-    fn services_skipped_on_request(&self) -> bool {
+    /// The services phase was skipped on request (`--no-db`): nothing derived
+    /// from services applies to the workspace.
+    pub fn services_skipped_on_request(&self) -> bool {
         let services = self.phase(Phase::Services);
         services.state == PhaseState::Skipped && services.deliberate
+    }
+
+    /// Whether this is a `--no-db` workspace whose `.devflow/env` was stamped
+    /// with the generation recorded before it covered the names the
+    /// configuration declares (by an earlier devflow). That stamp still reads as
+    /// current in [`Receipt::drift`], so that no hook runs again only because
+    /// devflow learned to record names; but it cannot see a service come or
+    /// export another variable, so the file is written again (by the repair
+    /// that runs no hook, which stamps the current generation) even when it
+    /// already has a manifest. Nothing else can recognise the legacy form:
+    /// the generation is a digest of `config`.
+    pub fn env_generation_is_legacy(&self, config: &Config) -> bool {
+        self.services_skipped_on_request()
+            && self.env_generation.as_deref()
+                == Some(legacy_env_generation_without_services(config).as_str())
+    }
+
+    /// Remember the names `.devflow/env` was just written with (see
+    /// [`Receipt::exported`]). `true` when that adds one.
+    pub fn record_exported<'a>(&mut self, names: impl IntoIterator<Item = &'a str>) -> bool {
+        let before = self.exported.len();
+        self.exported.extend(names.into_iter().map(str::to_string));
+        self.exported.len() != before
     }
 
     /// Record that `.devflow/env` was just written for `config`. A workspace
@@ -1121,6 +1207,24 @@ impl Receipt {
 pub struct ReceiptLock {
     _file: std::fs::File,
     git_dir: PathBuf,
+}
+
+impl ReceiptLock {
+    /// The Git directory of the worktree it is for: what a function that takes
+    /// the lock as its proof checks against the workspace it acts on.
+    pub fn git_dir(&self) -> &Path {
+        &self.git_dir
+    }
+}
+
+/// This process runs under a hook devflow started (`DEVFLOW_SETUP_ACTIVE=1`).
+///
+/// The run that started the hook holds the workspace's locks until the hook is
+/// over, and waits for the hook, so a devflow that waits for either lock could
+/// only be waiting for its own parent: it tries both once and reports
+/// [`Busy`](crate::error::Busy) instead.
+pub fn started_by_a_hook() -> bool {
+    std::env::var_os("DEVFLOW_SETUP_ACTIVE").is_some_and(|value| value == "1")
 }
 
 /// Held for the duration of one operation on a workspace's pitchfork daemons
@@ -1764,6 +1868,21 @@ mod tests {
         }
         no_db.skip_deliberate(Phase::Services, "--no-db".into());
         no_db.stamp_env_generation(&Config::default());
+        // A service that comes changes the names the file must list, so the
+        // environment reopens; the services skip is kept, no service drifts.
+        let drift = no_db.drift(&config);
+        assert!(drift.env && drift.added.is_empty() && drift.changed.is_empty());
+        assert!(no_db.reopen(&config));
+        assert!(no_db.phase(Phase::Env).required_skip);
+        let services = no_db.phase(Phase::Services);
+        assert!(
+            services.deliberate && !services.required_skip,
+            "{services:?}"
+        );
+        // Once the file is written again, nothing drifts.
+        no_db.set_phase(Phase::Env, PhaseState::Done, None);
+        no_db.set_phase(Phase::Hooks, PhaseState::Done, None);
+        no_db.stamp_env_generation(&config);
         assert_eq!(no_db.drift(&config), Drift::default());
         assert!(!no_db.reopen(&config));
         assert_eq!(no_db.status(), Status::Ready);
@@ -1821,18 +1940,93 @@ mod tests {
         assert_eq!(no_db.drift(&with_env), Drift::default());
         assert_eq!(no_db.status(), Status::Ready);
 
-        // A service coming or changing is not a change to a file with no
-        // service in it.
+        // A service coming changes the names the file lists (`DATABASE_URL`
+        // and the `PG*` family are the workspace's although it has no
+        // database): the environment reopens, no service drifts.
         let mut serviced = with_env.clone();
         serviced.set_postgres("db", Default::default());
-        assert_eq!(no_db.drift(&serviced), Drift::default());
-        assert!(!no_db.reopen(&serviced));
+        let drift = no_db.drift(&serviced);
+        assert!(drift.env && drift.added.is_empty() && drift.changed.is_empty());
+        assert!(no_db.reopen(&serviced));
+        assert_eq!(no_db.status(), Status::NeedsAttention);
+        no_db.set_phase(Phase::Env, PhaseState::Done, None);
+        no_db.set_phase(Phase::Hooks, PhaseState::Done, None);
+        no_db.stamp_env_generation(&serviced);
+        assert_eq!(no_db.status(), Status::Ready);
+
+        // A change that exports the same names is not a change to the file:
+        // the image of the PostgreSQL service, say.
+        let mut other_image = serviced.clone();
+        other_image.postgres_mut().unwrap().1.image = "postgres:19".into();
+        assert_eq!(no_db.drift(&other_image), Drift::default());
+        assert!(!no_db.reopen(&other_image));
         assert_eq!(no_db.status(), Status::Ready);
 
         // A receipt written before this stamp (the full generation) still
         // compares equal while the configuration is the same.
         no_db.env_generation = Some(serviced.env_generation());
         assert_eq!(no_db.drift(&serviced), Drift::default());
+        // So does the one a `--no-db` workspace recorded before the declared
+        // names were part of it: it is not reopened, nor its hooks run again,
+        // only because devflow learned to record them.
+        no_db.env_generation = Some(legacy_env_generation_without_services(&serviced));
+        assert_eq!(no_db.drift(&serviced), Drift::default());
+        assert!(!no_db.reopen(&serviced));
+        // It is recognised as legacy, so that the repair (which runs no hook)
+        // can write the file again and record the current generation; the
+        // current one, and a full generation, are not.
+        assert!(no_db.env_generation_is_legacy(&serviced));
+        no_db.stamp_env_generation(&serviced);
+        assert!(!no_db.env_generation_is_legacy(&serviced));
+        no_db.env_generation = Some(serviced.env_generation());
+        assert!(!no_db.env_generation_is_legacy(&serviced));
+        // A legacy stamp of an older `[env]` is an ordinary drift, not legacy.
+        no_db.env_generation = Some(legacy_env_generation_without_services(&plain));
+        assert!(no_db.drift(&serviced).env);
+        assert!(!no_db.env_generation_is_legacy(&serviced));
+        // A workspace that has services never has the legacy form.
+        let mut full = no_db.clone();
+        full.set_phase(Phase::Services, PhaseState::Done, None);
+        full.env_generation = Some(legacy_env_generation_without_services(&serviced));
+        assert!(!full.env_generation_is_legacy(&serviced));
+    }
+
+    #[test]
+    fn a_workspace_without_services_notices_a_service_that_exports_another_variable() {
+        let parse = |service: &str| {
+            Config::parse(&format!(
+                "[project]\nname = \"p\"\nid = \"0b8fb0a2-4b3e-4a39-a5f5-0f2f3cf2a6a1\"\n\n\
+                 [services.cache]\nengine = \"valkey\"\n{service}"
+            ))
+            .unwrap()
+        };
+        let before = parse("");
+        let mut no_db = Receipt::new(uuid::Uuid::new_v4(), "w", None);
+        for phase in [Phase::Materialize, Phase::Payload, Phase::Env, Phase::Hooks] {
+            no_db.set_phase(phase, PhaseState::Done, None);
+        }
+        no_db.skip_deliberate(Phase::Services, "--no-db".into());
+        no_db.stamp_env_generation(&before);
+        assert_eq!(no_db.drift(&before), Drift::default());
+
+        // The workspace owns the variable the service exports, whether or not
+        // a service applies to it: a new name changes what the file must list.
+        let renamed = parse("env = \"CACHE_URL\"\n");
+        let drift = no_db.drift(&renamed);
+        assert!(drift.env && drift.added.is_empty() && drift.changed.is_empty());
+        assert!(no_db.reopen(&renamed));
+        assert!(no_db.phase(Phase::Env).required_skip);
+        // The same names are not a change to the file.
+        let mut same = Receipt::new(uuid::Uuid::new_v4(), "w", None);
+        for phase in [Phase::Materialize, Phase::Payload, Phase::Env, Phase::Hooks] {
+            same.set_phase(phase, PhaseState::Done, None);
+        }
+        same.skip_deliberate(Phase::Services, "--no-db".into());
+        same.stamp_env_generation(&before);
+        assert_eq!(
+            same.drift(&parse("image = \"valkey/valkey:9-alpine\"\n")),
+            Drift::default()
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ use super::{
     setup_tests::{click, click_scrolled, exists, visible, wait, wizard},
     ui_tests::{
         Harness, Scratch, allowed, another_scratch_project, frame, install_loaded, open,
-        open_scratch, press_key, refused, scratch_project, settle, update,
+        open_scratch, press_key, refused, scratch_project, settle, update, ws_path,
     },
 };
 use crate::{
@@ -737,7 +737,7 @@ fn a_start_confirmed_after_the_selection_moved_starts_the_workspace_it_reviewed(
         other.workspace.path = other.workspace.path.join("feature-b");
         other.receipt = None;
         model.workspaces.push(other);
-        model.selected_workspace = Some("feature-b".into());
+        model.selected_workspace = model.workspaces.last().map(|w| w.workspace.path.clone());
         cx.notify();
     });
     click(cx, h, "trust");
@@ -800,7 +800,7 @@ fn a_palette_process_action_acts_on_the_workspace_it_was_listed_for(cx: &mut Tes
         other.workspace.path = other.workspace.path.join("feature-b");
         other.receipt = None;
         model.workspaces.push(other);
-        model.selected_workspace = Some("feature-b".into());
+        model.selected_workspace = model.workspaces.last().map(|w| w.workspace.path.clone());
         cx.notify();
     });
     cx.update_window(h.window.into(), |_, window, cx| {
@@ -893,7 +893,7 @@ fn every_page_draws_workspace_branch_daemon_and_snapshot_names_masked(cx: &mut T
         let ws = &mut model.workspaces[1];
         ws.workspace.name = workspace.into();
         ws.workspace.branch = Some(branch.into());
-        model.selected_workspace = Some(workspace.into());
+        model.selected_workspace = Some(model.workspaces[1].workspace.path.clone());
         let status = model.pitchfork.status.as_mut().unwrap();
         status.daemons[0].name = daemon.into();
         model.database.snapshots[0].name = snapshot.into();
@@ -906,7 +906,7 @@ fn every_page_draws_workspace_branch_daemon_and_snapshot_names_masked(cx: &mut T
             // The sidebar and the Workspaces tab.
             sidebar::workspace_label(&model.workspaces[1].workspace.name),
             // The Daemons tab's header and rows, and the detail's.
-            daemons::title(model.selected_workspace.as_deref()),
+            daemons::title(model.selected_status().map(|w| w.workspace.name.as_str())),
             super::processes::daemon_label(&status.daemons[0]),
         ];
         for row in crate::model::workspace_rows(&model.workspaces) {
@@ -3446,6 +3446,7 @@ fn cleaning_up_missing_worktrees_lists_them_first_and_keeps_what_owns_data(
     receipt.creating = Some(devflow_core::receipt::PendingBranch {
         service: "cache".into(),
         branch_id: Uuid::new_v4(),
+        engine: Some(devflow_core::config::Engine::Valkey),
     });
     receipt.save(&owner.git_dir).unwrap();
     let registered = |name: &str| root.join(".git/worktrees").join(name).is_dir();
@@ -3523,7 +3524,7 @@ fn a_workspace_that_waits_for_approval_leads_to_where_it_is_given(cx: &mut TestA
             devflow_core::receipt::Phase::Hooks,
             "setup hooks are not trusted; review and approve them, then run setup again".into(),
         );
-        model.selected_workspace = Some("feature-x".into());
+        model.selected_workspace = Some(ws_path("feature-x"));
         cx.notify();
     });
     frame(cx, &h, |window| {

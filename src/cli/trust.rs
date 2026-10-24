@@ -88,10 +88,14 @@ pub fn current_target(ctx: &Ctx, project: &Project) -> PathBuf {
 }
 
 /// The directory of workspace `name`, else the main checkout (core reports
-/// the unknown name itself).
-pub fn target_of(project: &Project, name: Option<&str>) -> PathBuf {
-    name.and_then(|name| worktree::find(project, name).ok().flatten())
-        .map_or_else(|| project.root.clone(), |workspace| workspace.path)
+/// the unknown name itself). A name that means several workspaces is an
+/// error here too: what is reviewed must be what the command then acts on.
+pub fn target_of(project: &Project, name: Option<&str>) -> anyhow::Result<PathBuf> {
+    let found = name
+        .map(|name| worktree::find(project, name))
+        .transpose()?
+        .flatten();
+    Ok(found.map_or_else(|| project.root.clone(), |workspace| workspace.path))
 }
 
 /// Decide the approval for an operation that may run hooks (`relevant`) in

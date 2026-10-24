@@ -24,7 +24,7 @@ use devflow_core::services::catalog::{
     CloneMethod, Coordinator, Op, OpKind, RecordState, ResetPlan, SourceRef, Step, Store,
 };
 use devflow_core::services::{NewBranch, Service, docker, probe};
-use devflow_core::setup::{self, CreateRequest, NoProgress, SetupOptions};
+use devflow_core::setup::{self, CreateRequest, NoProgress, ServiceRun, SetupOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
@@ -3526,6 +3526,7 @@ fn create(
         CreateRequest {
             name: name.into(),
             from: None,
+            base: None,
             options,
         },
         &mut NoProgress,
@@ -3559,7 +3560,10 @@ fn port_of(url: &str) -> u16 {
 #[test]
 #[ignore = "needs Docker, valkey/valkey:8-alpine and debian:stable-slim"]
 fn workspaces_get_their_own_branch_exported_url_and_drop_it_on_removal() {
-    let fx = Fixture::new("[services.cache]\nengine = \"valkey\"\nenv = \"CACHE_URL\"\n");
+    let fx = Fixture::new(
+        "[services.cache]\nengine = \"valkey\"\nenv = \"CACHE_URL\"\n\n\
+         [data]\nnoninteractive_from = \"snapshot:seed\"\n",
+    );
     // The first workspace clones the default workspace, whose empty root
     // branch is created for it.
     let first = create(&fx, "feature-a", SetupOptions::default()).unwrap();
@@ -3618,6 +3622,7 @@ fn workspaces_get_their_own_branch_exported_url_and_drop_it_on_removal() {
         CreateRequest {
             name: "feature-c".into(),
             from: Some("feature-a".into()),
+            base: None,
             options: SetupOptions::default(),
         },
         &mut NoProgress,
@@ -3626,6 +3631,30 @@ fn workspaces_get_their_own_branch_exported_url_and_drop_it_on_removal() {
     let url_c = env_url(&third.workspace.path, "CACHE_URL");
     let mut c = Redis::auth(port_of(&url_c), &password_of(&url_c)).unwrap();
     assert_eq!(c.get("mine").as_deref(), Some("a"));
+
+    // A run that cannot prompt, before the seed snapshot exists, fails the
+    // service with remedies instead of cloning a live workspace.
+    let error = create(
+        &fx,
+        "feature-pre",
+        SetupOptions {
+            non_interactive: true,
+            ..SetupOptions::default()
+        },
+    )
+    .unwrap_err();
+    let kinds: Vec<_> = devflow_core::remedy::remedies_of(&error)
+        .iter()
+        .map(|r| r.kind())
+        .collect();
+    assert!(
+        kinds.contains(&"create_seed_snapshot") && kinds.contains(&"choose_data_source"),
+        "{kinds:?}: {error:#}"
+    );
+    assert!(
+        format!("{error:#}").contains("no snapshot named 'seed'"),
+        "{error:#}"
+    );
 
     // A snapshot of a workspace, and a workspace created from it (`--data-from`).
     let snapshot =
@@ -3652,6 +3681,45 @@ fn workspaces_get_their_own_branch_exported_url_and_drop_it_on_removal() {
             .get("mine")
             .as_deref(),
         Some("a")
+    );
+
+    // Now the same run takes the seed snapshot, as the service's data, with
+    // no warning; an interactive run and an explicit source do not.
+    let seeded = create(
+        &fx,
+        "feature-e",
+        SetupOptions {
+            non_interactive: true,
+            ..SetupOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(seeded.receipt.service_sources["cache"], "snapshot:seed@v1");
+    assert!(seeded.warnings.is_empty(), "{:?}", seeded.warnings);
+    let url_e = env_url(&seeded.workspace.path, "CACHE_URL");
+    assert_eq!(
+        Redis::auth(port_of(&url_e), &password_of(&url_e))
+            .unwrap()
+            .get("mine")
+            .as_deref(),
+        Some("a")
+    );
+    let explicit = create(
+        &fx,
+        "feature-f",
+        SetupOptions {
+            non_interactive: true,
+            data_from: Some(DataSource::Empty),
+            ..SetupOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(explicit.receipt.service_sources["cache"], "empty");
+    let interactive = create(&fx, "feature-g", SetupOptions::default()).unwrap();
+    assert!(
+        interactive.receipt.service_sources["cache"].starts_with("workspace:"),
+        "{:?}",
+        interactive.receipt.service_sources
     );
 
     // A staged reset keeps the URL and brings the data back to the source.
@@ -3709,6 +3777,137 @@ fn workspaces_get_their_own_branch_exported_url_and_drop_it_on_removal() {
         "{orphans:?}"
     );
     svc.reconcile().unwrap();
+}
+
+#[test]
+#[ignore = "needs Docker, valkey/valkey:8-alpine and debian:stable-slim"]
+fn a_removal_drops_the_branch_recorded_before_its_creation_and_only_this_instances() {
+    use devflow_core::receipt::{PendingBranch, Receipt};
+    let fx = Fixture::new("[services.cache]\nengine = \"valkey\"\nenv = \"CACHE_URL\"\n");
+    let svc = fx.service();
+    let made = create(&fx, "crashed", SetupOptions::default()).unwrap();
+    let bound = made.receipt.services["cache"].branch_id.unwrap();
+    let record = svc.branch(bound).unwrap().unwrap();
+    let (container, volume) = (record.container_id.clone().unwrap(), record.volume.clone());
+
+    // The intent names a branch that is another instance's in the catalog
+    // (the default workspace's): left alone, and said so.
+    let default = fx_default_branch(&fx);
+    let mut crashed = Receipt::load(&made.workspace.git_dir).unwrap().unwrap();
+    crashed.services.remove("cache");
+    crashed.creating = Some(PendingBranch {
+        service: "cache".into(),
+        branch_id: default.id,
+        engine: Some(devflow_core::config::Engine::Valkey),
+    });
+    crashed.save(&made.workspace.git_dir).unwrap();
+    let other = setup::remove(
+        &fx.project,
+        "crashed",
+        setup::RemoveOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(other.dropped_branch, None);
+    assert!(
+        other
+            .warnings
+            .iter()
+            .any(|w| w.contains("created by another instance")),
+        "{:?}",
+        other.warnings
+    );
+    assert!(svc.branch(default.id).unwrap().is_some());
+    // Its own branch, recorded nowhere any more, is the orphan a leak becomes;
+    // the next part is about not making one.
+    assert!(svc.branch(bound).unwrap().is_some());
+
+    // A crash between the creation and the recorded credentials: the receipt
+    // has the intent and no binding, while the catalog has the branch.
+    let again = create(&fx, "crashed-too", SetupOptions::default()).unwrap();
+    let id = again.receipt.services["cache"].branch_id.unwrap();
+    let record = svc.branch(id).unwrap().unwrap();
+    let (container2, volume2) = (record.container_id.clone().unwrap(), record.volume.clone());
+    let mut crashed = Receipt::load(&again.workspace.git_dir).unwrap().unwrap();
+    crashed.services.remove("cache");
+    crashed.creating = Some(PendingBranch {
+        service: "cache".into(),
+        branch_id: id,
+        engine: Some(devflow_core::config::Engine::Valkey),
+    });
+    crashed.save(&again.workspace.git_dir).unwrap();
+    let removed = setup::remove(
+        &fx.project,
+        "crashed-too",
+        setup::RemoveOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(removed.dropped_branch, Some(id), "{removed:?}");
+    assert!(svc.branch(id).unwrap().is_none());
+    assert!(!container_exists(&container2) && !volume_exists(&volume2));
+
+    // And one that was only ever recorded, never created, is accounted for
+    // without a word.
+    let never = create(&fx, "never", SetupOptions::default()).unwrap();
+    let kept = never.receipt.services["cache"].branch_id.unwrap();
+    let mut recorded = Receipt::load(&never.workspace.git_dir).unwrap().unwrap();
+    recorded.creating = Some(PendingBranch {
+        service: "cache".into(),
+        branch_id: Uuid::new_v4(),
+        engine: Some(devflow_core::config::Engine::Valkey),
+    });
+    recorded.save(&never.workspace.git_dir).unwrap();
+    let gone = setup::remove(
+        &fx.project,
+        "never",
+        setup::RemoveOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(gone.dropped_branch, Some(kept));
+    assert!(gone.warnings.is_empty(), "{:?}", gone.warnings);
+
+    // The service left the configuration after the crash, and the record is
+    // one from before the engine was written with it: the branch recorded
+    // before its creation is still found, by the catalog's record of the key.
+    let left = create(&fx, "left", SetupOptions::default()).unwrap();
+    let id = left.receipt.services["cache"].branch_id.unwrap();
+    let record = svc.branch(id).unwrap().unwrap();
+    let (container3, volume3) = (record.container_id.clone().unwrap(), record.volume.clone());
+    let mut crashed = Receipt::load(&left.workspace.git_dir).unwrap().unwrap();
+    crashed.services.remove("cache");
+    crashed.creating = Some(PendingBranch {
+        service: "cache".into(),
+        branch_id: id,
+        engine: None,
+    });
+    crashed.save(&left.workspace.git_dir).unwrap();
+    let config = std::fs::read_to_string(fx.project.root.join("devflow.toml")).unwrap();
+    std::fs::write(
+        fx.project.root.join("devflow.toml"),
+        config.replace(
+            "[services.cache]\nengine = \"valkey\"\nenv = \"CACHE_URL\"\n",
+            "",
+        ),
+    )
+    .unwrap();
+    let without = Project::open(&fx.project.root).unwrap();
+    assert!(without.config.containers().next().is_none());
+    let removed = setup::remove(
+        &without,
+        "left",
+        setup::RemoveOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(removed.dropped_branch, Some(id), "{removed:?}");
+    assert!(svc.branch(id).unwrap().is_none());
+    assert!(!container_exists(&container3) && !volume_exists(&volume3));
+
+    // Clean up what the first part deliberately leaked.
+    svc.remove_branch(bound).unwrap();
+    assert!(!container_exists(&container) && !volume_exists(&volume));
 }
 
 /// The default workspace's branch record.
@@ -3924,7 +4123,7 @@ fn switch_starts_a_stopped_container_and_a_taken_port_is_a_warning_not_a_failure
     // switch still starts the container.
     svc.down(id).unwrap();
     assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
-    let switched = setup::switch(
+    let switched = setup::activate(
         &fx.project,
         &first.workspace,
         SetupOptions::default(),
@@ -3933,15 +4132,69 @@ fn switch_starts_a_stopped_container_and_a_taken_port_is_a_warning_not_a_failure
     .unwrap();
     assert!(switched.warnings.is_empty(), "{:?}", switched.warnings);
     assert_eq!(
+        switched
+            .services_state
+            .iter()
+            .map(|s| (s.key.as_str(), s.state))
+            .collect::<Vec<_>>(),
+        [("cache", ServiceRun::Started)],
+        "the switch started the stopped container"
+    );
+    assert_eq!(
         Redis::auth(port, &password).unwrap().get("kept").as_deref(),
         Some("yes"),
         "the same port, the same password, the data a graceful stop saved"
+    );
+    let again = setup::activate(
+        &fx.project,
+        &first.workspace,
+        SetupOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(
+        again
+            .services_state
+            .iter()
+            .map(|s| s.state)
+            .collect::<Vec<_>>(),
+        [ServiceRun::Running],
+        "a container that was up is running, not started"
+    );
+
+    // A setup that resumes starts the container itself, in its services phase;
+    // the entry still says it was started, though it finds it running by then.
+    svc.down(id).unwrap();
+    let mut receipt = devflow_core::receipt::Receipt::load(&first.workspace.git_dir)
+        .unwrap()
+        .unwrap();
+    receipt.set_phase(
+        devflow_core::receipt::Phase::Services,
+        devflow_core::receipt::PhaseState::Pending,
+        None,
+    );
+    receipt.save(&first.workspace.git_dir).unwrap();
+    let resumed = setup::activate(
+        &fx.project,
+        &first.workspace,
+        SetupOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(
+        resumed
+            .services_state
+            .iter()
+            .map(|s| s.state)
+            .collect::<Vec<_>>(),
+        [ServiceRun::Started],
+        "the services phase brought the container up"
     );
 
     // Something else took the port meanwhile: reported, the switch happened.
     svc.down(id).unwrap();
     let thief = TcpListener::bind(("127.0.0.1", port)).unwrap();
-    let switched = setup::switch(
+    let switched = setup::activate(
         &fx.project,
         &first.workspace,
         SetupOptions::default(),
@@ -3954,8 +4207,27 @@ fn switch_starts_a_stopped_container_and_a_taken_port_is_a_warning_not_a_failure
         "{warning}"
     );
     assert_eq!(svc.branch(id).unwrap().unwrap().port, Some(port));
+    assert_eq!(switched.status, devflow_core::receipt::Status::Ready);
+    let failed = &switched.services_state[0];
+    assert_eq!(failed.state, ServiceRun::Failed);
+    assert!(
+        failed
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.contains(&port.to_string())),
+        "{failed:?}"
+    );
+    assert!(
+        switched.remedies.iter().any(|r| matches!(
+            r,
+            devflow_core::remedy::Remedy::StartService { key, branch: Some(b), .. }
+                if key == "cache" && *b == id
+        )),
+        "{:?}",
+        switched.remedies
+    );
     drop(thief);
-    let switched = setup::switch(
+    let switched = setup::activate(
         &fx.project,
         &first.workspace,
         SetupOptions::default(),

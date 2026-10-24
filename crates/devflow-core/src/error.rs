@@ -134,6 +134,54 @@ impl std::fmt::Display for Protected {
 
 impl std::error::Error for Protected {}
 
+/// A removal failed after it had begun to change things: the daemons were
+/// stopped, the teardown hooks ran, or some of the data was dropped. Unlike a
+/// [`Protected`] refusal, which comes before any effect, the workspace is
+/// neither as it was nor gone. `done` says what was changed and `remains` what
+/// is still there; removing the workspace again converges, since every step is
+/// by recorded identity and one already done is skipped (teardown hooks run at
+/// least once).
+#[derive(Debug, Clone)]
+pub struct PartialRemoval {
+    pub workspace: String,
+    /// Why it stopped.
+    pub cause: String,
+    /// What was already done.
+    pub done: Vec<String>,
+    /// What is still there: the worktree, the workspace's receipt, data not
+    /// yet dropped.
+    pub remains: Vec<String>,
+    /// `--force` goes on past the cause (a failing teardown hook, a drop that
+    /// failed); `false` when nothing but trying again helps.
+    pub forceable: bool,
+    /// What can be done about it; see [`crate::remedy::remedies_of`].
+    pub remedies: Vec<crate::remedy::Remedy>,
+    /// What pitchfork reported after the removal's stop of the workspace's
+    /// daemons, when that is what stopped it: which are stopped, which still
+    /// run, whether the state could be read.
+    pub stop_report: Option<crate::processes::ProcessReport>,
+}
+
+impl std::fmt::Display for PartialRemoval {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "removal of '{}' stopped part-way: {}",
+            self.workspace,
+            self.cause.trim_end_matches('.')
+        )?;
+        if !self.done.is_empty() {
+            write!(f, ". Already done: {}", self.done.join("; "))?;
+        }
+        if !self.remains.is_empty() {
+            write!(f, ". Still there: {}", self.remains.join("; "))?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for PartialRemoval {}
+
 /// The configuration file changed on disk since the editor opened it.
 #[derive(Debug, Clone)]
 pub struct ConfigChanged {

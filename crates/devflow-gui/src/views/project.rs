@@ -25,34 +25,36 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A workspace in the picker: drawn masked (a legal name can look like a
 /// credential), chosen by its recorded name.
 #[derive(Clone)]
 struct WorkspaceChoice {
-    name: String,
+    /// The checkout: the choice is made by it, since two workspaces can share
+    /// a name.
+    path: PathBuf,
     label: SharedString,
 }
 
 impl WorkspaceChoice {
-    fn of(name: &str) -> Self {
+    fn of(name: &str, path: &Path) -> Self {
         Self {
-            name: name.to_string(),
+            path: path.to_path_buf(),
             label: shown(name).into(),
         }
     }
 }
 
 impl SelectItem for WorkspaceChoice {
-    type Value = String;
+    type Value = PathBuf;
 
     fn title(&self) -> SharedString {
         self.label.clone()
     }
 
-    fn value(&self) -> &String {
-        &self.name
+    fn value(&self) -> &PathBuf {
+        &self.path
     }
 }
 
@@ -81,7 +83,7 @@ impl HeaderInfo {
                 .as_ref()
                 .map(|s| (s.cow, s.cow_source)),
             untrusted: matches!(model.trust, Some(TrustState::Untrusted { .. })),
-            judged: model.selected_workspace.clone(),
+            judged: model.selected_status().map(|w| w.workspace.name.clone()),
         }
     }
 }
@@ -95,7 +97,7 @@ pub struct ProjectView {
     pub(super) config: Entity<ConfigView>,
     pub(super) logs: Entity<LogsView>,
     picker: Entity<SelectState<Vec<WorkspaceChoice>>>,
-    picker_items: Vec<String>,
+    picker_items: Vec<(String, PathBuf)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -110,11 +112,11 @@ impl ProjectView {
             cx.subscribe(
                 &picker,
                 |this, _, event: &SelectEvent<Vec<WorkspaceChoice>>, cx| {
-                    let SelectEvent::Confirm(Some(name)) = event else {
+                    let SelectEvent::Confirm(Some(path)) = event else {
                         return;
                     };
-                    let name = name.clone();
-                    this.state.update(cx, |s, cx| s.select_workspace(name, cx));
+                    let path = path.clone();
+                    this.state.update(cx, |s, cx| s.select_workspace(path, cx));
                 },
             ),
         ];
@@ -135,32 +137,35 @@ impl ProjectView {
     /// Keep the workspace picker in step with the model without resetting an
     /// open dropdown on every notification.
     fn sync_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (names, selected) = match self.state.read(cx).selection.current() {
-            Some(model) => (
-                model
-                    .workspaces
-                    .iter()
-                    .map(|w| w.workspace.name.clone())
-                    .collect(),
-                model.selected_workspace.clone(),
-            ),
-            None => (Vec::new(), None),
-        };
+        let (names, selected): (Vec<(String, PathBuf)>, _) =
+            match self.state.read(cx).selection.current() {
+                Some(model) => (
+                    model
+                        .workspaces
+                        .iter()
+                        .map(|w| (w.workspace.name.clone(), w.workspace.path.clone()))
+                        .collect(),
+                    model.selected_workspace.clone(),
+                ),
+                None => (Vec::new(), None),
+            };
         let items_changed = names != self.picker_items;
         let shown = self.picker.read(cx).selected_value().cloned();
         if !items_changed && shown == selected {
             return;
         }
         if items_changed {
-            let items: Vec<WorkspaceChoice> =
-                names.iter().map(|n| WorkspaceChoice::of(n)).collect();
+            let items: Vec<WorkspaceChoice> = names
+                .iter()
+                .map(|(name, path)| WorkspaceChoice::of(name, path))
+                .collect();
             self.picker
                 .update(cx, |p, cx| p.set_items(items, window, cx));
             self.picker_items = names;
         }
-        if let Some(name) = selected {
+        if let Some(path) = selected {
             self.picker
-                .update(cx, |p, cx| p.set_selected_value(&name, window, cx));
+                .update(cx, |p, cx| p.set_selected_value(&path, window, cx));
         }
     }
 

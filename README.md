@@ -45,13 +45,15 @@ None of them creates a worktree, prepares it, or branches database data. devflow
 
 devflow embeds libgit2, so the `git` binary is not required. Managed Postgres needs Docker (or a compatible engine such as OrbStack); external mode needs a PostgreSQL 18 server instead.
 
-```sh
-# CLI release binary (Linux x86_64/arm64, macOS Apple Silicon) -> ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/clement-tourriere/devflow/main/scripts/install.sh | sh
+> **This README describes devflow 1.0, which is not published as a release yet.** The latest published release is **0.8.0**, which reads another configuration format (see [docs/MIGRATING.md](docs/MIGRATING.md)): the installer below fetches it and warns after installing a 0.x release. To use 1.0, build it from source.
 
-# or from source
+```sh
+# from source: this is devflow 1.0
 git clone https://github.com/clement-tourriere/devflow.git && cd devflow
 cargo install --path .
+
+# latest published release (0.x until 1.0 is released; Linux x86_64/arm64, macOS Apple Silicon) -> ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/clement-tourriere/devflow/main/scripts/install.sh | sh
 
 # desktop app (macOS 15+; not part of the release binaries)
 cargo build --release -p devflow-gui        # target/release/devflow-gui
@@ -192,6 +194,10 @@ API_ORIGIN = "http://localhost:3000"
 - `preset = "prisma"` (or `presets_`, `Presets`) is not the `presets` list: it sets a variable named `preset`. devflow accepts it, since it is a valid recipe, and warns in `devflow env list` and `devflow doctor`: `did you mean presets = ["prisma"]?`.
 - A value built from the database password is secret: it is written only to `.devflow/env` (mode 0600), never printed, and masked whole in hook output and logs.
 - Recipes and presets are applied only for an approved scope (next section); until then `.devflow/env` holds what devflow generates and the workspace is `needs_attention`.
+- A workspace owns every name its configuration declares, whether it has a value for it or not: its identity (`DEVFLOW_PROJECT`, `DEVFLOW_PROJECT_ROOT`, `DEVFLOW_WORKSPACE`, `DEVFLOW_WORKSPACE_PATH`, `DEVFLOW_SOURCE_PATH`, `DEVFLOW_WORKSPACE_ID`, `COMPOSE_PROJECT_NAME`), the connection variables of each configured service (PostgreSQL: `DATABASE_URL`, the `PG*` variables, every `<NAME>_DATABASE_URL`; Valkey and Redis: their `env` name; MySQL: its URL variable and `MYSQL_*`) and your recipes and presets. It also keeps every name it ever exported: the receipt remembers them (and setup takes them from the file it is about to replace, so a recipe removed before the first setup of this devflow is remembered too, saved before the new file is written), so a recipe you remove stays the workspace's. A `--no-db` workspace that has no service still reopens its environment when a service comes, or exports another variable, since the names the file lists change; its services stay skipped. Hooks and `devflow exec` take each of those out of the inherited environment and then set the workspace's own values, so a `--no-db` workspace of a project with PostgreSQL has no `DATABASE_URL` rather than the one of the workspace you ran `devflow switch -c` from. `.devflow/env` lists the names in two versioned comments (`# devflow-owns v1:` for what the configuration declares, `# devflow-formerly v1:` for the names it exported once), which is how `devflow exec` knows them without reading the project. A `.devflow/env` without them, written by an earlier devflow, is not guessed at: `devflow exec` refuses it and setup writes it again, and hooks run only from a file that has them. When the inherited environment names the workspace it came from (`DEVFLOW_WORKSPACE_PATH` and `DEVFLOW_WORKSPACE_ID`) and that workspace's `.devflow/env` is a plain file (no component of its path, from `/` down, is a symlink) recording the same id, every name in that file, and every former name it lists, is taken out too: a recipe you removed, another project's variables. Matching the path and the id only decides what to clear; it gives the workspace no ownership of anything and approves nothing.
+- **A source that cannot be resolved is not "no source".** If the inherited environment carries `DEVFLOW_WORKSPACE_PATH` or `DEVFLOW_WORKSPACE_ID` and the workspace they name cannot be resolved (its directory is gone, it has no `.devflow/env`, the file is a symlink or records another id, or one of the two variables is missing), hooks and `devflow exec` refuse, naming the stale workspace and its directory: its variables may be in the environment, and nothing says which. Open a new shell, or unset them. To go on anyway, set `DEVFLOW_CLEAR_INHERITED=1` (`devflow exec` also takes `--clear-inherited`): every variable the workspace owns and every name devflow can generate (`DATABASE_URL`, the `PG*` family, `REDIS_URL`, `MYSQL_*`, the preset variables, the identity names) is taken out first.
+- Execution controls (`DEVFLOW_SETUP_ACTIVE`, `DEVFLOW_PHASE`, `DEVFLOW_TRUST_HOOKS`, `DEVFLOW_NON_INTERACTIVE`, `DEVFLOW_CD_FILE`, `DEVFLOW_BIN`, `DEVFLOW_CONFIG_DIR`, `DEVFLOW_DATA_DIR`, `DEVFLOW_INSTANCE_ID`, `DEVFLOW_INHERIT`, `DEVFLOW_CLEAR_INHERITED` and the other `DEVFLOW_*`) and the variables a process needs to run (`PATH`, `HOME`, …) are never taken out. To keep the caller's value of a name the workspace sets no value for (CI that brings its own `DATABASE_URL` to a `--no-db` workspace), name it: `devflow exec --inherit DATABASE_URL -- CMD` (repeatable), or `DEVFLOW_INHERIT=DATABASE_URL,REDIS_URL` for hooks and `exec` alike. A value the workspace sets always wins, and `setup --database-url` is a value it sets.
+- A copied dotenv file (`[worktree] copy` entries named `.env` or `.env.*`) that sets one of these names to another value than `.devflow/env` is named by `devflow setup` and `devflow doctor` (file and variables, never a value): tools that read the file themselves, and not through `devflow exec`, use its value.
 
 `devflow env list` shows the recipes, the presets and what they resolve to in a workspace (credentials masked, including a literal under a name like `APP_PASSWORD`; `--show-values` prints them); `devflow env set NAME '${DATABASE_URL}'`, `devflow env unset NAME` and `devflow env preset add|remove NAME` edit them like `hooks` does, and `--local` writes `devflow.local.toml`, the only place a literal credential is accepted.
 
@@ -203,7 +209,32 @@ One approval covers a versioned scope: every hook command (with its name and tim
 
 A new workspace's database is a clone of the database of the workspace its code comes from (`--from`, else the default workspace), unless you pass `--data-from WS|snapshot:NAME[@vN]|branch:ID|empty`. A branch `ID` is a UUID or any unique prefix of at least 8 hex characters, with or without dashes, so the short ids `db branch list` and `service list` show work in `--data-from branch:ID`, `--to branch:ID`, `db branch delete ID` and `service NAME drop ID`; an unknown or ambiguous prefix is an error that names the candidates. The default workspace's database is created empty the first time something needs it: `switch -c` (which warns about it) or `devflow setup` in the main checkout.
 
-Cloning needs the source database to have no open sessions. For a managed server bound to loopback, `on_busy_source` defaults to `disconnect`: creating a workspace from a live workspace terminates the open sessions of the source database. For external or non-loopback servers the default is `fail` and the clone is refused. Set `on_busy_source` under `[services.db]` to choose.
+Cloning needs the source database to have no open sessions. `on_busy_source` under `[services.db]` chooses what happens when it has some:
+
+| `on_busy_source` | Behavior | Default for |
+| --- | --- | --- |
+| `disconnect` | Terminate the source's sessions (their open transactions are aborted), then clone. The warning names what was ended: `terminated 2 session(s) on the source database (psql (app, pid 812, 172.17.0.1, idle in transaction), …)`. | a managed server bound to loopback |
+| `fail` | Refuse, naming the sessions. | external and non-loopback servers |
+| `wait` | Wait up to `busy_wait` (default `"30s"`) for the sessions to end on their own, then fail naming the ones that are left. Nothing is terminated. | (opt in) |
+
+Sessions are named by application name, role, process id, client address and state (`idle in transaction`, `active`), never by query. Under `wait`, `busy_wait = "2m"` sets the time; it is an error without `on_busy_source = "wait"`.
+
+How the database is copied follows the measured copy-on-write capability (see [Copy-on-write, measured](#copy-on-write-measured)): `STRATEGY FILE_COPY` when it is `verified` (measured on a managed server, declared with `cow = "verified"` on an external one), and, when it is `copy` or `unknown`, `STRATEGY WAL_LOG` for a source smaller than `wal_log_below` (default `"256MiB"`; `"0"` always uses `FILE_COPY`), because `FILE_COPY` forces checkpoints that cost more than the copy of a small database where blocks cannot be shared. The branch records the strategy it was cloned with (`clone_strategy` in `db branch list --json`, and in the setup detail).
+
+#### Seed data for automation (`[data]`)
+
+A run that cannot prompt (`--non-interactive`, `--json`, no terminal, the Git hook) and was not told where the data comes from (`--data-from`) can start from a snapshot you keep for the purpose:
+
+```toml
+[data]
+noninteractive_from = "snapshot:seed"   # "snapshot:NAME" or "snapshot:NAME@vN"
+noninteractive_max_age = "7d"           # optional: warn when the snapshot is older
+# noninteractive_fallback = "empty"     # optional: a service without the snapshot starts empty
+```
+
+Snapshots are per service and named (`devflow db snapshot create`, `devflow service NAME snapshot create`): each service takes its data from its own snapshot of that name. A service **without** it fails, with remedies (create the snapshot, or pass `--data-from`): its usual data source is a live workspace, and cloning one ends PostgreSQL sessions or stops MySQL, which a run nobody watches must not do on its own. `noninteractive_fallback = "empty"` is the one opt-out: such a service starts empty, with a warning naming it. A snapshot older than `noninteractive_max_age` (counted from when its data was taken) is used with a warning. The seed applies to the creation or adoption of a workspace; `--data-from` and an interactive run never use it, and neither does the default workspace, whose root branch is shared and always created empty. A data source stays immutable once chosen (a retry keeps the source it pinned), so changing `[data]` does not touch existing workspaces. Unknown keys under `[data]` are errors like everywhere else.
+
+MySQL briefly stops the source while a clone copies its data directory; the setup outcome carries that as a warning (`the source of service 'sql' was stopped for 3.0 s while its data was copied`), next to the clone report that `devflow service status` and `doctor` show.
 
 #### Test and shadow databases (`extra_databases`)
 
@@ -361,6 +392,8 @@ A whole workspace, end to end (`devflow switch -c`, release build, Apple silicon
 
 The first clone after the cache was loaded also wrote its first save (+120 MiB): that is the source's own data reaching disk, not a cost of the clone. Your numbers will differ with the filesystem, the dataset and the hooks.
 
+On a filesystem that cannot share blocks, `FILE_COPY` is the slower choice for a small database: it forces a checkpoint and copies the files, where `WAL_LOG` does not (pytest-postgresql measured 6.7 s against 0.47 s on ext4 for a small database; [issue 1260](https://github.com/dbfixtures/pytest-postgresql/issues/1260)). devflow therefore uses `WAL_LOG` for a source under `wal_log_below` (default 256 MiB) unless sharing is `verified`, and `FILE_COPY` otherwise, and records which one each branch got.
+
 Worktree payloads are cloned with `clonefile` on APFS and `FICLONE` on btrfs, XFS with reflink and ZFS 2.2+; on other filesystems they are copied.
 
 `devflow doctor` reports the capability it found and whether it was measured or declared. Set `require_cow = true` under `[services.db]` to refuse branch creation when CoW is not verified. Without CoW, branches still work; they take longer and use the full database size.
@@ -421,7 +454,7 @@ mise exec -- devflow exec -- bun install  # mise first, devflow after it: devflo
 cd apps/web && mise exec -- devflow exec -- npm test   # also from a subdirectory
 ```
 
-`devflow exec [--workspace NAME] -- CMD [ARGS…]` finds the workspace containing the current directory (any subdirectory; the nearest directory with a `.git` is the worktree root), reads its `.devflow/env`, sets each variable over the inherited environment and replaces itself with `CMD` (Unix `exec`: signals, standard streams and the exit status pass through; where the program cannot start, the codes are `env(1)`'s, 127 and 126). Like for hooks, inherited libpq selectors (`PGSERVICE`, `PGSSLROOTCERT`, …) are dropped when the workspace has a database. It never starts `CMD` against an unknown database: outside a workspace, in a checkout without `.devflow/env` (setup has not reached it), or with a symlinked `.devflow` or `.devflow/env`, it exits 1 with a message that holds no value. It prints nothing of its own and never a value. The fast path reads two things (no project scan, no registry, no server), and measured on macOS with a release build it costs about 5 ms over starting the program directly, nearly all of it starting devflow itself.
+`devflow exec [--workspace NAME] -- CMD [ARGS…]` finds the workspace containing the current directory (any subdirectory; the nearest directory with a `.git` is the worktree root), reads its `.devflow/env`, sets each variable over the inherited environment and replaces itself with `CMD` (Unix `exec`: signals, standard streams and the exit status pass through; where the program cannot start, the codes are `env(1)`'s, 127 and 126). Like for hooks, every name the workspace owns (see Environment above) is first taken out of the inherited environment, set or not: a `--no-db` workspace gets no `DATABASE_URL`, and an inherited `PGSERVICE` or `PGSSLROOTCERT` cannot redirect a `psql`. `--inherit NAME` (repeatable) and `DEVFLOW_INHERIT` keep the caller's value of a name the workspace sets none for. It never starts `CMD` against an unknown database: outside a workspace, in a checkout without `.devflow/env` (setup has not reached it), or with a symlinked `.devflow` or `.devflow/env`, it exits 1 with a message that holds no value. It prints nothing of its own and never a value. The fast path reads the workspace's `.devflow/env` (and, when the environment names the workspace it came from, that one's; no project scan, no registry, no server), and measured on macOS with a release build it costs about 5 ms over starting the program directly, nearly all of it starting devflow itself.
 
 What `devflow init` proposes is built this way: setup hooks that run repository commands through mise become `mise exec -- devflow exec -- CMD` (the `cd DIR &&` ahead of it is safe, because devflow applies last), and pitchfork daemons get `run = "devflow exec -- CMD"` with `mise = true` for the toolchain. That holds for every project that has a managed service (PostgreSQL, Valkey, Redis or MySQL, configured or proposed) or `[env]` content, a Redis-only project included; a project with none of them keeps its commands as they are. None of that depends on how mise is configured. The `mise:env-file` item (`[env] _.file = ".devflow/env"`) stays a proposal for the shells and editors you use in the worktree; when it is blocked it only warns that "shells in the worktree won't see the branch's variables through mise; commands devflow runs are unaffected". A mise *task* cannot be wrapped from outside (its own `env` comes after everything), so `mise run migrate` keeps depending on that wiring; call `devflow exec -- COMMAND` inside the task instead.
 
@@ -430,7 +463,7 @@ What `devflow init` proposes is built this way: setup hooks that run repository 
 For hooks you wrote by hand, devflow checks at run time, before the first `setup` hook, and reads the commands, not the files that happen to exist:
 
 - A hook that runs `devflow exec` inside mise (`mise exec -- devflow exec -- …`) needs no check of the variables.
-- For any other hook that runs mise (`mise` is a command word of its string, also inside `sh -c '…'`; a command hidden behind `xargs` or a variable is not seen, and neither is a shim), devflow runs `mise exec -- sh -c …` in the worktree with exactly the environment the hook will get (the inherited one without Git's and libpq's variables, the workspace's variables injected, `MISE_ENV` among them if you set it in `[env]`), bounded to 20 seconds, and compares each variable of `.devflow/env` with what the process mise starts sees: a different value is *overridden*, a missing one *removed*. Only variable names are shown, never values. Tools are not installed and project dependencies are not prepared by the check.
+- For any other hook that runs mise (`mise` is a command word of its string, also inside `sh -c '…'`; a command hidden behind `xargs` or a variable is not seen, and neither is a shim), devflow runs `mise exec -- sh -c …` in the worktree with exactly the environment the hook will get (the inherited one without Git's context and without the names the workspace owns, the workspace's variables injected, `MISE_ENV` among them if you set it in `[env]`), bounded to 20 seconds, and compares what the process mise starts sees with the workspace's environment, for every name the workspace owns: a variable it sets with a different value is *overridden*, a missing one *removed*, and a name it owns and sets no value for (a `--no-db` workspace's `DATABASE_URL`) that mise brings back is *reintroduced*. Names you keep with `--inherit` or `DEVFLOW_INHERIT` are not expected either way. Only variable names are shown, never values. Tools are not installed and project dependencies are not prepared by the check.
 - Whether mise trusts the worktree's configuration is asked for every hook that runs mise, with `mise env`, which refuses and trusts nothing. (`mise exec` and `mise run` trust a configuration they have not been told to trust when they run without a terminal, as of mise 2026.10; devflow does not let them do that for a worktree it set up.) devflow never trusts a configuration for you.
 - A hook the check cannot stand for is named in a warning, not blocked: a `cd` ahead of mise (mise reads that directory's configuration), a mise task (`mise run`, `mise r`, `mise tasks run`, `mise watch`: the task's own `env` comes after), `mise -C`/`-E`, or a `MISE_*` assigned in the command. The warning names the hook (its name, or `setup hook #N`), never its command, and recommends `devflow exec`.
 
@@ -441,6 +474,8 @@ For hooks you wrote by hand, devflow checks at run time, before the first `setup
 | The configuration is not trusted | The same, telling you to run `mise trust PATH`. `devflow doctor` lists the options (below). |
 | mise is not installed | The hooks run, unless one of them runs `mise`. |
 | The check fails or times out | No hook runs; fix the cause (`mise exec -- true` in the worktree shows it). |
+
+`devflow doctor` also has an `isolation` check for the workspace it runs in: it compares the process environment with `.devflow/env` for every name the workspace owns and names the variables that carry another value (and the workspace they came from, when the environment says so), and, with a reachable server, asks the workspace's URL `SELECT current_database()` and compares the answer with the database its receipt binds. A `dotenv` check names the copied dotenv files that disagree.
 
 Only the `setup` hooks are checked, once, when the `hooks` phase runs; `switch` and `teardown` hooks are not. `devflow setup --skip-mise-check` (or `switch --skip-mise-check`) runs the hooks anyway. The receipt records when (`mise_check_skipped_at`), `devflow list` shows `ready (mise check skipped)` and the setup summary says so.
 
@@ -454,6 +489,7 @@ devflow --json --non-interactive switch -c agent/fix-login   # read workspace.pa
 
 - `--json` prints one versioned document; `--non-interactive` disables prompts. Exit code 2 means the workspace is not `ready` (`needs_attention` or `in_progress`).
 - Commands that need the workspace's database go through `devflow exec`: `cd "$path" && devflow exec -- npm test`. It applies `.devflow/env` last, from any subdirectory, and fails (exit 1) rather than start the command without it.
+- A non-interactive creation can start from a seed snapshot instead of the code source's data: set `[data] noninteractive_from = "snapshot:NAME"` (see [Seed data for automation](#seed-data-for-automation-data)).
 - Untrusted hooks and `[env]` recipes are skipped in non-interactive mode and the workspace is marked `needs_attention`. Run `devflow trust` once (`-y`/`--yes` approves without asking), or set `DEVFLOW_TRUST_HOOKS=1` for a single run in CI.
 - Worktrees created by other tools (T3 Code, Claude Code, plain `git worktree add`) are prepared by a `post-checkout` hook: `devflow hook install` once, or `devflow init --hook`. The hook does nothing unless `devflow` is on the `PATH` of the process running Git.
 

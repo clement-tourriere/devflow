@@ -1,5 +1,6 @@
 //! `devflow.toml` schema, loading with the machine-local overlay, raw-text
 //! editing with concurrent-edit detection, and 0.x detection.
+use crate::db::DataSource;
 use crate::diag::{Seg, key_label};
 use crate::error::{ConfigShape, NotInitialized, ShapeKind};
 use crate::hooks::{HookCommand, HookPhase};
@@ -43,6 +44,99 @@ pub struct Config {
     /// How devflow treats the project's pitchfork daemons.
     #[serde(default, skip_serializing_if = "PitchforkSection::is_default")]
     pub pitchfork: PitchforkSection,
+    /// Where the data of workspaces nobody can be asked about comes from.
+    #[serde(default, skip_serializing_if = "DataSection::is_default")]
+    pub data: DataSection,
+}
+
+/// `[data]`: seed data for runs that cannot prompt.
+///
+/// "Non-interactive" is a run that cannot ask: `--non-interactive`, `--json`,
+/// no terminal, the Git hook. Such a run that was not told where the data
+/// comes from (`--data-from`) takes it from here, for every service that has a
+/// snapshot of that name, and from the service's usual default (with a
+/// warning) for one that does not.
+///
+/// The section decides where the data of a workspace comes from when it is
+/// created or adopted. A data source is immutable once chosen, so it is part
+/// of no generation: changing it reopens no workspace that has its data.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct DataSection {
+    /// `snapshot:NAME` (or `snapshot:NAME@vN`): the snapshot each service
+    /// seeds a non-interactive workspace from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub noninteractive_from: Option<String>,
+    /// A seed snapshot older than this (humantime, e.g. "7d") is still used,
+    /// with a warning.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub noninteractive_max_age: Option<String>,
+    /// What a service without that snapshot does. Unset, it fails the run
+    /// (with remedies): its default data source is a live workspace, and
+    /// cloning one ends PostgreSQL sessions or stops MySQL. The only value is
+    /// `"empty"`: an empty database for that service, with a warning.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub noninteractive_fallback: Option<SeedFallback>,
+}
+
+/// What `[data] noninteractive_fallback` allows a service without the seed
+/// snapshot to start from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeedFallback {
+    /// An empty database (an empty cache, an initialized MySQL).
+    Empty,
+}
+
+impl DataSection {
+    fn is_default(&self) -> bool {
+        *self == DataSection::default()
+    }
+
+    /// The configured seed: always a [`DataSource::Snapshot`].
+    pub fn noninteractive_source(&self) -> Option<DataSource> {
+        self.noninteractive_from.as_deref()?.parse().ok()
+    }
+
+    /// The age past which the seed snapshot is reported as stale.
+    pub fn noninteractive_max_age(&self) -> Option<Duration> {
+        parse_duration(self.noninteractive_max_age.as_deref()?, "").ok()
+    }
+
+    fn validate(&self) -> Result<()> {
+        if let Some(text) = &self.noninteractive_from {
+            // The text is a value: it is not repeated.
+            let source = text.parse::<DataSource>().ok();
+            anyhow::ensure!(
+                matches!(source, Some(DataSource::Snapshot { .. })),
+                "data.noninteractive_from: expected a snapshot like \"snapshot:NAME\" (or \
+                 \"snapshot:NAME@v2\"); snapshots are per service and named"
+            );
+            // Versions count from 1: a zero or negative one would otherwise be
+            // read as "no version" and select the latest snapshot.
+            anyhow::ensure!(
+                !matches!(source, Some(DataSource::Snapshot { version: Some(v), .. }) if v < 1),
+                "data.noninteractive_from: the snapshot version must be a positive number, like \
+                 \"snapshot:NAME@v2\""
+            );
+        }
+        anyhow::ensure!(
+            self.noninteractive_from.is_some() || self.noninteractive_fallback.is_none(),
+            "data.noninteractive_fallback needs data.noninteractive_from"
+        );
+        if let Some(text) = &self.noninteractive_max_age {
+            anyhow::ensure!(
+                self.noninteractive_from.is_some(),
+                "data.noninteractive_max_age needs data.noninteractive_from"
+            );
+            let age = parse_duration(text, "data.noninteractive_max_age")?;
+            anyhow::ensure!(
+                !age.is_zero(),
+                "data.noninteractive_max_age must be longer than zero"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// `[pitchfork]`: devflow's part in starting a workspace's daemons.
@@ -67,6 +161,12 @@ impl PitchforkSection {
 pub const MAX_KEY_LEN: usize = 31;
 /// Engines this build understands, for error messages.
 const SUPPORTED_ENGINES: &str = "postgres, valkey, redis, mysql";
+
+/// How long `on_busy_source = "wait"` waits when `busy_wait` is not set.
+pub const DEFAULT_BUSY_WAIT: Duration = Duration::from_secs(30);
+/// Source size under which a clone without verified copy-on-write uses
+/// `STRATEGY WAL_LOG`, when `wal_log_below` is not set.
+pub const DEFAULT_WAL_LOG_BELOW: u64 = 256 * 1024 * 1024;
 
 /// Image of a `valkey` service when `image` is not set.
 pub const VALKEY_IMAGE: &str = "valkey/valkey:8-alpine";
@@ -100,7 +200,7 @@ const MYSQL_SYSTEM_DATABASES: [&str; 4] =
     ["mysql", "sys", "information_schema", "performance_schema"];
 
 /// Keys that only `engine = "postgres"` has.
-const POSTGRES_ONLY_KEYS: [&str; 10] = [
+const POSTGRES_ONLY_KEYS: [&str; 12] = [
     "mode",
     "admin_url",
     "app_host",
@@ -110,6 +210,8 @@ const POSTGRES_ONLY_KEYS: [&str; 10] = [
     "database",
     "extra_databases",
     "on_busy_source",
+    "busy_wait",
+    "wal_log_below",
     "cow",
 ];
 
@@ -245,6 +347,9 @@ impl ServiceConfig {
                 if let Some(url) = pg.admin_url.as_mut() {
                     *url = crate::redact::text(url);
                 }
+                // How a future clone runs, never what an existing binding holds.
+                pg.busy_wait = None;
+                pg.wal_log_below = None;
             }
             ServiceConfig::Valkey(_) | ServiceConfig::Redis(_) | ServiceConfig::Mysql(_) => {}
         }
@@ -338,6 +443,8 @@ pub enum BusySourcePolicy {
     Disconnect,
     /// Refuse to clone a source database that has sessions.
     Fail,
+    /// Wait up to `busy_wait` for the sessions to end, then refuse naming them.
+    Wait,
 }
 
 /// Whether cloned databases share blocks with their source.
@@ -384,6 +491,15 @@ pub struct PostgresSection {
     /// Default: `disconnect` for a managed server bound to loopback, `fail` otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub on_busy_source: Option<BusySourcePolicy>,
+    /// With `on_busy_source = "wait"`: how long to wait for the source's
+    /// sessions to end (humantime). Default: [`DEFAULT_BUSY_WAIT`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub busy_wait: Option<String>,
+    /// A clone of a source smaller than this uses `STRATEGY WAL_LOG` unless
+    /// copy-on-write is verified (a size like "256MiB"; "0" always uses
+    /// `FILE_COPY`). Default: [`DEFAULT_WAL_LOG_BELOW`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wal_log_below: Option<String>,
     /// Refuse to create branches unless CoW is verified.
     pub require_cow: bool,
     /// External mode: operator declaration after checking the server's filesystem.
@@ -404,6 +520,8 @@ impl Default for PostgresSection {
             database: None,
             extra_databases: Vec::new(),
             on_busy_source: None,
+            busy_wait: None,
+            wal_log_below: None,
             require_cow: false,
             cow: None,
         }
@@ -908,6 +1026,33 @@ fn parse_duration(text: &str, at: &str) -> Result<Duration> {
         .map_err(|_| anyhow::anyhow!("{at}: expected a duration like \"30s\" or \"15m\""))
 }
 
+/// Read a size setting: whole bytes with an optional binary or decimal unit
+/// ("256MiB", "1 GiB", "512M", "0"). The error names the setting and not the
+/// text.
+fn parse_size(text: &str, at: &str) -> Result<u64> {
+    let text = text.trim();
+    let split = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    let (digits, unit) = text.split_at(split);
+    let factor: Option<u64> = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => Some(1),
+        "k" | "kib" => Some(1 << 10),
+        "m" | "mib" => Some(1 << 20),
+        "g" | "gib" => Some(1 << 30),
+        "kb" => Some(1_000),
+        "mb" => Some(1_000_000),
+        "gb" => Some(1_000_000_000),
+        _ => None,
+    };
+    digits
+        .parse::<u64>()
+        .ok()
+        .zip(factor)
+        .and_then(|(n, factor)| n.checked_mul(factor))
+        .ok_or_else(|| anyhow::anyhow!("{at}: expected a size like \"256MiB\" or \"1GiB\""))
+}
+
 impl HookEntry {
     /// An unnamed command with the section's timeout.
     pub fn new(run: impl Into<String>) -> Self {
@@ -1033,7 +1178,36 @@ impl PostgresSection {
                  most), and not main, postgres, devflow or template*"
             );
         }
+        if let Some(text) = &self.busy_wait {
+            anyhow::ensure!(
+                self.on_busy_source == Some(BusySourcePolicy::Wait),
+                "services.{key}.busy_wait only applies with on_busy_source = \"wait\""
+            );
+            anyhow::ensure!(
+                !parse_duration(text, &format!("services.{key}.busy_wait"))?.is_zero(),
+                "services.{key}.busy_wait must be longer than zero"
+            );
+        }
+        if let Some(text) = &self.wal_log_below {
+            parse_size(text, &format!("services.{key}.wal_log_below"))?;
+        }
         Ok(())
+    }
+
+    /// How long a `wait` policy waits for the source's sessions to end.
+    pub fn busy_wait(&self) -> Duration {
+        self.busy_wait
+            .as_deref()
+            .and_then(|text| parse_duration(text, "").ok())
+            .unwrap_or(DEFAULT_BUSY_WAIT)
+    }
+
+    /// The source size (bytes) under which an unverified clone uses `WAL_LOG`.
+    pub fn wal_log_below(&self) -> u64 {
+        self.wal_log_below
+            .as_deref()
+            .and_then(|text| parse_size(text, "").ok())
+            .unwrap_or(DEFAULT_WAL_LOG_BELOW)
     }
 
     /// The variables the scratch databases are exported as, in the order
@@ -1294,6 +1468,7 @@ impl Config {
             validate_relative(entry).with_context(|| format!("invalid worktree.copy[{index}]"))?;
         }
         self.hooks.validate()?;
+        self.data.validate()?;
         let exports = self.exported_variables();
         let extra_vars: Vec<String> = exports.iter().map(|(name, _)| name.clone()).collect();
         self.env.validate_with(&extra_vars)?;
@@ -1639,6 +1814,14 @@ fn current_shapes(value: &toml::Table) -> Vec<String> {
     found.extend(has("worktree", &["dir", "copy"]));
     found.extend(has("hooks", &["setup", "switch", "teardown", "timeout"]));
     found.extend(has("pitchfork", &["autostart"]));
+    found.extend(has(
+        "data",
+        &[
+            "noninteractive_from",
+            "noninteractive_max_age",
+            "noninteractive_fallback",
+        ],
+    ));
     found
 }
 
@@ -2533,6 +2716,176 @@ mod tests {
         assert_ne!(a.service_generation("db"), c.service_generation("db"));
         // The same key, engine and content give the same env generation anywhere.
         assert_eq!(one.env_generation(), same.env_generation());
+    }
+
+    #[test]
+    fn the_wait_policy_and_the_strategy_threshold_are_validated() {
+        let pg = |extra: &str| parse(&format!("[services.db]\nengine = \"postgres\"\n{extra}\n"));
+        let config = pg("on_busy_source = \"wait\"").unwrap();
+        let section = config.postgres().unwrap().1;
+        assert_eq!(section.busy_policy(), BusySourcePolicy::Wait);
+        assert_eq!(section.busy_wait(), DEFAULT_BUSY_WAIT);
+        assert_eq!(section.wal_log_below(), DEFAULT_WAL_LOG_BELOW);
+
+        let config =
+            pg("on_busy_source = \"wait\"\nbusy_wait = \"2m\"\nwal_log_below = \"1GiB\"").unwrap();
+        let section = config.postgres().unwrap().1;
+        assert_eq!(section.busy_wait(), Duration::from_secs(120));
+        assert_eq!(section.wal_log_below(), 1 << 30);
+        assert_eq!(
+            pg("wal_log_below = \"0\"")
+                .unwrap()
+                .postgres()
+                .unwrap()
+                .1
+                .wal_log_below(),
+            0,
+            "zero never uses WAL_LOG"
+        );
+
+        let error = pg("busy_wait = \"5s\"").unwrap_err().to_string();
+        assert!(error.contains("busy_wait only applies"), "{error}");
+        let error = pg("on_busy_source = \"disconnect\"\nbusy_wait = \"5s\"")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("busy_wait only applies"), "{error}");
+        let error = pg("on_busy_source = \"wait\"\nbusy_wait = \"soon\"")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("busy_wait") && !error.contains("soon"),
+            "{error}"
+        );
+        let error = pg("on_busy_source = \"wait\"\nbusy_wait = \"0s\"")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("longer than zero"), "{error}");
+        let error = pg("wal_log_below = \"big\"").unwrap_err().to_string();
+        assert!(
+            error.contains("wal_log_below") && !error.contains("big"),
+            "{error}"
+        );
+        // Container services have neither key.
+        let error = parse("[services.cache]\nengine = \"valkey\"\nbusy_wait = \"5s\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("busy_wait"), "{error}");
+    }
+
+    #[test]
+    fn the_strategy_settings_do_not_reopen_a_bound_service() {
+        let plain = parse("[services.db]\nengine = \"postgres\"\n").unwrap();
+        let tuned = parse(
+            "[services.db]\nengine = \"postgres\"\non_busy_source = \"wait\"\n\
+             wal_log_below = \"1GiB\"\nbusy_wait = \"1m\"\n",
+        )
+        .unwrap();
+        let waiting =
+            parse("[services.db]\nengine = \"postgres\"\non_busy_source = \"wait\"\n").unwrap();
+        assert_eq!(
+            tuned.service_generation("db"),
+            waiting.service_generation("db"),
+            "how long to wait and when to use WAL_LOG change nothing a binding holds"
+        );
+        assert_ne!(
+            plain.service_generation("db"),
+            waiting.service_generation("db"),
+            "the policy stays part of the section, as before"
+        );
+    }
+
+    #[test]
+    fn the_data_section_is_validated_and_part_of_no_generation() {
+        let none = parse("").unwrap();
+        assert_eq!(none.data, DataSection::default());
+        assert_eq!(none.data.noninteractive_source(), None);
+
+        let seeded = parse(
+            "[services.db]\nengine = \"postgres\"\n[data]\nnoninteractive_from = \"snapshot:seed\"\n\
+             noninteractive_max_age = \"7d\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            seeded.data.noninteractive_source(),
+            Some(DataSource::Snapshot {
+                name: "seed".into(),
+                version: None
+            })
+        );
+        assert_eq!(
+            seeded.data.noninteractive_max_age(),
+            Some(Duration::from_secs(7 * 86_400))
+        );
+        let pinned = parse("[data]\nnoninteractive_from = \"snapshot:seed@v2\"\n").unwrap();
+        assert_eq!(
+            pinned.data.noninteractive_source(),
+            Some(DataSource::Snapshot {
+                name: "seed".into(),
+                version: Some(2)
+            })
+        );
+
+        let fallback = parse(
+            "[data]\nnoninteractive_from = \"snapshot:seed\"\nnoninteractive_fallback = \"empty\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            fallback.data.noninteractive_fallback,
+            Some(SeedFallback::Empty)
+        );
+        assert_eq!(none.data.noninteractive_fallback, None, "fail by default");
+
+        // A data source is immutable once chosen: the section reaches
+        // workspaces when they are created or adopted, not afterwards.
+        let plain = parse("[services.db]\nengine = \"postgres\"\n").unwrap();
+        assert_eq!(plain.env_generation(), seeded.env_generation());
+        assert_eq!(
+            plain.service_generation("db"),
+            seeded.service_generation("db")
+        );
+
+        for (text, needle) in [
+            ("[data]\nnoninteractive_from = \"empty\"\n", "snapshot"),
+            ("[data]\nnoninteractive_from = \"main\"\n", "snapshot"),
+            ("[data]\nnoninteractive_from = \"snapshot:\"\n", "snapshot"),
+            (
+                "[data]\nnoninteractive_from = \"snapshot:seed@v-1\"\n",
+                "positive number",
+            ),
+            (
+                "[data]\nnoninteractive_from = \"snapshot:seed@v0\"\n",
+                "positive number",
+            ),
+            (
+                "[data]\nnoninteractive_max_age = \"7d\"\n",
+                "needs data.noninteractive_from",
+            ),
+            (
+                "[data]\nnoninteractive_from = \"snapshot:s\"\nnoninteractive_max_age = \"later\"\n",
+                "noninteractive_max_age",
+            ),
+            (
+                "[data]\nnoninteractive_from = \"snapshot:s\"\nnoninteractive_max_age = \"0s\"\n",
+                "longer than zero",
+            ),
+            (
+                "[data]\nnoninteractive_fallback = \"empty\"\n",
+                "needs data.noninteractive_from",
+            ),
+            (
+                "[data]\nnoninteractive_from = \"snapshot:s\"\nnoninteractive_fallback = \"workspace\"\n",
+                "noninteractive_fallback",
+            ),
+            ("[data]\nfrom = \"snapshot:s\"\n", "from"),
+        ] {
+            let error = parse(text).unwrap_err().to_string();
+            assert!(error.contains(needle), "{text}: {error}");
+        }
+        // A value is never repeated in an error.
+        let error = parse("[data]\nnoninteractive_from = \"hunter2\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("hunter2"), "{error}");
     }
 
     #[test]

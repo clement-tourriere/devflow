@@ -40,7 +40,7 @@ tmp=$(mktemp -d)
 mkdir "$tmp/text"
 scanner=
 watchdog=
-# shellcheck disable=SC2329 # run by the EXIT trap
+# shellcheck disable=SC2317,SC2329 # run by the EXIT trap
 cleanup() {
 	for pid in $scanner $watchdog; do
 		kill "$pid" 2>/dev/null || true

@@ -920,6 +920,8 @@ fn busy_source_policies() {
         .create_branch("a", ResolvedSource::Empty, None)
         .unwrap();
     let mut held = connect(&a.url);
+    held.batch_execute("SET application_name = 'df-busy-app'")
+        .unwrap();
     held.batch_execute("CREATE TABLE t (i int)").unwrap();
     held.batch_execute("BEGIN; INSERT INTO t VALUES (1)")
         .unwrap();
@@ -929,6 +931,34 @@ fn busy_source_policies() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("open session"), "{error}");
+    // The sessions are named by application, address and state, never by query.
+    assert!(
+        error.contains("df-busy-app") && error.contains("idle in transaction"),
+        "{error}"
+    );
+    assert!(
+        !error.contains("INSERT") && !error.contains("CREATE TABLE"),
+        "{error}"
+    );
+    // A credential in an application name is masked, whole, before the name is
+    // cut short for the message. PostgreSQL itself keeps 63 bytes of the name,
+    // so the server hands back this one without its `@`.
+    let leaked = "Zx8Qm2LpV7nRt4YcB9sHd6WkJ3fAe5Gu"; // kingfisher:ignore
+    let mut leaky = connect(&a.url);
+    leaky
+        .batch_execute(&format!(
+            "SET application_name = 'worker postgres://dfl_0123456789ab:{leaked}@host/db'"
+        ))
+        .unwrap();
+    let error = server
+        .create_branch("b2", ResolvedSource::Branch(a.branch.id), None)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("open session") && !error.contains(&leaked[..8]),
+        "{error}"
+    );
+    drop(leaky);
     let error = server
         .create_snapshot("s", a.branch.id)
         .unwrap_err()
@@ -953,7 +983,10 @@ fn busy_source_policies() {
         .create_branch("b", ResolvedSource::Branch(a.branch.id), None)
         .unwrap();
     assert!(
-        b.warnings.iter().any(|w| w.contains("1 session")),
+        b.warnings.iter().any(|w| w.contains("1 session")
+            && w.contains("df-busy-app")
+            && w.contains("idle in transaction")
+            && !w.contains("INSERT")),
         "{:?}",
         b.warnings
     );
@@ -969,6 +1002,200 @@ fn busy_source_policies() {
     assert!(held.simple_query("SELECT 1").is_err());
     // The uncommitted insert was aborted, not copied.
     assert_eq!(count(&mut connect(&b.url), "SELECT * FROM t"), 0);
+}
+
+/// `on_busy_source = "wait"`: a source whose sessions end within `busy_wait` is
+/// cloned without touching them; one that stays busy fails naming the sessions
+/// and leaves nothing behind.
+#[test]
+#[ignore = "needs Docker"]
+fn busy_source_wait_policy() {
+    let env = Env::new("on_busy_source = \"wait\"\nbusy_wait = \"2s\"");
+    let server = env.server();
+    server.up().unwrap();
+    let mut admin = superuser(&server, "postgres");
+    let a = server
+        .create_branch("a", ResolvedSource::Empty, None)
+        .unwrap();
+    let mut held = connect(&a.url);
+    held.batch_execute("SET application_name = 'df-wait-app'")
+        .unwrap();
+    held.batch_execute("CREATE TABLE t (i int); BEGIN; INSERT INTO t VALUES (1)")
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let error = server
+        .create_branch("b", ResolvedSource::Branch(a.branch.id), None)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(1_900),
+        "waited {:?}",
+        started.elapsed()
+    );
+    assert!(
+        error.contains("open session")
+            && error.contains("waiting 2s")
+            && error.contains("df-wait-app")
+            && error.contains("idle in transaction"),
+        "{error}"
+    );
+    assert!(
+        !error.contains("INSERT"),
+        "queries are never named: {error}"
+    );
+    assert!(
+        held.simple_query("SELECT 1").is_ok(),
+        "wait must not touch the session"
+    );
+    assert_eq!(df_databases(&mut admin).len(), 1);
+    assert_eq!(login_roles(&mut admin).len(), 1);
+    assert_eq!(server.list_branches().unwrap().len(), 1);
+
+    // The session ends while the clone waits: the clone goes through, and no
+    // session was terminated.
+    env.write_config("on_busy_source = \"wait\"\nbusy_wait = \"30s\"", None);
+    let server = env.server();
+    let ender = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1_200));
+        held.batch_execute("ROLLBACK").unwrap();
+        drop(held);
+    });
+    let started = std::time::Instant::now();
+    // While the clone waits, its branch row is already there with the strategy
+    // it will clone with: journaled before the `CREATE DATABASE`.
+    let (b, journaled) = std::thread::scope(|scope| {
+        let creating =
+            scope.spawn(|| server.create_branch("b", ResolvedSource::Branch(a.branch.id), None));
+        let mut meta = superuser(&server, "devflow");
+        let mut journaled = None;
+        while journaled.is_none() && !creating.is_finished() {
+            journaled = meta
+                .query_opt(
+                    "SELECT clone_strategy FROM branches WHERE status = 'creating'",
+                    &[],
+                )
+                .unwrap()
+                .map(|row| row.get::<_, Option<String>>(0));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        (creating.join().unwrap().unwrap(), journaled)
+    });
+    let waited = started.elapsed();
+    ender.join().unwrap();
+    let journaled = journaled.flatten();
+    assert!(
+        matches!(journaled.as_deref(), Some("file_copy" | "wal_log")),
+        "{journaled:?}"
+    );
+    assert_eq!(
+        b.branch.clone_strategy.map(|s| s.to_string()),
+        journaled,
+        "the row kept what it journaled"
+    );
+    assert!(
+        waited >= std::time::Duration::from_millis(1_000)
+            && waited < std::time::Duration::from_secs(25),
+        "waited {waited:?}"
+    );
+    assert_eq!(b.branch.status, RecordStatus::Ready);
+    assert!(b.warnings.is_empty(), "{:?}", b.warnings);
+    // A snapshot waits the same way.
+    let snapshot = server.create_snapshot("s", a.branch.id).unwrap();
+    assert!(snapshot.warnings.is_empty(), "{:?}", snapshot.warnings);
+}
+
+/// The clone strategy follows the measured capability and the source size,
+/// and the branch records it (a reset replaces it with the new data's).
+#[test]
+#[ignore = "needs Docker"]
+fn clone_strategy_follows_the_capability_and_the_source_size() {
+    use devflow_core::db::CloneStrategy;
+    let env = Env::new("");
+    let server = env.server();
+    let status = server.up().unwrap();
+    print_cow(&env, &status);
+    let a = server
+        .create_branch("a", ResolvedSource::Empty, None)
+        .unwrap();
+    assert_eq!(
+        a.branch.clone_strategy, None,
+        "an empty database is not cloned"
+    );
+
+    // The default threshold (256 MiB) is above a fresh database.
+    let b = server
+        .create_branch("b", ResolvedSource::Branch(a.branch.id), None)
+        .unwrap();
+    let expected = if b.branch.cow == CowCapability::Verified {
+        CloneStrategy::FileCopy
+    } else {
+        CloneStrategy::WalLog
+    };
+    assert_eq!(
+        b.branch.clone_strategy,
+        Some(expected),
+        "cow {:?}",
+        b.branch.cow
+    );
+    let listed = server
+        .list_branches()
+        .unwrap()
+        .into_iter()
+        .find(|branch| branch.id == b.branch.id)
+        .unwrap();
+    assert_eq!(
+        listed.clone_strategy,
+        Some(expected),
+        "recorded, not recomputed"
+    );
+
+    // The data is there whichever way it was copied.
+    let mut writer = connect(&a.url);
+    writer
+        .batch_execute("CREATE TABLE t (i int); INSERT INTO t SELECT generate_series(1, 1000)")
+        .unwrap();
+    drop(writer);
+    let c = server
+        .create_branch("c", ResolvedSource::Branch(a.branch.id), None)
+        .unwrap();
+    assert_eq!(count(&mut connect(&c.url), "SELECT * FROM t"), 1000);
+
+    // 0 never uses WAL_LOG; so does a source above the threshold.
+    for threshold in ["0", "1kB"] {
+        env.write_config(&format!("wal_log_below = \"{threshold}\""), None);
+        let server = env.server();
+        let d = server
+            .create_branch("d", ResolvedSource::Branch(a.branch.id), None)
+            .unwrap();
+        assert_eq!(
+            d.branch.clone_strategy,
+            Some(CloneStrategy::FileCopy),
+            "wal_log_below = {threshold}"
+        );
+        server.drop_branch(d.branch.id).unwrap();
+    }
+
+    // A snapshot is a clone too, and a reset records the strategy of its data.
+    env.write_config("wal_log_below = \"1GiB\"", None);
+    let server = env.server();
+    server.create_snapshot("s", a.branch.id).unwrap();
+    let reset = server
+        .reset_branch(b.branch.id, ResolvedSource::Branch(a.branch.id))
+        .unwrap();
+    assert_eq!(reset.clone_strategy, Some(expected));
+    let reset = server
+        .reset_branch(b.branch.id, ResolvedSource::Empty)
+        .unwrap();
+    assert_eq!(reset.clone_strategy, None, "an empty reset is not a clone");
+    assert_eq!(
+        count(
+            &mut superuser(&server, "devflow"),
+            "SELECT 1 FROM branches WHERE op_clone_strategy IS NOT NULL"
+        ),
+        0,
+        "a finished reset leaves no journaled strategy behind"
+    );
 }
 
 /// `require_cow` follows the capability: measured (managed), declared
@@ -3471,7 +3698,8 @@ fn scratch_orphans_additions_and_the_schema_upgrade() {
         .unwrap();
     meta.batch_execute(
         "DROP TABLE scratch_databases; ALTER TABLE branches DROP COLUMN scratch_seq, \
-         DROP COLUMN op_scratch; \
+         DROP COLUMN op_scratch, DROP COLUMN clone_strategy, \
+         DROP COLUMN op_clone_strategy; \
          UPDATE meta SET value = '1' WHERE key = 'schema_version'",
     )
     .unwrap();
@@ -3503,16 +3731,16 @@ fn scratch_orphans_additions_and_the_schema_upgrade() {
             &mut meta,
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ),
-        "3"
+        "4"
     );
     // The branch that predates the table gets its scratch database on request.
     assert_eq!(server.ensure_scratch(plain.branch.id).unwrap().len(), 1);
     // A newer schema is refused, as before.
-    meta.batch_execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+    meta.batch_execute("UPDATE meta SET value = '5' WHERE key = 'schema_version'")
         .unwrap();
     let error = format!("{:#}", server.reconcile().unwrap_err());
     assert!(error.contains("newer than this devflow"), "{error}");
-    meta.batch_execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
+    meta.batch_execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
         .unwrap();
     server.drop_branch(plain.branch.id).unwrap();
     server.drop_branch(upgraded.branch.id).unwrap();

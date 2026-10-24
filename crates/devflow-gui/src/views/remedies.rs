@@ -103,7 +103,9 @@ fn workspace_at(
         .map(|w| w.workspace.clone())
 }
 
-/// The workspace of the open project (the one at `root`) called `name`.
+/// The workspace of the open project (the one at `root`) called `name`, if
+/// exactly one is (a name two workspaces share finds neither: the remedy is
+/// then refused, not applied to a guess).
 fn workspace_named(
     state: &Entity<AppState>,
     root: &Path,
@@ -166,7 +168,7 @@ pub fn run_scoped(state: &Entity<AppState>, remedy: &Remedy, window: &mut Window
             };
             // The review of what the workspace asks to run is the Setup tab's.
             state.update(cx, |s, cx| {
-                s.select_workspace(found.name, cx);
+                s.select_workspace(found.path, cx);
                 s.go_to_tab(Tab::Setup, cx);
             });
         }
@@ -300,7 +302,7 @@ pub fn run_scoped(state: &Entity<AppState>, remedy: &Remedy, window: &mut Window
                 return refuse(window, cx, remedy, no_workspace);
             };
             state.update(cx, |s, cx| {
-                s.select_workspace(found.name, cx);
+                s.select_workspace(found.path, cx);
                 s.go_to_tab(Tab::Workspaces, cx);
             });
         }
@@ -311,6 +313,24 @@ pub fn run_scoped(state: &Entity<AppState>, remedy: &Remedy, window: &mut Window
             let root: PathBuf = root.clone();
             state.update(cx, |s, cx| s.add_env_preset(root, preset, window, cx));
         }
+        // The app's own environment came from a shell inside a workspace that
+        // is gone: only a new start gets rid of it.
+        Remedy::ClearInherited => refuse(
+            window,
+            cx,
+            remedy,
+            "This app was started from a shell that carries the variables of another workspace. \
+             Quit it and open it again from a new shell, or from the Dock.",
+        ),
+        // The new-workspace dialog has the "Start from" and "Data from" fields.
+        Remedy::ChooseBase { .. } | Remedy::ChooseDataSource { .. } => {
+            dialogs::open_new_workspace(state, window, cx)
+        }
+        // Snapshots are made from a workspace's data on the Data tab.
+        Remedy::CreateSeedSnapshot { .. } => state.update(cx, |s, cx| s.go_to_tab(Tab::Data, cx)),
+        // The app names workspaces by their folder already: the table is where
+        // the person sees which one is meant.
+        Remedy::UsePath { .. } => state.update(cx, |s, cx| s.go_to_tab(Tab::Workspaces, cx)),
         // The project list's remedies are `problems::run_remedy`'s.
         Remedy::Retry
         | Remedy::ForgetProject { .. }

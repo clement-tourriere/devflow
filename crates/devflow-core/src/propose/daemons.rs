@@ -70,8 +70,17 @@ impl Builder<'_> {
             // The daemon gets the workspace's variables from `devflow exec`,
             // which sets them after mise (`mise = true`) and anything else
             // has set theirs. A mise task cannot be wrapped that way.
+            //
+            // A daemon with `mise = true` is wrapped whatever the project
+            // exports: `.devflow/env` always exists (the workspace's identity
+            // is in it), and `up` refuses a mise daemon that is not wrapped
+            // unless mise loads that file, so the proposal has to pass it.
             let needs_workspace_env = self.needs_workspace_env();
-            let wrapped = needs_workspace_env && !runs_mise_task(&candidate.run);
+            let wrapped = (needs_workspace_env || uses_mise) && !runs_mise_task(&candidate.run);
+            // A mise task that cannot be wrapped only gets `.devflow/env`
+            // through mise's own wiring, proposed only for a project that
+            // exports something; without it `mise = true` would be refused.
+            let mise_daemon = uses_mise && (wrapped || needs_workspace_env);
             let run = if wrapped {
                 through_devflow_exec(&candidate.run)
             } else {
@@ -105,7 +114,7 @@ impl Builder<'_> {
                     comment: None,
                 });
             }
-            if uses_mise {
+            if mise_daemon {
                 ops.push(PatchOp::Set {
                     path: daemon("mise"),
                     value: json!(true),
@@ -128,7 +137,7 @@ impl Builder<'_> {
             }
             // A mise task only gets `.devflow/env` through mise; the plan
             // links it to the item that arranges that (see `link_mise_wiring`).
-            let relies_on_mise_env = !wrapped && uses_mise && needs_workspace_env;
+            let relies_on_mise_env = !wrapped && mise_daemon;
             let spec = Spec::new(
                 id,
                 ItemKind::Daemon,
@@ -143,7 +152,7 @@ impl Builder<'_> {
                 "run": run,
                 "dir": candidate.dir,
                 "port": candidate.port,
-                "mise": uses_mise,
+                "mise": mise_daemon,
             }))
             .confidence(candidate.confidence)
             .evidence(candidate.evidence)

@@ -38,12 +38,73 @@ pub struct EntryReport {
     pub result: EntryResult,
 }
 
+/// One line for a payload phase: what was cloned, copied, found in place or
+/// missing, from `source`. "Cloned" is only said of entries whose blocks are
+/// shared with the source; "copied" only of byte copies.
+pub fn summary(reports: &[EntryReport], source: &Path) -> String {
+    let count =
+        |wanted: fn(&EntryResult) -> bool| reports.iter().filter(|r| wanted(&r.result)).count();
+    let parts: Vec<String> = [
+        (
+            count(|r| {
+                matches!(
+                    r,
+                    EntryResult::Done {
+                        method: Method::Cloned
+                    }
+                )
+            }),
+            "cloned",
+        ),
+        (
+            count(|r| {
+                matches!(
+                    r,
+                    EntryResult::Done {
+                        method: Method::Copied
+                    }
+                )
+            }),
+            "copied",
+        ),
+        (
+            count(|r| {
+                matches!(
+                    r,
+                    EntryResult::Done {
+                        method: Method::Mixed
+                    }
+                )
+            }),
+            "partly cloned, partly copied",
+        ),
+        (
+            count(|r| matches!(r, EntryResult::AlreadyPresent)),
+            "already there",
+        ),
+        (
+            count(|r| matches!(r, EntryResult::Missing)),
+            "not in the source",
+        ),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, what)| format!("{n} {what}"))
+    .collect();
+    if parts.is_empty() {
+        return "nothing to copy".to_string();
+    }
+    format!("{} (from {})", parts.join(", "), source.display())
+}
+
 /// Clone each relative `entries` path from `source_root` into `dest_root`.
 ///
 /// Paths must stay inside both roots: `..`, absolute paths and symlinked
 /// parent directories that leave a root are refused. Each entry is staged
-/// under a temporary name beside its destination and renamed into place, so
-/// an interrupted copy never leaves a partial entry under the real name.
+/// under a temporary name beside its destination and renamed into place
+/// without replacing anything ([`rename_noreplace`]), so an interrupted copy
+/// never leaves a partial entry under the real name and a destination that
+/// appears meanwhile is never overwritten.
 pub fn copy_paths(
     source_root: &Path,
     dest_root: &Path,
@@ -88,24 +149,25 @@ fn copy_one(source_root: &Path, dest_root: &Path, entry: &str) -> Result<EntryRe
         uuid::Uuid::new_v4(),
         name.to_string_lossy()
     ));
-    let result = (|| -> Result<Method> {
+    let result = (|| -> Result<Option<Method>> {
         let stats = Stats::default();
         if metadata.is_dir() {
             copy_tree(&source, &staged, &stats)?;
         } else {
             copy_entry(&source, &staged, &metadata, &stats)?;
         }
-        // rename(2) replaces an existing empty directory or file; check
-        // again so a concurrently created destination is never overwritten.
-        anyhow::ensure!(
-            fs::symlink_metadata(&dest).is_err(),
-            "destination appeared during the copy"
-        );
-        fs::rename(&staged, &dest)?;
-        Ok(stats.method())
+        Ok(match rename_noreplace(&staged, &dest) {
+            Ok(()) => Some(stats.method()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => None,
+            Err(e) => return Err(e.into()),
+        })
     })();
     match result {
-        Ok(method) => Ok(EntryResult::Done { method }),
+        Ok(Some(method)) => Ok(EntryResult::Done { method }),
+        Ok(None) => {
+            let _ = remove_any(&staged);
+            Ok(EntryResult::AlreadyPresent)
+        }
         Err(error) => {
             let _ = remove_any(&staged);
             if fs::symlink_metadata(&dest).is_ok() {
@@ -113,6 +175,102 @@ fn copy_one(source_root: &Path, dest_root: &Path, entry: &str) -> Result<EntryRe
             }
             Err(error)
         }
+    }
+}
+
+/// Move `from` to `to`, failing with `AlreadyExists` instead of replacing
+/// whatever is at `to` (`rename(2)` silently replaces a file or an empty
+/// directory). The check and the rename are one atomic step where the kernel
+/// offers it (`renamex_np` with `RENAME_EXCL` on macOS, `renameat2` with
+/// `RENAME_NOREPLACE` on Linux). Where the file system or kernel does not,
+/// a file is installed with `link(2)`, which fails with `EEXIST` rather than
+/// replace, and anything else is an `Unsupported` error: never a plain rename
+/// that a concurrent writer to `to` could lose a file or an empty directory
+/// to. (Platforms other than macOS and Linux have only the check and the
+/// rename, which is not atomic.)
+fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let c = |path: &Path| {
+            std::ffi::CString::new(path.as_os_str().as_bytes())
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
+        };
+        let (from_c, to_c) = (c(from)?, c(to)?);
+        #[cfg(target_os = "macos")]
+        // SAFETY: both arguments are NUL-terminated paths that outlive the call.
+        let result = unsafe { libc::renamex_np(from_c.as_ptr(), to_c.as_ptr(), libc::RENAME_EXCL) };
+        #[cfg(target_os = "linux")]
+        // SAFETY: both arguments are NUL-terminated paths that outlive the call.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                from_c.as_ptr(),
+                libc::AT_FDCWD,
+                to_c.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            if result == 0 {
+                return Ok(());
+            }
+            let error = io::Error::last_os_error();
+            // The flag is not offered: by the kernel (ENOSYS, EINVAL), or by
+            // this file system (ENOTSUP).
+            let unsupported = matches!(
+                error.raw_os_error(),
+                Some(libc::EINVAL | libc::ENOSYS | libc::ENOTSUP)
+            );
+            if unsupported {
+                install_without_flag(from, to)
+            } else {
+                Err(error)
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let _ = (from_c, to_c);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        if fs::symlink_metadata(to).is_ok() {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        fs::rename(from, to)
+    }
+}
+
+/// Install `from` at `to` without `rename`'s flag: a regular file is linked
+/// into place (`EEXIST` if `to` appeared) and the staged name dropped; a
+/// directory or a symbolic link cannot be installed without the risk of
+/// replacing something, so it is not installed.
+#[cfg(any(unix, test))]
+fn install_without_flag(from: &Path, to: &Path) -> io::Result<()> {
+    if !fs::symlink_metadata(from)?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "this file system cannot install {} without the risk of replacing something \
+                 that appears at {} meanwhile (it has no atomic no-replace rename), so it was \
+                 not installed",
+                from.display(),
+                to.display()
+            ),
+        ));
+    }
+    match fs::hard_link(from, to) {
+        Ok(()) => fs::remove_file(from),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(e),
+        Err(e) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "this file system has neither an atomic no-replace rename nor hard links, so \
+                 {} was not installed ({e})",
+                to.display()
+            ),
+        )),
     }
 }
 
@@ -172,7 +330,7 @@ fn copy_tree(source: &Path, target: &Path, stats: &Stats) -> Result<()> {
     {
         match reflink_copy::reflink(source, target) {
             Ok(()) => {
-                preserve_tree_times(source, target)?;
+                restore_directory_times(source, target)?;
                 stats.cloned.fetch_add(1, Ordering::Relaxed);
                 return Ok(());
             }
@@ -215,21 +373,34 @@ fn copy_entry(source: &Path, target: &Path, metadata: &fs::Metadata, stats: &Sta
     preserve_metadata(target, metadata)
 }
 
-// clonefile preserves contents, modes and extended attributes, but timestamps
-// need restoring after the hierarchy has been created.
+// clonefile preserves contents, modes, extended attributes and the times of
+// files and symbolic links (measured on APFS, see the `clone_keeps_times`
+// test), but every directory it creates is stamped with the time of the call.
+// Only directories need their times back, and setting one does not touch its
+// parent's, so the tree is walked in parallel and in any order, reading only
+// the directories (a file's type comes with its directory entry).
 #[cfg(target_os = "macos")]
-fn preserve_tree_times(source: &Path, target: &Path) -> Result<()> {
+fn restore_directory_times(source: &Path, target: &Path) -> Result<()> {
+    let children = fs::read_dir(source)?
+        .filter_map(|entry| match entry {
+            Ok(entry) => match entry.file_type() {
+                Ok(kind) if kind.is_dir() => Some(Ok(entry.file_name())),
+                Ok(_) => None,
+                Err(e) => Some(Err(e)),
+            },
+            Err(e) => Some(Err(e)),
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    children
+        .par_iter()
+        .try_for_each(|name| restore_directory_times(&source.join(name), &target.join(name)))?;
     let metadata = fs::symlink_metadata(source)?;
-    if metadata.is_symlink() {
-        return preserve_symlink_times(target, &metadata);
-    }
-    if metadata.is_dir() {
-        for entry in fs::read_dir(source)? {
-            let entry = entry?;
-            preserve_tree_times(&entry.path(), &target.join(entry.file_name()))?;
-        }
-    }
-    preserve_metadata(target, &metadata)
+    filetime::set_file_times(
+        target,
+        filetime::FileTime::from_last_access_time(&metadata),
+        filetime::FileTime::from_last_modification_time(&metadata),
+    )?;
+    Ok(())
 }
 
 fn preserve_metadata(target: &Path, metadata: &fs::Metadata) -> Result<()> {
@@ -448,5 +619,223 @@ mod tests {
         symlink(&outside, dst.join("conf")).unwrap();
         assert!(copy_paths(&src, &dst, &entries(&["conf/app"])).is_err());
         assert!(!outside.join("app").exists());
+    }
+
+    fn mtime(path: &Path) -> filetime::FileTime {
+        filetime::FileTime::from_last_modification_time(&fs::symlink_metadata(path).unwrap())
+    }
+
+    fn walk(root: &Path, out: &mut Vec<std::path::PathBuf>) {
+        out.push(root.to_path_buf());
+        if fs::symlink_metadata(root).unwrap().is_dir() {
+            for entry in fs::read_dir(root).unwrap() {
+                walk(&entry.unwrap().path(), out);
+            }
+        }
+    }
+
+    #[test]
+    fn a_cloned_tree_keeps_the_times_and_modes_of_the_source() {
+        let root = tempfile::tempdir().unwrap();
+        let (src, dst) = (root.path().join("src"), root.path().join("dst"));
+        fs::create_dir(&dst).unwrap();
+        let tree = src.join("node_modules");
+        fs::create_dir_all(tree.join("a/deep/er")).unwrap();
+        fs::create_dir_all(tree.join("b")).unwrap();
+        fs::write(tree.join("a/deep/er/file.js"), "x").unwrap();
+        fs::write(tree.join("a/run.sh"), "#!/bin/sh").unwrap();
+        fs::set_permissions(tree.join("a/run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(tree.join("b"), fs::Permissions::from_mode(0o700)).unwrap();
+        symlink("deep/er/file.js", tree.join("a/link")).unwrap();
+        symlink("missing", tree.join("b/dangling")).unwrap();
+        // Distinct old times everywhere; directories last, since filling a
+        // directory changes its time.
+        let mut all = Vec::new();
+        walk(&tree, &mut all);
+        for (n, path) in all.iter().rev().enumerate() {
+            let time = filetime::FileTime::from_unix_time(1_500_000_000 + 1000 * n as i64, 0);
+            if fs::symlink_metadata(path).unwrap().is_symlink() {
+                filetime::set_symlink_file_times(path, time, time).unwrap();
+            } else {
+                filetime::set_file_times(path, time, time).unwrap();
+            }
+        }
+
+        copy_paths(&src, &dst, &entries(&["node_modules"])).unwrap();
+
+        let mut cloned = Vec::new();
+        walk(&dst.join("node_modules"), &mut cloned);
+        assert_eq!(all.len(), cloned.len());
+        for path in &all {
+            let twin = dst.join(path.strip_prefix(&src).unwrap());
+            let (a, b) = (
+                fs::symlink_metadata(path).unwrap(),
+                fs::symlink_metadata(&twin).unwrap(),
+            );
+            assert_eq!(mtime(path), mtime(&twin), "mtime of {}", twin.display());
+            assert_eq!(a.file_type(), b.file_type(), "{}", twin.display());
+            if !a.is_symlink() {
+                assert_eq!(
+                    a.permissions().mode() & 0o7777,
+                    b.permissions().mode() & 0o7777,
+                    "mode of {}",
+                    twin.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_existing_destination_is_never_replaced() {
+        let root = tempfile::tempdir().unwrap();
+        let (a, b) = (root.path().join("a"), root.path().join("b"));
+        // A file, then an empty directory: rename(2) would replace both.
+        fs::write(&a, "new").unwrap();
+        fs::write(&b, "mine").unwrap();
+        let error = rename_noreplace(&a, &b).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&b).unwrap(), "mine");
+        assert_eq!(fs::read_to_string(&a).unwrap(), "new");
+        fs::remove_file(&b).unwrap();
+        fs::create_dir(&b).unwrap();
+        fs::create_dir(root.path().join("c")).unwrap();
+        let error = rename_noreplace(&root.path().join("c"), &b).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(root.path().join("c").is_dir());
+        // A free destination works, and a missing source is an ordinary error.
+        rename_noreplace(&a, &root.path().join("free")).unwrap();
+        assert!(!a.exists());
+        let error = rename_noreplace(&a, &root.path().join("free2")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn without_the_rename_flag_a_file_is_linked_and_nothing_else_is_installed() {
+        let root = tempfile::tempdir().unwrap();
+        let p = |n: &str| root.path().join(n);
+        // A file: installed, the staged name gone.
+        fs::write(p("stage"), "new").unwrap();
+        install_without_flag(&p("stage"), &p("dest")).unwrap();
+        assert_eq!(fs::read_to_string(p("dest")).unwrap(), "new");
+        assert!(!p("stage").exists());
+        // A file that appeared meanwhile is never replaced.
+        fs::write(p("stage2"), "new").unwrap();
+        fs::write(p("taken"), "mine").unwrap();
+        let error = install_without_flag(&p("stage2"), &p("taken")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(p("taken")).unwrap(), "mine");
+        // A directory (empty destination directory included) or a link is
+        // reported as not installed, and nothing moves.
+        fs::create_dir(p("tree")).unwrap();
+        fs::create_dir(p("empty")).unwrap();
+        let error = install_without_flag(&p("tree"), &p("empty")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("not installed"), "{error}");
+        assert!(p("tree").is_dir() && p("empty").is_dir());
+        symlink("dest", p("link")).unwrap();
+        let error = install_without_flag(&p("link"), &p("linked")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(p("link").symlink_metadata().is_ok() && !p("linked").exists());
+    }
+
+    #[test]
+    fn a_destination_that_appears_during_the_copy_is_reported_and_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let (src, dst) = (root.path().join("src"), root.path().join("dst"));
+        fs::create_dir(&dst).unwrap();
+        // The staging name is unknown, so another thread makes the destination
+        // appear while the copy runs, many times over.
+        for round in 0..30 {
+            let entry = format!("data{round}");
+            fs::create_dir_all(src.join(&entry)).unwrap();
+            fs::write(src.join(&entry).join("x"), "x").unwrap();
+            let stop = std::sync::atomic::AtomicBool::new(false);
+            let list = entries(&[&entry]);
+            let report = std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    while !stop.load(Ordering::Relaxed) {
+                        if fs::create_dir(dst.join(&entry)).is_ok() {
+                            break;
+                        }
+                    }
+                });
+                let report = copy_paths(&src, &dst, &list).unwrap();
+                stop.store(true, Ordering::Relaxed);
+                report
+            });
+            // Whoever won, the destination is whole, and a copy that reports
+            // itself done is the one that is there.
+            let installed = dst.join(&entry).join("x").is_file();
+            match report[0].result {
+                EntryResult::Done { .. } => assert!(installed, "round {round}"),
+                EntryResult::AlreadyPresent => assert!(!installed, "round {round}"),
+                ref other => panic!("{other:?}"),
+            }
+            assert!(fs::read_dir(&dst).unwrap().all(|e| {
+                !e.unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".devflow-stage")
+            }));
+        }
+    }
+
+    #[test]
+    fn the_summary_says_cloned_only_for_shared_blocks() {
+        let report = |result| EntryReport {
+            path: "p".into(),
+            result,
+        };
+        let done = |method| report(EntryResult::Done { method });
+        let from = Path::new("/w/shop");
+        assert_eq!(
+            summary(&[done(Method::Cloned), done(Method::Cloned)], from),
+            "2 cloned (from /w/shop)"
+        );
+        assert_eq!(
+            summary(&[done(Method::Copied)], from),
+            "1 copied (from /w/shop)"
+        );
+        assert_eq!(
+            summary(
+                &[
+                    done(Method::Cloned),
+                    done(Method::Mixed),
+                    report(EntryResult::AlreadyPresent),
+                    report(EntryResult::Missing),
+                ],
+                from
+            ),
+            "1 cloned, 1 partly cloned, partly copied, 1 already there, 1 not in the source (from /w/shop)"
+        );
+        assert_eq!(summary(&[], from), "nothing to copy");
+    }
+
+    /// Measurement, not a check: `cargo test -p devflow-core --release cow::tests::timing
+    /// -- --ignored --nocapture` clones a 20,000-file tree of 300 MB.
+    #[test]
+    #[ignore = "timing"]
+    fn timing() {
+        let root = tempfile::tempdir().unwrap();
+        let (src, dst) = (root.path().join("src"), root.path().join("dst"));
+        fs::create_dir(&dst).unwrap();
+        let block = vec![7u8; 15 * 1024];
+        for pkg in 0..200 {
+            let lib = src.join(format!("node_modules/pkg{pkg}/lib"));
+            fs::create_dir_all(&lib).unwrap();
+            for file in 0..100 {
+                fs::write(lib.join(format!("f{file}.js")), &block).unwrap();
+            }
+        }
+        let started = std::time::Instant::now();
+        let report = copy_paths(&src, &dst, &entries(&["node_modules"])).unwrap();
+        eprintln!(
+            "payload phase: {:?} {:?}",
+            started.elapsed(),
+            report[0].result
+        );
+        let started = std::time::Instant::now();
+        let _ = reflink_copy::reflink(src.join("node_modules"), dst.join("bare"));
+        eprintln!("bare clonefile: {:?}", started.elapsed());
     }
 }

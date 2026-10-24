@@ -140,6 +140,18 @@ pub(super) struct Target {
 }
 
 impl Target {
+    /// The credentials this target connects with, for masking them wherever
+    /// text from the server may repeat them.
+    pub(super) fn secrets(&self) -> Vec<String> {
+        self.config
+            .get_password()
+            .and_then(|password| std::str::from_utf8(password).ok())
+            .filter(|password| !password.is_empty())
+            .map(str::to_string)
+            .into_iter()
+            .collect()
+    }
+
     /// Managed: the published container port with the generated superuser
     /// password. External: `DEVFLOW_PG_ADMIN_URL`, else `admin_url`.
     pub(super) fn resolve(server: &Server) -> Result<Target> {

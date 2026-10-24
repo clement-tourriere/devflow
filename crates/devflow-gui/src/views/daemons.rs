@@ -249,7 +249,8 @@ impl Render for DaemonsView {
                     .status
                     .as_ref()
                     .map(|status| ProcessTarget::of(model, status)),
-                model.selected_workspace.clone(),
+                // Its name, to say which workspace this is about (a label).
+                model.selected_status().map(|w| w.workspace.name.clone()),
                 state.busy().is_some(),
                 model.refusals.clone(),
                 state.pitchfork_install.clone(),

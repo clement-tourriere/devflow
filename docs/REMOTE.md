@@ -96,7 +96,9 @@ Docker's volume storage on the engine host must be on a reflink filesystem. devf
 
 With `port = 0` (the default) devflow allocates the host port once, from the project and service identity in 20000–39999, records it in `admin.json` and publishes it fixed from then on, so URLs survive container restarts. The first allocation moves on to the next candidate when Docker cannot bind one; a recorded port that is taken later makes `devflow db up` fail with the port and the cause, and devflow never moves it. An explicit `port` overrides the allocation. Servers started by an earlier 1.0 build kept an ephemeral port: the next `devflow db up` allocates a stable one, and the next `devflow switch` rewrites the URLs of its own workspaces (URL-only sandboxes are never refreshed).
 
-With a bind address other than loopback, `on_busy_source` defaults to `fail`: cloning a database that has open connections is refused. On loopback a managed server defaults to `disconnect`, which terminates the open sessions of the source database. Set `"disconnect"` here only if aborting those sessions is acceptable.
+With a bind address other than loopback, `on_busy_source` defaults to `fail`: cloning a database that has open connections is refused. On loopback a managed server defaults to `disconnect`, which terminates the open sessions of the source database. Set `"disconnect"` here only if aborting those sessions is acceptable. `"wait"` waits up to `busy_wait` (default `"30s"`) for the sessions to end and then fails, naming them; it never terminates anything.
+
+Without verified copy-on-write (an external server reports `unknown` unless you declare `cow = "verified"`), a source smaller than `wal_log_below` (default `"256MiB"`) is cloned with `STRATEGY WAL_LOG` and a larger one with `FILE_COPY`; the branch records the strategy.
 
 ## 3. Networking
 

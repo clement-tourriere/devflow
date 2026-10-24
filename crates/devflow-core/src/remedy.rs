@@ -122,6 +122,38 @@ pub enum Remedy {
     SwitchTo { root: PathBuf, name: String },
     /// Name a preset in `[env]` of the project at `root`.
     AddEnvPreset { root: PathBuf, preset: String },
+    /// Start the new workspace `name` of the project at `root` from one of
+    /// `candidates` (remote-tracking branches, `origin/x`, that all match its
+    /// name), which the person picks.
+    ChooseBase {
+        root: PathBuf,
+        name: String,
+        candidates: Vec<String>,
+    },
+    /// The environment carries the variables of a workspace that cannot be
+    /// resolved ([`crate::env_owner::Stale`]). Open a new shell, or unset
+    /// them, or go on anyway: the workspace's own names and every name devflow
+    /// can generate are taken out of the environment first
+    /// (`DEVFLOW_CLEAR_INHERITED`, `devflow exec --clear-inherited`).
+    ClearInherited,
+    /// Create the snapshot `snapshot` of service `key` (the seed that
+    /// `[data] noninteractive_from` names) from the data of a workspace.
+    CreateSeedSnapshot {
+        root: PathBuf,
+        key: String,
+        snapshot: String,
+        engine: crate::config::Engine,
+    },
+    /// Say where a new workspace's data comes from: a workspace, a snapshot,
+    /// a branch or an empty database.
+    ChooseDataSource { root: PathBuf },
+    /// `name` matches several workspaces (a checkout that moved to another
+    /// branch and one that took its old branch): name the one meant by its
+    /// path, one of `candidates`.
+    UsePath {
+        name: String,
+        candidates: Vec<PathBuf>,
+    },
 }
 
 impl Remedy {
@@ -155,6 +187,11 @@ impl Remedy {
             Remedy::RemoveWorkspace { .. } => "remove_workspace",
             Remedy::SwitchTo { .. } => "switch_to",
             Remedy::AddEnvPreset { .. } => "add_env_preset",
+            Remedy::ChooseBase { .. } => "choose_base",
+            Remedy::ClearInherited => "clear_inherited",
+            Remedy::CreateSeedSnapshot { .. } => "create_seed_snapshot",
+            Remedy::ChooseDataSource { .. } => "choose_data_source",
+            Remedy::UsePath { .. } => "use_path",
         }
     }
 
@@ -213,6 +250,13 @@ impl Remedy {
             Remedy::AddEnvPreset { preset, .. } => {
                 return format!("Add the {preset} preset");
             }
+            Remedy::ChooseBase { .. } => "Choose where to start from…",
+            Remedy::ClearInherited => "Continue without the inherited variables",
+            Remedy::CreateSeedSnapshot { key, snapshot, .. } => {
+                return format!("Create the {snapshot} snapshot of {key}…");
+            }
+            Remedy::ChooseDataSource { .. } => "Choose where the data comes from…",
+            Remedy::UsePath { .. } => "Choose a workspace by its folder",
         }
         .to_string()
     }
@@ -285,11 +329,34 @@ impl Remedy {
             Remedy::AddEnvPreset { preset, .. } => {
                 Some(format!("devflow env preset add {}", word(preset)))
             }
-            Remedy::Retry
+            Remedy::ChooseBase {
+                name, candidates, ..
+            } => candidates
+                .first()
+                .map(|base| format!("devflow switch -c {} --base {}", word(name), word(base))),
+            Remedy::CreateSeedSnapshot {
+                key,
+                snapshot,
+                engine,
+                ..
+            } => Some(if *engine == crate::config::Engine::Postgres {
+                format!("devflow db snapshot create {}", word(snapshot))
+            } else {
+                format!(
+                    "devflow service {} snapshot create {}",
+                    word(key),
+                    word(snapshot)
+                )
+            }),
+            Remedy::ChooseDataSource { .. } => None,
+            // Which command is the caller's: it puts the path where it put the name.
+            Remedy::UsePath { .. }
+            | Remedy::Retry
             | Remedy::OpenFile { .. }
             | Remedy::CopyHookLine { .. }
             | Remedy::Reveal { .. }
-            | Remedy::OpenGuide { .. } => None,
+            | Remedy::OpenGuide { .. }
+            | Remedy::ClearInherited => None,
         }
     }
 
@@ -338,6 +405,35 @@ impl Remedy {
             Remedy::PruneWorktrees { .. } => Some(format!(
                 "run `{}` to see the worktrees whose directory is gone and forget the ones that own nothing",
                 self.command()?
+            )),
+            Remedy::ClearInherited => Some(
+                "open a new shell, or unset DEVFLOW_WORKSPACE_PATH and DEVFLOW_WORKSPACE_ID \
+                 and the other variables of that workspace; to go on anyway set \
+                 DEVFLOW_CLEAR_INHERITED=1 (`devflow exec` also takes --clear-inherited), which \
+                 takes out every variable the workspace owns and every name devflow can generate \
+                 first"
+                    .to_string(),
+            ),
+            Remedy::ChooseBase { candidates, .. } => Some(format!(
+                "start from one of {} with `{}`",
+                candidates.join(", "),
+                self.command()?
+            )),
+            Remedy::CreateSeedSnapshot { .. } => Some(format!(
+                "run `{}` in the workspace whose data should seed new ones (`--from WS` names another)",
+                self.command()?
+            )),
+            Remedy::ChooseDataSource { .. } => Some(
+                "pass `--data-from` with a workspace, `snapshot:NAME`, `branch:ID` or `empty`"
+                    .to_string(),
+            ),
+            Remedy::UsePath { name, candidates } => Some(format!(
+                "give the path of the one you mean instead of '{name}': {}",
+                candidates
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )),
             Remedy::StartDatabase { .. }
             | Remedy::StartService { .. }
@@ -486,6 +582,9 @@ pub fn remedies_of(error: &anyhow::Error) -> Vec<Remedy> {
     }
     if let Some(protected) = error.downcast_ref::<crate::error::Protected>() {
         return protected.remedies.clone();
+    }
+    if let Some(partial) = error.downcast_ref::<crate::error::PartialRemoval>() {
+        return partial.remedies.clone();
     }
     if let Some(foreign) = error.downcast_ref::<crate::githook::ForeignHook>() {
         // The line first: it is the hint a terminal prints and the JSON

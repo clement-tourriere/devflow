@@ -194,6 +194,12 @@ fn configured(project: &Project) -> Vec<(String, Engine)> {
 
 /// The service a command acts on: `name`, else the only one.
 fn select(project: &Project, name: Option<&str>) -> Result<Service> {
+    Service::open(project, &selected_key(project, name)?)
+}
+
+/// The key of the service a command acts on, without opening it (opening asks
+/// the Docker daemon).
+fn selected_key(project: &Project, name: Option<&str>) -> Result<String> {
     let all = configured(project);
     let key = match name {
         Some(name) => {
@@ -236,7 +242,7 @@ fn select(project: &Project, name: Option<&str>) -> Result<Service> {
             ),
         },
     };
-    Service::open(project, &key)
+    Ok(key)
 }
 
 /// The services a listing covers: `name`, else every container service.
@@ -866,7 +872,10 @@ fn drop_branch(
     id: devflow_core::ids::IdRef,
     lost: bool,
 ) -> Result<ExitCode> {
-    let svc = select(project, name)?;
+    // An id no record has is reported before the Docker daemon is asked.
+    let key = selected_key(project, name)?;
+    Service::resolve_recorded_branch(project, &key, &id)?;
+    let svc = Service::open(project, &key)?;
     let id = svc.resolve_branch(&id)?;
     if lost {
         // The volume the record names now is what the guarded removal expects

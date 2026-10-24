@@ -43,7 +43,13 @@ use gpui_kit::{
     px, size,
     test::TestWindowExt as _,
 };
-use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
+use std::{
+    cell::RefCell,
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::Arc,
+    time::Duration,
+};
 use uuid::Uuid;
 
 pub(super) fn workspace(name: &str, is_default: bool) -> Workspace {
@@ -58,6 +64,11 @@ pub(super) fn workspace(name: &str, is_default: bool) -> Workspace {
         head: Some("abc1234".into()),
         fingerprint: None,
     }
+}
+
+/// The checkout of the test workspace called `name`: what selects it.
+pub(super) fn ws_path(name: &str) -> PathBuf {
+    workspace(name, false).path
 }
 
 pub(super) fn ready_receipt(name: &str, branch: Uuid) -> Receipt {
@@ -93,6 +104,7 @@ pub(super) fn branch(id: Uuid, name: &str) -> BranchInfo {
         instance_id: None,
         status: RecordStatus::Ready,
         cow: CowCapability::Verified,
+        clone_strategy: None,
         error: None,
         created_at: Utc::now(),
         size_bytes: Some(392 * 1024 * 1024),
@@ -222,21 +234,27 @@ pub(super) fn loaded_model(logs_dir: &std::path::Path) -> ProjectModel {
             receipt: Some(ready_receipt("main", main_branch)),
             status: Some(Status::Ready),
             busy: false,
+            drift: None,
+            env_file: None,
         },
         WorkspaceStatus {
             workspace: workspace("feature-x", false),
             receipt: Some(ready_receipt("feature-x", feature_branch)),
             status: Some(Status::NeedsAttention),
             busy: false,
+            drift: None,
+            env_file: None,
         },
         WorkspaceStatus {
             workspace: workspace("adopted", false),
             receipt: None,
             status: None,
             busy: false,
+            drift: None,
+            env_file: None,
         },
     ];
-    model.selected_workspace = Some("main".into());
+    model.selected_workspace = Some(ws_path("main"));
     model.database.configured = true;
     model.database.status = Some(ServerStatus {
         mode: PostgresMode::Managed,
@@ -676,7 +694,7 @@ pub(super) fn open_scratch(cx: &mut TestAppContext, scratch: &Scratch) -> Harnes
 }
 
 fn create_workspace(cx: &mut TestAppContext, h: &Harness, name: &'static str) {
-    use crate::ops::TrustChoice;
+    use crate::ops::{NewWorkspace, TrustChoice};
     let in_flight = cx.update(|cx| {
         h.state.update(cx, |s, _| {
             s.selection.current_mut().unwrap().begin_refresh()
@@ -684,7 +702,15 @@ fn create_workspace(cx: &mut TestAppContext, h: &Harness, name: &'static str) {
     });
     cx.update_window(h.window.into(), |_, window, cx| {
         h.state.update(cx, |s, cx| {
-            s.create_workspace(name.into(), None, None, TrustChoice::NotNeeded, window, cx)
+            s.create_workspace(
+                NewWorkspace {
+                    name: name.into(),
+                    ..Default::default()
+                },
+                TrustChoice::NotNeeded,
+                window,
+                cx,
+            )
         });
     })
     .unwrap();
@@ -731,8 +757,203 @@ fn creating_a_workspace_runs_end_to_end(cx: &mut TestAppContext) {
         let model = s.selection.current().unwrap();
         assert_eq!(
             model.selected_workspace.as_deref(),
-            Some("feature-a"),
+            model
+                .workspace("feature-a")
+                .map(|w| w.workspace.path.as_path()),
             "the new workspace is selected"
+        );
+        assert!(model.selected_workspace.is_some());
+    });
+}
+
+#[gpui_kit::test]
+fn creating_a_workspace_enters_it_like_a_switch_from_the_command_line(cx: &mut TestAppContext) {
+    use devflow_core::{project::Project, trust};
+    let scratch = scratch_project();
+    // A switch hook, approved: the command line runs it on `switch -c`, so the
+    // app's New workspace must too (both call core's one activation).
+    let file = scratch.entry.root.join("devflow.toml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let base = text.split("[hooks]").next().unwrap();
+    std::fs::write(
+        &file,
+        format!("{base}[hooks]\nsetup = []\nswitch = [\"touch entered.txt\"]\nteardown = []\n"),
+    )
+    .unwrap();
+    trust::approve(&Project::open(&scratch.entry.root).unwrap()).unwrap();
+
+    let h = open_scratch(cx, &scratch);
+    create_workspace(cx, &h, "feature-s");
+    cx.read_entity(&h.state, |s, _| {
+        let model = s.selection.current().unwrap();
+        let ws = model.workspace("feature-s").unwrap();
+        assert!(
+            ws.workspace.path.join("entered.txt").is_file(),
+            "the switch hook ran when the workspace was created"
+        );
+        assert!(
+            ws.receipt.as_ref().unwrap().last_active_at.is_some(),
+            "and the entry was recorded"
+        );
+        // The entry's report is kept for the detail (no container service
+        // here, so it lists none).
+        assert_eq!(model.entered.get(&ws.workspace.path).map(Vec::len), Some(0));
+    });
+}
+
+/// Two workspaces called `feature`: A, created under that name, whose checkout
+/// then moved to branch `other`, and B, a worktree Git made for the branch A
+/// left, which devflow adopted. Returns the project and the checkouts.
+fn two_workspaces_called_feature(scratch: &Scratch) -> (PathBuf, PathBuf) {
+    use devflow_core::{
+        project::Project,
+        setup::{self, CreateRequest, NoProgress, SetupOptions},
+    };
+    let project = Project::open(&scratch.entry.root).unwrap();
+    let a = setup::create(
+        &project,
+        CreateRequest {
+            name: "feature".into(),
+            from: None,
+            base: None,
+            options: SetupOptions::default(),
+        },
+        &mut NoProgress,
+    )
+    .unwrap()
+    .workspace;
+    let git = |dir: &Path, args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    // `git switch -c other` in A, then `git worktree add ../elsewhere feature`.
+    git(&a.path, &["switch", "-q", "-c", "other"]);
+    let b_path = a.path.parent().unwrap().join("elsewhere");
+    git(
+        &scratch.entry.root,
+        &["worktree", "add", "-q", b_path.to_str().unwrap(), "feature"],
+    );
+    let b = devflow_core::worktree::find(&project, b_path.to_str().unwrap())
+        .unwrap()
+        .unwrap();
+    setup::setup(
+        &project,
+        &b,
+        SetupOptions::default(),
+        false,
+        false,
+        &mut NoProgress,
+    )
+    .unwrap();
+    (a.path, b.path)
+}
+
+#[gpui_kit::test]
+fn removing_a_row_removes_that_workspace_even_when_another_has_the_same_name(
+    cx: &mut TestAppContext,
+) {
+    let scratch = scratch_project();
+    let (a, b) = two_workspaces_called_feature(&scratch);
+    let h = open_scratch(cx, &scratch);
+    let (row_a, row_b, names) = cx.read_entity(&h.state, |s, _| {
+        let model = s.selection.current().unwrap();
+        let row = |path: &Path| {
+            model
+                .workspaces
+                .iter()
+                .position(|w| w.workspace.path == path)
+                .unwrap()
+        };
+        (
+            row(&a),
+            row(&b),
+            model
+                .workspaces
+                .iter()
+                .map(|w| w.workspace.name.clone())
+                .collect::<Vec<_>>(),
+        )
+    });
+    assert_eq!(
+        names.iter().filter(|n| *n == "feature").count(),
+        2,
+        "two rows answer to the name: {names:?}"
+    );
+    assert!(row_a != row_b);
+    // The name finds neither (never the first), the checkout finds each.
+    cx.read_entity(&h.state, |s, _| {
+        let model = s.selection.current().unwrap();
+        assert!(model.workspace("feature").is_none());
+        assert_eq!(model.workspace_ref_at(&b).unwrap().path, b);
+        assert_eq!(model.workspace_ref_at(&a).unwrap().path, a);
+    });
+
+    // Remove the row of B, through the dialog: B goes, A stays.
+    frame(cx, &h, |_| {});
+    cx.update_window(h.window.into(), |_, window, cx| {
+        window.clear_notifications(cx);
+        window.hover(("remove", row_b), cx);
+        window.click(("remove", row_b), cx)
+    })
+    .unwrap();
+    cx.run_until_parked();
+    frame(cx, &h, |window| {
+        assert!(window.find("remove").visible(), "the dialog is open");
+    });
+    // The dialog slides in on the wall clock, not the test clock.
+    std::thread::sleep(std::time::Duration::from_millis(450));
+    frame(cx, &h, |_| {});
+    cx.update_window(h.window.into(), |_, window, cx| window.click("remove", cx))
+        .unwrap();
+    cx.run_until_parked();
+    let b_gone = b.clone();
+    settle(cx, &h, move |s| s.busy().is_none() && !b_gone.exists());
+    let outcome = cx.read_entity(&h.state, |s, _| {
+        s.activity
+            .as_ref()
+            .map(|a| (a.title.clone(), a.outcome.clone()))
+    });
+    assert!(
+        a.exists() && !b.exists(),
+        "the row that was clicked was removed (a: {}, b: {}): {outcome:?}",
+        a.exists(),
+        b.exists()
+    );
+}
+
+#[gpui_kit::test]
+fn selecting_a_row_selects_that_workspace_even_when_another_has_the_same_name(
+    cx: &mut TestAppContext,
+) {
+    let scratch = scratch_project();
+    let (a, b) = two_workspaces_called_feature(&scratch);
+    let h = open_scratch(cx, &scratch);
+    for path in [&b, &a] {
+        update(cx, &h, |s, cx| s.select_workspace(path.clone(), cx));
+        cx.read_entity(&h.state, |s, _| {
+            let model = s.selection.current().unwrap();
+            assert_eq!(model.selected_workspace.as_ref(), Some(path));
+            assert_eq!(
+                model.selected_status().map(|w| &w.workspace.path),
+                Some(path),
+                "the detail is the selected checkout's"
+            );
+        });
+    }
+    // The list reloaded keeps the selection.
+    cx.update(|cx| h.state.update(cx, |s, cx| s.refresh(cx)));
+    settle(cx, &h, |s| {
+        s.selection.current().is_some_and(|m| !m.refreshing)
+    });
+    cx.read_entity(&h.state, |s, _| {
+        assert_eq!(
+            s.selection.current().unwrap().selected_workspace.as_ref(),
+            Some(&a)
         );
     });
 }
@@ -855,9 +1076,11 @@ fn select_other_project(state: &mut AppState) {
             receipt: None,
             status: None,
             busy: false,
+            drift: None,
+            env_file: None,
         })
         .collect();
-    model.selected_workspace = Some("main".into());
+    model.selected_workspace = Some(ws_path("main"));
 }
 
 #[gpui_kit::test]
@@ -1323,7 +1546,7 @@ fn a_refresh_for_another_workspace_is_dropped(cx: &mut TestAppContext) {
     let for_main = update(cx, &h, |s, _| {
         s.selection.current_mut().unwrap().begin_refresh()
     });
-    update(cx, &h, |s, cx| s.select_workspace("feature-x".into(), cx));
+    update(cx, &h, |s, cx| s.select_workspace(ws_path("feature-x"), cx));
     // ... and main's daemons arrive afterwards.
     apply(cx, for_main, "main/web");
     assert!(
@@ -1338,7 +1561,7 @@ fn a_refresh_for_another_workspace_is_dropped(cx: &mut TestAppContext) {
             .unwrap()
             .selected_workspace
             .clone()),
-        Some("feature-x".to_string())
+        Some(ws_path("feature-x"))
     );
 
     // The refresh for the current workspace is applied.
@@ -2258,11 +2481,13 @@ fn shop_and_blog(state: &mut AppState) {
         summary(vec![
             WorkspaceSummary {
                 name: "main".into(),
+                path: PathBuf::from("/tmp/blog/main"),
                 state: WorkspaceState::Ready,
                 is_default: true,
             },
             WorkspaceSummary {
                 name: "wip".into(),
+                path: PathBuf::from("/tmp/blog/wip"),
                 state: WorkspaceState::InProgress,
                 is_default: false,
             },
@@ -2283,27 +2508,30 @@ fn the_sidebar_is_a_tree_of_projects_and_their_workspaces(cx: &mut TestAppContex
     frame(cx, &h, |window| {
         for id in [
             project_id(shop),
-            workspace_id(shop, "main"),
-            workspace_id(shop, "feature-x"),
-            workspace_id(shop, "adopted"),
+            workspace_id(shop, &ws_path("main")),
+            workspace_id(shop, &ws_path("feature-x")),
+            workspace_id(shop, &ws_path("adopted")),
             new_workspace_id(shop),
             project_id(blog),
-            workspace_id(blog, "main"),
-            workspace_id(blog, "wip"),
+            workspace_id(blog, Path::new("/tmp/blog/main")),
+            workspace_id(blog, Path::new("/tmp/blog/wip")),
             new_workspace_id(blog),
         ] {
             assert!(window.find(id.clone()).visible(), "{id} is in the tree");
         }
         // Workspaces are indented under their project.
         assert!(
-            window.find(workspace_id(shop, "main")).bounds().left()
+            window
+                .find(workspace_id(shop, &ws_path("main")))
+                .bounds()
+                .left()
                 > window.find(project_id(shop)).bounds().left()
         );
     });
 
     // Clicking a workspace of the shown project selects its row in the table.
     cx.update_window(h.window.into(), |_, window, cx| {
-        window.click(workspace_id(shop, "feature-x"), cx)
+        window.click(workspace_id(shop, &ws_path("feature-x")), cx)
     })
     .unwrap();
     cx.run_until_parked();
@@ -2320,13 +2548,13 @@ fn the_sidebar_is_a_tree_of_projects_and_their_workspaces(cx: &mut TestAppContex
             table.read(cx).selected_row(),
         )
     });
-    assert_eq!(selected.as_deref(), Some("feature-x"));
+    assert_eq!(selected, Some(ws_path("feature-x")));
     assert_eq!(row, Some(1), "the table highlights that workspace");
 
     // A workspace of another project selects the project, on the Workspaces tab.
     update(cx, &h, |s, _| s.tab = Tab::Logs);
     cx.update_window(h.window.into(), |_, window, cx| {
-        window.click(workspace_id(blog, "wip"), cx)
+        window.click(workspace_id(blog, Path::new("/tmp/blog/wip")), cx)
     })
     .unwrap();
     cx.run_until_parked();
@@ -2339,7 +2567,7 @@ fn the_sidebar_is_a_tree_of_projects_and_their_workspaces(cx: &mut TestAppContex
         )
     });
     assert_eq!(project, blog);
-    assert_eq!(workspace.as_deref(), Some("wip"));
+    assert_eq!(workspace, Some(PathBuf::from("/tmp/blog/wip")));
     assert_eq!(page_tab, (Page::Project, Tab::Workspaces));
     assert!(
         cx.read_entity(&h.state, |s, _| s.is_expanded(shop)),
@@ -2352,16 +2580,28 @@ fn the_sidebar_is_a_tree_of_projects_and_their_workspaces(cx: &mut TestAppContex
     })
     .unwrap();
     frame(cx, &h, |window| {
-        assert!(window.try_find(workspace_id(blog, "wip")).is_none());
+        assert!(
+            window
+                .try_find(workspace_id(blog, Path::new("/tmp/blog/wip")))
+                .is_none()
+        );
         assert!(window.try_find(new_workspace_id(blog)).is_none());
-        assert!(window.try_find(workspace_id(shop, "main")).is_some());
+        assert!(
+            window
+                .try_find(workspace_id(shop, &ws_path("main")))
+                .is_some()
+        );
     });
     cx.update_window(h.window.into(), |_, window, cx| {
         window.click(project_id(blog), cx)
     })
     .unwrap();
     frame(cx, &h, |window| {
-        assert!(window.find(workspace_id(blog, "wip")).visible());
+        assert!(
+            window
+                .find(workspace_id(blog, Path::new("/tmp/blog/wip")))
+                .visible()
+        );
     });
 }
 
@@ -2402,6 +2642,8 @@ fn the_new_workspace_row_of_a_project_waits_for_it_to_load(cx: &mut TestAppConte
             receipt: None,
             status: None,
             busy: false,
+            drift: None,
+            env_file: None,
         }]),
         database: DatabaseModel::default(),
         services: crate::services::ServicesModel::default(),
@@ -2482,6 +2724,7 @@ fn a_summary_read_from_before_a_change_is_dropped(cx: &mut TestAppContext) {
     let list = |name: &str| {
         vec![WorkspaceSummary {
             name: name.into(),
+            path: PathBuf::from("/tmp/blog").join(name),
             state: WorkspaceState::Ready,
             is_default: true,
         }]
@@ -2600,6 +2843,7 @@ fn blog_names(cx: &mut TestAppContext, h: &Harness, blog: Uuid) -> Vec<String> {
 fn one_workspace(name: &str) -> Vec<WorkspaceSummary> {
     vec![WorkspaceSummary {
         name: name.into(),
+        path: PathBuf::from("/tmp").join(name),
         state: WorkspaceState::Ready,
         is_default: true,
     }]
@@ -3140,7 +3384,7 @@ fn the_review_before_starting_is_of_the_workspaces_own_files_and_so_is_its_appro
         s.inflight = MAX_JOBS;
         s.tab = Tab::Daemons;
         let model = s.selection.current_mut().unwrap();
-        model.selected_workspace = Some("feature".into());
+        model.selected_workspace = Some(feature.clone());
         let mut status = process_status("feature", feature.to_str().unwrap(), Vec::new());
         status.can_start = refused(Refusal::NotApproved {
             action: devflow_core::processes::Action::Start,
@@ -3226,7 +3470,7 @@ fn the_trust_badge_follows_the_selected_workspace(cx: &mut TestAppContext) {
     frame(cx, &h, |window| {
         assert!(window.try_find("trust-badge").is_none());
     });
-    update(cx, &h, |s, cx| s.select_workspace("feature-x".into(), cx));
+    update(cx, &h, |s, cx| s.select_workspace(ws_path("feature-x"), cx));
     cx.read_entity(&h.state, |s, _| {
         assert!(
             s.selection.current().unwrap().trust.is_none(),

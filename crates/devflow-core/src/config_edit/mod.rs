@@ -385,6 +385,9 @@ fn run_locked(
         // landed since (validation and the scope can be slow) must not be
         // overwritten.
         write_unless_changed(&file.path, &new_text, file.hash.as_deref())?;
+        if target == Target::Local && file.text.is_none() {
+            exclude_local_file(&file.path, &mut ctx.notes);
+        }
     }
     Ok(Applied {
         target,
@@ -396,6 +399,80 @@ fn run_locked(
         notes: ctx.notes,
         scope_changed,
     })
+}
+
+/// `devflow.local.toml` was just created: it holds what must not be committed
+/// (credentials, machine paths), so list it in `<git common dir>/info/exclude`
+/// unless Git already ignores it, and say so. Never fatal: the edit is
+/// written; a failure here is a note.
+fn exclude_local_file(path: &Path, notes: &mut Vec<String>) {
+    let name = file_name(path);
+    let Some(dir) = path.parent() else { return };
+    let Ok(repo) = git2::Repository::discover(dir) else {
+        return;
+    };
+    let Some(relative) = repo
+        .workdir()
+        .and_then(|workdir| Some((workdir.canonicalize().ok()?, dir.canonicalize().ok()?)))
+        .and_then(|(workdir, dir)| {
+            dir.join(&name)
+                .strip_prefix(&workdir)
+                .ok()
+                .map(Path::to_path_buf)
+        })
+    else {
+        return;
+    };
+    if repo.status_should_ignore(&relative).unwrap_or(true) {
+        return;
+    }
+    let exclude = repo.commondir().join("info/exclude");
+    let line = format!("/{}", relative.to_string_lossy().replace('\\', "/"));
+    let result = append_exclude_line(&exclude, &line);
+    notes.push(match result {
+        Ok(()) => format!(
+            "{name} is new and Git did not ignore it: listed in {} so it is not committed by accident",
+            exclude.display()
+        ),
+        Err(error) => format!(
+            "{name} is new and Git does not ignore it, and {} could not be updated ({error}): \
+             add it to .gitignore before committing",
+            exclude.display()
+        ),
+    });
+}
+
+/// Add `line` to the ignore file `exclude`, keeping every byte it has: Git
+/// accepts patterns that are not UTF-8, so the file is read as bytes and only
+/// appended to, never rewritten. A file that cannot be read is an error (it is
+/// not "empty"); one that does not exist is created.
+fn append_exclude_line(exclude: &Path, line: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let existing = match std::fs::read(exclude) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error),
+    };
+    if existing
+        .split(|byte| *byte == b'\n')
+        .any(|existing| existing.trim_ascii() == line.as_bytes())
+    {
+        return Ok(());
+    }
+    if let Some(parent) = exclude.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut addition = Vec::new();
+    if existing.last().is_some_and(|last| *last != b'\n') {
+        addition.push(b'\n');
+    }
+    addition.extend_from_slice(line.as_bytes());
+    addition.push(b'\n');
+    std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(exclude)?
+        .write_all(&addition)
 }
 
 /// Replace `path` with `text` unless it no longer holds what `expected` (its

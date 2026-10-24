@@ -8,7 +8,7 @@ use super::{
     onboarding::{self, OnboardingView, Step},
     ui_tests::{
         Harness, Scratch, frame, init_scratch_repo, install_loaded, open, open_scratch, press_key,
-        scratch_project, update,
+        scratch_project, update, ws_path,
     },
 };
 use crate::model::{LoadPhase, Tab};
@@ -875,7 +875,7 @@ fn a_failed_phase_is_a_banner_with_a_retry_and_a_skip_points_to_the_setup_tab(
             Some("the server is down".into()),
         );
         receipt.skip_required(Phase::Hooks, "the hooks are not approved".into());
-        model.selected_workspace = Some("feature-x".into());
+        model.selected_workspace = Some(ws_path("feature-x"));
         cx.notify();
     });
     frame(cx, &h, |window| {
@@ -898,7 +898,7 @@ fn a_failed_phase_is_a_banner_with_a_retry_and_a_skip_points_to_the_setup_tab(
 #[gpui_kit::test]
 fn the_detail_follows_the_selection_and_hides_when_there_is_none(cx: &mut TestAppContext) {
     let h = open(cx, install_loaded);
-    update(cx, &h, |s, cx| s.select_workspace("adopted".into(), cx));
+    update(cx, &h, |s, cx| s.select_workspace(ws_path("adopted"), cx));
     frame(cx, &h, |window| {
         assert!(window.find("workspace-detail").visible());
         // No receipt: nothing to time, and the pane says it was not set up.

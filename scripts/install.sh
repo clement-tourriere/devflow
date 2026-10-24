@@ -9,6 +9,10 @@
 #   DEVFLOW_VERSION      Release tag to install (e.g. v1.0.0). Default: latest
 #   DEVFLOW_INSTALL_DIR  Install directory. Default: ~/.local/bin
 #
+# Until the first 1.x release is published, the latest release is a 0.x (another
+# configuration format, see docs/MIGRATING.md); the installer warns after
+# installing one.
+#
 # Installs the `devflow` CLI only. The desktop app (devflow-gui) is built from
 # source: cargo build --release -p devflow-gui
 #
@@ -107,6 +111,18 @@ main() {
 
     installed_version="$("$install_dir/devflow" --version)"
     say "Installed $installed_version to $install_dir/devflow"
+
+    # 1.0 changed the configuration format and has no in-place upgrade; until
+    # the first 1.x release is published the installer can only fetch a 0.x.
+    case "$installed_version" in
+        "devflow 0."*)
+            say ""
+            say "WARNING: this is a 0.x release. devflow 1.0 reads another configuration"
+            say "format (devflow.toml with [services.NAME] tables) and is not yet published as a"
+            say "release binary. Migration notes: https://github.com/$REPO/blob/main/docs/MIGRATING.md"
+            say "To build 1.0 from source: cargo install --git https://github.com/$REPO devflow"
+            ;;
+    esac
 
     case ":$PATH:" in
         *":$install_dir:"*) ;;

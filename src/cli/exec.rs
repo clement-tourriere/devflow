@@ -17,6 +17,20 @@ pub struct ExecArgs {
     #[arg(long, value_name = "NAME")]
     pub workspace: Option<String>,
 
+    /// Keep the caller's value of this variable when the workspace sets none
+    /// (repeatable; `DEVFLOW_INHERIT=NAME,NAME` says the same). By default
+    /// every variable the workspace owns, set or not, is taken out of the
+    /// inherited environment
+    #[arg(long = "inherit", value_name = "NAME", value_parser = env_name)]
+    pub inherit: Vec<String>,
+
+    /// Go on although the environment carries the variables of a workspace
+    /// that cannot be resolved (its directory is gone, say): every variable
+    /// the workspace owns and every name devflow can generate is taken out
+    /// first (`DEVFLOW_CLEAR_INHERITED=1` says the same)
+    #[arg(long)]
+    pub clear_inherited: bool,
+
     /// The command and its arguments, after `--`
     #[arg(
         last = true,
@@ -28,16 +42,31 @@ pub struct ExecArgs {
     pub command: Vec<OsString>,
 }
 
+/// A variable name for `--inherit`.
+fn env_name(name: &str) -> Result<String, String> {
+    if devflow_core::config::valid_env_name(name) {
+        Ok(name.to_string())
+    } else {
+        Err(format!(
+            "'{name}' is not a variable name (letters, digits and underscores)"
+        ))
+    }
+}
+
 pub fn run(ctx: &Ctx, args: ExecArgs) -> Result<ExitCode> {
     // Find the variables first: the command never starts without them.
+    let options = exec::Options {
+        inherit: args.inherit.clone(),
+        clear_stale: args.clear_inherited,
+    };
     let prepared = match &args.workspace {
         Some(name) => {
             let project = ctx.project()?;
             let workspace = worktree::find(&project, name)?
                 .ok_or_else(|| anyhow!("no workspace named '{name}'; see `devflow list`"))?;
-            exec::prepare_root(&workspace.path)?
+            exec::prepare_root_with(&workspace.path, &options)?
         }
-        None => exec::prepare(&ctx.cwd)?,
+        None => exec::prepare_with(&ctx.cwd, &options)?,
     };
     let Some((program, rest)) = args.command.split_first() else {
         return Err(anyhow!("a command is required after `--`"));

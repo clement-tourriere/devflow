@@ -1592,6 +1592,146 @@ fn prune_lists_first_forgets_only_what_owns_nothing_and_sends_the_rest_to_remove
     failed(&env.run(&["--json", "prune", "feature/nope", "--yes"]));
 }
 
+/// Make `origin/<name>` hold a colleague's commit (one new file) in the test
+/// repository, as a fresh clone would after `git clone`.
+fn colleague_branch(env: &Env, name: &str, file: &str) -> git2::Oid {
+    let git = git2::Repository::open(&env.repo).unwrap();
+    if git.find_remote("origin").is_err() {
+        git.remote("origin", "https://example.invalid/shop.git")
+            .unwrap();
+    }
+    let parent = git.head().unwrap().peel_to_commit().unwrap();
+    let blob = git.blob(b"from a colleague\n").unwrap();
+    let mut builder = git.treebuilder(Some(&parent.tree().unwrap())).unwrap();
+    builder.insert(file, blob, 0o100644).unwrap();
+    let tree = git.find_tree(builder.write().unwrap()).unwrap();
+    let sig = git2::Signature::now("Colleague", "colleague@example.com").unwrap();
+    let id = git
+        .commit(None, &sig, &sig, "colleague", &tree, &[&parent])
+        .unwrap();
+    git.reference(&format!("refs/remotes/origin/{name}"), id, true, "fetch")
+        .unwrap();
+    id
+}
+
+#[test]
+fn switch_create_starts_from_the_remote_branch_of_that_name_and_tracks_it() {
+    let env = Env::new();
+    env.init();
+    let id = colleague_branch(&env, "feature-x", "colleague.txt");
+    let out = env.run(&["--json", "--non-interactive", "switch", "-c", "feature-x"]);
+    ok(&out);
+    let doc = json(&out);
+    assert_eq!(doc["status"], "ready", "{doc}");
+    assert_eq!(doc["branch_start"]["commit"], id.to_string(), "{doc}");
+    assert_eq!(doc["branch_start"]["tracks"], "origin/feature-x", "{doc}");
+    assert_eq!(
+        doc["branch_start"]["start"]["kind"], "remote_branch",
+        "{doc}"
+    );
+    let path = PathBuf::from(doc["path"].as_str().unwrap());
+    assert!(path.join("colleague.txt").is_file());
+    let config = git2::Repository::open(&env.repo).unwrap().config().unwrap();
+    assert_eq!(
+        config.get_string("branch.feature-x.remote").unwrap(),
+        "origin"
+    );
+    assert_eq!(
+        config.get_string("branch.feature-x.merge").unwrap(),
+        "refs/heads/feature-x"
+    );
+    // The materialize phase says it in words, too.
+    let detail = doc["receipt"]["phases"]["materialize"]["detail"]
+        .as_str()
+        .unwrap();
+    assert!(detail.contains("tracking origin/feature-x"), "{detail}");
+
+    // A name no remote has starts from the default workspace, as before.
+    let doc = json(&env.run(&["--json", "--non-interactive", "switch", "-c", "plain"]));
+    assert_eq!(
+        doc["branch_start"]["start"]["kind"], "default_workspace",
+        "{doc}"
+    );
+    assert!(doc["branch_start"].get("tracks").is_none(), "{doc}");
+}
+
+#[test]
+fn switch_create_base_starts_a_new_branch_at_any_commit_ish() {
+    let env = Env::new();
+    env.init();
+    let id = colleague_branch(&env, "other", "other.txt");
+    let out = env.run(&[
+        "--json",
+        "--non-interactive",
+        "switch",
+        "-c",
+        "mine",
+        "--base",
+        "origin/other",
+    ]);
+    ok(&out);
+    let doc = json(&out);
+    assert_eq!(doc["branch_start"]["commit"], id.to_string(), "{doc}");
+    assert_eq!(
+        doc["branch_start"]["start"]["spec"], "origin/other",
+        "{doc}"
+    );
+    assert!(doc["branch_start"].get("tracks").is_none(), "{doc}");
+    assert!(
+        PathBuf::from(doc["path"].as_str().unwrap())
+            .join("other.txt")
+            .is_file()
+    );
+
+    // A starting point that does not exist is a plain error and creates nothing.
+    let out = env.run(&["switch", "-c", "ghost", "--base", "no-such-thing"]);
+    failed(&out);
+    let text = stderr(&out);
+    assert!(
+        text.contains("no-such-thing") && !text.contains("class="),
+        "{text}"
+    );
+    assert!(
+        !json(&env.run(&["--json", "list"]))["workspaces"]
+            .to_string()
+            .contains("ghost")
+    );
+    // --base only makes sense with -c.
+    failed(&env.run(&["switch", "mine", "--base", "main"]));
+}
+
+#[test]
+fn a_repository_with_git_lfs_is_refused_with_a_way_on() {
+    let env = Env::new();
+    env.init();
+    std::fs::write(
+        env.repo.join(".gitattributes"),
+        "*.psd filter=lfs diff=lfs merge=lfs -text\n",
+    )
+    .unwrap();
+    let git = git2::Repository::open(&env.repo).unwrap();
+    let mut index = git.index().unwrap();
+    index.add_path(Path::new(".gitattributes")).unwrap();
+    index.write().unwrap();
+    let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+    let parent = git.head().unwrap().peel_to_commit().unwrap();
+    git.commit(Some("HEAD"), &sig, &sig, "lfs", &tree, &[&parent])
+        .unwrap();
+
+    let out = env.run(&["--non-interactive", "switch", "-c", "lfs-work"]);
+    failed(&out);
+    let text = stderr(&out);
+    assert!(text.contains("Git LFS"), "{text}");
+    assert!(text.contains("hint:"), "{text}");
+    assert!(!text.contains("class="), "{text}");
+    assert!(
+        !json(&env.run(&["--json", "list"]))["workspaces"]
+            .to_string()
+            .contains("lfs-work")
+    );
+}
+
 #[test]
 fn switching_to_a_missing_workspace_suggests_create() {
     let env = Env::new();
@@ -2479,13 +2619,17 @@ fn switch_create_runs_switch_hooks_on_first_entry() {
         "entered\n"
     );
 
-    // Switching to the existing workspace runs them again.
-    ok(&trusted(&[
+    // Switching to the existing workspace runs them again, and reports them
+    // the same way: `switch_hooks`, apart from the setup run's `hooks`.
+    let doc = json(ok(&trusted(&[
         "--json",
         "--non-interactive",
         "switch",
         "feature/s",
-    ]));
+    ])));
+    assert_eq!(doc["switch_hooks"]["phase"], "switch", "{doc}");
+    assert_eq!(doc["switch_hooks"]["ok"], true, "{doc}");
+    assert!(doc["hooks"].is_null(), "no setup hook ran: {doc}");
     assert_eq!(
         std::fs::read_to_string(path.join("switch-ran.txt")).unwrap(),
         "entered\nentered\n"
@@ -2618,6 +2762,99 @@ fn removal_protections_carry_a_typed_hint() {
 
     ok(&env.run(&["--json", "remove", "feature/d", "--force"]));
     assert!(!path.exists());
+}
+
+#[test]
+fn the_force_hint_of_a_refused_removal_repeats_delete_branch() {
+    // The reproduction: the refusal about the branch told the person to run
+    // `devflow remove X --force`; doing that removed the worktree and silently
+    // kept the branch they had asked to delete.
+    let env = Env::new();
+    env.init();
+    let doc = json(ok(&env.run(&[
+        "--json",
+        "--non-interactive",
+        "switch",
+        "-c",
+        "feature/e",
+    ])));
+    let path = PathBuf::from(doc["path"].as_str().unwrap());
+    // A commit the default workspace does not have.
+    let git = git2::Repository::open(&path).unwrap();
+    std::fs::write(path.join("extra.txt"), "work\n").unwrap();
+    let mut index = git.index().unwrap();
+    index.add_path(Path::new("extra.txt")).unwrap();
+    index.write().unwrap();
+    let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+    let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+    let parent = git.head().unwrap().peel_to_commit().unwrap();
+    git.commit(Some("HEAD"), &sig, &sig, "work", &tree, &[&parent])
+        .unwrap();
+    drop(tree);
+    drop(parent);
+    drop(git);
+
+    let out = env.run(&["remove", "feature/e", "--delete-branch"]);
+    failed(&out);
+    assert!(path.is_dir(), "refused before any effect");
+    assert!(
+        stderr(&out).contains("hint: run `devflow remove feature/e --force --delete-branch`"),
+        "{}",
+        describe(&out)
+    );
+    let out = env.run(&["--json", "remove", "feature/e", "--delete-branch"]);
+    failed(&out);
+    let doc = json(&out);
+    assert!(
+        doc["hint"]
+            .as_str()
+            .unwrap()
+            .contains("devflow remove feature/e --force --delete-branch"),
+        "{doc}"
+    );
+    // Running the hint does what was asked, the branch included.
+    let doc = json(ok(&env.run(&[
+        "--json",
+        "remove",
+        "feature/e",
+        "--force",
+        "--delete-branch",
+    ])));
+    assert_eq!(doc["deleted_branch"], true, "{doc}");
+    assert!(!path.exists());
+    let git = git2::Repository::open(&env.repo).unwrap();
+    assert!(
+        git.find_branch("feature/e", git2::BranchType::Local)
+            .is_err(),
+        "the branch is gone"
+    );
+
+    // Without the flag the hint does not grow one.
+    let doc = json(ok(&env.run(&[
+        "--json",
+        "--non-interactive",
+        "switch",
+        "-c",
+        "feature/f",
+    ])));
+    let path = PathBuf::from(doc["path"].as_str().unwrap());
+    std::fs::write(path.join("README.md"), "changed\n").unwrap();
+    let out = env.run(&["remove", "feature/f"]);
+    failed(&out);
+    assert!(
+        stderr(&out).contains("hint: run `devflow remove feature/f --force` to override"),
+        "{}",
+        describe(&out)
+    );
+    // Nor does a plain forced removal claim to have kept a branch it was never
+    // asked about.
+    let out = env.run(&["remove", "feature/f", "--force"]);
+    ok(&out);
+    assert!(
+        !stdout(&out).contains("kept the Git branch"),
+        "{}",
+        describe(&out)
+    );
 }
 
 #[test]
@@ -2998,8 +3235,17 @@ impl Env {
     /// A project with a committed daemon, approved in the main checkout, and a
     /// ready workspace `feature/p`. Returns its path and its pitchfork namespace.
     fn workspace_with_daemon(&self, fake: &FakePitchfork) -> (PathBuf, String) {
+        self.workspace_with_pitchfork_file(fake, DAEMON_FILE)
+    }
+
+    /// [`Env::workspace_with_daemon`] with the committed `pitchfork.toml` given.
+    fn workspace_with_pitchfork_file(
+        &self,
+        fake: &FakePitchfork,
+        pitchfork_toml: &str,
+    ) -> (PathBuf, String) {
         self.init();
-        self.commit_file("pitchfork.toml", DAEMON_FILE);
+        self.commit_file("pitchfork.toml", pitchfork_toml);
         ok(&self.run(&["--json", "trust", "--yes"]));
         let out = self.run_fake(
             fake,
@@ -3239,6 +3485,130 @@ fn up_refuses_with_an_explanation_and_never_starts_anything() {
     assert_eq!(
         doc["workspaces"][0]["can_start"]["refusal"]["kind"], "autonomous_triggers",
         "{doc}"
+    );
+}
+
+#[test]
+fn ps_and_up_agree_about_a_daemon_that_relies_on_mise() {
+    // The reproduction: `ps --json` said `can_start.allowed` for a daemon with
+    // `mise = true` that mise does not hand `.devflow/env`, and `up` refused it.
+    // (No mise is on the PATH `run_fake` gives, which `up` and `ps` both ask.)
+    let env = Env::new();
+    let fake = env.fake_pitchfork();
+    let (path, namespace) = env.workspace_with_pitchfork_file(
+        &fake,
+        "[daemons.web]\nrun = \"bun run dev\"\nport = 3000\nmise = true\n",
+    );
+    let doc = json(ok(&env.run_fake(&fake, &path, &["--json", "ps"])));
+    let status = &doc["workspaces"][0];
+    assert_eq!(status["can_start"]["allowed"], false, "{doc}");
+    assert_eq!(
+        status["can_start"]["refusal"]["kind"], "mise_delivery",
+        "{doc}"
+    );
+    assert_eq!(status["daemons"][0]["startable"], false, "{doc}");
+    let out = env.run_fake(&fake, &path, &["--json", "--non-interactive", "up"]);
+    failed(&out);
+    let up = json(&out);
+    assert!(
+        up["error"]
+            .as_str()
+            .unwrap()
+            .contains("get the workspace's variables through mise"),
+        "{up}"
+    );
+    assert_eq!(
+        status["can_start"]["reason"].as_str().unwrap(),
+        up["error"].as_str().unwrap(),
+        "ps says what up says"
+    );
+    assert!(
+        up["hint"].as_str().unwrap().contains("devflow exec"),
+        "{up}"
+    );
+    assert!(fake.mutations().is_empty(), "{:?}", fake.calls());
+
+    // Wrapped in `devflow exec`, the shape `init` proposes, both allow it.
+    std::fs::write(
+        path.join("pitchfork.toml"),
+        "[daemons.web]\nrun = \"devflow exec -- bun run dev\"\nport = 3000\nmise = true\n",
+    )
+    .unwrap();
+    ok(&env.run_in(&path, &["--json", "trust", "--yes"]));
+    let doc = json(ok(&env.run_fake(&fake, &path, &["--json", "ps"])));
+    assert_eq!(doc["workspaces"][0]["can_start"]["allowed"], true, "{doc}");
+    fake.set(
+        "after_start.json",
+        &serde_json::to_string(&json!([daemon(&namespace, "running", Some(4242))])).unwrap(),
+    );
+    ok(&env.run_fake(&fake, &path, &["--json", "--non-interactive", "up"]));
+    assert_eq!(fake.mutations(), [format!("start -q {namespace}/web")]);
+}
+
+#[test]
+fn the_daemon_init_proposes_for_a_project_with_mise_passes_up() {
+    // The reproduction: in a project without services, `init --accept
+    // daemon:web` wrote `run = "bun run dev"` with `mise = true`, which `up`
+    // refused because mise does not load `.devflow/env`.
+    let env = Env::new();
+    for (path, text) in [
+        (
+            "package.json",
+            r#"{"name":"shop","scripts":{"dev":"vite"},"devDependencies":{"vite":"5"}}"#,
+        ),
+        ("bun.lock", "{}\n"),
+        ("vite.config.ts", "export default {};\n"),
+        ("mise.toml", "[tools]\nnode = \"22\"\nbun = \"1.2\"\n"),
+    ] {
+        std::fs::write(env.repo.join(path), text).unwrap();
+    }
+    ok(&env.run(&[
+        "--json",
+        "init",
+        "--yes",
+        "--name",
+        "shop",
+        "--accept",
+        "daemon:web",
+    ]));
+    let pitchfork = std::fs::read_to_string(env.repo.join("pitchfork.toml")).unwrap();
+    assert!(
+        pitchfork.contains("run = \"devflow exec -- bun run dev")
+            && pitchfork.contains("mise = true"),
+        "{pitchfork}"
+    );
+    // (The written files are committed, as the project's would be.)
+    for file in [
+        "package.json",
+        "bun.lock",
+        "vite.config.ts",
+        "mise.toml",
+        "devflow.toml",
+        "pitchfork.toml",
+    ] {
+        let text = std::fs::read_to_string(env.repo.join(file)).unwrap();
+        env.commit_file(file, &text);
+    }
+    ok(&env.run(&["--json", "trust", "--yes"]));
+    let fake = env.fake_pitchfork();
+    let out = env.run_fake(
+        &fake,
+        &env.repo,
+        &[
+            "--json",
+            "--non-interactive",
+            "switch",
+            "-c",
+            "feature/m",
+            "--no-hooks",
+        ],
+    );
+    ok(&out);
+    let path = PathBuf::from(json(&out)["path"].as_str().unwrap());
+    let doc = json(ok(&env.run_fake(&fake, &path, &["--json", "ps"])));
+    assert_eq!(
+        doc["workspaces"][0]["can_start"]["allowed"], true,
+        "init's own proposal passes the gate up applies: {doc}"
     );
 }
 
@@ -3849,8 +4219,19 @@ esac"#,
 const OWN_URL: &str = "postgres://own:own-password-8@localhost:5432/own"; // kingfisher:ignore
 const MAIN_URL: &str = "postgres://main:main-password-9@localhost:5432/main"; // kingfisher:ignore
 
-/// Write `.devflow/env` in `dir` the way setup does (single-quoted values).
+/// Write `.devflow/env` in `dir` the way setup does: single-quoted values and
+/// the list of the names a workspace with those variables owns.
 fn write_workspace_env(dir: &Path, vars: &[(&str, &str)]) {
+    let vars: Vec<(String, String)> = vars
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let owned = devflow_core::env_owner::declared_for(&devflow_core::Config::default(), &vars);
+    devflow_core::env_file::write_owned(dir, &vars, &owned, &Default::default()).unwrap();
+}
+
+/// Write `.devflow/env` as a devflow from before the list of owned names did.
+fn write_legacy_workspace_env(dir: &Path, vars: &[(&str, &str)]) {
     std::fs::create_dir_all(dir.join(".devflow")).unwrap();
     let text: String = vars.iter().map(|(k, v)| format!("{k}='{v}'\n")).collect();
     std::fs::write(dir.join(".devflow/env"), text).unwrap();
@@ -3971,6 +4352,23 @@ fn exec_never_starts_a_command_against_an_unknown_database() {
         );
     }
 
+    // A file from a devflow that did not keep the list of owned names is
+    // refused, with setup as the way out, and nothing starts.
+    write_legacy_workspace_env(&env.repo, &[("DATABASE_URL", MAIN_URL)]);
+    let out = touch(&env.repo, &[]);
+    failed(&out);
+    assert!(
+        stderr(&out).contains("earlier devflow") && stderr(&out).contains("devflow setup"),
+        "{}",
+        describe(&out)
+    );
+    assert!(!started.exists(), "no command was started");
+    assert!(
+        !stderr(&out).contains("main-password"),
+        "{}",
+        describe(&out)
+    );
+
     // A program that cannot start: the codes of env(1), no arguments quoted.
     write_workspace_env(&env.repo, &[("A", "1")]);
     let out = env
@@ -4020,6 +4418,474 @@ fn exec_takes_the_variables_of_a_named_workspace() {
         .unwrap();
     ok(&out);
     assert_eq!(stdout(&out), "feature/x");
+}
+
+/// A project with an external PostgreSQL service and an `[env]` recipe built on
+/// its URL, set up in the main checkout (workspace A) against `OWN_URL`, with
+/// the variables A's `.devflow/env` holds returned: the environment a shell
+/// that loaded the file (mise's `_.file`) hands to everything it starts.
+fn workspace_a_variables(env: &Env) -> Vec<(String, String)> {
+    env.init();
+    env.edit_config(
+        "[hooks]",
+        "[services.db]\nengine = \"postgres\"\nmode = \"external\"\n\n\
+         [env]\nAPP_DB = \"${DATABASE_URL}\"\n\n[hooks]",
+    );
+    let out = env
+        .command(&env.repo)
+        .args([
+            "--json",
+            "--non-interactive",
+            "setup",
+            "--database-url",
+            OWN_URL,
+        ])
+        .env("DEVFLOW_TRUST_HOOKS", "1")
+        .output()
+        .unwrap();
+    ok(&out);
+    let vars = devflow_core::env_file::read(&env.repo).unwrap();
+    let names: Vec<&str> = vars.iter().map(|(name, _)| name.as_str()).collect();
+    for name in ["DATABASE_URL", "PGHOST", "APP_DB", "DEVFLOW_WORKSPACE_ID"] {
+        assert!(names.contains(&name), "{name} in {names:?}");
+    }
+    vars
+}
+
+/// `devflow exec -- env -0` in `dir` with `carried` in its environment.
+fn exec_env(
+    env: &Env,
+    dir: &Path,
+    carried: &[(String, String)],
+    extra: &[(&str, &str)],
+    args: &[&str],
+) -> std::collections::BTreeMap<String, String> {
+    let mut command = env.command(dir);
+    command.envs(carried.iter().map(|(k, v)| (k, v)));
+    command.envs(extra.iter().copied());
+    let out = command
+        .arg("exec")
+        .args(args)
+        .args(["--", "env", "-0"])
+        .output()
+        .unwrap();
+    ok(&out);
+    out.stdout
+        .split(|byte| *byte == 0)
+        .filter_map(|entry| std::str::from_utf8(entry).ok()?.split_once('='))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+#[test]
+fn a_no_db_workspace_never_gets_the_database_of_the_workspace_the_caller_is_in() {
+    let env = Env::new();
+    let carried = workspace_a_variables(&env);
+    env.edit_config(
+        "setup = []",
+        "setup = [\"printf '%s|%s|%s|%s' \\\"${DATABASE_URL-unset}\\\" \\\"${APP_DB-unset}\\\" \\\"${PGHOST-unset}\\\" \\\"${DEVFLOW_SETUP_ACTIVE-unset}\\\" > hook-seen.txt\"]",
+    );
+
+    // `devflow switch -c feature-b --no-db` from a shell that carries A's
+    // variables: the setup hook sees none of A's database.
+    let mut command = env.command(&env.repo);
+    command.envs(carried.iter().map(|(k, v)| (k, v)));
+    let out = command
+        .args([
+            "--json",
+            "--non-interactive",
+            "switch",
+            "-c",
+            "feature-b",
+            "--no-db",
+        ])
+        .env("DEVFLOW_TRUST_HOOKS", "1")
+        .output()
+        .unwrap();
+    ok(&out);
+    let doc = json(&out);
+    assert_eq!(doc["status"], "ready", "{doc}");
+    let b = PathBuf::from(doc["path"].as_str().unwrap());
+    // Names only: the execution control reaches the hook, A's values do not.
+    assert_eq!(
+        std::fs::read_to_string(b.join("hook-seen.txt")).unwrap(),
+        "unset|unset|unset|1"
+    );
+
+    // `devflow exec` in B: B's identity, none of A's database.
+    let got = exec_env(&env, &b, &carried, &[("UNRELATED", "kept")], &[]);
+    assert_eq!(got["DEVFLOW_WORKSPACE"], "feature-b", "{got:?}");
+    assert_eq!(got["UNRELATED"], "kept");
+    for name in ["DATABASE_URL", "PGHOST", "PGUSER", "PGDATABASE", "APP_DB"] {
+        assert!(!got.contains_key(name), "{name} leaked");
+    }
+    // The manifest says what B owns although it sets no value for it.
+    let file = std::fs::read_to_string(b.join(".devflow/env")).unwrap();
+    assert!(
+        file.contains("# devflow-owns v1:") && file.contains("DATABASE_URL"),
+        "{file}"
+    );
+    assert!(!file.contains(OWN_URL), "the file is B's own");
+
+    // A name the caller keeps on purpose: `--inherit` or `DEVFLOW_INHERIT`.
+    let got = exec_env(&env, &b, &carried, &[], &["--inherit", "DATABASE_URL"]);
+    assert_eq!(got["DATABASE_URL"], OWN_URL);
+    assert!(!got.contains_key("APP_DB"));
+    let got = exec_env(
+        &env,
+        &b,
+        &carried,
+        &[("DEVFLOW_INHERIT", "APP_DB, PGHOST")],
+        &[],
+    );
+    assert!(got.contains_key("APP_DB") && got.contains_key("PGHOST"));
+    assert!(!got.contains_key("DATABASE_URL"));
+    // A name that is not one is refused before anything runs.
+    let out = env
+        .command(&b)
+        .args(["exec", "--inherit", "NOT A NAME", "--", "true"])
+        .output()
+        .unwrap();
+    failed(&out);
+
+    // A variable only A's file knows (a recipe B does not have) is taken out
+    // through the source set: the environment names A and A's file says so.
+    let a_file = env.repo.join(".devflow/env");
+    let mut text = std::fs::read_to_string(&a_file).unwrap();
+    text.push_str("OLD_RECIPE='from a'\n");
+    std::fs::write(&a_file, text).unwrap();
+    let mut carried_old = carried.clone();
+    carried_old.push(("OLD_RECIPE".into(), "from a".into()));
+    let got = exec_env(&env, &b, &carried_old, &[], &[]);
+    assert!(!got.contains_key("OLD_RECIPE"), "{got:?}");
+}
+
+/// The result of `devflow exec -- touch MARKER` in `dir` with `carried`.
+fn exec_touch(
+    env: &Env,
+    dir: &Path,
+    carried: &[(String, String)],
+    extra: &[(&str, &str)],
+    args: &[&str],
+) -> (Output, bool) {
+    let marker = env.root.join(format!("started-{}", uuid::Uuid::new_v4()));
+    let mut command = env.command(dir);
+    command.envs(carried.iter().map(|(k, v)| (k, v)));
+    command.envs(extra.iter().copied());
+    let out = command
+        .arg("exec")
+        .args(args)
+        .args(["--", "touch"])
+        .arg(&marker)
+        .output()
+        .unwrap();
+    let started = marker.exists();
+    (out, started)
+}
+
+fn with_value(carried: &[(String, String)], name: &str, value: String) -> Vec<(String, String)> {
+    carried
+        .iter()
+        .map(|(k, v)| {
+            if k == name {
+                (k.clone(), value.clone())
+            } else {
+                (k.clone(), v.clone())
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn an_environment_naming_a_workspace_that_cannot_be_resolved_refuses_until_told_to_go_on() {
+    let env = Env::new();
+    let carried = workspace_a_variables(&env);
+    let out = env
+        .command(&env.repo)
+        .args([
+            "--json",
+            "--non-interactive",
+            "switch",
+            "-c",
+            "feature-s",
+            "--no-db",
+        ])
+        .env("DEVFLOW_TRUST_HOOKS", "1")
+        .output()
+        .unwrap();
+    ok(&out);
+    let b = PathBuf::from(json(&out)["path"].as_str().unwrap());
+    // What the shell holds besides: a name only devflow could have generated,
+    // and one that is nobody's.
+    let mut stale_base = carried.clone();
+    stale_base.push(("REDIS_URL".into(), "redis://from-a".into()));
+    stale_base.push(("UNRELATED".into(), "kept".into()));
+
+    let linked = env.root.join("linked-a");
+    std::fs::create_dir_all(linked.join(".devflow")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(env.repo.join(".devflow/env"), linked.join(".devflow/env")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&env.root, env.root.join("alias")).unwrap();
+    let stale_shells: Vec<(&str, Vec<(String, String)>)> = vec![
+        // A removed and set up again: another instance behind the same path.
+        (
+            "another instance",
+            with_value(&stale_base, "DEVFLOW_WORKSPACE_ID", "forged".into()),
+        ),
+        // The workspace's directory is gone.
+        (
+            "gone",
+            with_value(
+                &stale_base,
+                "DEVFLOW_WORKSPACE_PATH",
+                env.root.join("removed").display().to_string(),
+            ),
+        ),
+        // The file is reached through a link.
+        #[cfg(unix)]
+        (
+            "linked",
+            with_value(
+                &stale_base,
+                "DEVFLOW_WORKSPACE_PATH",
+                linked.display().to_string(),
+            ),
+        ),
+        // A link above the worktree: the same file, reached through `alias`.
+        #[cfg(unix)]
+        (
+            "linked ancestor",
+            with_value(
+                &stale_base,
+                "DEVFLOW_WORKSPACE_PATH",
+                env.root.join("alias/repo").display().to_string(),
+            ),
+        ),
+        // A path and no id.
+        (
+            "no id",
+            stale_base
+                .iter()
+                .filter(|(k, _)| k != "DEVFLOW_WORKSPACE_ID")
+                .cloned()
+                .collect(),
+        ),
+    ];
+    for (why, shell) in &stale_shells {
+        let (out, started) = exec_touch(&env, &b, shell, &[], &[]);
+        failed(&out);
+        assert!(!started, "{why}: the command was not started");
+        let text = stderr(&out);
+        assert!(text.contains("cannot be resolved"), "{why}: {text}");
+        assert!(text.contains("DEVFLOW_CLEAR_INHERITED"), "{why}: {text}");
+        assert!(!text.contains("own-password"), "{why}: {text}");
+
+        // Told to go on, by the flag or the variable: the target set and every
+        // name devflow can generate are taken out, the rest stays.
+        for (extra, args) in [
+            (vec![], vec!["--clear-inherited"]),
+            (vec![("DEVFLOW_CLEAR_INHERITED", "1")], vec![]),
+        ] {
+            let got = exec_env(&env, &b, shell, &extra, &args);
+            assert_eq!(got["DEVFLOW_WORKSPACE"], "feature-s", "{why}: {got:?}");
+            for name in ["DATABASE_URL", "PGHOST", "APP_DB", "REDIS_URL"] {
+                assert!(!got.contains_key(name), "{why}: {name} leaked");
+            }
+            assert_eq!(got["UNRELATED"], "kept", "{why}");
+        }
+    }
+    // A shell that names A properly still keeps a name nobody owns, and a name
+    // devflow could have generated but this project does not: only the stale
+    // case clears those.
+    let got = exec_env(&env, &b, &stale_base, &[], &[]);
+    assert_eq!(got["REDIS_URL"], "redis://from-a");
+    assert!(!got.contains_key("DATABASE_URL"));
+}
+
+#[test]
+fn hooks_refuse_a_stale_environment_with_its_remedy_and_go_on_when_told_to() {
+    let env = Env::new();
+    let carried = workspace_a_variables(&env);
+    env.edit_config("setup = []", "setup = [\"echo ran > hook-ran.txt\"]");
+    let stale = with_value(&carried, "DEVFLOW_WORKSPACE_ID", "forged".into());
+    let mut command = env.command(&env.repo);
+    command.envs(stale.iter().map(|(k, v)| (k, v)));
+    let out = command
+        .args([
+            "--json",
+            "--non-interactive",
+            "switch",
+            "-c",
+            "feature-h",
+            "--no-db",
+        ])
+        .env("DEVFLOW_TRUST_HOOKS", "1")
+        .output()
+        .unwrap();
+    // The hooks did not run: the workspace is kept and needs attention.
+    assert!(!out.status.success(), "{}", describe(&out));
+    let text = describe(&out);
+    assert!(text.contains("cannot be resolved"), "{text}");
+    assert!(text.contains("clear_inherited"), "{text}");
+    let b = env
+        .repo
+        .parent()
+        .unwrap()
+        .join("repo.worktrees")
+        .join("feature-h");
+    assert!(!b.join("hook-ran.txt").exists());
+
+    // The same shell with the override: setup resumes and the hooks run.
+    let mut command = env.command(&b);
+    command.envs(stale.iter().map(|(k, v)| (k, v)));
+    let out = command
+        .args(["--json", "--non-interactive", "setup"])
+        .env("DEVFLOW_TRUST_HOOKS", "1")
+        .env("DEVFLOW_CLEAR_INHERITED", "1")
+        .output()
+        .unwrap();
+    ok(&out);
+    assert_eq!(json(&out)["status"], "ready");
+    assert!(b.join("hook-ran.txt").is_file());
+}
+
+#[test]
+fn a_removed_recipe_is_cleared_after_the_file_was_written_again() {
+    let env = Env::new();
+    let carried = workspace_a_variables(&env);
+    // The shell still holds A's `APP_DB`, which A's file once exported.
+    assert!(carried.iter().any(|(k, _)| k == "APP_DB"));
+    // The recipe is removed and setup rewrites A's file.
+    env.edit_config("APP_DB = \"${DATABASE_URL}\"\n", "");
+    let out = env
+        .command(&env.repo)
+        .args(["--json", "--non-interactive", "setup"])
+        .env("DEVFLOW_TRUST_HOOKS", "1")
+        .output()
+        .unwrap();
+    ok(&out);
+    let file = std::fs::read_to_string(env.repo.join(".devflow/env")).unwrap();
+    assert!(!file.contains("APP_DB='"), "no longer exported: {file}");
+    assert!(
+        file.contains("# devflow-formerly v1: APP_DB"),
+        "but still A's: {file}"
+    );
+    // A new workspace B created from that shell: A's file, which the shell
+    // names, says it once exported APP_DB.
+    let out = env
+        .command(&env.repo)
+        .args([
+            "--json",
+            "--non-interactive",
+            "switch",
+            "-c",
+            "feature-f",
+            "--no-db",
+        ])
+        .envs(carried.iter().map(|(k, v)| (k, v)))
+        .output()
+        .unwrap();
+    ok(&out);
+    let b = PathBuf::from(json(&out)["path"].as_str().unwrap());
+    let got = exec_env(&env, &b, &carried, &[], &[]);
+    assert!(!got.contains_key("APP_DB"), "{got:?}");
+    // And A itself, whose own file lists it as a former name.
+    let got = exec_env(&env, &env.repo, &carried, &[], &[]);
+    assert!(!got.contains_key("APP_DB"), "{got:?}");
+    assert!(got.contains_key("DATABASE_URL"));
+}
+
+#[test]
+fn a_hook_that_runs_devflow_exec_for_another_workspace_gets_that_workspaces_variables() {
+    let env = Env::new();
+    let carried = workspace_a_variables(&env);
+    let default_name = {
+        let doc = json(&env.run(&["--json", "list"]));
+        doc["workspaces"][0]["workspace"]["name"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    // B has no database; its setup hook asks for A's variables.
+    env.edit_config(
+        "setup = []",
+        &format!(
+            "setup = [\"devflow exec --workspace {default_name} -- sh -c 'printf %s \\\"${{DATABASE_URL-unset}}|$DEVFLOW_WORKSPACE|$DEVFLOW_SETUP_ACTIVE|${{HOOK_ONLY-unset}}\\\" > other-seen.txt'\", \
+             \"printf %s \\\"${{DATABASE_URL-unset}}|$DEVFLOW_WORKSPACE\\\" > own-seen.txt\"]"
+        ),
+    );
+    let bin = Path::new(env!("CARGO_BIN_EXE_devflow")).parent().unwrap();
+    let path = std::env::join_paths(std::iter::once(bin.to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    let out = env
+        .command(&env.repo)
+        .args([
+            "--json",
+            "--non-interactive",
+            "switch",
+            "-c",
+            "feature-o",
+            "--no-db",
+        ])
+        .envs(carried.iter().map(|(k, v)| (k, v)))
+        .env("DEVFLOW_TRUST_HOOKS", "1")
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    ok(&out);
+    let doc = json(&out);
+    assert_eq!(doc["status"], "ready", "{doc}");
+    let b = PathBuf::from(doc["path"].as_str().unwrap());
+    // The hook's own process has B's variables: none of A's database.
+    assert_eq!(
+        std::fs::read_to_string(b.join("own-seen.txt")).unwrap(),
+        "unset|feature-o"
+    );
+    // The command it ran for A got A's: its database, its identity, and the
+    // execution control of the hook that is running it.
+    assert_eq!(
+        std::fs::read_to_string(b.join("other-seen.txt")).unwrap(),
+        format!("{OWN_URL}|{default_name}|1|unset")
+    );
+}
+
+#[test]
+fn a_nested_devflow_keeps_the_execution_controls_while_the_workspaces_values_are_replaced() {
+    let env = Env::new();
+    let carried = workspace_a_variables(&env);
+    env.edit_config(
+        "setup = []",
+        "setup = [\"devflow exec -- sh -c 'printf %s \\\"$DEVFLOW_SETUP_ACTIVE|$DEVFLOW_WORKSPACE|${DATABASE_URL-unset}\\\" > nested-seen.txt'\"]",
+    );
+    let bin = Path::new(env!("CARGO_BIN_EXE_devflow")).parent().unwrap();
+    let path = std::env::join_paths(std::iter::once(bin.to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    let mut command = env.command(&env.repo);
+    command.envs(carried.iter().map(|(k, v)| (k, v)));
+    let out = command
+        .args([
+            "--json",
+            "--non-interactive",
+            "switch",
+            "-c",
+            "feature-n",
+            "--no-db",
+        ])
+        .env("DEVFLOW_TRUST_HOOKS", "1")
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    ok(&out);
+    let b = PathBuf::from(json(&out)["path"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(b.join("nested-seen.txt")).unwrap(),
+        "1|feature-n|unset"
+    );
 }
 
 fn mise_installed() -> bool {
@@ -4221,14 +5087,30 @@ fn init_wires_the_workspace_environment_for_container_only_projects() {
 }
 
 #[test]
-fn init_leaves_a_project_without_services_or_env_unwrapped() {
+fn init_wraps_a_mise_daemon_but_not_a_plain_one_in_a_project_without_services_or_env() {
+    // With mise: `mise = true` is set, and `up` refuses such a daemon unless it
+    // runs through `devflow exec` (or mise loads `.devflow/env`), so it is
+    // wrapped; nothing asks for the mise wiring.
     let env = Env::new();
     vite_with_compose(&env, "services: {}\n", true);
     let plan = json(&env.run(&["--json", "init", "--plan", "--name", "shop"]));
     let items = plan["items"].as_array().unwrap();
     let web = items.iter().find(|i| i["id"] == "daemon:web").unwrap();
-    assert_eq!(web["value"]["run"], "bun run dev --port $PORT --strictPort");
+    assert_eq!(
+        web["value"]["run"],
+        "devflow exec -- bun run dev --port $PORT --strictPort"
+    );
+    assert_eq!(web["value"]["mise"], true);
     assert!(items.iter().all(|i| i["id"] != "mise:env-file"), "{plan}");
+
+    // Without mise, and with nothing exported, the command is left as it is.
+    let env = Env::new();
+    vite_with_compose(&env, "services: {}\n", false);
+    let plan = json(&env.run(&["--json", "init", "--plan", "--name", "shop"]));
+    let items = plan["items"].as_array().unwrap();
+    let web = items.iter().find(|i| i["id"] == "daemon:web").unwrap();
+    assert_eq!(web["value"]["run"], "bun run dev --port $PORT --strictPort");
+    assert_eq!(web["value"]["mise"], false);
 }
 
 fn setup_hook_runs(env: &Env) -> Vec<String> {
@@ -4741,4 +5623,329 @@ fn config_migrate_uses_dash_c_and_does_not_hide_a_broken_configuration() {
     let out = env.run(&["--json", "config", "migrate"]);
     ok(&out);
     assert_eq!(json(&out)["migrated"], false);
+}
+
+// --- activation ------------------------------------------------------------
+
+/// `git clean -fdx` in a workspace's checkout.
+fn clean_checkout(path: &Path) {
+    let _ = std::fs::remove_dir_all(path.join(".devflow"));
+}
+
+#[test]
+fn setup_and_switch_rebuild_a_cleaned_checkouts_env_file() {
+    let env = Env::new();
+    env.init();
+    env.edit_config("setup = []", "setup = [\"echo ran >> ../setup-ran\"]");
+    let trusted = |dir: &Path, args: &[&str]| {
+        env.command(dir)
+            .args(args)
+            .env("DEVFLOW_TRUST_HOOKS", "1")
+            .output()
+            .unwrap()
+    };
+    let doc = json(ok(&trusted(
+        &env.repo,
+        &[
+            "--json",
+            "--non-interactive",
+            "switch",
+            "-c",
+            "feature/clean",
+        ],
+    )));
+    let path = PathBuf::from(doc["path"].as_str().unwrap());
+    let ran = || std::fs::read_to_string(path.parent().unwrap().join("setup-ran")).unwrap();
+    assert_eq!(ran().lines().count(), 1);
+    let workspace_in = |dir: &Path| {
+        let out = env
+            .command(dir)
+            .args(["exec", "--", "sh", "-c", "echo $DEVFLOW_WORKSPACE"])
+            .output()
+            .unwrap();
+        (out.status.success(), stdout(&out).trim().to_string())
+    };
+    assert_eq!(workspace_in(&path), (true, "feature/clean".into()));
+
+    // `git clean -fdx`: exec refuses, and says what to do.
+    clean_checkout(&path);
+    let out = env
+        .command(&path)
+        .args(["exec", "--", "true"])
+        .output()
+        .unwrap();
+    failed(&out);
+    assert!(stderr(&out).contains("devflow setup"), "{}", describe(&out));
+
+    // The advice is true: setup rebuilds it, says so, and runs no hook again.
+    let out = trusted(&path, &["--json", "--non-interactive", "setup"]);
+    ok(&out);
+    let doc = json(&out);
+    assert_eq!(doc["status"], "ready", "{doc}");
+    assert_eq!(doc["repaired"], json!(["env_file"]), "{doc}");
+    assert_eq!(workspace_in(&path), (true, "feature/clean".into()));
+    assert_eq!(ran().lines().count(), 1, "no hook ran again");
+    let out = trusted(&path, &["--json", "--non-interactive", "setup"]);
+    assert_eq!(json(ok(&out))["repaired"], json!([]));
+
+    // So does switching to it, and the human output says what happened.
+    clean_checkout(&path);
+    let out = env.run(&["--non-interactive", "switch", "feature/clean"]);
+    ok(&out);
+    assert!(
+        stderr(&out).contains("rebuilt .devflow/env"),
+        "{}",
+        describe(&out)
+    );
+    assert_eq!(workspace_in(&path), (true, "feature/clean".into()));
+    assert_eq!(ran().lines().count(), 1);
+}
+
+#[test]
+fn a_checkout_on_another_branch_is_listed_and_found_by_the_workspace_it_belongs_to() {
+    let env = Env::new();
+    env.init();
+    let doc = json(ok(&env.run(&[
+        "--json",
+        "--non-interactive",
+        "switch",
+        "-c",
+        "feature/a",
+    ])));
+    let path = PathBuf::from(doc["path"].as_str().unwrap());
+    let git = git2::Repository::open(&path).unwrap();
+    let head = git.head().unwrap().peel_to_commit().unwrap();
+    git.branch("other", &head, false).unwrap();
+    git.set_head("refs/heads/other").unwrap();
+
+    // The listing says whose data the checkout holds, in words and in JSON.
+    let doc = json(&env.run(&["--json", "list"]));
+    let item = doc["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["workspace"]["name"] == "feature/a")
+        .unwrap_or_else(|| panic!("{doc}"));
+    assert_eq!(item["workspace"]["branch"], "other", "{item}");
+    assert_eq!(item["drift"]["workspace"], "feature/a", "{item}");
+    assert_eq!(item["drift"]["branch"], "other", "{item}");
+    let table = stdout(ok(&env.run(&["list"])));
+    assert!(
+        table.contains("now on branch other; its data still belongs to workspace feature/a"),
+        "{table}"
+    );
+
+    // The workspace is still found by its name, and by the branch it holds.
+    for name in ["feature/a", "other"] {
+        let out = env.run(&["path", name]);
+        ok(&out);
+        assert!(
+            same_path(&stdout(&out), &path),
+            "{name}: {}",
+            describe(&out)
+        );
+    }
+    let out = env.run(&["--json", "--non-interactive", "switch", "feature/a"]);
+    ok(&out);
+    let doc = json(&out);
+    assert_eq!(doc["drift"]["branch"], "other", "{doc}");
+    assert_eq!(doc["workspace"]["name"], "feature/a", "{doc}");
+    let out = env.run(&["--non-interactive", "switch", "feature/a"]);
+    assert!(
+        stderr(&out).contains("now on branch other; its data still belongs to workspace feature/a"),
+        "{}",
+        describe(&out)
+    );
+
+    // Its variables are still the workspace's.
+    let out = env
+        .command(&path)
+        .args(["exec", "--", "sh", "-c", "echo $DEVFLOW_WORKSPACE"])
+        .output()
+        .unwrap();
+    assert_eq!(stdout(ok(&out)).trim(), "feature/a");
+}
+
+#[test]
+fn the_first_switch_to_the_main_checkout_says_it_runs_setup_there() {
+    let env = Env::new();
+    env.init();
+    env.edit_config("setup = []", "setup = [\"echo ran >> setup-ran.txt\"]");
+    let name = json(&env.run(&["--json", "list"]))["workspaces"][0]["workspace"]["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let switch = |args: &[&str]| {
+        env.command(&env.repo)
+            .args(args)
+            .env("DEVFLOW_TRUST_HOOKS", "1")
+            .output()
+            .unwrap()
+    };
+    let out = switch(&["--json", "--non-interactive", "switch", &name]);
+    ok(&out);
+    let doc = json(&out);
+    assert_eq!(doc["first_setup"], true, "{doc}");
+    assert_eq!(doc["status"], "ready", "{doc}");
+    assert!(
+        stderr(&out).contains("setup runs now in the main checkout")
+            && stderr(&out).contains("setup hooks included"),
+        "{}",
+        describe(&out)
+    );
+    assert_eq!(
+        std::fs::read_to_string(env.repo.join("setup-ran.txt"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    // Only the first time.
+    let out = switch(&["--json", "--non-interactive", "switch", &name]);
+    ok(&out);
+    assert_eq!(json(&out)["first_setup"], false);
+    assert!(
+        !stderr(&out).contains("main checkout"),
+        "{}",
+        describe(&out)
+    );
+}
+
+#[test]
+fn a_devflow_started_by_a_switch_hook_gets_busy_instead_of_waiting() {
+    let env = Env::new();
+    env.init();
+    let nested = format!(
+        "{} --json --non-interactive setup > nested.json 2> nested.err; echo $? > nested.code",
+        env!("CARGO_BIN_EXE_devflow")
+    );
+    env.edit_config(
+        "setup = []",
+        &format!("setup = []\nswitch = [\"{nested}\"]"),
+    );
+    let started = std::time::Instant::now();
+    let out = env
+        .command(&env.repo)
+        .args(["--json", "--non-interactive", "switch", "-c", "feature/h"])
+        .env("DEVFLOW_TRUST_HOOKS", "1")
+        .output()
+        .unwrap();
+    ok(&out);
+    let doc = json(&out);
+    assert_eq!(doc["status"], "ready", "{doc}");
+    assert_eq!(doc["switch_hooks"]["ok"], true, "{doc}");
+    let path = PathBuf::from(doc["path"].as_str().unwrap());
+    // The nested setup was refused as busy (exit 2, `in_progress`), not run
+    // and not waited for.
+    assert_eq!(
+        std::fs::read_to_string(path.join("nested.code"))
+            .unwrap()
+            .trim(),
+        "2"
+    );
+    let nested = json_file(&path.join("nested.json"));
+    assert_eq!(nested["status"], "in_progress", "{nested}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(60));
+}
+
+fn json_file(path: &Path) -> Value {
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+#[test]
+fn a_name_that_means_two_workspaces_is_refused_with_their_paths() {
+    let env = Env::new();
+    env.init();
+    let create = |name: &str| {
+        let doc = json(ok(&env.run(&[
+            "--json",
+            "--non-interactive",
+            "switch",
+            "-c",
+            name,
+        ])));
+        PathBuf::from(doc["path"].as_str().unwrap())
+    };
+    let (a, b) = (create("feature/a"), create("feature/b"));
+    // `a` moves to another branch, and `b` takes the branch `a` had.
+    let git = git2::Repository::open(&a).unwrap();
+    let head = git.head().unwrap().peel_to_commit().unwrap();
+    git.branch("other", &head, false).unwrap();
+    git.set_head("refs/heads/other").unwrap();
+    git2::Repository::open(&b)
+        .unwrap()
+        .set_head("refs/heads/feature/a")
+        .unwrap();
+
+    for args in [
+        &["path", "feature/a"][..],
+        &["--non-interactive", "switch", "feature/a"][..],
+        &["remove", "feature/a"][..],
+    ] {
+        let out = env.run(args);
+        failed(&out);
+        let text = stderr(&out);
+        assert!(
+            text.contains("names more than one workspace")
+                && text.contains(&a.display().to_string())
+                && text.contains(&b.display().to_string()),
+            "{args:?}: {}",
+            describe(&out)
+        );
+        assert!(text.contains("hint:"), "{args:?}: {}", describe(&out));
+    }
+    assert!(
+        a.exists() && b.exists(),
+        "a refused removal removed nothing"
+    );
+    let doc = json(&env.run(&["--json", "path", "feature/a"]));
+    assert_eq!(doc["remedies"][0]["kind"], "use_path", "{doc}");
+
+    // The names that mean one workspace, and the paths, still work.
+    for (name, expected) in [("other", &a), ("feature/b", &b)] {
+        let out = env.run(&["path", name]);
+        assert!(same_path(&stdout(ok(&out)), expected), "{name}");
+    }
+    let out = env.run(&["remove", a.to_str().unwrap()]);
+    ok(&out);
+    assert!(!a.exists() && b.exists());
+}
+
+#[test]
+fn list_says_when_a_set_up_workspace_lost_its_env_file() {
+    let env = Env::new();
+    env.init();
+    let doc = json(ok(&env.run(&[
+        "--json",
+        "--non-interactive",
+        "switch",
+        "-c",
+        "feature/g",
+    ])));
+    let path = PathBuf::from(doc["path"].as_str().unwrap());
+    clean_checkout(&path);
+
+    let table = stdout(ok(&env.run(&["list"])));
+    assert!(
+        table.contains("feature/g: .devflow/env is missing"),
+        "{table}"
+    );
+    assert!(
+        !table.contains("`devflow"),
+        "a note names the file, never a command: {table}"
+    );
+    let doc = json(&env.run(&["--json", "list"]));
+    let item = doc["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["workspace"]["name"] == "feature/g")
+        .unwrap();
+    assert_eq!(item["env_file"], "missing", "{item}");
+    assert_eq!(item["status"], "ready", "the status is the receipt's");
+
+    // Entering it writes the file again, and the note is gone.
+    ok(&env.run(&["--non-interactive", "switch", "feature/g"]));
+    assert!(path.join(".devflow/env").is_file());
+    assert!(!stdout(ok(&env.run(&["list"]))).contains("env is missing"));
 }

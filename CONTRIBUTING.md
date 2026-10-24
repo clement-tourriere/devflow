@@ -66,6 +66,9 @@ Scopes in use: `cli`, `core`, `config`, `worktree`, `cow`, `setup`, `hooks`, `tr
 - `tests/cli.rs` runs the `devflow` binary end to end; `crates/devflow-core/tests/workspace.rs` covers worktrees, setup and removal without Docker.
 - Database behavior is tested against real PostgreSQL 18 in Docker. Those tests are ignored by default (`-- --ignored --test-threads=1`) and use isolated containers and state: `--test db_postgres`, plus `--test workspace -- --ignored managed_postgres` for the managed server end to end. `--test workspace -- --ignored pitchfork` needs pitchfork on `PATH`.
 - Valkey/Redis branches have their own Docker tests: `cargo test -p devflow --test services_docker -- --ignored --test-threads=1` (needs `valkey/valkey:8-alpine` and `debian:stable-slim`; `redis:8-alpine` for one test). Each test uses its own project id and data directory, and puts `DEVFLOW_TEST_LABEL` on every container, volume and helper devflow creates (`dev.devflow.test=<run>`), and a guard removes everything carrying the label even after a panic. Interrupted runs can be cleaned with `docker ps -aq --filter label=dev.devflow.test | xargs docker rm -f` and the same filter for `docker volume`. `DEVFLOW_TEST_COPY_DELAY_SECS`, `DEVFLOW_TEST_COPY_TIMEOUT_SECS` and `DEVFLOW_TEST_NO_REFLINK` make the copy slow, short or reflink-less for the kill, deadline and `require_cow` tests.
+- MySQL has its own: `cargo test -p devflow --test services_mysql_docker -- --ignored --test-threads=1` (needs `mysql:8.4` and `debian:stable-slim`). CI runs both service suites on Linux, next to the PostgreSQL one.
+- `scripts/bench-workspaces.sh` is a manual benchmark (not run by CI): five workspaces on a scratch project with PostgreSQL and Valkey (`--mysql` adds MySQL), printing the cold and warm `switch -c` times, the memory of every container (`docker stats`), the growth of the Docker VM's disk and of the volumes, and a MySQL source's downtime, as a table and JSON (`--json FILE`). It needs Docker, `jq` and the images the suites use, pulls nothing, keeps its registry and data in a temporary directory and removes what it created. Run it on an idle engine: other containers add noise to the memory and disk figures.
+- `scripts/smoke-test.sh DEVFLOW [VERSION]` is the quick start CI runs against an installed release (`init`, `switch -c`, `list`, `remove` in a scratch repository); run it on a local build to see what it checks.
 - The GUI has headless tests (`cargo test --locked -p devflow-gui`, macOS); native visual checks are manual.
 - Ext4 runners cannot share blocks, so CI cannot assert `verified` CoW. Verify CoW on OrbStack or a Linux btrfs/XFS host and report it separately from the mocked and unit checks. Set `DEVFLOW_EXPECT_COW=verified` to make the Docker tests assert it.
 - Use `DEVFLOW_CONFIG_DIR` and `DEVFLOW_DATA_DIR` to isolate tests from your real registry and managed servers.
@@ -82,11 +85,13 @@ Nothing that looks like a credential may be committed or pushed. The [hk](https:
 
 ### Pull requests
 
-1. CI passes: the secret scan, Conventional Commits, formatting, clippy, tests, the Docker database tests, the GUI clippy, build and tests on macOS, shellcheck of the scripts, and `cargo audit`.
+1. CI passes: the secret scan, Conventional Commits, formatting, clippy, tests, the Docker database and container-service tests, the GUI clippy, build and tests on macOS, shellcheck of the scripts, and `cargo audit`.
 2. Update `docs/` or `README.md` when behavior changes, and `CLAUDE.md` or `AGENTS.md` when layout or the automation contract changes.
 3. Add a `CHANGELOG.md` entry under `Unreleased` for user-facing changes.
 
 ## Releases
+
+On the tag, CI builds the artifacts, publishes them, and then installs them with `scripts/install.sh` on Linux amd64, Linux arm64 and macOS and runs `scripts/smoke-test.sh` (the installed `--version` must equal the tag). The same job runs by hand from the Actions tab (`workflow_dispatch`, with the release tag as a required input such as `v1.0.0`; `latest` is not accepted) to check a published release, after it has verified that the release holds every asset. Until the first 1.x release is published, the latest release is a 0.x that reads another configuration format, so the README says so and the installer warns after installing one.
 
 Releases are cut with Commitizen from `main`; the `pre_bump_hooks` run `scripts/sync-version.py`, which keeps the three crates and `Cargo.lock` on one version, and the tag is GPG-signed. `mise run release` always bumps the patch version. `cz bump` replaces the curated `## Unreleased` notes with a list generated from commit messages, so put them back:
 

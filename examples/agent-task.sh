@@ -70,6 +70,7 @@ fi
 
 # Set when the command's processes could not be stopped: the workspace stays.
 unsafe=0
+# shellcheck disable=SC2317,SC2329 # run by the EXIT trap
 cleanup() {
   if [ "${KEEP:-0}" != "1" ] && [ "$unsafe" != "1" ]; then
     # From the main checkout: devflow refuses to remove the workspace you are in.
@@ -149,6 +150,7 @@ forward() {
   fi
 }
 # A signal the person (or the CI runner) sent: forwarded, and the grace starts.
+# shellcheck disable=SC2317,SC2329 # run by the INT and TERM traps
 cancel() {
   if [ -z "$cancelled" ]; then
     cancelled=$ticks

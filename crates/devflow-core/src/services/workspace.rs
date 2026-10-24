@@ -123,7 +123,12 @@ pub fn resolve_in(
                     )
                 })?;
             branch_ready(key, records, id)?;
-            (SourceRef::Branch { id }, format!("workspace:{name}"))
+            // The label names the workspace, whatever it was asked for by (a
+            // branch, a path).
+            (
+                SourceRef::Branch { id },
+                format!("workspace:{}", workspace.name),
+            )
         }
         DataSource::Branch { .. } | DataSource::BranchPrefix { .. } => {
             let id = source

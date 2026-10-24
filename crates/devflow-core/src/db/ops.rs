@@ -112,18 +112,23 @@ fn capability(s: &mut Session) -> CowCapability {
     known
 }
 
-/// Capability of a clone from `src` (the server's, or `unknown` when the
-/// source lives outside the verified filesystem), enforcing `postgres.require_cow`.
+/// Capability of a clone from `src`: the server's, or `unknown` when the
+/// source lives outside the verified filesystem.
+fn source_capability(s: &mut Session, src: &Source) -> CowCapability {
+    // The verification covers $PGDATA's filesystem only.
+    let cow = capability(s);
+    match &src.template {
+        Some(template) if cow == CowCapability::Verified && !s.on_default_tablespace(template) => {
+            CowCapability::Unknown
+        }
+        _ => cow,
+    }
+}
+
+/// Capability of a clone from `src`, enforcing `postgres.require_cow`.
 /// `refused` completes the error: what was left undone.
 fn clone_capability(s: &mut Session, src: &Source, refused: &str) -> Result<CowCapability> {
-    // The verification covers $PGDATA's filesystem only.
-    let mut cow = capability(s);
-    if cow == CowCapability::Verified
-        && let Some(template) = &src.template
-        && !s.on_default_tablespace(template)
-    {
-        cow = CowCapability::Unknown;
-    }
+    let cow = source_capability(s, src);
     if s.server.settings.require_cow && cow != CowCapability::Verified {
         bail!(
             "postgres.require_cow is set, but copy-on-write is '{}' for this branch; {refused}",
@@ -131,6 +136,33 @@ fn clone_capability(s: &mut Session, src: &Source, refused: &str) -> Result<CowC
         );
     }
     Ok(cow)
+}
+
+/// Decide how to clone `src`, given the capability measured (or declared) for
+/// it, and record the choice on it. `FILE_COPY` is what copy-on-write needs.
+/// Without verified sharing it only copies, and forces checkpoints that cost
+/// more than the copy of a small source (on ext4 a small database took 6.7 s
+/// that way and 0.47 s through the WAL), so a source under `wal_log_below`
+/// uses `WAL_LOG`, unless `require_cow` is set. A size that cannot be read keeps `FILE_COPY`. An empty
+/// database has no strategy.
+fn choose_strategy(s: &mut Session, src: &mut Source, cow: CowCapability) {
+    let Some(template) = src.template.as_deref() else {
+        return;
+    };
+    // `WAL_LOG` never shares blocks, so it never stands in for what
+    // `require_cow` asks for: such a server clones with `FILE_COPY` only (and
+    // `clone_capability` has refused anything but `verified` before this).
+    src.strategy = Some(
+        if cow == CowCapability::Verified || s.server.settings.require_cow {
+            CloneStrategy::FileCopy
+        } else {
+            let below = s.server.settings.wal_log_below();
+            match s.database_size(template) {
+                Some(size) if size < below => CloneStrategy::WalLog,
+                _ => CloneStrategy::FileCopy,
+            }
+        },
+    );
 }
 
 pub(super) fn up(server: &Server) -> Result<ServerStatus> {
@@ -368,6 +400,9 @@ struct Source {
     login: Option<String>,
     kind: &'static str,
     id: Option<Uuid>,
+    /// How the clone is made; set by [`pick_strategy`] once the capability is
+    /// known. `None` for an empty database.
+    strategy: Option<CloneStrategy>,
 }
 
 fn resolve_source(s: &mut Session, source: ResolvedSource) -> Result<Source> {
@@ -378,6 +413,7 @@ fn resolve_source(s: &mut Session, source: ResolvedSource) -> Result<Source> {
             login: None,
             kind: "empty",
             id: None,
+            strategy: None,
         },
         ResolvedSource::Branch(id) => {
             let row = ready_branch(s, id)?;
@@ -386,6 +422,7 @@ fn resolve_source(s: &mut Session, source: ResolvedSource) -> Result<Source> {
                 login: Some(row.role_name),
                 kind: "branch",
                 id: Some(id),
+                strategy: None,
             }
         }
         ResolvedSource::Snapshot(id) => {
@@ -402,6 +439,7 @@ fn resolve_source(s: &mut Session, source: ResolvedSource) -> Result<Source> {
                 login: None,
                 kind: "snapshot",
                 id: Some(id),
+                strategy: None,
             }
         }
     })
@@ -476,9 +514,10 @@ pub(super) fn create_branch(
     let mut s = begin(server)?;
     guarded(&mut s, |s| {
         let project = s.project_id();
-        let src = resolve_source(s, source)?;
+        let mut src = resolve_source(s, source)?;
 
         let cow = clone_capability(s, &src, "no branch was created")?;
+        choose_strategy(s, &mut src, cow);
 
         let db = db_name(project, id);
         let login = login_name(id);
@@ -497,6 +536,7 @@ pub(super) fn create_branch(
                 source_id: src.id,
                 instance_id,
                 cow,
+                clone_strategy: src.strategy,
             },
         )?;
         if let Err(error) = build_branch(s, id, &src, &db, &login, &owner, &password) {
@@ -554,7 +594,11 @@ fn build_branch(
 fn create_database(s: &mut Session, src: &Source, db: &str) -> Result<()> {
     match &src.template {
         None => s.create_empty_database(db),
-        Some(template) => s.clone_database(template, db),
+        Some(template) => s.clone_database(
+            template,
+            db,
+            src.strategy.unwrap_or(CloneStrategy::FileCopy),
+        ),
     }
 }
 
@@ -632,9 +676,10 @@ pub(super) fn reset_branch(
             source != ResolvedSource::Branch(id),
             "a branch cannot be reset to itself"
         );
-        let src = resolve_reset_source(s, source)?;
+        let mut src = resolve_reset_source(s, source)?;
         // Same capability and `require_cow` rules as creation, before anything is staged.
         let cow = clone_capability(s, &src, "the branch was not reset")?;
+        choose_strategy(s, &mut src, cow);
         let owner = owner_name(project);
         let replacement = db_name(project, Uuid::new_v4());
         let backup = db_name(project, Uuid::new_v4());
@@ -651,6 +696,7 @@ pub(super) fn reset_branch(
                 source_kind: src.kind,
                 source_id: src.id,
                 scratch: &scratch_ids,
+                clone_strategy: src.strategy,
             },
         )?;
         if let Err(error) = run_reset(s, &row, &src, cow, &owner, &replacement, &backup) {
@@ -734,12 +780,27 @@ fn run_reset(
 // ---- drop / rotate --------------------------------------------------------
 
 pub(super) fn drop_branch(server: &Server, id: Uuid) -> Result<()> {
+    drop_branch_checked(server, id, |_| Ok(())).map(|_| ())
+}
+
+/// [`drop_branch`] for a caller that must decide on the branch as it is now:
+/// `check` sees the row read under the project's advisory lock, right before
+/// anything is dropped, and an error from it leaves everything as it was.
+/// `Ok(false)` when there is no such branch (an interrupted creation is rolled
+/// back before the row is looked at, so a branch that never got as far as its
+/// row is none).
+pub(super) fn drop_branch_checked(
+    server: &Server,
+    id: Uuid,
+    check: impl FnOnce(&meta::BranchRow) -> Result<()>,
+) -> Result<bool> {
     let mut s = begin(server)?;
     guarded(&mut s, |s| {
         let project = s.project_id();
         let Some(row) = meta::get_branch(&mut s.admin, project, id)? else {
-            return Ok(());
+            return Ok(false);
         };
+        check(&row)?;
         if row.op.is_some() {
             return Err(s.needs_reconcile(format!(
                 "branch {} has an unrecovered reset ({}); resolve it before dropping",
@@ -764,7 +825,7 @@ pub(super) fn drop_branch(server: &Server, id: Uuid) -> Result<()> {
             }
             return Err(error);
         }
-        Ok(())
+        Ok(true)
     })
 }
 
@@ -908,7 +969,9 @@ pub(super) fn create_snapshot(
     let mut s = begin(server)?;
     guarded(&mut s, |s| {
         let project = s.project_id();
-        let src = resolve_source(s, ResolvedSource::Branch(from_branch))?;
+        let mut src = resolve_source(s, ResolvedSource::Branch(from_branch))?;
+        let cow = source_capability(s, &src);
+        choose_strategy(s, &mut src, cow);
         let id = Uuid::new_v4();
         let db = db_name(project, id);
         let owner = owner_name(project);

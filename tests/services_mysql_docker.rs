@@ -2237,6 +2237,7 @@ fn create(
         CreateRequest {
             name: name.into(),
             from: None,
+            base: None,
             options,
         },
         &mut NoProgress,
@@ -2293,13 +2294,25 @@ fn doctor_line(fx: &Fixture) -> String {
 #[test]
 #[ignore = "needs Docker, mysql:8.4 and debian:stable-slim"]
 fn workspaces_get_their_own_mysql_branch_and_variables_and_the_command_reports_them() {
-    let fx = Fixture::mysql();
+    let fx = Fixture::new(
+        "[services.sql]\nengine = \"mysql\"\ndatabase = \"shop\"\n\n\
+         [data]\nnoninteractive_from = \"snapshot:seed\"\n",
+    );
     let first = create(&fx, "feature-a", SetupOptions::default()).unwrap();
     assert_eq!(
         first.status,
         devflow_core::receipt::Status::Ready,
         "{:?}",
         first.receipt.phases
+    );
+    // The source stopped for the copy: the outcome says so, as a warning.
+    assert!(
+        first
+            .warnings
+            .iter()
+            .any(|w| w.contains("source of service 'sql' was stopped for ")),
+        "{:?}",
+        first.warnings
     );
     let binding = &first.receipt.services["sql"];
     assert_eq!(binding.engine, Engine::Mysql);
@@ -2376,6 +2389,29 @@ fn workspaces_get_their_own_mysql_branch_and_variables_and_the_command_reports_t
         env_value(&second.workspace.path, "MYSQL_PORT"),
         env_value(path, "MYSQL_PORT")
     );
+    assert!(
+        second.warnings.iter().all(|w| !w.contains("was stopped")),
+        "a snapshot stops no source: {:?}",
+        second.warnings
+    );
+
+    // A run that cannot prompt takes the configured seed snapshot.
+    let seeded = create(
+        &fx,
+        "feature-c",
+        SetupOptions {
+            non_interactive: true,
+            ..SetupOptions::default()
+        },
+    )
+    .unwrap();
+    let (_, seeded_record) = setup::service_branch(&fx.project, &seeded.workspace, "sql").unwrap();
+    assert_eq!(
+        seeded_record.source,
+        SourceRef::Snapshot { id: snapshot.id }
+    );
+    assert_eq!(Db::of(&svc, seeded_record.id).count("t"), 1);
+    assert!(seeded.warnings.is_empty(), "{:?}", seeded.warnings);
 
     // The last clone was from a snapshot: no source was stopped for it.
     let line = doctor_line(&fx);

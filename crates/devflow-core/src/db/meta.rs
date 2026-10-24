@@ -1,6 +1,6 @@
 //! The `devflow` metadata database: schema, migrations, row access. Row
 //! identities here, never name prefixes, decide what devflow may touch.
-use super::{BranchInfo, RecordStatus, ScratchInfo, SnapshotInfo};
+use super::{BranchInfo, CloneStrategy, RecordStatus, ScratchInfo, SnapshotInfo};
 use crate::config::CowCapability;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -17,7 +17,7 @@ choose another server or drop/rename it";
 /// database with this prefix is never adopted or dropped on the strength of its
 /// name; only the mark decides, and leftovers are reported.
 pub(super) const BOOTSTRAP_PREFIX: &str = "devflow_bootstrap_";
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 /// Serializes schema migrations across processes ("devflow" + 1).
 const MIGRATION_LOCK_KEY: i64 = 0x6465_7666_6c6f_7701;
 
@@ -112,6 +112,16 @@ const SCHEMA_V3: &str = "
 ALTER TABLE branches ADD COLUMN IF NOT EXISTS op_scratch uuid[];
 ";
 
+/// Version 4: the strategy a branch's data was cloned with (`file_copy` or
+/// `wal_log`), and the one a reset in flight is about to clone its replacement
+/// with (`op_clone_strategy`, journaled with the intent before the copy and
+/// moved to `clone_strategy` by the cutover). Null for an empty database and
+/// for a branch cloned before the columns existed.
+const SCHEMA_V4: &str = "
+ALTER TABLE branches ADD COLUMN IF NOT EXISTS clone_strategy text;
+ALTER TABLE branches ADD COLUMN IF NOT EXISTS op_clone_strategy text;
+";
+
 /// Create or upgrade the schema under an advisory lock. Refuses to touch a
 /// schema written by a newer devflow.
 pub(super) fn migrate(client: &mut Client) -> Result<()> {
@@ -140,6 +150,9 @@ pub(super) fn migrate(client: &mut Client) -> Result<()> {
     }
     if current < 3 {
         tx.batch_execute(SCHEMA_V3)?;
+    }
+    if current < 4 {
+        tx.batch_execute(SCHEMA_V4)?;
     }
     if current < SCHEMA_VERSION {
         tx.execute(
@@ -209,8 +222,12 @@ fn parse_cow(text: &str) -> CowCapability {
 
 // ---- branches -------------------------------------------------------------
 
+/// `clone_strategy` is read through `to_jsonb` so that a reader still works on
+/// a schema older than version 4 (readers never migrate): the column is then
+/// null.
 const BRANCH_COLUMNS: &str = "id, name, db_name, role_name, source_kind, source_id, instance_id, \
-     status, cow, error, generation, op, op_phase, replacement_db, backup_db, created_at";
+     status, cow, to_jsonb(branches) ->> 'clone_strategy' AS clone_strategy, error, generation, \
+     op, op_phase, replacement_db, backup_db, created_at";
 
 pub(super) struct BranchRow {
     pub id: Uuid,
@@ -222,6 +239,7 @@ pub(super) struct BranchRow {
     pub instance_id: Option<Uuid>,
     pub status: RecordStatus,
     pub cow: CowCapability,
+    pub clone_strategy: Option<CloneStrategy>,
     pub error: Option<String>,
     pub generation: i32,
     /// `Some("reset")` while a reset is in flight.
@@ -244,6 +262,10 @@ impl BranchRow {
             instance_id: row.get("instance_id"),
             status: parse_status(row.get("status"))?,
             cow: parse_cow(row.get("cow")),
+            clone_strategy: row
+                .get::<_, Option<String>>("clone_strategy")
+                .as_deref()
+                .and_then(CloneStrategy::parse),
             error: row.get("error"),
             generation: row.get("generation"),
             op: row.get("op"),
@@ -265,6 +287,7 @@ impl BranchRow {
             instance_id: self.instance_id,
             status: self.status,
             cow: self.cow,
+            clone_strategy: self.clone_strategy,
             error: self.error.clone(),
             created_at: self.created_at,
             size_bytes,
@@ -284,13 +307,14 @@ pub(super) struct NewBranch<'a> {
     pub source_id: Option<Uuid>,
     pub instance_id: Option<Uuid>,
     pub cow: CowCapability,
+    pub clone_strategy: Option<CloneStrategy>,
 }
 
 pub(super) fn insert_branch(client: &mut Client, project: Uuid, new: &NewBranch) -> Result<()> {
     client.execute(
         "INSERT INTO branches (id, project_id, name, db_name, role_name, source_kind, source_id, \
-                               instance_id, status, cow) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'creating', $9)",
+                               instance_id, status, cow, clone_strategy) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'creating', $9, $10)",
         &[
             &new.id,
             &project,
@@ -301,6 +325,7 @@ pub(super) fn insert_branch(client: &mut Client, project: Uuid, new: &NewBranch)
             &new.source_id,
             &new.instance_id,
             &cow_str(new.cow),
+            &new.clone_strategy.map(CloneStrategy::as_str),
         ],
     )?;
     Ok(())
@@ -420,6 +445,8 @@ pub(super) struct ResetIntent<'a> {
     pub source_id: Option<Uuid>,
     /// The scratch databases this reset empties (their row ids).
     pub scratch: &'a [Uuid],
+    /// How the replacement is cloned; `None` for an empty one.
+    pub clone_strategy: Option<CloneStrategy>,
 }
 
 /// Open the reset journal of a `ready` branch at `generation` with no operation.
@@ -432,7 +459,7 @@ pub(super) fn begin_reset(
     let updated = client.execute(
         "UPDATE branches SET op = 'reset', op_phase = 'staging', replacement_db = $3, \
                 backup_db = $4, op_source_kind = $5, op_source_id = $6, op_scratch = $7, \
-                error = NULL, updated_at = now() \
+                op_clone_strategy = $8, error = NULL, updated_at = now() \
          WHERE id = $1 AND generation = $2 AND status = 'ready' AND op IS NULL",
         &[
             &id,
@@ -442,6 +469,7 @@ pub(super) fn begin_reset(
             &intent.source_kind,
             &intent.source_id,
             &intent.scratch,
+            &intent.clone_strategy.map(CloneStrategy::as_str),
         ],
     )?;
     expect_one(updated, "the reset record")
@@ -476,7 +504,8 @@ pub(super) fn set_op_phase(
 pub(super) fn clear_op(client: &mut Client, id: Uuid, generation: i32, phase: &str) -> Result<()> {
     let updated = client.execute(
         "UPDATE branches SET op = NULL, op_phase = NULL, replacement_db = NULL, backup_db = NULL, \
-                op_source_kind = NULL, op_source_id = NULL, op_scratch = NULL, updated_at = now() \
+                op_source_kind = NULL, op_source_id = NULL, op_scratch = NULL, \
+                op_clone_strategy = NULL, updated_at = now() \
          WHERE id = $1 AND op = 'reset' AND op_phase = $3 AND generation = $2",
         &[&id, &generation, &phase],
     )?;

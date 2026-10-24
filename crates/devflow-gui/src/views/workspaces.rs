@@ -184,9 +184,14 @@ impl TableDelegate for WorkspaceTable {
                     ))
                 })
                 .into_any_element(),
-            "branch" => div()
-                .truncate()
-                .child(row.branch.clone())
+            "branch" => h_flex()
+                .gap_2()
+                .child(div().truncate().child(row.branch.clone()))
+                .children(
+                    row.drift
+                        .clone()
+                        .map(|drift| ui::pill("branch-drift", "moved", ui::Tone::Warning, drift)),
+                )
                 .into_any_element(),
             "status" => ui::workspace_tag(row.state).into_any_element(),
             "database" => div()
@@ -300,14 +305,14 @@ impl WorkspacesView {
             // The clicked row is the workspace the Daemons and Logs tabs show.
             cx.subscribe(&table, |this, table, event: &TableEvent, cx| {
                 if let TableEvent::SelectRow(ix) = event {
-                    let name = table
+                    let path = table
                         .read(cx)
                         .delegate()
                         .rows
                         .get(*ix)
-                        .map(|r| r.workspace.name.clone());
-                    if let Some(name) = name {
-                        this.state.update(cx, |s, cx| s.select_workspace(name, cx));
+                        .map(|r| r.workspace.path.clone());
+                    if let Some(path) = path {
+                        this.state.update(cx, |s, cx| s.select_workspace(path, cx));
                     }
                 }
             }),
@@ -340,7 +345,7 @@ impl WorkspacesView {
             let selected = model
                 .selected_workspace
                 .as_ref()
-                .and_then(|name| rows.iter().position(|r| &r.workspace.name == name));
+                .and_then(|path| rows.iter().position(|r| &r.workspace.path == path));
             (rows, selected, state.busy().is_some())
         };
         self.table.update(cx, |table, cx| {
@@ -364,11 +369,7 @@ impl Render for WorkspacesView {
             let model = state.selection.current();
             (
                 model.and_then(|m| m.workspaces_error.clone()),
-                model.is_some_and(|m| {
-                    m.selected_workspace
-                        .as_ref()
-                        .is_some_and(|name| m.workspace(name).is_some())
-                }),
+                model.is_some_and(|m| m.selected_status().is_some()),
             )
         };
         v_flex()

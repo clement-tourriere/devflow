@@ -30,7 +30,7 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-use std::rc::Rc;
+use std::{path::PathBuf, rc::Rc};
 use uuid::Uuid;
 
 /// A project row and, when unfolded, its workspaces.
@@ -49,8 +49,9 @@ struct ProjectNode {
     workspaces: Option<Vec<WorkspaceSummary>>,
     /// Why they could not be read.
     error: Option<SharedString>,
-    /// The workspace shown in the main area, for the selected project.
-    selected_workspace: Option<String>,
+    /// The workspace (its checkout) shown in the main area, for the selected
+    /// project.
+    selected_workspace: Option<PathBuf>,
     state: Entity<AppState>,
 }
 
@@ -118,8 +119,10 @@ pub fn project_id(project: Uuid) -> SharedString {
     format!("project-{project}").into()
 }
 
-pub fn workspace_id(project: Uuid, workspace: &str) -> SharedString {
-    format!("workspace-{project}-{workspace}").into()
+/// A workspace's row is identified by its checkout: a name is a label that two
+/// workspaces can share.
+pub fn workspace_id(project: Uuid, workspace: &std::path::Path) -> SharedString {
+    format!("workspace-{project}-{}", workspace.display()).into()
 }
 
 pub fn new_workspace_id(project: Uuid) -> SharedString {
@@ -248,19 +251,19 @@ fn render_project(node: ProjectNode, window: &mut Window, cx: &mut App) -> AnyEl
             (Some(list), _) => {
                 for ws in list {
                     let open = {
-                        let (state, name) = (state.clone(), ws.name.clone());
+                        let (state, path) = (state.clone(), ws.path.clone());
                         move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                            state.update(cx, |s, cx| s.open_workspace(id, name.clone(), cx))
+                            state.update(cx, |s, cx| s.open_workspace(id, path.clone(), cx))
                         }
                     };
                     let dot = ws.state;
                     items.push(
                         SidebarMenuItem::new(workspace_label(&ws.name))
                             .icon(Icon::new(Lucide::GitBranch))
-                            .active(node.selected_workspace.as_deref() == Some(ws.name.as_str()))
+                            .active(node.selected_workspace.as_deref() == Some(ws.path.as_path()))
                             .suffix(move |_, cx| ui::workspace_dot(dot, cx))
                             .on_click(open)
-                            .render(workspace_id(id, &ws.name), window, cx)
+                            .render(workspace_id(id, &ws.path), window, cx)
                             .into_any_element(),
                     );
                 }

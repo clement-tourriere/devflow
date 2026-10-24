@@ -13,6 +13,7 @@ pub mod detect;
 pub mod diag;
 pub mod doctor;
 pub mod env_file;
+pub mod env_owner;
 pub mod error;
 pub mod exec;
 pub mod githook;

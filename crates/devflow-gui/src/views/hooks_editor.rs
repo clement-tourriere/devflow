@@ -556,7 +556,11 @@ impl HooksEditorView {
             };
             (
                 model.entry.root.clone(),
-                model.selected_workspace.clone(),
+                // By its checkout: the name could mean two workspaces.
+                model
+                    .selected_workspace
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
                 model.key.project,
             )
         };

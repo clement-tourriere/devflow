@@ -201,6 +201,42 @@ impl Service {
         .map(|service| service.in_project(project))
     }
 
+    /// The recorded branch an id as typed names, read from the catalog file
+    /// without asking the Docker daemon. An id that matches no recorded branch
+    /// is reported the way [`Service::resolve_branch`] reports it, so a typo
+    /// needs no running daemon; a match still has to be acted on through
+    /// [`Service::open`], which checks the daemon the records are bound to.
+    pub fn resolve_recorded_branch(
+        project: &Project,
+        key: &str,
+        id: &crate::ids::IdRef,
+    ) -> Result<Uuid> {
+        project
+            .config
+            .containers()
+            .find(|(k, _, _)| *k == key)
+            .with_context(|| {
+                format!(
+                    "{} has no container service '{key}' (valkey, redis or mysql)",
+                    project.config_path.display()
+                )
+            })?;
+        let catalog = Store::open(project.id(), "")?.load_unbound()?;
+        let branches = catalog
+            .services
+            .get(key)
+            .map(|service| service.branches.as_slice())
+            .unwrap_or_default();
+        id.resolve(
+            "branch",
+            branches
+                .iter()
+                .filter(|b| b.state != RecordState::Aborted)
+                .map(|b| b.id),
+        )
+        .with_context(|| format!("service '{key}'"))
+    }
+
     /// The service a receipt binding names, whether or not the configuration
     /// still has it (removing a service never deletes its data, so its
     /// branches can still be listed and dropped).

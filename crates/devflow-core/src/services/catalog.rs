@@ -1010,6 +1010,26 @@ impl Store {
         }
     }
 
+    /// The catalog as recorded, without comparing the Docker daemon it is
+    /// bound to: for read-only questions that need no daemon (which recorded
+    /// branch an id prefix names). Anything that acts on the records uses
+    /// [`Store::load`].
+    pub fn load_unbound(&self) -> Result<Catalog> {
+        match read_file(&self.path)? {
+            Some(catalog) => {
+                ensure!(
+                    catalog.project_id == self.project,
+                    "{} belongs to project {}, not {}",
+                    self.path.display(),
+                    catalog.project_id,
+                    self.project
+                );
+                Ok(catalog)
+            }
+            None => Ok(Catalog::fresh(self.project, &self.docker)),
+        }
+    }
+
     fn check(&self, catalog: Catalog) -> Result<Catalog> {
         ensure!(
             catalog.project_id == self.project,
@@ -1255,6 +1275,14 @@ mod tests {
             "{error}"
         );
         assert!(b.update(|_| Ok(())).is_err());
+        // Reading which branch an id names needs no daemon; the project is
+        // still checked.
+        assert!(b.load_unbound().unwrap().services.contains_key("cache"));
+        let other = Store {
+            project: Uuid::from_u128(8),
+            ..store(dir.path(), "daemon-a")
+        };
+        assert!(other.load_unbound().is_err());
         // The engine of a key does not change.
         let error = a
             .update(|c| c.service_mut("cache", Engine::Redis).map(|_| ()))

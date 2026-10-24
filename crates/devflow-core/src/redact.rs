@@ -98,6 +98,83 @@ pub fn text_with(input: &str, secrets: &[&str]) -> String {
     render(input, spans)
 }
 
+/// [`text_with`] for text that may have been **cut short** before it reached
+/// us (PostgreSQL keeps 63 bytes of an `application_name`), where a credential
+/// can have lost the `@` or the `=` that the patterns look for. On top of the
+/// patterns it masks, conservatively:
+///
+/// - after any `scheme://user:`, everything up to the last `@` before the next
+///   whitespace, or to the end of the text when there is none (so
+///   `scheme://u:pass` and `scheme://u:pass@h/d` both lose `pass`; a
+///   `host:port` URL loses its port, which is the price of not guessing);
+/// - after a `pass…`/`pwd` word followed by `=` (`password=`, `PWD =`,
+///   `passwd=`), everything to the end of the text.
+///
+/// Whatever precedes the credential is kept, so the text still says which
+/// connection it was.
+pub fn text_cut(input: &str, secrets: &[&str]) -> String {
+    let mut spans = pattern_spans(input);
+    for secret in secrets.iter().filter(|s| !s.is_empty()) {
+        let mut from = 0;
+        while let Some(found) = input[from..].find(secret) {
+            let start = from + found;
+            spans.push((start, start + secret.len()));
+            from = start + input[start..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    cut_url_spans(input, &mut spans);
+    cut_assignment_spans(input, &mut spans);
+    render(input, spans)
+}
+
+/// The spans of [`text_cut`]'s first rule.
+fn cut_url_spans(input: &str, spans: &mut Vec<(usize, usize)>) {
+    let mut search = 0;
+    while let Some(found) = input[search..].find("://") {
+        let base = search + found + 3;
+        search = base;
+        let rest = &input[base..];
+        let word = &rest[..rest.find(char::is_whitespace).unwrap_or(rest.len())];
+        // The user ends at the first `:` before any `/`.
+        let authority = &word[..word.find('/').unwrap_or(word.len())];
+        let Some(colon) = authority.find(':') else {
+            continue;
+        };
+        let start = base + colon + 1;
+        let end = match word[colon + 1..].rfind('@') {
+            Some(at) => base + colon + 1 + at,
+            None => base + rest.len(),
+        };
+        if start < end {
+            spans.push((start, end));
+        }
+    }
+}
+
+/// The spans of [`text_cut`]'s second rule.
+fn cut_assignment_spans(input: &str, spans: &mut Vec<(usize, usize)>) {
+    let lower = input.to_ascii_lowercase();
+    for word in ["pass", "pwd"] {
+        let mut search = 0;
+        while let Some(found) = lower[search..].find(word) {
+            let after = search + found + word.len();
+            search = after;
+            let name_end = after
+                + lower[after..]
+                    .find(|c: char| !c.is_ascii_alphabetic() && c != '_')
+                    .unwrap_or(lower.len() - after);
+            let rest = &lower[name_end..];
+            let blanks = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+            if rest[blanks..].starts_with('=') {
+                let value = name_end + blanks + 1;
+                if value < input.len() {
+                    spans.push((value, input.len()));
+                }
+            }
+        }
+    }
+}
+
 /// JSON fields whose object value is a map keyed by names the user chose (a
 /// service key, a scratch database, a snapshot, a file): `receipt.services`,
 /// `service_sources`, `service_source_ids`, `extras`, `snapshot_versions`,
@@ -961,5 +1038,27 @@ mod tests {
         json(&mut nested);
         assert_eq!(nested["DB_PASS"]["template"], "${X}");
         assert_eq!(nested["DB_PASS"]["source"], "local");
+    }
+
+    #[test]
+    fn text_cut_masks_what_a_cut_may_have_left_unrecognisable() {
+        // No `@`, with or without more text; a `@` that is there is kept.
+        // kingfisher:ignore
+        assert_eq!(text_cut("x postgres://u:abc", &[]), "x postgres://u:***");
+        // kingfisher:ignore
+        let cut = text_cut("postgres://u:abc@h/d y", &[]);
+        // kingfisher:ignore
+        assert_eq!(cut, "postgres://u:***@h/d y");
+        assert_eq!(text_cut("postgres://u", &[]), "postgres://u");
+        assert_eq!(text_cut("postgres://", &[]), "postgres://");
+        // A word with `pass`/`pwd` and `=`, spaces around it allowed, to the end.
+        assert_eq!(text_cut("a Password = s3 b", &[]), "a Password =***");
+        assert_eq!(text_cut("a pwd=s3", &[]), "a pwd=***");
+        assert_eq!(text_cut("a passwd=", &[]), "a passwd=");
+        assert_eq!(text_cut("bypass lane", &[]), "bypass lane");
+        // Known secrets and the usual patterns still apply.
+        assert_eq!(text_cut("tok hunter2", &["hunter2"]), "tok ***");
+        // kingfisher:ignore
+        assert_eq!(text_cut("é postgres://u:p@h", &[]), "é postgres://u:***@h");
     }
 }

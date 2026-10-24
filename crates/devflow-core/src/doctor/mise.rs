@@ -19,6 +19,7 @@ use crate::env_file::{
     self, DEFAULT_MISE_TIMEOUT, HookMise, MiseCommand, MiseDelivery, check_command_env,
     check_mise_delivery_with, classify_hooks,
 };
+use crate::env_owner::ChildEnv;
 use crate::hooks::HookPhase;
 use crate::project::Project;
 use crate::{setup, worktree};
@@ -38,13 +39,7 @@ pub(super) fn checks_in(project: &Project, cwd: &Path, mise: &MiseCommand) -> Ve
     let Ok(list) = setup::list(project) else {
         return Vec::new();
     };
-    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-    let current = list
-        .iter()
-        .filter(|item| !item.workspace.missing)
-        .filter(|item| cwd.starts_with(&item.workspace.path))
-        .max_by_key(|item| item.workspace.path.components().count());
-    let Some(current) = current else {
+    let Some(current) = super::isolation::current_workspace(&list, cwd) else {
         return Vec::new();
     };
     let (path, name) = (&current.workspace.path, &current.workspace.name);
@@ -61,11 +56,15 @@ pub(super) fn checks_in(project: &Project, cwd: &Path, mise: &MiseCommand) -> Ve
     if !configured && !hooks.iter().any(|hook| hook.unprotected) {
         return Vec::new();
     }
-    let vars = env_file::read(path).unwrap_or_default();
-    let delivery = check_command_env(path, &vars, HookPhase::Setup, DEFAULT_MISE_TIMEOUT, mise);
+    // A file without the list of owned names, or an environment that names a
+    // workspace that cannot be resolved, is `isolation`'s to report.
+    let Ok(env) = ChildEnv::from_file(path) else {
+        return Vec::new();
+    };
+    let delivery = check_command_env(path, &env, HookPhase::Setup, DEFAULT_MISE_TIMEOUT, mise);
     let mut checks = vec![env_check(project, name, &delivery, &hooks)];
     if configured && delivery.is_delivered() {
-        let keys: Vec<String> = vars.iter().map(|(key, _)| key.clone()).collect();
+        let keys: Vec<String> = env.vars().iter().map(|(key, _)| key.clone()).collect();
         checks.extend(wiring_check(
             name,
             &check_mise_delivery_with(path, &keys, DEFAULT_MISE_TIMEOUT, mise),
@@ -115,7 +114,9 @@ fn env_check(
             Check::ok("mise-env", detail).hint(EXEC_HINT)
         }
         MiseDelivery::Delivered | MiseDelivery::NotLoaded => Check::ok("mise-env", detail),
-        MiseDelivery::Overridden { .. } | MiseDelivery::Removed { .. } => {
+        MiseDelivery::Overridden { .. }
+        | MiseDelivery::Removed { .. }
+        | MiseDelivery::Reintroduced { .. } => {
             let hint = format!(
                 "{EXEC_HINT}; or fix mise's configuration ([env] keys, later `_.file` entries, \
                  mise.local.toml, environment-specific files). Setup can be asked to skip \

@@ -163,6 +163,49 @@ pub enum RecordStatus {
     Failed,
 }
 
+/// The `CREATE DATABASE … STRATEGY` a clone used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloneStrategy {
+    /// Copy the files (`file_copy_method`): reflinks where the filesystem has
+    /// them. Forces checkpoints.
+    FileCopy,
+    /// Copy through the WAL: no forced checkpoints, which is faster for a
+    /// small source on a filesystem that cannot share blocks.
+    WalLog,
+}
+
+impl CloneStrategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CloneStrategy::FileCopy => "file_copy",
+            CloneStrategy::WalLog => "wal_log",
+        }
+    }
+
+    pub(crate) fn parse(text: &str) -> Option<CloneStrategy> {
+        match text {
+            "file_copy" => Some(CloneStrategy::FileCopy),
+            "wal_log" => Some(CloneStrategy::WalLog),
+            _ => None,
+        }
+    }
+
+    /// The keyword `CREATE DATABASE … STRATEGY` takes.
+    fn keyword(self) -> &'static str {
+        match self {
+            CloneStrategy::FileCopy => "FILE_COPY",
+            CloneStrategy::WalLog => "WAL_LOG",
+        }
+    }
+}
+
+impl std::fmt::Display for CloneStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BranchInfo {
     pub id: uuid::Uuid,
@@ -177,6 +220,10 @@ pub struct BranchInfo {
     pub instance_id: Option<uuid::Uuid>,
     pub status: RecordStatus,
     pub cow: CowCapability,
+    /// How the branch's data was cloned; `None` for an empty database, a
+    /// branch recorded before the strategy was, and an attachment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_strategy: Option<CloneStrategy>,
     pub error: Option<String>,
     pub created_at: DateTime<Utc>,
     /// On-disk size reported by PostgreSQL (logical; shared blocks counted fully).
@@ -433,6 +480,21 @@ impl Server {
     /// role, then the metadata row.
     pub fn drop_branch(&self, id: uuid::Uuid) -> Result<()> {
         ops::drop_branch(self, id)
+    }
+
+    /// [`Server::drop_branch`] that drops the branch only if workspace
+    /// instance `instance` created it, judged on the branch's row read under
+    /// the project's lock, right before anything is dropped; another owner (or
+    /// none recorded) is an error and nothing is touched. `Ok(false)` when
+    /// there is no such branch (so nothing was dropped).
+    pub fn drop_branch_owned_by(&self, id: uuid::Uuid, instance: uuid::Uuid) -> Result<bool> {
+        ops::drop_branch_checked(self, id, |row| {
+            anyhow::ensure!(
+                row.instance_id == Some(instance),
+                "branch {id} was not created by this workspace's instance, so it is left alone"
+            );
+            Ok(())
+        })
     }
 
     /// Set a new random password for a `ready` branch role and return the URL.

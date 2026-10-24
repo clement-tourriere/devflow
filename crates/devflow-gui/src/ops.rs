@@ -5,7 +5,7 @@ use crate::{
     activity::Activity,
     jobs::{
         self, ChannelProgress, Done, EVENT_QUEUE, Event, Failure, FailureKind, MAX_EVENTS_PER_TICK,
-        PitchforkSource, Probe, ProcessNote,
+        Probe, ProcessNote,
     },
     model::{
         ConfigIdentity, ConfigModel, ProcessTarget, ReloadTarget, RequestKey, Section, WorkspaceRef,
@@ -118,6 +118,18 @@ pub fn approve_reviewed(project: &Project, target: &Path, scope: &Scope) -> Appr
             Err(_) => Approval::Failed(message),
         },
     }
+}
+
+/// What the New workspace dialog asks for.
+#[derive(Debug, Clone, Default)]
+pub struct NewWorkspace {
+    pub name: String,
+    /// The checkout payloads and data come from; `None` is the default one.
+    /// Named by where it is: its name can be another workspace's too.
+    pub from: Option<PathBuf>,
+    /// Where the new branch starts: any branch, tag or commit.
+    pub base: Option<String>,
+    pub data_from: Option<DataSource>,
 }
 
 #[derive(Clone, Default)]
@@ -316,6 +328,7 @@ impl AppState {
         self.inflight = self.inflight.saturating_sub(1);
         let result = result.map(Done::redacted);
         self.keep_process_refusals(key, &meta, &result);
+        self.keep_entered(key, &result);
         if let Some(activity) = self
             .activity
             .as_mut()
@@ -388,11 +401,11 @@ impl AppState {
             // A refresh started during the job saw a half-finished state.
             model.invalidate_refresh();
             if let Ok(Done {
-                select_workspace: Some(name),
+                select_workspace: Some(path),
                 ..
             }) = &result
             {
-                model.selected_workspace = Some(name.clone());
+                model.selected_workspace = Some(path.clone());
             }
             self.refresh(cx);
         } else {
@@ -405,6 +418,23 @@ impl AppState {
         // The job's slot is free: reads of the sidebar that waited can start.
         self.start_queued_summaries(cx);
         cx.notify();
+    }
+
+    /// How a workspace's services stood when it was entered is kept for the
+    /// detail, until the next time it is.
+    fn keep_entered(&mut self, key: RequestKey, result: &Result<Done, Failure>) {
+        let Some(model) = self.selection.accept(key) else {
+            return;
+        };
+        if let Ok(Done {
+            entered: Some(entered),
+            ..
+        }) = result
+        {
+            model
+                .entered
+                .insert(entered.path.clone(), entered.services.clone());
+        }
     }
 
     /// A start that core refused is kept for its workspace, where the detail
@@ -485,31 +515,37 @@ impl AppState {
         unchanged
     }
 
-    /// The directory a review for workspace `name` (the default workspace
-    /// when `None`) is about.
-    pub fn trust_target(&self, name: Option<&str>) -> PathBuf {
+    /// The directory a review for the workspace at `path` (the default
+    /// workspace when `None`) is about.
+    pub fn trust_target(&self, path: Option<&Path>) -> PathBuf {
         match self.selection.current() {
-            Some(model) => model.trust_dir(name),
+            Some(model) => model.trust_dir(path),
             None => PathBuf::new(),
         }
     }
 
     pub fn create_workspace(
         &mut self,
-        name: String,
-        from: Option<String>,
-        data_from: Option<DataSource>,
+        new: NewWorkspace,
         trust: TrustChoice,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let NewWorkspace {
+            name,
+            from,
+            base,
+            data_from,
+        } = new;
         let title = shown(&format!("Create workspace {name}"));
         // The review was of the workspace the new one is made from.
         let source = self.trust_target(from.as_deref());
+        // Core finds the source by the path as well as by a name.
+        let from = from.map(|path| path.display().to_string());
         if !self.hooks_unchanged(&trust, &source, &title, window, cx) {
             return;
         }
-        let source = self.pitchfork.clone();
+        let pitchfork = self.pitchfork.resolve();
         self.start_job(
             title,
             true,
@@ -517,19 +553,21 @@ impl AppState {
             window,
             cx,
             move |project, progress| {
+                // Entering the new workspace is a switch too, as in the
+                // command line: both run core's one activation.
                 let request = CreateRequest {
                     name: name.clone(),
                     from,
+                    base,
                     options: SetupOptions {
                         data_from,
                         approval: trust.approval(),
+                        pitchfork,
                         ..Default::default()
                     },
                 };
-                let outcome = setup::create(&project, request, progress)?;
-                let mut done = done_from(format!("Created workspace {name}"), &outcome);
-                note_autostart(&mut done, &source, &project, &outcome);
-                Ok(done)
+                let outcome = setup::create_and_activate(&project, request, progress)?;
+                Ok(done_from(format!("Created workspace {name}"), &outcome))
             },
         );
     }
@@ -545,7 +583,7 @@ impl AppState {
         if !self.hooks_unchanged(&trust, &workspace.path, &title, window, cx) {
             return;
         }
-        let source = self.pitchfork.clone();
+        let pitchfork = self.pitchfork.resolve();
         self.start_job(
             title,
             true,
@@ -555,13 +593,11 @@ impl AppState {
             move |project, progress| {
                 let options = SetupOptions {
                     approval: trust.approval(),
+                    pitchfork,
                     ..Default::default()
                 };
-                let outcome = setup::setup(&project, &workspace, options, false, false, progress)?
-                    .context("setup did not run")?;
-                let mut done = done_from(format!("Set up {}", workspace.name), &outcome);
-                note_autostart(&mut done, &source, &project, &outcome);
-                Ok(done)
+                let outcome = setup::activate(&project, &workspace, options, progress)?;
+                Ok(done_from(format!("Set up {}", workspace.name), &outcome))
             },
         );
     }
@@ -606,7 +642,11 @@ impl AppState {
         let cwd = self.launch_dir.clone();
         self.start_job(title, true, hint, window, cx, move |project, progress| {
             let options = remove_options(&choice, &trust, cwd.as_deref(), &target);
-            let outcome = setup::remove(&project, &target.name, options, progress)?;
+            // By its folder: a workspace's name can also be another one's
+            // branch (a checkout that moved and a checkout that took its old
+            // branch), and a removal must act on the row that was clicked.
+            let by_path = target.path.display().to_string();
+            let outcome = setup::remove(&project, &by_path, options, progress)?;
             let mut warnings = outcome.warnings;
             if !outcome.stopped_daemons.is_empty() {
                 warnings.push(format!(
@@ -1142,6 +1182,8 @@ fn fresh_server_of(project: &Project) -> Result<Server> {
 fn done_from(summary: String, outcome: &SetupOutcome) -> Done {
     let needs_attention = outcome.status == Status::NeedsAttention;
     let mut warnings = outcome.warnings.clone();
+    // What was repaired and which branch the checkout holds now.
+    warnings.extend(outcome.notes());
     if outcome.approval_differs {
         warnings.push(
             "This workspace holds other hooks, [env] or pitchfork files than the ones you \
@@ -1149,7 +1191,7 @@ fn done_from(summary: String, outcome: &SetupOutcome) -> Done {
                 .to_string(),
         );
     }
-    Done {
+    let mut done = Done {
         summary: if needs_attention {
             format!("{summary}, but it needs attention (see the output)")
         } else {
@@ -1157,30 +1199,33 @@ fn done_from(summary: String, outcome: &SetupOutcome) -> Done {
         },
         warnings,
         needs_attention,
-        select_workspace: Some(outcome.workspace.name.clone()),
+        select_workspace: Some(outcome.workspace.path.clone()),
         process: None,
-    }
+        entered: Some(Box::new(jobs::Entered {
+            path: outcome.workspace.path.clone(),
+            services: outcome
+                .services_state
+                .iter()
+                .map(|service| jobs::EnteredService {
+                    key: service.key.clone(),
+                    engine: service.engine.to_string(),
+                    state: service.state,
+                    reason: service.reason.clone(),
+                })
+                .collect(),
+        })),
+    };
+    note_autostart(&mut done, outcome);
+    done
 }
 
 /// What `[pitchfork] autostart` did after a setup that left the workspace
-/// ready, as one line for the notification (and the refusal, if core gave one,
-/// for the workspace's detail). Process state is reported apart from
-/// readiness: nothing here changes the workspace's status.
-fn note_autostart(
-    done: &mut Done,
-    source: &PitchforkSource,
-    project: &Project,
-    outcome: &SetupOutcome,
-) {
-    if outcome.status != Status::Ready {
-        return;
-    }
-    let Some(autostart) = processes::autostart(
-        source.resolve().as_ref(),
-        project,
-        &outcome.workspace,
-        processes::DEFAULT_START_TIMEOUT,
-    ) else {
+/// ready (core ran it as the last step of entering the workspace), as one line
+/// for the notification (and the refusal, if core gave one, for the
+/// workspace's detail). Process state is reported apart from readiness:
+/// nothing here changes the workspace's status.
+fn note_autostart(done: &mut Done, outcome: &SetupOutcome) {
+    let Some(autostart) = &outcome.autostart else {
         return;
     };
     let line = match (&autostart.report, &autostart.skipped) {
@@ -1243,6 +1288,7 @@ fn process_done(workspace: &str, report: &ProcessReport) -> Done {
             path: report.path.clone(),
             refusal: None,
         }),
+        entered: None,
     }
 }
 

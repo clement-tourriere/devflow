@@ -1,4 +1,5 @@
 use super::*;
+use crate::env_file;
 use std::time::Duration;
 
 const DB: &str = "postgres://devflow:db-password-1@localhost:5432/branch_db"; // kingfisher:ignore
@@ -68,7 +69,14 @@ impl Fixture {
     }
 
     fn check(&self, hooks: &[HookCommand], skip: bool, mise: &MiseCommand) -> Verdict {
-        check(&self.root, hooks, &self.vars, skip, mise)
+        check(
+            &self.root,
+            HookPhase::Setup,
+            hooks,
+            &ChildEnv::plain(self.vars.clone()),
+            skip,
+            mise,
+        )
     }
 }
 
@@ -118,6 +126,71 @@ fn a_variable_mise_removes_is_named_as_removed() {
     );
     assert!(block.contains("devflow exec"), "{block}");
     assert!(!block.contains("PGHOST"), "only the removed key: {block}");
+}
+
+/// A `--no-db` workspace of a project with PostgreSQL: it owns `DATABASE_URL`
+/// and the libpq family and sets none of them.
+fn no_db() -> ChildEnv {
+    ChildEnv::standalone(
+        vec![("DEVFLOW_WORKSPACE".to_string(), "w".to_string())],
+        &["DEVFLOW_WORKSPACE", "DATABASE_URL", "PGHOST"]
+            .iter()
+            .map(|name| name.to_string())
+            .collect(),
+    )
+}
+
+#[test]
+fn a_mise_that_brings_back_a_name_the_workspace_owns_blocks_the_hooks_of_every_phase() {
+    let f = Fixture::new();
+    // mise's `[env]` sets the main checkout's database for a workspace that
+    // has none: the cleanup of the inherited environment is undone inside mise.
+    let mise = f.mise(&format!(
+        "DATABASE_URL='{MAIN}'; export DATABASE_URL; echo \"$DEVFLOW_PHASE\" > \"$SEEN\""
+    ));
+    for phase in [HookPhase::Setup, HookPhase::Switch, HookPhase::Teardown] {
+        let verdict = check(
+            &f.root,
+            phase,
+            &[hook("mise exec -- npm ci")],
+            &no_db(),
+            false,
+            &mise,
+        );
+        let block = verdict.block.expect("blocked");
+        assert!(
+            block.contains("mise sets DATABASE_URL although this workspace owns it"),
+            "{block}"
+        );
+        assert!(!block.contains("PGHOST"), "only the name mise set: {block}");
+        assert!(!block.contains("main-password"), "{block}");
+        // The probe ran as that phase's hooks do.
+        assert_eq!(
+            std::fs::read_to_string(&f.scratch).unwrap().trim(),
+            phase.as_str()
+        );
+    }
+    // A caller that keeps the name on purpose is not contradicted.
+    let verdict = check(
+        &f.root,
+        HookPhase::Setup,
+        &[hook("mise exec -- npm ci")],
+        &no_db().keeping(["DATABASE_URL".to_string()]),
+        false,
+        &mise,
+    );
+    assert_eq!(verdict, Verdict::default());
+    // A mise that adds nothing lets the hooks run.
+    let clean = f.mise("true");
+    let verdict = check(
+        &f.root,
+        HookPhase::Switch,
+        &[hook("mise exec -- npm ci")],
+        &no_db(),
+        false,
+        &clean,
+    );
+    assert_eq!(verdict, Verdict::default());
 }
 
 #[test]
@@ -397,13 +470,85 @@ fn a_missing_mise_blocks_only_when_a_hook_runs_it() {
     assert!(unnamed.block.expect("blocked").contains("setup hook #2"));
 }
 
+impl Fixture {
+    fn check_in(&self, phase: HookPhase, hooks: &[HookCommand], mise: &MiseCommand) -> Verdict {
+        check(
+            &self.root,
+            phase,
+            hooks,
+            &ChildEnv::plain(self.vars.clone()),
+            false,
+            mise,
+        )
+    }
+}
+
+/// The reasons of the switch and teardown phases reach warnings, errors and the
+/// app, which show no command lines: they say what is wrong (names and files,
+/// never a command) and the way on is a typed remedy. The setup phase's reason
+/// keeps its guidance.
 #[test]
-fn nothing_is_checked_without_the_generated_file() {
+fn the_switch_and_teardown_reasons_hold_no_command_line() {
+    let f = Fixture::new();
+    let overriding = f.mise(&format!("DATABASE_URL='{MAIN}'; export DATABASE_URL"));
+    for phase in [HookPhase::Switch, HookPhase::Teardown] {
+        let verdict = f.check_in(phase, &[hook("mise exec -- npm ci")], &overriding);
+        let block = verdict
+            .block
+            .clone()
+            .unwrap_or_else(|| panic!("{verdict:?}"));
+        let label = format!("{} hook #1", phase.as_str());
+        assert!(
+            block.contains(&label)
+                && block.contains("mise resolves DATABASE_URL from another source"),
+            "{block}"
+        );
+        for command in ["devflow exec", "mise exec", "mise trust", "--force", "run "] {
+            assert!(
+                !block.contains(command),
+                "{phase:?} holds `{command}`: {block}"
+            );
+        }
+        // A hook the check cannot stand for is named, without advice.
+        let warned = f
+            .check_in(phase, &[hook("cd app && mise exec -- npm ci")], &overriding)
+            .warnings
+            .join("\n");
+        assert!(warned.contains(&label), "{warned}");
+        assert!(!warned.contains("devflow exec"), "{warned}");
+    }
+    // The setup phase keeps saying what to do.
+    let block = f
+        .check_in(
+            HookPhase::Setup,
+            &[hook("mise exec -- npm ci")],
+            &overriding,
+        )
+        .block
+        .expect("blocked");
+    assert!(
+        block.contains("devflow exec") && block.contains("skip this check"),
+        "{block}"
+    );
+}
+
+#[test]
+fn the_check_does_not_depend_on_the_generated_file() {
+    // What a hook gets is built from the receipt, never from `.devflow/env`:
+    // after generated files were cleaned, an approved hook still runs through
+    // mise with whatever mise does to that environment.
     let f = Fixture::new();
     let mise = f.mise("unset DATABASE_URL");
     std::fs::remove_file(env_file::path(&f.root)).unwrap();
+    let block = f
+        .check(&[hook("mise exec -- x")], false, &mise)
+        .block
+        .expect("blocked without the file too");
+    assert!(block.contains("DATABASE_URL"), "{block}");
+    // A mise that changes nothing passes with or without it.
+    let quiet = f.mise("true");
     assert_eq!(
-        f.check(&[hook("mise exec -- x")], false, &mise),
+        f.check(&[hook("mise exec -- x")], false, &quiet),
         Verdict::default()
     );
 }

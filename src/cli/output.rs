@@ -281,6 +281,15 @@ impl Progress for Printer {
     fn output(&mut self, line: &str) {
         note(format!("{} {}", self.palette.dim("│"), redact::text(line)));
     }
+
+    fn notice(&mut self, line: &str) {
+        // On stderr, like hook output: standard output stays the document.
+        note(format!(
+            "{} {}",
+            self.palette.yellow("!"),
+            redact::text(line)
+        ));
+    }
 }
 
 #[cfg(test)]

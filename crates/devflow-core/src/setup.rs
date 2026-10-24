@@ -10,14 +10,14 @@ use crate::cow::EntryReport;
 use crate::db::{
     BranchInfo, DataSource, RecordStatus, ResolvedSource, ScratchInfo, Server, SnapshotInfo,
 };
-use crate::error::{Busy, WorkspaceChanged};
+use crate::error::{Busy, PartialRemoval, WorkspaceChanged};
 use crate::hooks::{self, HookPhase, HookReport};
 use crate::pitchfork::Pitchfork;
-use crate::processes;
+use crate::processes::{self, Autostart};
 use crate::project::Project;
 use crate::receipt::{
-    self, DataBinding, ExtraBinding, PendingBranch, Phase, PhaseState, Receipt, ReceiptLock,
-    ServiceBinding, Status,
+    self, DataBinding, ExtraBinding, PendingBranch, Phase, PhaseState, ProcessLock, Receipt,
+    ReceiptLock, ServiceBinding, Status,
 };
 use crate::remedy::{Problem, Remedy};
 use crate::services::catalog::{BranchRecord, RecordState, SnapshotRecord, SourceRef};
@@ -30,12 +30,25 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-mod mise_gate;
+mod activate;
+pub mod mise_gate;
+mod removal;
+mod seed;
+
+pub use activate::{
+    BranchDrift, EnvFileProblem, Repair, ServiceRun, ServiceState, activate, autostart,
+    create_and_activate,
+};
 
 const UNTRUSTED: &str =
     "setup hooks are not trusted; review and approve them, then run setup again";
 const UNTRUSTED_ENV: &str = "the [env] recipes and presets are not trusted; review and approve \
      them, then run setup again";
+/// `.devflow/env` was written by an earlier devflow, without the list of the
+/// names the workspace owns: nothing runs from it until it is written again.
+pub const LEGACY_ENV: &str = ".devflow/env was written by an earlier devflow and does not list the \
+     names the workspace owns; hooks run only from a file that does, so set the workspace up \
+     again to write it";
 /// What a run reviewed is not what the workspace holds (an existing branch
 /// with other hooks, a pitchfork file that changed): nothing ran on that
 /// approval.
@@ -51,6 +64,12 @@ pub trait Progress {
     fn phase(&mut self, phase: Phase, state: PhaseState, detail: Option<&str>);
     /// A line of hook output.
     fn output(&mut self, line: &str);
+    /// Something the person should hear before a step runs (the first setup of
+    /// the main checkout runs its hooks there), apart from hook output. A
+    /// frontend that has no place of its own for it shows it as output.
+    fn notice(&mut self, line: &str) {
+        self.output(line);
+    }
 }
 
 pub struct NoProgress;
@@ -83,13 +102,23 @@ pub struct SetupOptions {
     /// receipt's, whether the old identity's daemons are gone; the one on
     /// `PATH` when `None`.
     pub pitchfork: Option<Pitchfork>,
+    /// The run cannot prompt (`--non-interactive`, `--json`, no terminal, the
+    /// Git hook). Without `data_from`, it takes the data of each service from
+    /// `[data] noninteractive_from` when the configuration has one.
+    pub non_interactive: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct CreateRequest {
     pub name: String,
-    /// Code origin workspace name. Default: the default workspace.
+    /// Code origin workspace name: the workspace payloads and data come from,
+    /// and the HEAD a new branch starts from unless `base` says otherwise.
+    /// Default: the default workspace.
     pub from: Option<String>,
+    /// Any commit-ish a new branch starts from (see
+    /// [`worktree::CreateOptions::base`]); only for a branch that does not
+    /// exist yet.
+    pub base: Option<String>,
     pub options: SetupOptions,
 }
 
@@ -99,6 +128,10 @@ pub struct SetupOutcome {
     pub receipt: Receipt,
     pub status: Status,
     pub payload: Vec<EntryReport>,
+    /// Where the branch of a workspace this call created (or checked out for
+    /// the first time) started and what it tracks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_start: Option<worktree::BranchOrigin>,
     pub hooks: Option<HookReport>,
     pub warnings: Vec<String>,
     /// What a person can do about the outcome (approve what the workspace asks
@@ -115,6 +148,27 @@ pub struct SetupOutcome {
     /// own scope and ask again.
     #[serde(skip)]
     pub approval_differs: bool,
+    /// The checkout holds another branch than the one the workspace was
+    /// created for; the workspace is its receipt, so its data and variables
+    /// are still the ones of [`BranchDrift::workspace`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drift: Option<BranchDrift>,
+    /// Files derived from the receipt that had gone missing and were written
+    /// again, without provisioning anything or running a hook.
+    pub repaired: Vec<Repair>,
+    /// The default workspace had never been set up, and this run set it up in
+    /// the main checkout (hooks included, unless they were skipped).
+    pub first_setup: bool,
+    /// Activation only: how each container service stands after the
+    /// workspace was entered, whatever the setup status says.
+    pub services_state: Vec<ServiceState>,
+    /// Activation only: the `switch` hooks, apart from `hooks` (the setup
+    /// run's).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub switch_hooks: Option<HookReport>,
+    /// Activation only: what `[pitchfork] autostart` did, apart from `status`.
+    #[serde(rename = "processes", skip_serializing_if = "Option::is_none")]
+    pub autostart: Option<Autostart>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,6 +179,15 @@ pub struct WorkspaceStatus {
     pub status: Option<Status>,
     /// A setup run currently holds this workspace's lock.
     pub busy: bool,
+    /// The checkout holds another branch than the one the workspace was
+    /// created for: `workspace.name` is the name it was created under, and
+    /// `workspace.branch` is what the checkout holds now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drift: Option<BranchDrift>,
+    /// The workspace is set up, but `.devflow/env` is missing or unreadable
+    /// (a `git clean -fdx`): entering it, or setup, writes it again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_file: Option<EnvFileProblem>,
 }
 
 impl WorkspaceStatus {
@@ -135,12 +198,19 @@ impl WorkspaceStatus {
         if self.workspace.missing {
             return Vec::new();
         }
-        remedies_for(
+        let mut remedies = remedies_for(
             project,
             &self.workspace.path,
             self.receipt.as_ref(),
             self.busy,
-        )
+        );
+        // Ready, but a derived file is gone: setup writes it again.
+        if self.env_file.is_some() && !self.busy && remedies.is_empty() {
+            remedies.push(Remedy::Setup {
+                workspace: self.workspace.path.clone(),
+            });
+        }
+        remedies
     }
 }
 
@@ -199,13 +269,39 @@ fn remedies_given(
 }
 
 /// Create a new workspace and run the whole pipeline. A workspace of that name
-/// whose setup did not finish is resumed instead. `switch` hooks are not part
-/// of creation: a caller that wants them runs [`run_switch_hooks`] afterwards.
+/// whose setup did not finish is resumed instead. Entering the workspace is not
+/// part of creation (no `switch` hooks, no containers started again, no
+/// daemons): a caller that wants a new workspace entered like a switched-to one
+/// uses [`create_and_activate`].
 pub fn create(
     project: &Project,
     request: CreateRequest,
     progress: &mut dyn Progress,
 ) -> Result<SetupOutcome> {
+    create_held(project, request, progress, false).map(|held| held.outcome)
+}
+
+/// A setup that ran, with the locks it ran under, still held: what entering the
+/// workspace goes on under. Entering takes the process lock first and the
+/// receipt lock second (the lock order, see `receipt.rs`).
+struct Held {
+    outcome: SetupOutcome,
+    lock: ReceiptLock,
+    /// Held by an entry only; `setup` and `create` do not take it.
+    process: Option<ProcessLock>,
+    /// The container services this run created or recovered a branch for.
+    fresh: Vec<String>,
+}
+
+/// [`create`] that keeps the locks it ran under. With `entering` it takes the
+/// process lock too, first (the workspace is being entered, see
+/// [`create_and_activate`]).
+fn create_held(
+    project: &Project,
+    request: CreateRequest,
+    progress: &mut dyn Progress,
+    entering: bool,
+) -> Result<Held> {
     let name = request.name.as_str();
     worktree::validate_name(name)?;
     // Before anything is created: an unusable URL leaves no worktree behind.
@@ -237,17 +333,26 @@ pub fn create(
             "workspace '{name}' already exists at {}",
             existing.path.display()
         );
+        // The branch exists, so a starting point is only a claim about where
+        // it is: it must be true, as for any existing local branch.
+        if let Some(base) = &request.base {
+            worktree::check_base(project, name, base)?;
+        }
         // Resuming never honours `DEVFLOW_INSTANCE_ID`: see [`setup`].
-        let outcome = setup_as(
+        let run = if entering {
+            Run::activation()
+        } else {
+            Run::resume()
+        };
+        return setup_held(
             project,
             existing,
             request.options,
-            false,
-            false,
-            None,
+            run,
+            &mut || {},
             progress,
-        )?;
-        return outcome.context("setup did not run");
+        )?
+        .context("setup did not run");
     }
 
     let from = match &request.from {
@@ -257,23 +362,46 @@ pub fn create(
         ),
         None => None,
     };
-    let code_source = match &from {
-        Some(from) => from.name.clone(),
-        None => all[0].name.clone(),
-    };
+    // The checkout the code and payloads come from, resolved once: what it is
+    // called can mean two checkouts, so it is remembered by where it is and
+    // which incarnation it was, not only by name.
+    let source_checkout = from.as_ref().unwrap_or(&all[0]);
+    let code_source = source_checkout.name.clone();
+    let code_source_path = source_checkout.path.clone();
+    let code_source_instance = listed_receipt(project, source_checkout).map(|r| r.instance_id);
 
     progress.phase(Phase::Materialize, PhaseState::Started, None);
-    let workspace = worktree::create(project, name, from.as_ref())?;
-    let _lock = lock(&workspace)?;
+    let created = worktree::create_with(
+        project,
+        name,
+        &worktree::CreateOptions {
+            from: from.as_ref(),
+            base: request.base.as_deref(),
+        },
+    )?;
+    let workspace = created.workspace;
+    let process = entering
+        .then(|| processes::process_lock(&workspace))
+        .transpose()?;
+    let lock = lock(&workspace)?;
     let mut receipt = Receipt::new(project.id(), &workspace.name, Some(code_source));
-    let detail = format!("created {}", workspace.path.display());
+    receipt.code_source_path = Some(code_source_path);
+    receipt.code_source_instance = code_source_instance;
+    let detail = format!(
+        "created {} ({})",
+        workspace.path.display(),
+        created.origin.describe()
+    );
     receipt.set_phase(Phase::Materialize, PhaseState::Done, Some(detail.clone()));
     receipt.save(&workspace.git_dir)?;
     progress.phase(Phase::Materialize, PhaseState::Done, Some(&detail));
 
     let mut runner = Runner::new(project, workspace, receipt, &request.options, progress);
+    runner.warnings.extend(created.warnings);
     runner.run(&Phase::ALL)?;
-    Ok(runner.finish())
+    let mut held = runner.finish_held(lock, process);
+    held.outcome.branch_start = Some(created.origin);
+    Ok(held)
 }
 
 /// Set up (or resume) an existing worktree. With `if_new`, does nothing when a
@@ -287,9 +415,9 @@ pub fn create(
 ///
 /// This is the only entry point that reads `DEVFLOW_INSTANCE_ID`: it is an
 /// orchestrator's instruction for the one workspace the explicit
-/// `devflow setup` runs in, never ambient state. [`create`], [`switch`],
-/// [`run_switch_hooks`], [`remove`], [`reset_data`] and [`list`] ignore it, so
-/// a variable left in a shell cannot re-identify the workspace they act on.
+/// `devflow setup` runs in, never ambient state. [`create`], [`activate`],
+/// [`create_and_activate`], [`remove`], [`reset_data`] and [`list`] ignore it,
+/// so a variable left in a shell cannot re-identify the workspace they act on.
 /// An id that another worktree of the project already records is refused.
 pub fn setup(
     project: &Project,
@@ -389,6 +517,67 @@ fn setup_between(
     between: &mut dyn FnMut(),
     progress: &mut dyn Progress,
 ) -> Result<Option<SetupOutcome>> {
+    let run = Run {
+        if_new,
+        new_instance,
+        instance,
+        activating: false,
+    };
+    Ok(setup_held(project, workspace, options, run, between, progress)?.map(|held| held.outcome))
+}
+
+/// How a setup run was asked for.
+#[derive(Clone, Copy)]
+struct Run {
+    /// Do nothing when a ready receipt exists.
+    if_new: bool,
+    /// Replace the receipt's instance id (a VM fork).
+    new_instance: bool,
+    /// `DEVFLOW_INSTANCE_ID`, for `devflow setup` alone.
+    instance: Option<uuid::Uuid>,
+    /// The workspace is being entered ([`activate`], [`create_and_activate`])
+    /// rather than only set up: the first setup of the main checkout says that
+    /// it runs there.
+    activating: bool,
+}
+
+impl Run {
+    /// Resuming an unfinished setup (`create` over a workspace that exists):
+    /// not an entry, never a fork, never `if_new`.
+    fn resume() -> Self {
+        Self {
+            activating: false,
+            ..Self::activation()
+        }
+    }
+
+    /// Entering a workspace: never a fork, never `if_new`.
+    fn activation() -> Self {
+        Self {
+            if_new: false,
+            new_instance: false,
+            instance: None,
+            activating: true,
+        }
+    }
+}
+
+/// [`setup_between`] that keeps the receipt lock after the run, so the caller
+/// goes on under it ([`activate`]).
+fn setup_held(
+    project: &Project,
+    workspace: &Workspace,
+    options: SetupOptions,
+    run: Run,
+    between: &mut dyn FnMut(),
+    progress: &mut dyn Progress,
+) -> Result<Option<Held>> {
+    let Run {
+        if_new,
+        new_instance,
+        instance,
+        activating,
+    } = run;
     ensure!(
         !workspace.missing,
         "the directory of workspace '{}' is missing: {}",
@@ -408,15 +597,26 @@ fn setup_between(
                 .zip(instance)
                 .is_some_and(|(r, id)| r.instance_id != id)
     };
+    // A derived file that went missing is repaired even when everything else
+    // says there is nothing to do: the shortcuts below leave a workspace alone
+    // only if it needs no repair.
+    let repairable = |r: &Option<Receipt>| {
+        r.as_ref()
+            .is_some_and(|r| activate::repair_needed(workspace, r, &project.config))
+    };
+    // Read through [`load_receipt`]: a version 1 receipt is migrated in memory
+    // and what the configuration invalidates is reopened, so `ready` below is
+    // what the next setup would act on.
     let before = load_receipt(project, workspace)?;
-    if if_new && ready(&before) && !forks(&before) {
+    if if_new && ready(&before) && !forks(&before) && !repairable(&before) {
         return Ok(None);
     }
     // Replacing the identity is an operation on the workspace's daemons: the
     // namespace they run under goes with it. It holds the process lock, taken
     // before the receipt lock (the lock order), from here until the new
-    // receipt is saved.
-    let mut process_lock = if forks(&before) {
+    // receipt is saved. An entry holds it throughout: it ends by starting the
+    // workspace's daemons.
+    let mut process_lock = if forks(&before) || activating {
         Some(processes::process_lock(workspace)?)
     } else {
         None
@@ -433,7 +633,7 @@ fn setup_between(
     // receipt is migrated on disk here, which has no effect beyond the file.
     let mut existing = load_receipt_locked(project, workspace, &lock)?;
     let mut fork = forks(&existing);
-    if if_new && ready(&existing) && !fork {
+    if if_new && ready(&existing) && !fork && !repairable(&existing) {
         return Ok(None);
     }
     if fork && process_lock.is_none() {
@@ -453,7 +653,7 @@ fn setup_between(
         // under both locks.
         existing = load_receipt_locked(project, workspace, &lock)?;
         fork = forks(&existing);
-        if if_new && ready(&existing) && !fork {
+        if if_new && ready(&existing) && !fork && !repairable(&existing) {
             return Ok(None);
         }
     }
@@ -467,13 +667,40 @@ fn setup_between(
         let pitchfork = options.pitchfork.clone().or_else(Pitchfork::locate);
         processes::check_replacement(pitchfork.as_ref(), workspace, old, copied)?;
     }
+    // The workspace is its receipt, not the branch the checkout holds now:
+    // what follows (the variables, the names of the data) uses the name it was
+    // created under, and a checkout that moved to another branch says so. The
+    // caller's view of the checkout may be old: what it holds is read again.
+    let first_setup = existing.is_none() && workspace.is_default && activating;
+    let mut drift = None;
+    let mut workspace = worktree::list(project)
+        .ok()
+        .and_then(|all| all.into_iter().find(|w| w.path == workspace.path))
+        .unwrap_or_else(|| workspace.clone());
+    if let Some(receipt) = &existing {
+        drift = BranchDrift::of(&workspace, receipt);
+        workspace.name = receipt.workspace.clone();
+    }
+    let mut repair = activate::RepairPlan::default();
     let mut receipt = match existing {
-        Some(receipt) => receipt,
+        Some(mut receipt) => {
+            // The receipt was migrated and what the configuration invalidates
+            // was reopened when it was read (a real change reopens phases,
+            // hooks included). What is left complete and still has no file
+            // is a lost derived file: see [`activate::RepairPlan`].
+            if !fork {
+                repair = activate::RepairPlan::reopen(&workspace, &mut receipt, &project.config);
+            }
+            receipt
+        }
         None => {
             let mut receipt = Receipt::new(project.id(), &workspace.name, None);
             if let Some(id) = instance {
                 receipt.instance_id = id;
             }
+            // Adopted while its HEAD is detached: it is named after its
+            // directory, and a detached HEAD is what it is meant to hold.
+            receipt.adopted_detached = workspace.branch.is_none();
             receipt.set_phase(
                 Phase::Materialize,
                 PhaseState::Done,
@@ -485,116 +712,58 @@ fn setup_between(
     if fork {
         fork_receipt(&mut receipt, &project.config, &options, instance);
     }
+    if first_setup {
+        progress.notice(&first_setup_notice(project, &workspace, &options));
+    }
     receipt.save(&workspace.git_dir)?;
-    // The new identity is in place; what follows does not touch the daemons.
-    drop(process_lock);
-    let mut runner = Runner::new(project, workspace.clone(), receipt, &options, progress);
+    // The new identity is in place; what follows does not touch the daemons,
+    // except an entry's own start at the end, under the lock it keeps.
+    let process_lock = if activating {
+        process_lock
+    } else {
+        drop(process_lock);
+        None
+    };
+    // The file is written from the receipt's URL: a managed server that came
+    // back on another port is followed first, before anything is written.
+    // (The receipt is saved above: the refresh reads it back.)
+    let mut warnings = Vec::new();
+    if repair.env {
+        warnings.extend(activate::follow_endpoint(
+            project,
+            &workspace,
+            &mut receipt,
+            options.approval.as_ref(),
+            &lock,
+        ));
+    }
+    let mut runner = Runner::new(project, workspace, receipt, &options, progress);
+    runner.warnings.extend(warnings);
     runner.warn_unmapped();
     runner.run(&Phase::ALL)?;
-    Ok(Some(runner.finish()))
+    // devflow's own pitchfork namespace file: the env phase writes it when it
+    // runs, a finished one is checked here (the check is idempotent).
+    repair.finish(&mut runner);
+    runner.drift = drift;
+    runner.first_setup = first_setup;
+    Ok(Some(runner.finish_held(lock, process_lock)))
 }
 
-/// Start the containers of the workspace's container services: a workspace
-/// that was already `ready` skips the services phase, but its containers may
-/// have stopped (a Docker restart, `devflow service down`). Containers start
-/// on activation, not when something connects. A container that cannot start
-/// (its port is taken) is a warning: the switch itself happened.
-fn start_containers(project: &Project, receipt: &Receipt) -> Vec<String> {
-    let mut warnings = Vec::new();
-    for (key, engine, _) in project.config.containers() {
-        let Some(id) = services::workspace::binding(receipt, key, engine)
-            .filter(|binding| !binding.orphaned)
-            .and_then(|binding| binding.branch_id)
-        else {
-            continue;
-        };
-        let started = Service::open(project, key).and_then(|svc| svc.up(id));
-        if let Err(error) = started {
-            warnings.push(format!("could not start service '{key}': {error:#}"));
-        }
-    }
-    warnings
-}
-
-/// Resume setup if incomplete, then run `switch` hooks. A workspace devflow has
-/// not set up yet is adopted. Switch hooks only run once the workspace is
-/// ready; an untrusted or failing switch hook is reported as a warning.
-pub fn switch(
-    project: &Project,
-    workspace: &Workspace,
-    options: SetupOptions,
-    progress: &mut dyn Progress,
-) -> Result<SetupOutcome> {
-    // A switch never honours `DEVFLOW_INSTANCE_ID`: see [`setup`].
-    let mut outcome = setup_as(
-        project,
-        workspace,
-        options.clone(),
-        false,
-        false,
-        None,
-        progress,
-    )?
-    .context("setup did not run")?;
-    match refresh_endpoint(
-        project,
-        workspace,
-        &mut outcome.receipt,
-        recipes_verdict(project, &workspace.path, options.approval.as_ref()).approved(),
-    ) {
-        Ok(Some(note)) => outcome.warnings.push(note),
-        Ok(None) => {}
-        Err(e) => outcome
-            .warnings
-            .push(format!("could not refresh the database URL: {e:#}")),
-    }
-    if !options.no_db {
-        outcome
-            .warnings
-            .extend(start_containers(project, &outcome.receipt));
-    }
-    match switch_hooks(project, workspace, &outcome.receipt, &options, progress)? {
-        SwitchHooks::Ran(report) => {
-            if let Some(failure) = report.failure() {
-                outcome.warnings.push(failure);
-            }
-            outcome.hooks = Some(report);
-        }
-        SwitchHooks::NotRun(Some((why, remedies))) => {
-            outcome.warnings.push(why);
-            outcome.remedies.extend(remedies);
-        }
-        SwitchHooks::NotRun(None) => {}
-    }
-    Ok(outcome)
-}
-
-/// Run the project's `switch` hooks in `workspace`, as [`switch`] does after
-/// its setup. [`create`] does not run them; a caller that wants a new
-/// workspace to behave like a switched-to one calls this after a successful
-/// `create`. `None` means nothing ran: there are no switch hooks, `no_hooks`
-/// is set, the workspace is not ready, or the hooks are not trusted
-/// (`options.approval`, `DEVFLOW_TRUST_HOOKS=1`, or an approval on record).
-/// A failing hook is reported in the returned [`HookReport`], not as an error.
-pub fn run_switch_hooks(
-    project: &Project,
-    workspace: &Workspace,
-    options: &SetupOptions,
-    progress: &mut dyn Progress,
-) -> Result<Option<HookReport>> {
-    let Some(receipt) = load_receipt(project, workspace)? else {
-        return Ok(None);
-    };
-    Ok(
-        match switch_hooks(project, workspace, &receipt, options, progress)? {
-            SwitchHooks::Ran(report) => Some(report),
-            SwitchHooks::NotRun(_) => None,
-        },
+/// What the first setup of the default workspace says before it runs: setup
+/// (and its hooks) happens in the main checkout, not in a worktree of its own.
+fn first_setup_notice(project: &Project, workspace: &Workspace, options: &SetupOptions) -> String {
+    let hooks = !options.no_hooks && !project.config.hooks.setup.is_empty();
+    format!(
+        "'{}' has not been set up by devflow yet: setup runs now in the main checkout, {}{}",
+        workspace.name,
+        workspace.path.display(),
+        if hooks { ", setup hooks included" } else { "" }
     )
 }
 
 enum SwitchHooks {
-    Ran(HookReport),
+    /// The report, and what the mise check had to say.
+    Ran(HookReport, Vec<String>),
     /// Did not run; the reason when the user should hear about it, with what
     /// can be done about it.
     NotRun(Option<(String, Vec<Remedy>)>),
@@ -616,6 +785,15 @@ fn switch_hooks(
             remedies_for(project, &workspace.path, Some(receipt), false),
         ))));
     }
+    if env_file::lacks_manifest(&workspace.path) {
+        return Ok(SwitchHooks::NotRun(Some((
+            format!("switch hooks were not run: {LEGACY_ENV}"),
+            // The workspace reads as ready, which has no remedy of its own.
+            vec![Remedy::Setup {
+                workspace: workspace.path.clone(),
+            }],
+        ))));
+    }
     match hooks_verdict(project, &workspace.path, options.approval.as_ref())? {
         Verdict::Approved => {}
         Verdict::NotApproved => {
@@ -635,7 +813,23 @@ fn switch_hooks(
             ))));
         }
     }
-    run_hooks(project, workspace, receipt, HookPhase::Switch, progress).map(SwitchHooks::Ran)
+    // The gate setup hooks have: a switch hook that goes through mise must get
+    // this workspace's variables, or it would run against another database.
+    let (gate, remedies) = mise_gate::check_phase(
+        project,
+        workspace,
+        receipt,
+        HookPhase::Switch,
+        options.skip_mise_check,
+    )?;
+    if let Some(reason) = gate.block {
+        return Ok(SwitchHooks::NotRun(Some((
+            format!("switch hooks were not run: {reason}"),
+            remedies,
+        ))));
+    }
+    run_hooks(project, workspace, receipt, HookPhase::Switch, progress)
+        .map(|report| SwitchHooks::Ran(report, gate.warnings))
 }
 
 /// Whether the `[env]` recipes and presets may be applied in the workspace at
@@ -703,6 +897,12 @@ pub struct RemoveOutcome {
     /// The pitchfork daemons stopped before the workspace was removed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stopped_daemons: Vec<String>,
+    /// Set when a forced removal went on without being able to tell what
+    /// pitchfork runs for the workspace (or without pitchfork to ask): the
+    /// namespace devflow assigned and the daemon ids that may still run, which
+    /// nothing records any more once the receipt is gone with the worktree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub may_still_run: Option<processes::MayStillRun>,
     pub warnings: Vec<String>,
 }
 
@@ -897,96 +1097,50 @@ pub fn remove(
         }
         trusted
     };
+    // The gate setup hooks have: a teardown hook that goes through mise must
+    // get this workspace's variables, or it would run against another
+    // database. A refusal, before any effect; forcing leaves the hooks out.
+    let run_teardown = if run_teardown {
+        let hook_receipt = receipt
+            .clone()
+            .unwrap_or_else(|| Receipt::new(project.id(), &workspace.name, None));
+        let (gate, remedies) = mise_gate::check_phase(
+            project,
+            &workspace,
+            &hook_receipt,
+            HookPhase::Teardown,
+            false,
+        )?;
+        warnings.extend(gate.warnings);
+        match gate.block {
+            None => true,
+            Some(reason) if force => {
+                warnings.push(format!("teardown hooks were skipped: {reason}"));
+                false
+            }
+            Some(reason) => {
+                return Err(protected_with(
+                    name,
+                    format!("teardown hooks were not run: {reason}"),
+                    true,
+                    remedies,
+                ));
+            }
+        }
+    } else {
+        false
+    };
 
-    // Every branch this instance created for the workspace, the configured
-    // service's first. Bindings of services the configuration no longer has
-    // are included: the receipt disappears with the worktree, and nothing else
-    // would ever find those branches again.
-    let mut drop_plan: Option<(Server, Vec<uuid::Uuid>)> = None;
-    if let Some(receipt) = &receipt
-        && !options.keep_data
-    {
-        let primary = project.config.postgres().map(|(key, _)| key);
-        let mut owned: Vec<(&str, uuid::Uuid)> = receipt
-            .services
-            .iter()
-            .filter(|(_, b)| b.engine == Engine::Postgres && b.owned)
-            .filter_map(|(key, b)| Some((key.as_str(), b.branch_id?)))
-            .collect();
-        owned.sort_by_key(|(key, _)| Some(*key) != primary);
-        if !owned.is_empty() {
-            match connect(project) {
-                Ok(Some(server)) => {
-                    let mut ids = Vec::new();
-                    for (_, id) in owned {
-                        match server.branch(id) {
-                            Ok(Some(info)) if info.instance_id == Some(receipt.instance_id) => {
-                                ids.push(id);
-                            }
-                            Ok(Some(_)) => warnings.push(format!(
-                                "database branch {id} was created by another instance and was left alone"
-                            )),
-                            Ok(None) => {
-                                warnings.push(format!("database branch {id} no longer exists"))
-                            }
-                            Err(e) => bail!(
-                                "cannot inspect the database branch of '{}': {e:#}; \
-                                 pass --keep-data to remove the worktree and leave the branch",
-                                workspace.name
-                            ),
-                        }
-                    }
-                    if !ids.is_empty() {
-                        drop_plan = Some((server, ids));
-                    }
-                }
-                Ok(None) => warnings.push(
-                    "the project has no postgres service, so the database branch was left alone"
-                        .into(),
-                ),
-                Err(e) => bail!(
-                    "cannot reach the database server to drop the branch of '{}': {e:#}; \
-                     pass --keep-data to remove the worktree and leave the branch",
-                    workspace.name
-                ),
-            }
+    // Every branch the receipt names (the bindings, the branch being created,
+    // an earlier build's), checked now, dropped with the rest, by recorded
+    // identity: the receipt disappears with the worktree, and nothing else
+    // would ever find those branches again. See [`removal`].
+    let data = match &receipt {
+        Some(receipt) if !options.keep_data => {
+            removal::plan(project, &workspace, receipt, force, &mut warnings)?
         }
-    }
-    // The container branches (Valkey, Redis, MySQL) this instance created: checked
-    // in the catalog now, dropped with the rest, by recorded identity.
-    let mut container_drops: Vec<(Service, uuid::Uuid)> = Vec::new();
-    if let Some(receipt) = &receipt
-        && !options.keep_data
-    {
-        for (key, binding) in receipt
-            .services
-            .iter()
-            .filter(|(_, b)| b.engine.is_container() && b.owned)
-        {
-            let Some(id) = binding.branch_id else {
-                continue;
-            };
-            let inspected = Service::recorded(project, key, binding.engine)
-                .and_then(|svc| Ok((svc.branch(id)?, svc)));
-            match inspected {
-                Ok((Some(record), svc)) if record.owner == Some(receipt.instance_id) => {
-                    container_drops.push((svc, id));
-                }
-                Ok((Some(_), _)) => warnings.push(format!(
-                    "branch {id} of service '{key}' was created by another instance and was \
-                     left alone"
-                )),
-                Ok((None, _)) => {
-                    warnings.push(format!("branch {id} of service '{key}' no longer exists"))
-                }
-                Err(e) => bail!(
-                    "cannot inspect the branch of service '{key}' of '{}': {e:#}; pass \
-                     --keep-data to remove the worktree and leave the branch",
-                    workspace.name
-                ),
-            }
-        }
-    }
+        _ => removal::DataPlan::default(),
+    };
     if options.delete_branch
         && !force
         && let Some(branch) = &workspace.branch
@@ -1002,72 +1156,147 @@ pub fn remove(
     }
 
     // --- effects ---
+    // Everything above was a preflight: a refusal there changed nothing. From
+    // here on a failure leaves the workspace part-way, and says what was done
+    // and what remains ([`PartialRemoval`]); removing it again converges.
+    let mut done: Vec<String> = Vec::new();
+    let data_left = data.describe();
+    let still_there = |data: &[String]| -> Vec<String> {
+        let mut all = vec![
+            format!("the worktree {}", workspace.path.display()),
+            "the workspace's receipt".to_string(),
+        ];
+        all.extend(data.iter().cloned());
+        if let (true, Some(branch)) = (options.delete_branch, &workspace.branch) {
+            all.push(format!("the Git branch '{branch}'"));
+        }
+        all
+    };
+    let retry = || {
+        vec![Remedy::RemoveWorkspace {
+            root: project.root.clone(),
+            name: workspace.name.clone(),
+        }]
+    };
+    let partial = |cause: String, done: &[String], data: &[String], forceable: bool| {
+        anyhow::Error::new(PartialRemoval {
+            workspace: workspace.name.clone(),
+            cause,
+            done: done.to_vec(),
+            remains: still_there(data),
+            forceable,
+            remedies: retry(),
+            stop_report: None,
+        })
+    };
+
     let mut stopped_daemons = Vec::new();
+    let mut may_still_run = None;
     if let (Some(running), Some(lock)) = (&running, &process_lock) {
-        let (ids, notes) =
-            processes::stop_for_removal_locked(project, &workspace, running, force, lock)
-                .map_err(|error| protected(name, format!("{error:#}"), true))?;
-        stopped_daemons = ids;
-        warnings.extend(notes);
+        let stopped = processes::stop_for_removal_locked(project, &workspace, running, force, lock)
+            .map_err(|error| match error.downcast::<processes::StopFailed>() {
+                // pitchfork was asked and the result is not what a removal
+                // needs: some daemons may be stopped, or the state could not be
+                // read afterwards. That is no refusal that came before any
+                // effect; it says what was done and what remains, and keeps the
+                // report.
+                Ok(failed) if failed.partial() => {
+                    let listed = |id: &String| {
+                        failed
+                            .report
+                            .daemons
+                            .iter()
+                            .any(|d| d.id.as_deref() == Some(id.as_str()))
+                    };
+                    let mut remains: Vec<String> = failed
+                        .remaining
+                        .iter()
+                        .map(|id| {
+                            if listed(id) {
+                                format!("the pitchfork daemon {id} still runs")
+                            } else {
+                                format!("whether the pitchfork daemon {id} still runs is not known")
+                            }
+                        })
+                        .collect();
+                    remains.extend(still_there(&data_left));
+                    anyhow::Error::new(PartialRemoval {
+                        workspace: workspace.name.clone(),
+                        cause: failed.cause.clone(),
+                        done: failed
+                            .stopped
+                            .iter()
+                            .map(|id| format!("stopped the pitchfork daemon {id}"))
+                            .collect(),
+                        remains,
+                        forceable: true,
+                        remedies: retry(),
+                        stop_report: Some(failed.report),
+                    })
+                }
+                Ok(failed) => protected(name, failed.to_string(), true),
+                Err(error) => protected(name, format!("{error:#}"), true),
+            })?;
+        if !stopped.stopped.is_empty() {
+            done.push(format!(
+                "stopped the pitchfork daemons {}",
+                stopped.stopped.join(", ")
+            ));
+        }
+        stopped_daemons = stopped.stopped;
+        warnings.extend(stopped.warnings);
+        may_still_run = stopped.may_still_run;
     }
     let mut hook_report = None;
     if run_teardown {
         let receipt = receipt
             .clone()
             .unwrap_or_else(|| Receipt::new(project.id(), &workspace.name, None));
-        let report = run_hooks(project, &workspace, &receipt, HookPhase::Teardown, progress)?;
+        let report = run_hooks(project, &workspace, &receipt, HookPhase::Teardown, progress)
+            .map_err(|error| {
+                partial(
+                    format!("{error:#}"),
+                    &[done.clone(), vec!["started the teardown hooks".to_string()]].concat(),
+                    &data_left,
+                    false,
+                )
+            })?;
+        done.push("ran the teardown hooks".to_string());
         if let Some(failure) = report.failure() {
             if !force {
-                return Err(protected(name, failure, true));
+                done.pop();
+                done.push("ran the teardown hooks, one of which failed".to_string());
+                return Err(partial(failure, &done, &data_left, true));
             }
             warnings.push(failure);
         }
         hook_report = Some(report);
     }
 
-    let mut dropped_branch = None;
-    if let Some((server, ids)) = drop_plan {
-        for id in ids {
-            match server.drop_branch(id) {
-                Ok(()) => {
-                    dropped_branch.get_or_insert(id);
-                }
-                Err(e) if force => {
-                    warnings.push(format!("could not drop database branch {id}: {e:#}"))
-                }
-                Err(e) => {
-                    return Err(e).with_context(|| {
-                        format!("cannot drop database branch {id}; pass --keep-data to skip it")
-                    });
-                }
-            }
+    let dropped_branch = match removal::execute(data, force, &mut warnings) {
+        Ok((first, dropped)) => {
+            done.extend(dropped);
+            first
         }
-    }
-
-    for (svc, id) in container_drops {
-        match svc.remove_branch(id) {
-            Ok(()) => {
-                dropped_branch.get_or_insert(id);
-            }
-            Err(e) if force => warnings.push(format!(
-                "could not drop branch {id} of service '{}': {e:#}",
-                svc.key
-            )),
-            Err(e) => {
-                return Err(e).with_context(|| {
-                    format!(
-                        "cannot drop branch {id} of service '{}'; pass --keep-data to skip it",
-                        svc.key
-                    )
-                });
-            }
+        Err(failed) => {
+            done.extend(failed.done);
+            return Err(partial(
+                format!("{:#}", failed.cause),
+                &done,
+                &failed.remains,
+                failed.forceable,
+            ));
         }
-    }
+    };
 
-    if workspace.locked {
-        worktree::force_remove(project, &workspace)?;
+    let removed = if workspace.locked {
+        worktree::force_remove(project, &workspace)
     } else {
-        worktree::remove(project, &workspace)?;
+        worktree::remove(project, &workspace)
+    };
+    if let Err(error) = removed {
+        // Nothing but trying again helps; the data is already dropped.
+        return Err(partial(format!("{error:#}"), &done, &[], false));
     }
 
     let mut deleted_branch = false;
@@ -1086,14 +1315,19 @@ pub fn remove(
         dropped_branch,
         deleted_branch,
         stopped_daemons,
+        may_still_run,
         warnings,
     })
 }
 
+/// The workspaces of the project. A workspace is its receipt, not the branch
+/// its checkout holds now: one that was switched to another branch is listed
+/// under the name it was created under, with `workspace.branch` and `drift`
+/// saying what the checkout holds.
 pub fn list(project: &Project) -> Result<Vec<WorkspaceStatus>> {
     Ok(worktree::list(project)?
         .into_iter()
-        .map(|workspace| {
+        .map(|mut workspace| {
             let receipt = listed_receipt(project, &workspace);
             let busy = receipt.is_some() && Receipt::is_locked(&workspace.git_dir);
             let status = match (&receipt, busy) {
@@ -1101,11 +1335,23 @@ pub fn list(project: &Project) -> Result<Vec<WorkspaceStatus>> {
                 (Some(r), false) => Some(r.status()),
                 (None, _) => None,
             };
+            let drift = receipt
+                .as_ref()
+                .and_then(|receipt| BranchDrift::of(&workspace, receipt));
+            if let Some(receipt) = receipt.as_ref().filter(|_| drift.is_some()) {
+                workspace.name = receipt.workspace.clone();
+            }
+            let env_file = receipt
+                .as_ref()
+                .filter(|receipt| !workspace.missing && complete(receipt, Phase::Env))
+                .and_then(|receipt| activate::env_problem(&workspace, receipt, &project.config));
             WorkspaceStatus {
                 workspace,
                 receipt,
                 status,
                 busy,
+                drift,
+                env_file,
             }
         })
         .collect())
@@ -1130,6 +1376,21 @@ pub fn receipt(project: &Project, workspace: &Workspace) -> Result<Option<Receip
     load_receipt(project, workspace)
 }
 
+/// The PostgreSQL binding whose connection the workspace exports: the one
+/// [`Receipt::postgres`] names (bindings of services the configuration no
+/// longer has are not exported), and none for a workspace whose services were
+/// skipped on request (`--no-db`), whatever binding an earlier setup left in
+/// the receipt. Everything that derives a variable from the connection, the
+/// generated ones and the presets and recipes alike, asks this.
+fn exported_postgres<'a>(
+    project: &Project,
+    receipt: &'a Receipt,
+) -> Option<(&'a str, &'a ServiceBinding)> {
+    receipt
+        .postgres(&project.config)
+        .filter(|_| !receipt.services_skipped_on_request())
+}
+
 /// Variables written to `.devflow/env` and passed to hooks.
 ///
 /// `DEVFLOW_WORKSPACE_ID` is informational (the receipt's instance id). It is
@@ -1143,9 +1404,12 @@ pub fn env_vars(
 ) -> Vec<(String, String)> {
     let mut vars = Vec::new();
     let mut push = |key: &str, value: String| vars.push((key.to_string(), value));
-    // The postgres service's binding (see [`Receipt::postgres`]): bindings of
-    // services the configuration no longer has are not exported.
-    if let Some((_, binding)) = receipt.postgres(&project.config) {
+    // A workspace whose services were skipped on request (`--no-db`) has none
+    // in its file, whatever binding an earlier setup left in the receipt: the
+    // skip is deliberate and stays so.
+    let services = !receipt.services_skipped_on_request();
+    // The postgres service's binding (see [`exported_postgres`]).
+    if let Some((_, binding)) = exported_postgres(project, receipt) {
         push("DATABASE_URL", binding.url.clone());
         // The `PG*` variables say what the URL says, as libpq reads it.
         match conn::Params::parse(&binding.url) {
@@ -1174,7 +1438,7 @@ pub fn env_vars(
     // Each container service's URL (with the branch's own password), under
     // the variable its section names. A binding of a service the
     // configuration no longer has is not exported.
-    for (key, engine, _) in project.config.containers() {
+    for (key, engine, _) in project.config.containers().filter(|_| services) {
         if let Some(binding) = receipt
             .services
             .get(key)
@@ -1215,10 +1479,47 @@ pub fn env_vars(
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceEnv {
     pub vars: Vec<(String, String)>,
+    /// Every name the configuration declares, bound or not
+    /// ([`crate::env_owner::declared_names`]): the names this workspace owns
+    /// even when it sets no value for them.
+    pub declared: std::collections::BTreeSet<String>,
+    /// Names this workspace instance exported once and the configuration no
+    /// longer declares ([`Receipt::exported`]): still its own, so a shell that
+    /// holds one of them is cleared of it.
+    pub former: std::collections::BTreeSet<String>,
     /// Values derived from credentials, to be masked whole in hook output.
     pub secrets: Vec<String>,
     /// Recipes and presets that were left out, and why.
     pub warnings: Vec<String>,
+}
+
+impl WorkspaceEnv {
+    fn owned_names(&self) -> std::collections::BTreeSet<String> {
+        self.declared.iter().chain(&self.former).cloned().collect()
+    }
+
+    /// The environment a process started in the workspace gets (see
+    /// [`crate::env_owner`]). Refuses ([`crate::env_owner::Stale`]) when the
+    /// process's environment names a workspace that cannot be resolved,
+    /// unless `DEVFLOW_CLEAR_INHERITED` says to go on.
+    pub fn child(&self) -> Result<crate::env_owner::ChildEnv, crate::env_owner::Stale> {
+        crate::env_owner::ChildEnv::new(self.vars.clone(), &self.owned_names())
+    }
+
+    /// [`WorkspaceEnv::child`] without looking at the process's environment.
+    pub fn standalone(&self) -> crate::env_owner::ChildEnv {
+        crate::env_owner::ChildEnv::standalone(self.vars.clone(), &self.owned_names())
+    }
+
+    /// [`WorkspaceEnv::child`] as the typed error hooks stop with.
+    fn child_or_stop(&self) -> Result<crate::env_owner::ChildEnv> {
+        self.child().map_err(crate::env_owner::Stale::into_error)
+    }
+
+    /// Write `.devflow/env` with the variables and the owned names.
+    pub fn write(&self, worktree: &Path) -> Result<PathBuf> {
+        env_file::write_owned(worktree, &self.vars, &self.declared, &self.former)
+    }
 }
 
 /// [`env_vars`] and, when `recipes` is set, the rendered `[env]` section.
@@ -1229,25 +1530,26 @@ pub fn workspace_env(
     recipes: bool,
 ) -> WorkspaceEnv {
     let mut vars = env_vars(project, workspace, receipt);
-    if !recipes || project.config.env.is_empty() {
-        return WorkspaceEnv {
-            vars,
-            ..WorkspaceEnv::default()
-        };
+    let mut env = WorkspaceEnv::default();
+    if recipes && !project.config.env.is_empty() {
+        let rendered = env_file::render(
+            &project.config.env,
+            &vars,
+            exported_postgres(project, receipt).map(|(_, binding)| binding.url.as_str()),
+        );
+        vars.extend(rendered.vars);
+        env.secrets = rendered.secrets;
+        env.warnings = rendered.warnings;
     }
-    let rendered = env_file::render(
-        &project.config.env,
-        &vars,
-        receipt
-            .postgres(&project.config)
-            .map(|(_, binding)| binding.url.as_str()),
-    );
-    vars.extend(rendered.vars);
-    WorkspaceEnv {
-        vars,
-        secrets: rendered.secrets,
-        warnings: rendered.warnings,
-    }
+    env.declared = crate::env_owner::declared_for(&project.config, &vars);
+    env.former = receipt
+        .exported
+        .iter()
+        .filter(|name| !env.declared.contains(*name) && !vars.iter().any(|(key, _)| key == *name))
+        .cloned()
+        .collect();
+    env.vars = vars;
+    env
 }
 
 /// Replace a workspace's data with a fresh clone of `to`. The default is the
@@ -1673,6 +1975,12 @@ struct Runner<'a> {
     /// A phase was refused because the run's approval is of other content
     /// than this workspace holds.
     differs: bool,
+    /// Container services this run started: it created or recovered their
+    /// branch, or brought up a container that was not running.
+    fresh: Vec<String>,
+    drift: Option<BranchDrift>,
+    repaired: Vec<Repair>,
+    first_setup: bool,
 }
 
 impl<'a> Runner<'a> {
@@ -1693,6 +2001,10 @@ impl<'a> Runner<'a> {
             hooks: None,
             warnings: Vec::new(),
             differs: false,
+            fresh: Vec::new(),
+            drift: None,
+            repaired: Vec::new(),
+            first_setup: false,
         }
     }
 
@@ -1710,23 +2022,43 @@ impl<'a> Runner<'a> {
         }
     }
 
-    fn finish(self) -> SetupOutcome {
+    /// The run's outcome, with the receipt lock it ran under.
+    fn finish_held(self, lock: ReceiptLock, process: Option<ProcessLock>) -> Held {
+        let (outcome, fresh) = self.outcome();
+        Held {
+            outcome,
+            lock,
+            process,
+            fresh,
+        }
+    }
+
+    /// The outcome, and the container services this run made a branch for.
+    fn outcome(self) -> (SetupOutcome, Vec<String>) {
         let remedies = remedies_for(
             self.project,
             &self.workspace.path,
             Some(&self.receipt),
             false,
         );
-        SetupOutcome {
+        let outcome = SetupOutcome {
             remedies,
             status: self.receipt.status(),
             workspace: self.workspace,
             receipt: self.receipt,
             payload: self.payload,
+            branch_start: None,
             hooks: self.hooks,
             warnings: self.warnings,
             approval_differs: self.differs,
-        }
+            drift: self.drift,
+            repaired: self.repaired,
+            first_setup: self.first_setup,
+            services_state: Vec::new(),
+            switch_hooks: None,
+            autostart: None,
+        };
+        (outcome, self.fresh)
     }
 
     fn record(&mut self, phase: Phase, state: PhaseState, detail: Option<String>) -> Result<()> {
@@ -1789,15 +2121,9 @@ impl<'a> Runner<'a> {
         };
         self.payload = cow::copy_paths(&source.path, &self.workspace.path, entries)?;
         self.receipt.record_payload(&self.payload);
-        let done = self
-            .payload
-            .iter()
-            .filter(|e| matches!(e.result, cow::EntryResult::Done { .. }))
-            .count();
-        Ok(PhaseResult::Done(Some(format!(
-            "{done} of {} copied from {}",
-            crate::text::counted_as(self.payload.len() as u64, "entry", "entries"),
-            source.path.display()
+        Ok(PhaseResult::Done(Some(cow::summary(
+            &self.payload,
+            &source.path,
         ))))
     }
 
@@ -2035,6 +2361,7 @@ impl<'a> Runner<'a> {
                     let source = self.receipt.data_source.clone().unwrap_or_default();
                     let extras = self.scratch_bindings(id, true, &creds.branch.extras)?;
                     self.bind(key, binding_from(&creds, source), extras)?;
+                    self.warnings.extend(creds.warnings.iter().cloned());
                     return Ok(format!(
                         "recovered branch {} after an interrupted run",
                         creds.database
@@ -2047,7 +2374,7 @@ impl<'a> Runner<'a> {
             }
         }
 
-        let requested = self.pick_source()?;
+        let requested = self.pick_source(&server)?;
         let (resolved, label) = match self.receipt.data_source_id.clone() {
             // Chosen by an earlier attempt: the same identity, whatever the
             // workspace or snapshot name means now.
@@ -2078,12 +2405,19 @@ impl<'a> Runner<'a> {
         self.receipt.creating = Some(PendingBranch {
             service: key.to_string(),
             branch_id: id,
+            engine: Some(Engine::Postgres),
         });
         self.receipt.save(&self.workspace.git_dir)?;
         let creds = server.create_branch_with_id(id, &name, resolved, Some(instance))?;
-        let detail = format!("branch {} from {label}", creds.database);
+        let mut detail = format!("branch {} from {label}", creds.database);
+        if let Some(strategy) = creds.branch.clone_strategy {
+            detail.push_str(&format!(" ({strategy})"));
+        }
         let extras = self.scratch_bindings(id, true, &creds.branch.extras)?;
         self.bind(key, binding_from(&creds, label), extras)?;
+        // What the server had to do to the source (sessions it ended) or to
+        // finish (an operation it recovered) is the caller's to surface.
+        self.warnings.extend(creds.warnings.iter().cloned());
         Ok(detail)
     }
 
@@ -2113,8 +2447,14 @@ impl<'a> Runner<'a> {
                 None => None,
             };
             if let Some((id, record)) = ready {
-                // Containers start on setup and on every switch.
+                // Containers start on setup and on every switch. One that was
+                // not running is started here, and the entry that follows says
+                // so, though it finds it running by then.
+                let was_running = activate::container_running(&record);
                 let endpoint = svc.up(id)?;
+                if was_running != Some(true) {
+                    self.fresh.push(key.to_string());
+                }
                 if let Some(bound) = self.receipt.services.get_mut(key) {
                     bound.url = endpoint.url.clone();
                     bound.endpoint = endpoint.container_endpoint.clone();
@@ -2145,6 +2485,9 @@ impl<'a> Runner<'a> {
                         .unwrap_or_default();
                     svc.up(record.id)?;
                     self.bind_container(key, &svc, &record.id, label)?;
+                    if let Some(ms) = record.downtime_ms {
+                        self.warn_source_downtime(key, ms);
+                    }
                     return Ok(format!(
                         "recovered branch {} after an interrupted run",
                         short_id(&record.id)
@@ -2162,7 +2505,7 @@ impl<'a> Runner<'a> {
         // branch or snapshot is cloned, or the service fails. A workspace or
         // snapshot name is never looked up again, because it may now mean
         // another branch.
-        let requested = self.container_source(key)?;
+        let requested = self.container_source(key, &svc)?;
         let (source, label) = match self.pinned_container_source(&svc, key)? {
             Some(pinned) => pinned,
             None => {
@@ -2181,6 +2524,7 @@ impl<'a> Runner<'a> {
         self.receipt.creating = Some(PendingBranch {
             service: key.to_string(),
             branch_id: id,
+            engine: Some(engine),
         });
         self.receipt.save(&self.workspace.git_dir)?;
         let record = svc.create_branch(NewBranch {
@@ -2190,6 +2534,9 @@ impl<'a> Runner<'a> {
             source,
         })?;
         self.bind_container(key, &svc, &record.id, label.clone())?;
+        if let Some(ms) = record.downtime_ms {
+            self.warn_source_downtime(key, ms);
+        }
         let mut how = match record.clone {
             Some(method) => format!(" ({method})"),
             None if source == SourceRef::Empty => " (empty)".to_string(),
@@ -2206,6 +2553,14 @@ impl<'a> Runner<'a> {
         ))
     }
 
+    /// A source that had to stop for the copy (MySQL) says for how long.
+    fn warn_source_downtime(&mut self, key: &str, ms: u64) {
+        self.warnings.push(format!(
+            "the source of service '{key}' was stopped for {:.1} s while its data was copied",
+            ms as f64 / 1000.0
+        ));
+    }
+
     /// Record the ready branch `id` as service `key`'s binding.
     fn bind_container(
         &mut self,
@@ -2220,7 +2575,11 @@ impl<'a> Runner<'a> {
         self.receipt.services.insert(key.to_string(), binding);
         // The credentials are recorded: nothing is left to recover.
         self.receipt.creating = None;
-        self.receipt.save(&self.workspace.git_dir)
+        self.receipt.save(&self.workspace.git_dir)?;
+        // This run made the branch (the source's downtime, if it had to stop
+        // for the copy, is reported by the caller: `warn_source_downtime`).
+        self.fresh.push(key.to_string());
+        Ok(())
     }
 
     /// The source service `key` pinned in an earlier run, by catalog
@@ -2254,7 +2613,7 @@ impl<'a> Runner<'a> {
     /// Where service `key`'s data comes from: what it chose earlier (a source
     /// is immutable once chosen), else `--data-from`, else the code source's
     /// branch (an empty one for the default workspace).
-    fn container_source(&mut self, key: &str) -> Result<DataSource> {
+    fn container_source(&mut self, key: &str, svc: &Service) -> Result<DataSource> {
         if let Some(text) = self.receipt.service_sources.get(key).cloned() {
             let recorded = decode_source(&text)?;
             if let Some(requested) = &self.options.data_from
@@ -2270,12 +2629,52 @@ impl<'a> Runner<'a> {
         if let Some(source) = &self.options.data_from {
             return Ok(source.clone());
         }
+        if let Some(source) = self.container_seed(key, svc)? {
+            return Ok(source);
+        }
         if self.workspace.is_default {
             return Ok(DataSource::Empty);
         }
         let source = source_workspace(self.project, &self.workspace, &self.receipt)?
             .context("cannot find the workspace this one was created from")?;
-        Ok(DataSource::Workspace { name: source.name })
+        // Named by its checkout, which is the one thing that cannot be
+        // ambiguous: the source was resolved already.
+        Ok(DataSource::Workspace {
+            name: source.path.display().to_string(),
+        })
+    }
+
+    /// The configured seed snapshot of service `key` for a non-interactive
+    /// run (see [`seed`]); a service without it fails, unless the
+    /// configuration says to start it empty.
+    fn container_seed(&mut self, key: &str, svc: &Service) -> Result<Option<DataSource>> {
+        let Some((name, version)) = seed::requested(
+            &self.project.config,
+            self.options,
+            self.workspace.is_default,
+        )
+        .map_err(Problem::into_error)?
+        else {
+            return Ok(None);
+        };
+        let found = svc
+            .records()?
+            .find_snapshot(&name, version)
+            .map(|s| seed::Candidate {
+                version: s.version,
+                taken_at: s.captured_at.unwrap_or(s.created_at),
+            });
+        let choice = seed::judge(
+            &self.project.config,
+            &self.project.root,
+            (key, svc.engine),
+            &name,
+            found,
+            chrono::Utc::now(),
+        )
+        .map_err(Problem::into_error)?;
+        self.warnings.extend(choice.warning);
+        Ok(Some(choice.source))
     }
 
     /// Like [`services::workspace::resolve_source`], but gives the default
@@ -2309,7 +2708,7 @@ impl<'a> Runner<'a> {
 
     /// The recorded source wins (data origin is immutable once chosen), then
     /// `--data-from`, then the code source's branch.
-    fn pick_source(&mut self) -> Result<DataSource> {
+    fn pick_source(&mut self, server: &Server) -> Result<DataSource> {
         if let Some(text) = &self.receipt.data_source {
             let recorded = decode_source(text)?;
             if let Some(requested) = &self.options.data_from
@@ -2324,12 +2723,61 @@ impl<'a> Runner<'a> {
         if let Some(source) = &self.options.data_from {
             return Ok(source.clone());
         }
+        if let Some(source) = self.postgres_seed(server)? {
+            return Ok(source);
+        }
         if self.workspace.is_default {
             return Ok(DataSource::Empty);
         }
         let source = source_workspace(self.project, &self.workspace, &self.receipt)?
             .context("cannot find the workspace this one was created from")?;
-        Ok(DataSource::Workspace { name: source.name })
+        // Named by its checkout (see `container_source`).
+        Ok(DataSource::Workspace {
+            name: source.path.display().to_string(),
+        })
+    }
+
+    /// The configured seed snapshot of the PostgreSQL service for a
+    /// non-interactive run (see [`seed`]); without it the service fails, unless
+    /// the configuration says to start it empty.
+    fn postgres_seed(&mut self, server: &Server) -> Result<Option<DataSource>> {
+        let Some((name, version)) = seed::requested(
+            &self.project.config,
+            self.options,
+            self.workspace.is_default,
+        )
+        .map_err(Problem::into_error)?
+        else {
+            return Ok(None);
+        };
+        let key = self
+            .project
+            .config
+            .postgres()
+            .map_or(DEFAULT_POSTGRES_KEY, |(key, _)| key)
+            .to_string();
+        let found = server
+            .list_snapshots()?
+            .into_iter()
+            .filter(|s| s.name == name && s.status == RecordStatus::Ready)
+            .filter_map(|s| Some((u32::try_from(s.version).ok()?, s)))
+            .filter(|(v, _)| version.is_none_or(|want| *v == want))
+            .max_by_key(|(v, _)| *v)
+            .map(|(version, s)| seed::Candidate {
+                version,
+                taken_at: s.created_at,
+            });
+        let choice = seed::judge(
+            &self.project.config,
+            &self.project.root,
+            (&key, Engine::Postgres),
+            &name,
+            found,
+            chrono::Utc::now(),
+        )
+        .map_err(Problem::into_error)?;
+        self.warnings.extend(choice.warning);
+        Ok(Some(choice.source))
     }
 
     /// Like [`resolve`], but gives the default workspace its (empty) root
@@ -2376,10 +2824,32 @@ impl<'a> Runner<'a> {
             self.options.approval.as_ref(),
         );
         let trusted = verdict.approved();
+        // The file about to be replaced may be the only record of what an
+        // earlier devflow exported (a receipt from before the history was kept
+        // has none): keep its names before anything is overwritten, so a recipe
+        // removed since stays this workspace's to clear.
+        let previous = crate::env_owner::previous_names(&self.workspace.path);
+        self.receipt
+            .record_exported(previous.iter().map(String::as_str));
         let env = workspace_env(self.project, &self.workspace, &self.receipt, trusted);
+        self.warnings.extend(env.warnings.iter().cloned());
+        // From now on the instance owns what it is about to export, even after
+        // the configuration stops declaring it, and the receipt says so before
+        // the replacement is published: a crash in between loses no name.
+        self.receipt
+            .record_exported(env.vars.iter().map(|(name, _)| name.as_str()));
+        self.receipt.save(&self.workspace.git_dir)?;
+        env.write(&self.workspace.path)?;
+        self.warnings.extend(
+            crate::env_owner::dotenv_conflicts(
+                &self.project.config,
+                &self.workspace.path,
+                &env.standalone(),
+            )
+            .iter()
+            .map(crate::env_owner::describe_conflict),
+        );
         let vars = env.vars;
-        self.warnings.extend(env.warnings);
-        env_file::write(&self.workspace.path, &vars)?;
         if !trusted {
             self.differs |= verdict == Verdict::Differs;
             return Ok(PhaseResult::SkippedRequired(
@@ -2425,13 +2895,18 @@ impl<'a> Runner<'a> {
                 .into(),
             ));
         }
+        if env_file::lacks_manifest(&self.workspace.path) {
+            return Ok(PhaseResult::SkippedRequired(LEGACY_ENV.into()));
+        }
         // Before the first hook: does a hook that goes through mise get this
         // workspace's variables? Asked with the environment the hooks get.
-        let vars = workspace_env(self.project, &self.workspace, &self.receipt, true).vars;
+        let child =
+            workspace_env(self.project, &self.workspace, &self.receipt, true).child_or_stop()?;
         let verdict = mise_gate::check(
             &self.workspace.path,
+            HookPhase::Setup,
             &self.project.config.hooks.commands(HookPhase::Setup)?,
-            &vars,
+            &child,
             self.options.skip_mise_check,
             &env_file::MiseCommand::default(),
         );
@@ -2523,13 +2998,24 @@ fn short_id(id: &uuid::Uuid) -> String {
 /// A managed server on an ephemeral port gets a new port after a restart:
 /// point the receipt and `.devflow/env` at the current one. Best effort, and
 /// never for URL-only attachments, which belong to whoever supplied them.
+///
+/// Explicitly locked: the caller holds the workspace's receipt lock (entering a
+/// workspace holds it throughout) and passes it as the proof. Nothing here
+/// takes or tries the lock, so a run that holds it can never be told "busy" by
+/// itself and skip the refresh without a word.
 fn refresh_endpoint(
     project: &Project,
     workspace: &Workspace,
     receipt: &mut Receipt,
     recipes: bool,
+    lock: &ReceiptLock,
 ) -> Result<Option<String>> {
     use crate::config::PostgresMode;
+    ensure!(
+        lock.git_dir() == workspace.git_dir,
+        "the receipt lock held is not the one of {}",
+        workspace.git_dir.display()
+    );
     let ephemeral = project.config.postgres().is_some_and(|(_, pg)| {
         pg.mode == PostgresMode::Managed && pg.port == 0 && pg.app_port.is_none()
     });
@@ -2550,16 +3036,15 @@ fn refresh_endpoint(
     let Some(url) = with_endpoint(&binding.url, &host, port).filter(|u| *u != binding.url) else {
         return Ok(None);
     };
-    let Some(_lock) = Receipt::try_lock(&workspace.git_dir)? else {
-        return Ok(None);
-    };
     if !rebind_url_if_unchanged(&workspace.git_dir, &project.config, receipt, &key, url)? {
         return Ok(None);
     }
-    env_file::write(
-        &workspace.path,
-        &workspace_env(project, workspace, receipt, recipes).vars,
-    )?;
+    let env = workspace_env(project, workspace, receipt, recipes);
+    env.write(&workspace.path)?;
+    // The file has these names now: the instance owns them from here on.
+    if receipt.record_exported(env.vars.iter().map(|(name, _)| name.as_str())) {
+        receipt.save(&workspace.git_dir)?;
+    }
     Ok(Some(format!(
         "the database endpoint changed to {host}:{port}; updated the receipt and .devflow/env"
     )))
@@ -2670,12 +3155,29 @@ fn source_workspace(
         return Ok(None);
     }
     let all = worktree::list(project)?;
-    if let Some(name) = &receipt.code_source {
-        if let Some(found) = all
-            .iter()
-            .find(|w| (w.name == *name || w.branch.as_deref() == Some(name)) && !w.missing)
-        {
+    if let Some(path) = &receipt.code_source_path {
+        // The checkout the source resolved to when this workspace was created,
+        // found where it was and only if it is still that incarnation: a
+        // name may mean two checkouts by now, and a checkout recreated in its
+        // place is not the source.
+        let found = all.iter().find(|w| w.path == *path && !w.missing);
+        let still_it = |source: &Workspace| match receipt.code_source_instance {
+            Some(instance) => {
+                listed_receipt(project, source).is_some_and(|r| r.instance_id == instance)
+            }
+            None => true,
+        };
+        if let Some(found) = found.filter(|source| still_it(source)) {
             return Ok((found.path != workspace.path).then(|| found.clone()));
+        }
+    } else if let Some(name) = &receipt.code_source {
+        // A receipt from before the path was kept: by every name the source
+        // has (its branch, the name it was created under, its path). A source
+        // whose checkout moved to another branch is still that source, and a
+        // name that means two checkouts is an error, not a guess.
+        let found = worktree::find(project, name)?.filter(|w| !w.missing);
+        if let Some(found) = found {
+            return Ok((found.path != workspace.path).then_some(found));
         }
     } else if let Some(default) = all.first() {
         return Ok(Some(default.clone()));
@@ -2705,7 +3207,12 @@ fn resolve(
                     )
                 })?;
             ensure_ready(server, id)?;
-            (ResolvedSource::Branch(id), encode_source(source))
+            // The label names the workspace, whatever it was asked for by (a
+            // branch, a path): `workspace:NAME`, the name it was created under.
+            let label = encode_source(&DataSource::Workspace {
+                name: workspace.name.clone(),
+            });
+            (ResolvedSource::Branch(id), label)
         }
         DataSource::Branch { .. } | DataSource::BranchPrefix { .. } => {
             let id = source
@@ -2944,7 +3451,15 @@ fn busy(workspace: &str) -> anyhow::Error {
 /// [`Receipt::try_lock`], retried briefly: a lock is released when the last
 /// duplicate of its file descriptor closes, and a process spawned by another
 /// thread can hold a duplicate for a few milliseconds.
+///
+/// A devflow that a hook started ([`receipt::started_by_a_hook`]) is not
+/// retried: the run that started it holds the workspace's locks until the hook
+/// is over, and the hook waits for the child, so waiting could only be for its
+/// parent.
 fn acquire(git_dir: &Path) -> Result<Option<crate::receipt::ReceiptLock>> {
+    if receipt::started_by_a_hook() {
+        return Receipt::try_lock(git_dir);
+    }
     Receipt::lock_retrying(git_dir)
 }
 
@@ -2990,7 +3505,7 @@ fn run_hooks(
         phase,
         &project.config.hooks.commands(phase)?,
         &workspace.path,
-        &env.vars,
+        &env.child_or_stop()?,
         &env.secrets,
         &Receipt::logs_dir(&workspace.git_dir),
         &mut |line| progress.output(line),
@@ -3425,6 +3940,7 @@ mod tests {
         receipt.creating = Some(PendingBranch {
             service: "db".into(),
             branch_id: uuid::Uuid::new_v4(),
+            engine: Some(Engine::Postgres),
         });
         let mut config = crate::Config::default();
         config.set_postgres("db", Default::default());
@@ -3500,6 +4016,7 @@ mod tests {
         receipt.creating = Some(PendingBranch {
             service: "db".into(),
             branch_id: branch,
+            engine: None,
         });
         assert_eq!(recoverable(&receipt, "db"), Some(branch));
         // The service was renamed: the new key has no intent of its own.
@@ -3685,6 +4202,7 @@ mod tests {
             instance_id: None,
             status: RecordStatus::Ready,
             cow: crate::config::CowCapability::Unknown,
+            clone_strategy: None,
             error: None,
             created_at: chrono::Utc::now(),
             size_bytes: None,

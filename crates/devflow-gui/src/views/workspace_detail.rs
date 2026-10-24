@@ -26,7 +26,7 @@ use devflow_core::{
     receipt::{PayloadOutcome, Phase, PhaseState, Receipt, ServiceBinding},
     redact,
     remedy::Remedy,
-    setup::WorkspaceStatus,
+    setup::{ServiceRun, WorkspaceStatus},
 };
 use gpui_kit::{
     assets::IconName as Lucide,
@@ -139,6 +139,35 @@ pub struct Detail {
     /// What core says can be done about the workspace's state: approve what
     /// it asks to run, run setup. Empty when it is ready, or busy.
     pub remedies: Vec<Remedy>,
+    /// "now on branch X; its data still belongs to workspace Y": the checkout
+    /// holds another branch than the workspace was created for.
+    pub drift: Option<String>,
+    /// `.devflow/env` is missing or unreadable on a workspace that is set up.
+    pub env_file: Option<String>,
+    /// How the container services stood when the workspace was last entered
+    /// in this app (empty before that).
+    pub services: Vec<ServiceNote>,
+}
+
+/// One container service as the last entry of the workspace left it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceNote {
+    pub service: String,
+    pub state: ServiceRun,
+    /// Why it did not start.
+    pub reason: Option<String>,
+    /// Starting it again, for a service that failed.
+    pub remedy: Option<Remedy>,
+}
+
+impl ServiceNote {
+    pub fn label(&self) -> &'static str {
+        match self.state {
+            ServiceRun::Running => "running",
+            ServiceRun::Started => "started",
+            ServiceRun::Failed => "not running",
+        }
+    }
 }
 
 /// How a container service's branch was cloned, as its receipt binding
@@ -425,6 +454,34 @@ impl Detail {
                 .as_ref()
                 .map(|project| status.remedies(project))
                 .unwrap_or_default(),
+            drift: status.drift.as_ref().map(|drift| shown(&drift.describe())),
+            env_file: status
+                .env_file
+                .map(|problem| problem.describe().to_string()),
+            services: model
+                .entered
+                .get(&status.workspace.path)
+                .map(|entered| {
+                    entered
+                        .iter()
+                        .map(|service| ServiceNote {
+                            service: service.key.clone(),
+                            state: service.state,
+                            reason: service.reason.clone(),
+                            remedy: (service.state == ServiceRun::Failed).then(|| {
+                                Remedy::StartService {
+                                    root: model.entry.root.clone(),
+                                    key: service.key.clone(),
+                                    branch: receipt
+                                        .and_then(|r| r.services.get(&service.key))
+                                        .and_then(|binding| binding.branch_id),
+                                    workspace: Some(status.workspace.path.clone()),
+                                }
+                            }),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -599,7 +656,7 @@ impl WorkspaceDetailView {
     fn key_of(&self, cx: &App) -> Option<MeasureKey> {
         let state = self.state.read(cx);
         let model = state.selection.current()?;
-        MeasureKey::of(model.workspace(model.selected_workspace.as_ref()?)?)
+        MeasureKey::of(model.selected_status()?)
     }
 
     /// Measure the payload paths of the selected workspace when they have not
@@ -664,7 +721,8 @@ impl WorkspaceDetailView {
         };
         let retry = {
             let state = self.state.clone();
-            let name = detail.name.clone();
+            // Found again by its checkout when clicked: its name is a label.
+            let at = detail.path.clone();
             let needs = matches!(
                 detail.state,
                 WorkspaceState::NeedsAttention
@@ -693,7 +751,7 @@ impl WorkspaceDetailView {
                     .read(cx)
                     .selection
                     .current()
-                    .and_then(|m| m.workspace(&name))
+                    .and_then(|m| m.workspace_at(&at))
                     .map(|w| w.workspace.clone());
                 let Some(workspace) = workspace else {
                     return;
@@ -949,6 +1007,25 @@ impl WorkspaceDetailView {
                             Tone::Neutral,
                             "The engine of this service.",
                         ))
+                        .children(
+                            detail
+                                .services
+                                .iter()
+                                .find(|note| note.service == conn.service)
+                                .map(|note| {
+                                    ui::pill(
+                                        "connection-state",
+                                        note.label(),
+                                        match note.state {
+                                            ServiceRun::Failed => Tone::Danger,
+                                            ServiceRun::Started => Tone::Info,
+                                            ServiceRun::Running => Tone::Success,
+                                        },
+                                        "How this service stood when the workspace was last \
+                                         entered.",
+                                    )
+                                }),
+                        )
                         .child(
                             div()
                                 .text_xs()
@@ -1376,55 +1453,119 @@ impl WorkspaceDetailView {
     }
 
     fn problems(&self, detail: &Detail, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        detail
-            .problems()
-            .into_iter()
-            .map(|row| {
-                let failed = row.state == PhaseState::Failed;
-                let text = match &row.detail {
-                    Some(d) if failed => format!("{} failed: {d}", row.title),
-                    Some(d) => format!("{} was skipped: {d}", row.title),
-                    None if failed => format!("{} failed.", row.title),
-                    None => format!("{} was skipped.", row.title),
-                };
-                // What core says fixes it, next to the reason: approving what
-                // setup skipped for want of approval, else running setup again.
-                let review = (!failed && matches!(row.phase, Phase::Env | Phase::Hooks))
-                    .then(|| detail.remedy("trust"))
-                    .flatten();
-                let action = match (review, detail.remedy("setup")) {
-                    (Some(trust), _) => Some(remedies::button_with_id(
+        // The checkout holds another branch than the workspace was created
+        // for: nothing is wrong with the data, but the name on the branch is
+        // not the workspace's.
+        // It only informs: there is nothing to run about it.
+        let drift = detail.drift.iter().map(|text| {
+            banner(Tone::Info, Lucide::GitBranch, text.clone(), None, cx)
+                .id("problem-branch-drift")
+                .test_support()
+                .into_any_element()
+        });
+        // A derived file is gone: setup writes it again (and the workspace
+        // stays ready; the status is the receipt's).
+        let env_file = detail.env_file.iter().map(|text| {
+            banner(
+                Tone::Warning,
+                Lucide::TriangleAlert,
+                text.clone(),
+                detail.remedy("setup").map(|remedy| {
+                    remedies::button_with_id(
                         &self.state,
-                        format!("problem-review-{}", row.phase.as_str()).into(),
-                        trust,
+                        "problem-fix-env-file".into(),
+                        remedy,
                         false,
-                    )),
-                    (None, Some(setup)) => Some(remedies::button_with_id(
-                        &self.state,
-                        format!("problem-fix-{}", row.phase.as_str()).into(),
-                        setup,
-                        false,
-                    )),
-                    (None, None) => None,
+                    )
+                }),
+                cx,
+            )
+            .id("problem-env-file")
+            .test_support()
+            .into_any_element()
+        });
+        // A service the last entry could not start, with the way to start it.
+        let services: Vec<AnyElement> = detail
+            .services
+            .iter()
+            .filter(|note| note.state == ServiceRun::Failed)
+            .map(|note| {
+                let text = match &note.reason {
+                    Some(reason) => format!("{} did not start: {reason}", note.service),
+                    None => format!("{} did not start.", note.service),
                 };
                 banner(
-                    if failed { Tone::Danger } else { Tone::Warning },
-                    if failed {
-                        Lucide::CircleAlert
-                    } else {
-                        Lucide::TriangleAlert
-                    },
+                    Tone::Danger,
+                    Lucide::CircleAlert,
                     text,
-                    action,
+                    note.remedy.as_ref().map(|remedy| {
+                        remedies::button_with_id(
+                            &self.state,
+                            format!("problem-start-{}", note.service).into(),
+                            remedy,
+                            false,
+                        )
+                    }),
                     cx,
                 )
                 .id(SharedString::from(format!(
-                    "problem-{}",
-                    row.phase.as_str()
+                    "problem-service-{}",
+                    note.service
                 )))
                 .test_support()
                 .into_any_element()
             })
+            .collect();
+        let phases = detail.problems().into_iter().map(|row| {
+            let failed = row.state == PhaseState::Failed;
+            let text = match &row.detail {
+                Some(d) if failed => format!("{} failed: {d}", row.title),
+                Some(d) => format!("{} was skipped: {d}", row.title),
+                None if failed => format!("{} failed.", row.title),
+                None => format!("{} was skipped.", row.title),
+            };
+            // What core says fixes it, next to the reason: approving what
+            // setup skipped for want of approval, else running setup again.
+            let review = (!failed && matches!(row.phase, Phase::Env | Phase::Hooks))
+                .then(|| detail.remedy("trust"))
+                .flatten();
+            let action = match (review, detail.remedy("setup")) {
+                (Some(trust), _) => Some(remedies::button_with_id(
+                    &self.state,
+                    format!("problem-review-{}", row.phase.as_str()).into(),
+                    trust,
+                    false,
+                )),
+                (None, Some(setup)) => Some(remedies::button_with_id(
+                    &self.state,
+                    format!("problem-fix-{}", row.phase.as_str()).into(),
+                    setup,
+                    false,
+                )),
+                (None, None) => None,
+            };
+            banner(
+                if failed { Tone::Danger } else { Tone::Warning },
+                if failed {
+                    Lucide::CircleAlert
+                } else {
+                    Lucide::TriangleAlert
+                },
+                text,
+                action,
+                cx,
+            )
+            .id(SharedString::from(format!(
+                "problem-{}",
+                row.phase.as_str()
+            )))
+            .test_support()
+            .into_any_element()
+        });
+        drift
+            .chain(env_file)
+            .chain(phases)
+            .chain(services)
             .collect()
     }
 }
@@ -1436,10 +1577,7 @@ impl Render for WorkspaceDetailView {
             let Some(model) = state.selection.current() else {
                 return div().into_any_element();
             };
-            let status = model
-                .selected_workspace
-                .as_ref()
-                .and_then(|name| model.workspace(name));
+            let status = model.selected_status();
             let busy = state.busy().is_some();
             let processes = status.map(|s| ProcessesData {
                 pitchfork: model.pitchfork.clone(),
@@ -1617,6 +1755,7 @@ mod tests {
             instance_id: None,
             status: RecordStatus::Ready,
             cow: CowCapability::Verified,
+            clone_strategy: None,
             error: None,
             created_at: Utc::now(),
             size_bytes: Some(392 * 1024 * 1024),
@@ -1651,6 +1790,8 @@ mod tests {
             status: Some(receipt.status()),
             receipt: Some(receipt),
             busy: false,
+            drift: None,
+            env_file: None,
         };
         (model, status)
     }
@@ -1715,6 +1856,71 @@ mod tests {
         assert_eq!(detail.payload.len(), 2);
         let db = detail.database.as_ref().unwrap();
         assert_eq!(db.size_bytes, Some(392 * 1024 * 1024));
+    }
+
+    #[test]
+    fn a_moved_checkout_and_a_service_that_did_not_start_are_said_with_their_remedy() {
+        use crate::jobs::EnteredService;
+        use devflow_core::setup::BranchDrift;
+        let (mut model, mut status) = fixture();
+        let detail = Detail::of(&model, &status);
+        assert!(detail.drift.is_none() && detail.services.is_empty() && detail.env_file.is_none());
+
+        status.drift = Some(BranchDrift {
+            workspace: "feature".into(),
+            branch: Some("other".into()),
+            head: None,
+        });
+        let path = status.workspace.path.clone();
+        model.entered.insert(
+            path,
+            vec![
+                EnteredService {
+                    key: "db".into(),
+                    engine: "postgres".into(),
+                    state: ServiceRun::Running,
+                    reason: None,
+                },
+                EnteredService {
+                    key: "cache".into(),
+                    engine: "valkey".into(),
+                    state: ServiceRun::Failed,
+                    reason: Some("port 6400 is taken".into()),
+                },
+            ],
+        );
+        let detail = Detail::of(&model, &status);
+        assert_eq!(
+            detail.drift.as_deref(),
+            Some("now on branch other; its data still belongs to workspace feature")
+        );
+        // The note about the branch is plain words: nothing to type.
+        assert!(!detail.drift.as_deref().unwrap().contains("devflow"));
+
+        // A file derived from the receipt is gone: the pane says so (naming
+        // the file, no command) and offers the remedy core gives.
+        status.env_file = Some(devflow_core::setup::EnvFileProblem::Missing);
+        let detail = Detail::of(&model, &status);
+        let text = detail.env_file.as_deref().unwrap();
+        assert!(
+            text.contains(".devflow/env") && !text.contains("`devflow"),
+            "{text}"
+        );
+        assert_eq!(detail.services.len(), 2);
+        assert_eq!(detail.services[0].label(), "running");
+        assert!(detail.services[0].remedy.is_none());
+        let failed = &detail.services[1];
+        assert_eq!(failed.label(), "not running");
+        assert_eq!(failed.reason.as_deref(), Some("port 6400 is taken"));
+        assert!(
+            matches!(
+                &failed.remedy,
+                Some(Remedy::StartService { key, workspace: Some(w), .. })
+                    if key == "cache" && *w == status.workspace.path
+            ),
+            "{:?}",
+            failed.remedy
+        );
     }
 
     #[test]

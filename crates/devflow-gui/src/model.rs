@@ -1,6 +1,7 @@
 //! Plain data the views render, plus the pure logic around it (labels, rows,
 //! stale-result filtering). Nothing here touches GPUI or blocks.
 use crate::{
+    jobs::EnteredService,
     redaction::{RawName, RefusalView, shown},
     services::ServicesModel,
 };
@@ -394,7 +395,13 @@ pub struct ProjectModel {
     /// check runs when a start is asked for), by workspace directory, until
     /// the next start works or the person dismisses them.
     pub refusals: HashMap<PathBuf, RefusalView>,
-    pub selected_workspace: Option<String>,
+    /// How each workspace's container services stood when it was last
+    /// entered, by workspace directory (kept until the next entry).
+    pub entered: HashMap<PathBuf, Vec<EnteredService>>,
+    /// The selected workspace, by its checkout (the one thing about a
+    /// workspace that is unique: a name is only a label, and two workspaces can
+    /// answer to one name when a checkout moved to another branch).
+    pub selected_workspace: Option<PathBuf>,
     pub refreshing: bool,
     /// A refresh was requested while one was running.
     pub refresh_again: bool,
@@ -420,6 +427,7 @@ impl ProjectModel {
             config_error: None,
             logs: LogsModel::default(),
             refusals: HashMap::new(),
+            entered: HashMap::new(),
             selected_workspace: None,
             refreshing: false,
             refresh_again: false,
@@ -435,17 +443,17 @@ impl ProjectModel {
         })
     }
 
-    /// The directory whose trust scope an operation on workspace `name` is
-    /// about: that workspace's own checkout (a linked worktree has its own
-    /// pitchfork files). `None` stands for the default workspace; a name the
+    /// The directory whose trust scope an operation on the workspace at `path`
+    /// is about: that workspace's own checkout (a linked worktree has its own
+    /// pitchfork files). `None` stands for the default workspace; a path the
     /// list does not have falls back to the main checkout.
-    pub fn trust_dir(&self, name: Option<&str>) -> PathBuf {
+    pub fn trust_dir(&self, path: Option<&Path>) -> PathBuf {
         let found = self
             .workspaces
             .iter()
             .map(|w| &w.workspace)
-            .find(|w| match name {
-                Some(name) => w.name == name,
+            .find(|w| match path {
+                Some(path) => w.path == path,
                 None => w.is_default,
             });
         match (found, &self.project) {
@@ -456,11 +464,12 @@ impl ProjectModel {
     }
 
     fn selected_workspace_entry(&self) -> Option<&Workspace> {
-        let name = self.selected_workspace.as_ref()?;
-        self.workspaces
-            .iter()
-            .map(|w| &w.workspace)
-            .find(|w| &w.name == name)
+        self.selected_status().map(|status| &status.workspace)
+    }
+
+    /// The selected workspace's row.
+    pub fn selected_status(&self) -> Option<&WorkspaceStatus> {
+        self.workspace_at(self.selected_workspace.as_deref()?)
     }
 
     pub fn selected_workspace_id(&self) -> Option<WorkspaceId> {
@@ -501,8 +510,12 @@ impl ProjectModel {
         }
     }
 
-    pub fn workspace_ref(&self, name: &str) -> Option<WorkspaceRef> {
-        let status = self.workspace(name)?;
+    /// A reference to the workspace whose checkout is at `path`: the row the
+    /// person clicked, whatever its name or branch. A name is not an identity
+    /// (see [`ProjectModel::workspace`]), so nothing that acts on a workspace
+    /// is looked up by one.
+    pub fn workspace_ref_at(&self, path: &Path) -> Option<WorkspaceRef> {
+        let status = self.workspace_at(path)?;
         Some(WorkspaceRef {
             project: self.entry.id,
             root: self.entry.root.clone(),
@@ -519,15 +532,34 @@ impl ProjectModel {
         if self.entry.id != target.project || self.entry.root != target.root {
             return None;
         }
-        self.workspace(&target.name).filter(|w| {
-            w.workspace.path == target.path
-                && instance_id(w) == target.instance_id
-                && w.workspace.fingerprint == target.fingerprint
+        self.workspace_at(&target.path).filter(|w| {
+            instance_id(w) == target.instance_id && w.workspace.fingerprint == target.fingerprint
         })
     }
 
+    /// The workspace whose checkout is at `path`: the lookup every action and
+    /// every selection uses.
+    pub fn workspace_at(&self, path: &Path) -> Option<&WorkspaceStatus> {
+        self.workspaces.iter().find(|w| w.workspace.path == path)
+    }
+
+    /// The workspace called `name`, if exactly one is: a name is a label, and
+    /// when two workspaces answer to it (a checkout moved to another branch and
+    /// another took its old one) neither is returned, never the first. For
+    /// names that come from outside the list (a remedy's, a test's); anything
+    /// the person pointed at is found by [`ProjectModel::workspace_at`].
     pub fn workspace(&self, name: &str) -> Option<&WorkspaceStatus> {
-        self.workspaces.iter().find(|w| w.workspace.name == name)
+        let mut named = self.workspaces.iter().filter(|w| w.workspace.name == name);
+        let found = named.next()?;
+        named.next().is_none().then_some(found)
+    }
+
+    /// [`ProjectModel::workspace_ref_at`] for a workspace named `name` (see
+    /// [`ProjectModel::workspace`]): for tests, which name the workspaces they
+    /// build.
+    #[cfg(test)]
+    pub fn workspace_ref(&self, name: &str) -> Option<WorkspaceRef> {
+        self.workspace_ref_at(&self.workspace(name)?.workspace.path)
     }
 
     pub fn default_workspace(&self) -> Option<&Workspace> {
@@ -541,10 +573,10 @@ impl ProjectModel {
     pub fn fix_selected_workspace(&mut self) {
         let valid = self
             .selected_workspace
-            .as_ref()
-            .is_some_and(|name| self.workspace(name).is_some());
+            .as_deref()
+            .is_some_and(|path| self.workspace_at(path).is_some());
         if !valid {
-            self.selected_workspace = self.default_workspace().map(|w| w.name.clone());
+            self.selected_workspace = self.default_workspace().map(|w| w.path.clone());
         }
     }
 
@@ -615,7 +647,9 @@ impl WorkspaceState {
 /// One workspace as the sidebar tree shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceSummary {
+    /// A label; the checkout (`path`) is the identity.
     pub name: String,
+    pub path: PathBuf,
     pub state: WorkspaceState,
     pub is_default: bool,
 }
@@ -624,6 +658,7 @@ impl WorkspaceSummary {
     pub fn of(ws: &WorkspaceStatus) -> Self {
         Self {
             name: ws.workspace.name.clone(),
+            path: ws.workspace.path.clone(),
             state: WorkspaceState::of(ws),
             is_default: ws.workspace.is_default,
         }
@@ -708,6 +743,9 @@ pub struct WorkspaceRow {
     pub workspace: Workspace,
     pub state: WorkspaceState,
     pub branch: String,
+    /// "now on branch X; its data still belongs to workspace Y" when the
+    /// checkout holds another branch than the workspace was created for.
+    pub drift: Option<String>,
     pub database: String,
     pub path: String,
 }
@@ -731,6 +769,7 @@ pub fn workspace_rows(list: &[WorkspaceStatus]) -> Vec<WorkspaceRow> {
                 .as_deref()
                 .map(shown)
                 .unwrap_or_else(|| "(detached)".into()),
+            drift: ws.drift.as_ref().map(|drift| shown(&drift.describe())),
             database: database_label(ws),
             path: shorten_home(&ws.workspace.path),
             workspace: ws.workspace.clone(),
@@ -990,8 +1029,10 @@ pub fn data_options(
         {
             options.push(DataOption {
                 label: shown(&format!("Workspace {}", ws.workspace.name)),
+                // By checkout, which cannot mean two workspaces; core labels
+                // the source with the workspace's name.
                 source: Some(DataSource::Workspace {
-                    name: ws.workspace.name.clone(),
+                    name: ws.workspace.path.display().to_string(),
                 }),
             });
         }
@@ -1051,6 +1092,8 @@ mod tests {
             receipt,
             status,
             busy,
+            drift: None,
+            env_file: None,
         }
     }
 
@@ -1174,6 +1217,7 @@ mod tests {
             instance_id: None,
             status: RecordStatus::Ready,
             cow: CowCapability::Verified,
+            clone_strategy: None,
             error: None,
             created_at: Utc::now(),
             size_bytes: Some(3 * 1024 * 1024),
@@ -1235,10 +1279,15 @@ mod tests {
             receipt: None,
             status: None,
             busy: false,
+            drift: None,
+            env_file: None,
         }];
         model.selected_workspace = Some("gone".into());
         model.fix_selected_workspace();
-        assert_eq!(model.selected_workspace.as_deref(), Some("main"));
+        assert_eq!(
+            model.selected_workspace.as_deref(),
+            Some(Path::new("/tmp/main"))
+        );
     }
 
     fn model_with(names: &[&str]) -> ProjectModel {
@@ -1256,6 +1305,8 @@ mod tests {
                 receipt: None,
                 status: None,
                 busy: false,
+                drift: None,
+                env_file: None,
             })
             .collect();
         model.fix_selected_workspace();
@@ -1270,7 +1321,7 @@ mod tests {
 
         // The user picked another workspace while that refresh was in flight:
         // main's daemons and logs must not be shown under feature.
-        model.selected_workspace = Some("feature".into());
+        model.selected_workspace = Some(PathBuf::from("/tmp/feature"));
         assert!(!model.accepts(&for_main), "result for the old workspace");
         let for_feature = model.begin_refresh();
         assert!(model.accepts(&for_feature));

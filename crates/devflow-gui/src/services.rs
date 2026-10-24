@@ -872,6 +872,8 @@ mod tests {
             status: receipt.as_ref().map(Receipt::status),
             receipt,
             busy: false,
+            drift: None,
+            env_file: None,
         }
     }
 

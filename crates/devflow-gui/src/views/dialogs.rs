@@ -2,7 +2,7 @@
 //! Each form is a small entity; `window.open_dialog` only hosts it.
 use crate::{
     model::{DataOption, RequestKey, WorkspaceRef, data_options, shorten_home},
-    ops::{Approval, RemoveChoice, TrustChoice, approve_reviewed},
+    ops::{Approval, NewWorkspace, RemoveChoice, TrustChoice, approve_reviewed},
     redaction::shown,
     state::{AppState, TrustPrompt, TrustPurpose},
 };
@@ -366,8 +366,13 @@ struct NewWorkspaceDialog {
     key: Option<RequestKey>,
     name: Entity<InputState>,
     from: Entity<SelectState<Vec<SharedString>>>,
-    from_names: Vec<String>,
-    default_name: Option<String>,
+    /// The checkouts the "Code from" choices stand for, by index: the choice
+    /// is made by checkout, since two workspaces can share a name.
+    from_paths: Vec<PathBuf>,
+    /// The default workspace's checkout: choosing it means "the default".
+    default_path: Option<PathBuf>,
+    /// Where the new branch starts; empty means the default.
+    base: Entity<InputState>,
     data: Option<Entity<SelectState<Vec<SharedString>>>>,
     data_options: Vec<DataOption>,
     error: Option<SharedString>,
@@ -376,13 +381,13 @@ struct NewWorkspaceDialog {
 
 impl NewWorkspaceDialog {
     fn build(state: &Entity<AppState>, window: &mut Window, cx: &mut App) -> Option<Entity<Self>> {
-        let (from_names, default_name, data_options) = {
+        let (from_choices, default_path, data_options) = {
             let model = state.read(cx).selection.current()?;
-            let default_name = model.default_workspace().map(|w| w.name.clone());
-            let names: Vec<String> = model
+            let default_path = model.default_workspace().map(|w| w.path.clone());
+            let choices: Vec<(String, PathBuf)> = model
                 .workspaces
                 .iter()
-                .map(|w| w.workspace.name.clone())
+                .map(|w| (w.workspace.name.clone(), w.workspace.path.clone()))
                 .collect();
             let options = model.database.configured.then(|| {
                 data_options(
@@ -391,20 +396,27 @@ impl NewWorkspaceDialog {
                     &model.database.snapshots,
                 )
             });
-            (names, default_name, options)
+            (choices, default_path, options)
         };
-        let default_ix = default_name
+        let default_ix = default_path
             .as_ref()
-            .and_then(|d| from_names.iter().position(|n| n == d))
+            .and_then(|d| from_choices.iter().position(|(_, path)| path == d))
             .unwrap_or(0);
+        let from_paths: Vec<PathBuf> = from_choices.iter().map(|(_, p)| p.clone()).collect();
         let key = state.read(cx).selected_key();
         let state = state.clone();
         Some(cx.new(|cx| {
             let name = cx.new(|cx| InputState::new(window, cx).placeholder("feature/my-task"));
-            // Drawn masked; the choice is read by index, from `from_names`.
-            let items: Vec<SharedString> = from_names.iter().map(|n| shown(n).into()).collect();
+            // Drawn masked; the choice is read by index, from `from_paths`.
+            let items: Vec<SharedString> = from_choices
+                .iter()
+                .map(|(name, _)| shown(name).into())
+                .collect();
             let from =
                 cx.new(|cx| SelectState::new(items, Some(IndexPath::new(default_ix)), window, cx));
+            let base = cx.new(|cx| {
+                InputState::new(window, cx).placeholder("default: the code source's HEAD")
+            });
             let data = data_options.as_ref().map(|options| {
                 let items: Vec<SharedString> =
                     options.iter().map(|o| o.label.clone().into()).collect();
@@ -424,8 +436,9 @@ impl NewWorkspaceDialog {
                 key,
                 name,
                 from,
-                from_names,
-                default_name,
+                from_paths,
+                default_path,
+                base,
                 data,
                 data_options: data_options.unwrap_or_default(),
                 error: None,
@@ -451,8 +464,9 @@ impl NewWorkspaceDialog {
             .from
             .read(cx)
             .selected_index(cx)
-            .and_then(|ix| self.from_names.get(ix.row).cloned())
-            .filter(|chosen| Some(chosen) != self.default_name.as_ref());
+            .and_then(|ix| self.from_paths.get(ix.row).cloned())
+            .filter(|chosen| Some(chosen) != self.default_path.as_ref());
+        let base = Some(self.base.read(cx).value().trim().to_string()).filter(|b| !b.is_empty());
         let data_from = self.data.as_ref().and_then(|select| {
             let ix = select.read(cx).selected_index(cx)?;
             self.data_options.get(ix.row)?.source.clone()
@@ -468,10 +482,13 @@ impl NewWorkspaceDialog {
             window,
             cx,
             move |trust, window, cx| {
-                let (name, from, data_from) = (name.clone(), from.clone(), data_from.clone());
-                state.update(cx, |s, cx| {
-                    s.create_workspace(name, from, data_from, trust, window, cx)
-                });
+                let new = NewWorkspace {
+                    name: name.clone(),
+                    from: from.clone(),
+                    base: base.clone(),
+                    data_from: data_from.clone(),
+                };
+                state.update(cx, |s, cx| s.create_workspace(new, trust, window, cx));
             },
         );
     }
@@ -494,6 +511,12 @@ impl Render for NewWorkspaceDialog {
                     .gap_1()
                     .child(label("Code from"))
                     .child(Select::new(&self.from).w_full()),
+            )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(label("Start from (branch, tag or commit)"))
+                    .child(Input::new(&self.base)),
             )
             .children(self.data.as_ref().map(|data| {
                 v_flex()
@@ -524,11 +547,16 @@ pub fn open_remove(
     window: &mut Window,
     cx: &mut App,
 ) {
+    // The row that was clicked, by its checkout: the name on it can be another
+    // workspace's too, and the reference core checks the removal against is
+    // made from this row and no other. It must still be the checkout (the
+    // directory) that was clicked.
     let target = state
         .read(cx)
         .selection
         .current()
-        .and_then(|model| model.workspace_ref(&workspace.name));
+        .and_then(|model| model.workspace_ref_at(&workspace.path))
+        .filter(|target| target.fingerprint == workspace.fingerprint);
     match target {
         Some(target) => open_remove_with(state, target, false, false, false, window, cx),
         None => stale_target(window, cx),
