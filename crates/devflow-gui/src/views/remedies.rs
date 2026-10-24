@@ -271,6 +271,10 @@ pub fn run_scoped(state: &Entity<AppState>, remedy: &Remedy, window: &mut Window
             let root = root.clone();
             state.update(cx, |s, cx| s.install_git_hook(root, window, cx));
         }
+        Remedy::IntegrateHost { root, host } => {
+            let (root, host) = (root.clone(), host.clone());
+            state.update(cx, |s, cx| s.integrate_host(root, host, window, cx));
+        }
         // devflow never edits a hook another tool wrote: it hands over the
         // exact line its own hook is made of (core's text, the CLI's too).
         Remedy::CopyHookLine { .. } => {
@@ -290,6 +294,11 @@ pub fn run_scoped(state: &Entity<AppState>, remedy: &Remedy, window: &mut Window
         Remedy::PruneWorktrees { root } => {
             let root = root.clone();
             state.update(cx, |s, cx| s.review_missing_worktrees(root, window, cx));
+        }
+        // The page lists what core found and asks before removing any of it.
+        Remedy::CleanUp { root } => {
+            let root = root.clone();
+            state.update(cx, |s, cx| s.open_cleanup(root, window, cx));
         }
         Remedy::RemoveWorkspace { root, name } => {
             let Some(found) = workspace_named(state, root, name, cx) else {
@@ -330,7 +339,17 @@ pub fn run_scoped(state: &Entity<AppState>, remedy: &Remedy, window: &mut Window
         Remedy::CreateSeedSnapshot { .. } => state.update(cx, |s, cx| s.go_to_tab(Tab::Data, cx)),
         // The app names workspaces by their folder already: the table is where
         // the person sees which one is meant.
-        Remedy::UsePath { .. } => state.update(cx, |s, cx| s.go_to_tab(Tab::Workspaces, cx)),
+        Remedy::UsePath { .. } | Remedy::ChooseWorkspace { .. } => {
+            state.update(cx, |s, cx| s.go_to_tab(Tab::Workspaces, cx))
+        }
+        // `devflow switch` changing a shell's directory has no counterpart in
+        // the app, which opens a workspace's folder itself.
+        Remedy::ShellIntegration { .. } => refuse(
+            window,
+            cx,
+            remedy,
+            "The shell integration is for the command line; the app does not need it.",
+        ),
         // The project list's remedies are `problems::run_remedy`'s.
         Remedy::Retry
         | Remedy::ForgetProject { .. }

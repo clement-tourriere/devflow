@@ -220,7 +220,7 @@ impl ConfigFiles {
 }
 
 fn read_state(path: PathBuf) -> Result<FileState> {
-    match std::fs::read_to_string(&path) {
+    match crate::config::read_text(&path) {
         Ok(text) => Ok(FileState {
             hash: Some(crate::propose::sha256_hex(&text)),
             text: Some(text),
@@ -231,7 +231,7 @@ fn read_state(path: PathBuf) -> Result<FileState> {
             text: None,
             hash: None,
         }),
-        Err(_) => bail!("cannot read {}", path.display()),
+        Err(error) => bail!("cannot read {}: {error}", path.display()),
     }
 }
 

@@ -1,6 +1,13 @@
 //! GUI preferences in `<config dir>/devflow/gui.toml`, and launching the
 //! user's editor and terminal.
-use anyhow::{Context as _, Result, bail};
+//!
+//! The editor and terminal commands are not the app's alone: `devflow open`
+//! uses them too, so they live in core's `settings.toml` next to `gui.toml`
+//! ([`devflow_core::settings`]). An older `gui.toml` holds them; [`load`] moves
+//! them over once and never replaces a value `settings.toml` already has.
+use anyhow::{Context as _, Result};
+use devflow_core::settings as shared;
+pub use devflow_core::settings::command_line;
 use gpui_kit::{
     App, Window, WindowAppearance,
     component::{Theme, ThemeMode},
@@ -69,8 +76,11 @@ impl ThemeChoice {
 #[serde(default)]
 pub struct Settings {
     /// Program and arguments; the workspace path is appended unless the
-    /// command contains `{path}`.
+    /// command contains `{path}`. Stored in core's `settings.toml` (shared with
+    /// `devflow open`); read from an older `gui.toml` for the migration.
+    #[serde(skip_serializing)]
     pub editor_command: String,
+    #[serde(skip_serializing)]
     pub terminal_command: String,
     pub theme: ThemeChoice,
     /// Closing the window hides it to the menu bar and the app keeps running;
@@ -82,12 +92,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            editor_command: "code".into(),
-            terminal_command: if cfg!(target_os = "macos") {
-                "open -a Terminal".into()
-            } else {
-                "x-terminal-emulator --working-directory={path}".into()
-            },
+            editor_command: shared::DEFAULT_EDITOR.into(),
+            terminal_command: shared::default_terminal().into(),
             theme: ThemeChoice::System,
             keep_in_menu_bar: true,
         }
@@ -98,23 +104,154 @@ pub fn path() -> Result<PathBuf> {
     Ok(devflow_core::paths::config_dir()?.join("gui.toml"))
 }
 
-/// Missing file means defaults; an unreadable one is an error the caller reports.
-pub fn load() -> Result<Settings> {
-    let path = path()?;
-    match std::fs::read_to_string(&path) {
-        Ok(text) => toml::from_str(&text).with_context(|| format!("invalid {}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
-        Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
-    }
+/// The file the editor and terminal commands are kept in: core's
+/// `settings.toml`, beside the given `gui.toml`.
+fn shared_path(gui: &Path) -> PathBuf {
+    gui.with_file_name("settings.toml")
 }
 
+/// Missing file means defaults; an unreadable one is an error the caller reports.
+pub fn load() -> Result<Settings> {
+    load_from(&path()?)
+}
+
+/// [`load`] from the given `gui.toml` (and the `settings.toml` beside it).
+///
+/// The editor and terminal come from `settings.toml`. A value an older
+/// `gui.toml` still holds that `settings.toml` does not have is moved there
+/// first and only then dropped from `gui.toml`; if it cannot be moved it
+/// stays where it is and is used from there, so no setting is ever lost.
+pub fn load_from(gui: &Path) -> Result<Settings> {
+    let mut settings = match std::fs::read_to_string(gui) {
+        Ok(text) => toml::from_str::<Settings>(&text)
+            .with_context(|| format!("invalid {}", gui.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", gui.display())),
+    };
+    // What the older file held, by key (a default is not a setting).
+    let legacy = std::fs::read_to_string(gui)
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
+        .unwrap_or_default();
+    let old = |key: &str| legacy.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    let (old_editor, old_terminal) = (old("editor_command"), old("terminal_command"));
+
+    let file = shared_path(gui);
+    let mut stored = shared::load_from(&file)?;
+    if stored.adopt(old_editor.as_deref(), old_terminal.as_deref()) {
+        // A failed write leaves `gui.toml` alone, and the values in use.
+        if shared::save_to(&file, &stored).is_ok() {
+            let _ = save_gui_to(gui, &settings);
+        }
+    } else if (old_editor.is_some() || old_terminal.is_some())
+        && legacy_is_settled(&stored, &old_editor, &old_terminal)
+    {
+        // `settings.toml` already decided both: nothing is left to move.
+        let _ = save_gui_to(gui, &settings);
+    }
+    settings.editor_command = stored
+        .editor_command
+        .clone()
+        .or(old_editor)
+        .unwrap_or_else(|| shared::DEFAULT_EDITOR.into());
+    settings.terminal_command = stored
+        .terminal_command
+        .clone()
+        .or(old_terminal)
+        .unwrap_or_else(|| shared::default_terminal().into());
+    Ok(settings)
+}
+
+/// Every old key that is there has been decided by `settings.toml`.
+fn legacy_is_settled(
+    stored: &shared::Settings,
+    editor: &Option<String>,
+    terminal: &Option<String>,
+) -> bool {
+    (editor.is_none() || stored.editor_command.is_some())
+        && (terminal.is_none() || stored.terminal_command.is_some())
+}
+
+/// Write `gui.toml`: the theme and the menu bar setting, and nothing of the
+/// editor and terminal, which are the command line's as much as the app's
+/// (`settings.toml`, see [`save_shared_changes`]). Atomically. This is what every
+/// background save is: a stale copy of the commands held in memory can never
+/// overwrite what was edited in `settings.toml` meanwhile.
 pub fn save_to(path: &Path, settings: &Settings) -> Result<()> {
+    save_gui_to(path, settings)
+}
+
+fn save_gui_to(path: &Path, settings: &Settings) -> Result<()> {
     let dir = path.parent().context("settings path has no parent")?;
     std::fs::create_dir_all(dir)?;
+    let mut table = toml::Table::try_from(settings)?;
+    // An older `gui.toml` may still hold the only copy of the editor and
+    // terminal commands: they stay until `settings.toml` has them (readable,
+    // and the key set), whatever this save is for. Never copied into
+    // `settings.toml` from here: what is in memory may be stale.
+    if let Some(old) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
+    {
+        let stored = shared::load_from(&shared_path(path)).ok();
+        for (key, settled) in [
+            (
+                "editor_command",
+                stored.as_ref().is_some_and(|s| s.editor_command.is_some()),
+            ),
+            (
+                "terminal_command",
+                stored
+                    .as_ref()
+                    .is_some_and(|s| s.terminal_command.is_some()),
+            ),
+        ] {
+            if let (false, Some(value)) = (settled, old.get(key)) {
+                table.insert(key.to_string(), value.clone());
+            }
+        }
+    }
     // Write beside the target and rename, so a crash never leaves a torn file.
     let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, toml::to_string_pretty(settings)?)?;
+    std::fs::write(&tmp, toml::to_string_pretty(&table)?)?;
     std::fs::rename(&tmp, path).with_context(|| format!("cannot write {}", path.display()))
+}
+
+/// Write the editor and terminal commands the user changed (`after` against
+/// `before`, what the form was opened with) to the `settings.toml` beside `gui`.
+/// The file is read again first and only the keys that changed are written, so
+/// an edit made to the other one meanwhile is kept. A command set back to the
+/// default that was never chosen is removed rather than written down. A file
+/// that cannot be read is an error, never replaced.
+pub fn save_shared_changes(gui: &Path, before: &Settings, after: &Settings) -> Result<()> {
+    let editor = before.editor_command != after.editor_command;
+    let terminal = before.terminal_command != after.terminal_command;
+    if !editor && !terminal {
+        return Ok(());
+    }
+    let file = shared_path(gui);
+    let mut stored = shared::load_from(&file)?;
+    let pick = |current: &Option<String>, new: &str, default: &str| {
+        (current.is_some() || new != default).then(|| new.to_string())
+    };
+    if editor {
+        stored.editor_command = pick(
+            &stored.editor_command,
+            &after.editor_command,
+            shared::DEFAULT_EDITOR,
+        );
+    }
+    if terminal {
+        stored.terminal_command = pick(
+            &stored.terminal_command,
+            &after.terminal_command,
+            shared::default_terminal(),
+        );
+    }
+    if stored != shared::Settings::default() || file.exists() {
+        shared::save_to(&file, &stored)?;
+    }
+    Ok(())
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -190,52 +327,6 @@ impl SettingsWriter {
         lock(&self.state).pending = None;
         Ok(())
     }
-}
-
-/// Split a command line on whitespace, honouring single and double quotes.
-pub fn split_command(command: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    let mut started = false;
-    for c in command.chars() {
-        match (quote, c) {
-            (Some(q), c) if c == q => quote = None,
-            (Some(_), c) => current.push(c),
-            (None, '"' | '\'') => {
-                quote = Some(c);
-                started = true;
-            }
-            (None, c) if c.is_whitespace() => {
-                if started || !current.is_empty() {
-                    parts.push(std::mem::take(&mut current));
-                    started = false;
-                }
-            }
-            (None, c) => current.push(c),
-        }
-    }
-    if started || !current.is_empty() {
-        parts.push(current);
-    }
-    parts
-}
-
-/// The argv for opening `dir` with `command`.
-pub fn command_line(command: &str, dir: &Path) -> Result<Vec<String>> {
-    let mut parts = split_command(command);
-    if parts.is_empty() {
-        bail!("no command is configured; set one in Settings");
-    }
-    let dir_text = dir.to_string_lossy();
-    if command.contains("{path}") {
-        for part in &mut parts {
-            *part = part.replace("{path}", &dir_text);
-        }
-    } else {
-        parts.push(dir_text.into_owned());
-    }
-    Ok(parts)
 }
 
 /// How a launched program ended, as far as the user needs to know.
@@ -365,45 +456,234 @@ pub fn poll_launch(exit: &mpsc::Receiver<LaunchExit>) -> LaunchPoll {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn splits_quoted_commands() {
-        assert_eq!(
-            split_command("open -a Terminal"),
-            ["open", "-a", "Terminal"]
-        );
-        assert_eq!(
-            split_command(r#""/Applications/Visual Studio Code.app/bin/code" --wait"#),
-            ["/Applications/Visual Studio Code.app/bin/code", "--wait"]
-        );
-        assert_eq!(split_command("  "), Vec::<String>::new());
-        assert_eq!(split_command("a '' b"), ["a", "", "b"]);
-    }
-
-    #[test]
-    fn path_is_appended_unless_templated() {
-        let dir = Path::new("/work/my app");
-        assert_eq!(command_line("code", dir).unwrap(), ["code", "/work/my app"]);
-        assert_eq!(
-            command_line("term --cwd={path}", dir).unwrap(),
-            ["term", "--cwd=/work/my app"]
-        );
-        assert!(command_line("", dir).is_err());
-    }
+    use anyhow::bail;
 
     #[test]
     fn settings_round_trip_and_tolerate_missing_keys() {
+        // The app's own file holds the theme and the menu bar setting; the
+        // commands are core's (`settings.toml`).
+        let dir = tempfile::tempdir().unwrap();
+        let gui = dir.path().join("gui.toml");
         let settings = Settings {
             editor_command: "zed".into(),
             terminal_command: "kitty".into(),
             theme: ThemeChoice::Dark,
             keep_in_menu_bar: false,
         };
-        let text = toml::to_string_pretty(&settings).unwrap();
-        assert_eq!(toml::from_str::<Settings>(&text).unwrap(), settings);
+        save_to(&gui, &settings).unwrap();
+        save_shared_changes(&gui, &Settings::default(), &settings).unwrap();
+        let text = std::fs::read_to_string(&gui).unwrap();
+        assert!(
+            !text.contains("editor_command") && !text.contains("terminal_command"),
+            "{text}"
+        );
+        let shared = shared::load_from(&dir.path().join("settings.toml")).unwrap();
+        assert_eq!(shared.editor_command.as_deref(), Some("zed"));
+        assert_eq!(shared.terminal_command.as_deref(), Some("kitty"));
+        assert_eq!(load_from(&gui).unwrap(), settings);
         let partial: Settings = toml::from_str("theme = \"light\"").unwrap();
         assert_eq!(partial.editor_command, "code");
         assert_eq!(partial.theme, ThemeChoice::Light);
+    }
+
+    #[test]
+    fn the_old_commands_in_gui_toml_move_to_settings_toml_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let gui = dir.path().join("gui.toml");
+        let file = dir.path().join("settings.toml");
+        std::fs::write(
+            &gui,
+            "editor_command = \"zed\"\nterminal_command = \"kitty\"\ntheme = \"dark\"\n",
+        )
+        .unwrap();
+        let loaded = load_from(&gui).unwrap();
+        assert_eq!(loaded.editor_command, "zed");
+        assert_eq!(loaded.terminal_command, "kitty");
+        assert_eq!(loaded.theme, ThemeChoice::Dark);
+        // Moved: settings.toml has them, gui.toml keeps the rest only.
+        let stored = shared::load_from(&file).unwrap();
+        assert_eq!(stored.editor_command.as_deref(), Some("zed"));
+        assert_eq!(stored.terminal_command.as_deref(), Some("kitty"));
+        let text = std::fs::read_to_string(&gui).unwrap();
+        assert!(
+            text.contains("theme = \"dark\"") && !text.contains("zed"),
+            "{text}"
+        );
+        // A second load changes nothing.
+        assert_eq!(load_from(&gui).unwrap(), loaded);
+    }
+
+    #[test]
+    fn a_value_settings_toml_has_wins_and_nothing_is_lost_when_it_cannot_be_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let gui = dir.path().join("gui.toml");
+        let file = dir.path().join("settings.toml");
+        // settings.toml chose the editor; the old file also names a terminal.
+        std::fs::write(&file, "editor_command = \"nvim\"\n").unwrap();
+        std::fs::write(
+            &gui,
+            "editor_command = \"zed\"\nterminal_command = \"kitty\"\n",
+        )
+        .unwrap();
+        let loaded = load_from(&gui).unwrap();
+        assert_eq!(loaded.editor_command, "nvim", "the newer choice");
+        assert_eq!(loaded.terminal_command, "kitty", "taken over");
+        assert_eq!(
+            shared::load_from(&file)
+                .unwrap()
+                .terminal_command
+                .as_deref(),
+            Some("kitty")
+        );
+
+        // settings.toml cannot be written (its place is a directory): the old
+        // values stay in gui.toml and are what the app uses.
+        let dir = tempfile::tempdir().unwrap();
+        let gui = dir.path().join("gui.toml");
+        std::fs::create_dir(dir.path().join("settings.toml")).unwrap();
+        std::fs::write(&gui, "editor_command = \"zed\"\n").unwrap();
+        // (An unreadable settings.toml is an error the caller reports.)
+        assert!(load_from(&gui).is_err());
+        assert!(std::fs::read_to_string(&gui).unwrap().contains("zed"));
+        std::fs::remove_dir(dir.path().join("settings.toml")).unwrap();
+        // Unwritable: a read-only directory.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let ro = tempfile::tempdir().unwrap();
+            let gui = ro.path().join("gui.toml");
+            std::fs::write(&gui, "editor_command = \"zed\"\n").unwrap();
+            std::fs::set_permissions(ro.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+            let loaded = load_from(&gui).unwrap();
+            std::fs::set_permissions(ro.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(loaded.editor_command, "zed");
+            assert!(std::fs::read_to_string(&gui).unwrap().contains("zed"));
+        }
+    }
+
+    #[test]
+    fn an_unchosen_default_is_not_written_down_and_only_edited_keys_are_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let gui = dir.path().join("gui.toml");
+        let file = dir.path().join("settings.toml");
+        let before = Settings::default();
+        save_to(&gui, &before).unwrap();
+        save_shared_changes(&gui, &before, &before).unwrap();
+        assert!(!file.exists());
+        let chosen = Settings {
+            editor_command: "zed".into(),
+            ..Settings::default()
+        };
+        save_shared_changes(&gui, &before, &chosen).unwrap();
+        let stored = shared::load_from(&file).unwrap();
+        assert_eq!(stored.editor_command.as_deref(), Some("zed"));
+        assert_eq!(stored.terminal_command, None);
+
+        // The command line edited the terminal meanwhile; the form changed the
+        // editor only: the terminal is kept as the other wrote it.
+        std::fs::write(
+            &file,
+            "editor_command = \"zed\"\nterminal_command = \"kitty\"\n",
+        )
+        .unwrap();
+        let again = Settings {
+            editor_command: "nvim".into(),
+            ..chosen.clone()
+        };
+        save_shared_changes(&gui, &chosen, &again).unwrap();
+        let stored = shared::load_from(&file).unwrap();
+        assert_eq!(stored.editor_command.as_deref(), Some("nvim"));
+        assert_eq!(stored.terminal_command.as_deref(), Some("kitty"));
+    }
+
+    #[test]
+    fn a_theme_save_keeps_legacy_commands_until_they_are_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let gui = dir.path().join("gui.toml");
+        let file = dir.path().join("settings.toml");
+        std::fs::write(
+            &gui,
+            "editor_command = \"zed\"\nterminal_command = \"kitty\"\ntheme = \"light\"\n",
+        )
+        .unwrap();
+        // The migration cannot happen yet: settings.toml's place is a directory.
+        std::fs::create_dir(&file).unwrap();
+        assert!(load_from(&gui).is_err());
+        // (The app would run on defaults and still save a theme.)
+        let toggled = Settings {
+            theme: ThemeChoice::Dark,
+            ..Settings::default()
+        };
+        let writer = SettingsWriter::default();
+        assert!(writer.submit(toggled.clone()));
+        assert!(writer.drain(&gui).is_none());
+        let text = std::fs::read_to_string(&gui).unwrap();
+        assert!(text.contains("theme = \"dark\""), "{text}");
+        assert!(
+            text.contains("editor_command = \"zed\"")
+                && text.contains("terminal_command = \"kitty\""),
+            "the only copy survives: {text}"
+        );
+        assert!(file.is_dir(), "nothing was written into the shared place");
+
+        // Storage recovers: the next start migrates them, and only then does
+        // gui.toml let them go.
+        std::fs::remove_dir(&file).unwrap();
+        let loaded = load_from(&gui).unwrap();
+        assert_eq!(
+            (
+                loaded.editor_command.as_str(),
+                loaded.terminal_command.as_str()
+            ),
+            ("zed", "kitty")
+        );
+        let stored = shared::load_from(&file).unwrap();
+        assert_eq!(stored.editor_command.as_deref(), Some("zed"));
+        assert_eq!(stored.terminal_command.as_deref(), Some("kitty"));
+        let text = std::fs::read_to_string(&gui).unwrap();
+        assert!(
+            !text.contains("zed") && text.contains("theme = \"dark\""),
+            "{text}"
+        );
+        // A later save keeps them out of gui.toml.
+        save_to(&gui, &toggled).unwrap();
+        assert!(
+            !std::fs::read_to_string(&gui)
+                .unwrap()
+                .contains("editor_command")
+        );
+    }
+
+    #[test]
+    fn a_background_save_never_writes_the_shared_commands() {
+        // A theme toggle saves the in-memory settings, whose commands may be
+        // stale: what `settings.toml` holds now is not touched.
+        let dir = tempfile::tempdir().unwrap();
+        let gui = dir.path().join("gui.toml");
+        let file = dir.path().join("settings.toml");
+        std::fs::write(&file, "editor_command = \"edited-outside\"\n").unwrap();
+        let stale = Settings {
+            editor_command: "stale".into(),
+            terminal_command: "stale-terminal".into(),
+            theme: ThemeChoice::Dark,
+            ..Settings::default()
+        };
+        save_to(&gui, &stale).unwrap();
+        let writer = SettingsWriter::default();
+        assert!(writer.submit(stale.clone()));
+        assert!(writer.drain(&gui).is_none());
+        writer.write_now(&gui, &stale).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "editor_command = \"edited-outside\"\n"
+        );
+        let text = std::fs::read_to_string(&gui).unwrap();
+        assert!(text.contains("theme = \"dark\""), "{text}");
+        // An unreadable settings.toml does not stop the theme from being saved.
+        std::fs::write(&file, "not = [valid").unwrap();
+        save_to(&gui, &Settings::default()).unwrap();
+        assert!(save_shared_changes(&gui, &Settings::default(), &stale).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "not = [valid");
     }
 
     #[test]
@@ -450,9 +730,15 @@ mod tests {
         }
     }
 
-    fn editor_in(file: &Path) -> String {
-        let text = std::fs::read_to_string(file).unwrap();
-        toml::from_str::<Settings>(&text).unwrap().editor_command
+    fn themed(theme: ThemeChoice) -> Settings {
+        Settings {
+            theme,
+            ..Settings::default()
+        }
+    }
+
+    fn theme_in(file: &Path) -> ThemeChoice {
+        load_from(file).unwrap().theme
     }
 
     #[test]
@@ -540,9 +826,9 @@ mod tests {
         let file = dir.path().join("gui.toml");
         let writer = SettingsWriter::default();
         // A theme change is waiting for its background write ...
-        assert!(writer.submit(named("older")));
+        assert!(writer.submit(themed(ThemeChoice::Light)));
         // ... when the Settings form saves.
-        writer.write_now(&file, &named("form")).unwrap();
+        writer.write_now(&file, &themed(ThemeChoice::Dark)).unwrap();
         let mut written = 0;
         let failed = writer.drain_with(|_| {
             written += 1;
@@ -550,19 +836,19 @@ mod tests {
         });
         assert!(failed.is_none());
         assert_eq!(written, 0, "the older value is not written after it");
-        assert_eq!(editor_in(&file), "form");
+        assert_eq!(theme_in(&file), ThemeChoice::Dark);
 
         // A failed save leaves what was waiting to be written.
         let blocked = dir.path().join("a-file");
         std::fs::write(&blocked, "x").unwrap();
-        assert!(writer.submit(named("waiting")));
+        assert!(writer.submit(themed(ThemeChoice::Light)));
         assert!(
             writer
-                .write_now(&blocked.join("gui.toml"), &named("lost"))
+                .write_now(&blocked.join("gui.toml"), &themed(ThemeChoice::System))
                 .is_err()
         );
         assert!(writer.drain(&file).is_none());
-        assert_eq!(editor_in(&file), "waiting");
+        assert_eq!(theme_in(&file), ThemeChoice::Light);
     }
 
     #[test]
@@ -570,16 +856,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("deep").join("gui.toml");
         let writer = SettingsWriter::default();
-        assert!(writer.submit(named("saved")));
+        assert!(writer.submit(themed(ThemeChoice::Dark)));
         assert!(writer.drain(&file).is_none());
-        assert_eq!(editor_in(&file), "saved");
+        assert_eq!(theme_in(&file), ThemeChoice::Dark);
 
         // The parent is a regular file: nothing can be created under it.
         let blocked = dir.path().join("a-file");
         std::fs::write(&blocked, "x").unwrap();
-        assert!(writer.submit(named("unsaved")));
+        assert!(writer.submit(themed(ThemeChoice::Light)));
         assert!(writer.drain(&blocked.join("gui.toml")).is_some());
-        assert!(writer.submit(named("again")), "a failure frees the writer");
+        assert!(
+            writer.submit(themed(ThemeChoice::System)),
+            "a failure frees the writer"
+        );
     }
 
     /// Wait for a launched program's verdict (it is reported from a thread).

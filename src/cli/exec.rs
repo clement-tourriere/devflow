@@ -31,6 +31,20 @@ pub struct ExecArgs {
     #[arg(long)]
     pub clear_inherited: bool,
 
+    /// Wait first for a setup running elsewhere to finish; the command starts
+    /// only in a workspace that is ready
+    #[arg(long)]
+    pub wait: bool,
+
+    /// With --wait: give up waiting after this long (for example 90s or 10m; default 15m)
+    #[arg(
+        long,
+        value_name = "DURATION",
+        value_parser = devflow_core::wait::parse_timeout,
+        requires = "wait"
+    )]
+    pub timeout: Option<std::time::Duration>,
+
     /// The command and its arguments, after `--`
     #[arg(
         last = true,
@@ -53,6 +67,27 @@ fn env_name(name: &str) -> Result<String, String> {
     }
 }
 
+/// `--wait`: the command starts only once the workspace is ready. When it is
+/// not (needs attention, still running at the timeout, never set up) the
+/// command is not started and the exit status is 2, the status of a workspace
+/// that is not ready everywhere else; once it starts, its own status is the
+/// result. `Some` is that exit status.
+fn wait_until_ready(
+    ctx: &Ctx,
+    project: &devflow_core::Project,
+    workspace: &devflow_core::worktree::Workspace,
+    timeout: Option<std::time::Duration>,
+) -> Result<Option<ExitCode>> {
+    let timeout = timeout.unwrap_or(devflow_core::wait::DEFAULT_TIMEOUT);
+    let waited = super::wait::wait_for(ctx, project, workspace, timeout)?;
+    if waited.settled.is_ready() {
+        return Ok(None);
+    }
+    let code = super::wait::report(ctx, "exec", project, &waited)?;
+    super::output::note("devflow exec: the command was not started");
+    Ok(Some(code))
+}
+
 pub fn run(ctx: &Ctx, args: ExecArgs) -> Result<ExitCode> {
     // Find the variables first: the command never starts without them.
     let options = exec::Options {
@@ -64,9 +99,23 @@ pub fn run(ctx: &Ctx, args: ExecArgs) -> Result<ExitCode> {
             let project = ctx.project()?;
             let workspace = worktree::find(&project, name)?
                 .ok_or_else(|| anyhow!("no workspace named '{name}'; see `devflow list`"))?;
+            if args.wait
+                && let Some(code) = wait_until_ready(ctx, &project, &workspace, args.timeout)?
+            {
+                return Ok(code);
+            }
             exec::prepare_root_with(&workspace.path, &options)?
         }
-        None => exec::prepare_with(&ctx.cwd, &options)?,
+        None => {
+            if args.wait {
+                let project = ctx.project()?;
+                let workspace = super::wait::containing(ctx, &project)?;
+                if let Some(code) = wait_until_ready(ctx, &project, &workspace, args.timeout)? {
+                    return Ok(code);
+                }
+            }
+            exec::prepare_with(&ctx.cwd, &options)?
+        }
     };
     let Some((program, rest)) = args.command.split_first() else {
         return Err(anyhow!("a command is required after `--`"));

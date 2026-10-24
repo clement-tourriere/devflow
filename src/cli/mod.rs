@@ -1,11 +1,15 @@
 //! Command definitions and dispatch. Handlers parse arguments, prompt and
 //! render; every lifecycle decision is made by `devflow-core`.
+mod complete;
 mod config;
 mod db;
 mod env;
 mod exec;
+mod gc;
 mod hooks;
 mod init;
+mod integrate;
+mod open;
 mod output;
 mod processes;
 mod project;
@@ -13,6 +17,7 @@ mod service;
 mod shell;
 mod system;
 mod trust;
+mod wait;
 mod workspace;
 
 use anyhow::{Context, Result};
@@ -73,14 +78,20 @@ enum Command {
     List(workspace::ListArgs),
     /// Print the path of a workspace
     Path(workspace::PathArgs),
+    /// Open a workspace in the editor or the terminal set in settings.toml
+    Open(open::OpenArgs),
     /// Run a command with the workspace's variables (`.devflow/env`) applied last
     Exec(exec::ExecArgs),
     /// Set up (or resume setting up) the current worktree
     Setup(workspace::SetupArgs),
+    /// Wait until a workspace's setup, running elsewhere, is over; exit 0 ready, 2 not
+    Wait(wait::WaitArgs),
     /// Remove a workspace, its database branch and (optionally) its Git branch
     Remove(workspace::RemoveArgs),
     /// Forget the Git registrations of worktrees whose directory is gone (asks first)
     Prune(workspace::PruneArgs),
+    /// Find workspaces Git or an agent host removed and remove what they still own (lists unless asked)
+    Gc(gc::GcArgs),
     /// Review and approve the project's hook commands
     Trust(trust::TrustArgs),
     /// List and edit the setup, switch and teardown commands (`hook` is the Git hook)
@@ -108,6 +119,8 @@ enum Command {
         #[command(subcommand)]
         action: workspace::HookAction,
     },
+    /// Set up an agent host (T3 Code, Claude Code, Conductor, Cursor) to create workspaces with devflow
+    Integrate(integrate::IntegrateArgs),
     /// Postgres server, branches and snapshots
     Db {
         #[command(subcommand)]
@@ -133,7 +146,7 @@ enum Command {
     Doctor,
     /// Print the shell wrapper that lets `devflow switch` change directory
     ShellInit(shell::ShellInitArgs),
-    /// Print shell completions
+    /// Print the script that turns on shell completion (workspace names included)
     Completions(system::CompletionsArgs),
     /// Open the desktop app
     Gui,
@@ -147,13 +160,17 @@ impl Command {
             Command::Switch(_) => "switch",
             Command::List(_) => "list",
             Command::Path(_) => "path",
+            Command::Open(_) => "open",
             Command::Setup(_) => "setup",
+            Command::Wait(_) => "wait",
             Command::Remove(_) => "remove",
             Command::Prune(_) => "prune",
+            Command::Gc(_) => "gc",
             Command::Trust(_) => "trust",
             Command::Hooks { command } => command.json_name(),
             Command::Env { command } => command.json_name(),
             Command::Hook { action } => action.json_name(),
+            Command::Integrate(_) => "integrate",
             Command::Project { command } => command.json_name(),
             Command::Config { command } => command.json_name(),
             Command::Db { command } => command.json_name()?,
@@ -270,6 +287,9 @@ impl Ctx {
 }
 
 pub fn main() -> ExitCode {
+    // A completion request (`COMPLETE=<shell> devflow -- WORDS`) is answered
+    // and ends here, before anything else is read or printed.
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
     shell::take_handoff();
     let args: Vec<OsString> = std::env::args_os().collect();
     let cli = match Cli::try_parse_from(&args) {
@@ -507,14 +527,18 @@ fn run(ctx: &Ctx, command: Command) -> Result<ExitCode> {
         Command::Switch(args) => workspace::switch(ctx, args),
         Command::List(args) => workspace::list(ctx, args),
         Command::Path(args) => workspace::path(ctx, args),
+        Command::Open(args) => open::run(ctx, args),
         Command::Exec(args) => exec::run(ctx, args),
         Command::Setup(args) => workspace::setup(ctx, args),
+        Command::Wait(args) => wait::run(ctx, args),
         Command::Remove(args) => workspace::remove(ctx, args),
         Command::Prune(args) => workspace::prune(ctx, args),
+        Command::Gc(args) => gc::run(ctx, args),
         Command::Trust(args) => trust::command(ctx, args),
         Command::Hooks { command } => hooks::run(ctx, command),
         Command::Env { command } => env::run(ctx, command),
         Command::Hook { action } => workspace::hook(ctx, action),
+        Command::Integrate(args) => integrate::run(ctx, args),
         Command::Project { command } => project::run(ctx, command),
         Command::Config { command } => config::run(ctx, command),
         Command::Db { command } => db::run(ctx, command),
@@ -526,7 +550,7 @@ fn run(ctx: &Ctx, command: Command) -> Result<ExitCode> {
         Command::Coordinate(args) => service::coordinate(args),
         Command::Doctor => system::doctor(ctx),
         Command::ShellInit(args) => shell::init(args),
-        Command::Completions(args) => system::completions::<Cli>(args),
+        Command::Completions(args) => system::completions(args),
         Command::Gui => system::gui(ctx),
     }
 }

@@ -142,6 +142,7 @@ pub(super) fn daemon(
         triggers: Vec::new(),
         configured: true,
         startable,
+        unreadable: None,
     }
 }
 
@@ -172,6 +173,7 @@ pub(super) fn process_status(
         workspace: workspace.into(),
         path: PathBuf::from(path),
         instance: None,
+        app_port: None,
         namespace: Namespace {
             value: "df-0b3c9d2e-a1b2c3d4".into(),
             source: NamespaceSource::Devflow,
@@ -656,14 +658,21 @@ pub(super) fn another_scratch_project(scratch: &Scratch, name: &str) -> Entry {
 }
 
 /// Drive the executor (and its fake clock) until `done` holds.
+///
+/// The jobs run on real threads, which the fake clock knows nothing about, so
+/// the budget is real time (a number of steps would be a number of
+/// microseconds on a machine that is busy with a build): every step that is
+/// not the last gives the job threads a moment to run.
 pub(super) fn settle(cx: &mut TestAppContext, h: &Harness, done: impl Fn(&AppState) -> bool) {
-    for _ in 0..200 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(150));
         cx.run_until_parked();
         if cx.read_entity(&h.state, |s, _| done(s)) {
             return;
         }
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
     let report = cx.read_entity(&h.state, |s, _| {
         format!(
@@ -1361,6 +1370,7 @@ fn trust_and_run_approves_what_was_shown_and_reopens_when_the_hooks_changed(
     for _ in 0..20 {
         cx.executor().advance_clock(Duration::from_millis(150));
         cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(10));
     }
     assert!(
         answers.borrow().is_empty(),
@@ -1387,9 +1397,11 @@ fn trust_and_run_approves_what_was_shown_and_reopens_when_the_hooks_changed(
     // Trusting the new content approves exactly that and runs it.
     cx.update_window(h.window.into(), |_, window, cx| window.click("trust", cx))
         .unwrap();
-    for _ in 0..20 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while answers.borrow().is_empty() && std::time::Instant::now() < deadline {
         cx.executor().advance_clock(Duration::from_millis(150));
         cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(*answers.borrow(), [TrustChoice::Reviewed(Box::new(now))]);
     let project = cx.read_entity(&h.state, |s, _| {
@@ -1505,6 +1517,7 @@ fn refreshed(h: &Harness, cx: &mut TestAppContext, daemon_name: &str) -> Refresh
     Refreshed {
         project,
         workspaces: Ok(workspaces),
+        cleanup: None,
         database: DatabaseModel::default(),
         services: crate::services::ServicesModel::default(),
         trust: Ok(TrustState::Trusted),
@@ -2429,8 +2442,16 @@ fn a_saved_form_is_not_overwritten_by_an_older_theme_write(cx: &mut TestAppConte
     };
     update(cx, &h, |s, _| s.store_settings(form.clone())).unwrap();
     cx.run_until_parked();
-    let saved = std::fs::read_to_string(&file).unwrap();
-    assert_eq!(toml::from_str::<Settings>(&saved).unwrap(), form);
+    // The theme is the app's own file; the editor is core's `settings.toml`
+    // beside it, shared with `devflow open`.
+    assert_eq!(crate::settings::load_from(&file).unwrap(), form);
+    assert_eq!(
+        devflow_core::settings::load_from(&file.with_file_name("settings.toml"))
+            .unwrap()
+            .editor_command
+            .as_deref(),
+        Some("zed")
+    );
     assert_eq!(cx.read_entity(&h.state, |s, _| s.settings.clone()), form);
     let _ = std::fs::remove_dir_all(file.parent().unwrap());
 }
@@ -2637,6 +2658,7 @@ fn the_new_workspace_row_of_a_project_waits_for_it_to_load(cx: &mut TestAppConte
 
     let loaded = Refreshed {
         project: project.unwrap(),
+        cleanup: None,
         workspaces: Ok(vec![WorkspaceStatus {
             workspace: workspace("main", true),
             receipt: None,

@@ -12,7 +12,7 @@ use crate::{
     state::AppState,
 };
 use anyhow::Result;
-use devflow_core::{db::DataSource, project::Project, setup::Progress as _};
+use devflow_core::{db::DataSource, project::Project, setup::Progress as _, worktree::Workspace};
 use gpui_kit::{
     ClipboardItem, Context, Window,
     component::{WindowExt as _, notification::Notification},
@@ -118,6 +118,77 @@ impl AppState {
                     } else {
                         format!("{service} of {label} was not running")
                     },
+                    ..Done::default()
+                })
+            },
+        );
+    }
+
+    /// Stop (or start) the containers of every container service the workspace
+    /// is bound to, keeping their data. Core does it; this is the job around
+    /// it. `owner` is the project the workspace was shown in.
+    pub fn workspace_services(
+        &mut self,
+        owner: ProjectRef,
+        workspace: Workspace,
+        start: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let label = crate::ops::shown(&workspace.name);
+        let title = if start {
+            format!("Start the services of {label}")
+        } else {
+            format!("Stop the services of {label}")
+        };
+        if let Err(message) = self.open_project_for(&owner) {
+            Self::notify_error(window, cx, &title, &message);
+            return;
+        }
+        let backend = self.services.clone();
+        self.start_job(
+            title.clone(),
+            true,
+            FailureHint::None,
+            window,
+            cx,
+            move |project, progress| {
+                use devflow_core::services::workspace::Change;
+                let changes = if start {
+                    backend.start_workspace(&project, &workspace)
+                } else {
+                    backend.stop_workspace(&project, &workspace)
+                };
+                let mut failed = Vec::new();
+                for service in &changes.services {
+                    let what = match service.change {
+                        Change::Stopped => "stopped; its data is kept".to_string(),
+                        Change::AlreadyStopped => "was not running".to_string(),
+                        Change::Started => "started".to_string(),
+                        Change::AlreadyRunning => "was already running".to_string(),
+                        Change::Failed => {
+                            let reason = service.reason.as_deref().unwrap_or("unknown reason");
+                            failed.push(format!("{}: {reason}", service.key));
+                            format!("failed: {reason}")
+                        }
+                    };
+                    progress.output(&format!("{}: {what}", service.key));
+                }
+                if let Some(error) = &changes.error {
+                    anyhow::bail!("{error}");
+                }
+                if changes.services.is_empty() {
+                    progress.output("The workspace has no container services.");
+                }
+                if !failed.is_empty() {
+                    anyhow::bail!("{}", failed.join("; "));
+                }
+                Ok(Done {
+                    summary: format!(
+                        "{} container service(s) of {label} {}",
+                        changes.services.len(),
+                        if start { "running" } else { "stopped" }
+                    ),
                     ..Done::default()
                 })
             },

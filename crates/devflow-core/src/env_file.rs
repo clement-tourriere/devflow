@@ -27,7 +27,7 @@ pub const FILE: &str = "env";
 
 /// Variables devflow generates besides the `PG*` ones (which depend on the
 /// connection URL). Recipes may reference these and cannot set them.
-pub const GENERATED: [&str; 8] = [
+pub const GENERATED: [&str; 9] = [
     "DATABASE_URL",
     "DEVFLOW_PROJECT",
     "DEVFLOW_PROJECT_ROOT",
@@ -36,6 +36,7 @@ pub const GENERATED: [&str; 8] = [
     "DEVFLOW_SOURCE_PATH",
     "DEVFLOW_WORKSPACE_ID",
     "COMPOSE_PROJECT_NAME",
+    "DEVFLOW_PORT",
 ];
 
 /// Whether devflow generates `name` for some workspace (so a recipe may

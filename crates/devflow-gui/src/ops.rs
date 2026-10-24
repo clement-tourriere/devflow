@@ -8,7 +8,8 @@ use crate::{
         Probe, ProcessNote,
     },
     model::{
-        ConfigIdentity, ConfigModel, ProcessTarget, ReloadTarget, RequestKey, Section, WorkspaceRef,
+        ConfigIdentity, ConfigModel, Page, ProcessTarget, ReloadTarget, RequestKey, Section,
+        WorkspaceRef,
     },
     redaction::RefusalView,
     settings::{self, LaunchPoll},
@@ -36,6 +37,7 @@ use std::{
 };
 use uuid::Uuid;
 
+mod cleanup;
 mod projects;
 mod remedies;
 
@@ -158,6 +160,7 @@ pub fn remove_options(
         pitchfork: None,
         cwd: cwd.map(Path::to_path_buf),
         expect: Some(target.expected()),
+        ..RemoveOptions::default()
     }
 }
 
@@ -414,6 +417,15 @@ impl AppState {
             if self.expanded.contains(&key.project) {
                 self.refresh_summary(key.project, cx);
             }
+        }
+        // The Clean up page shows what the job changed.
+        if self.page == Page::Cleanup
+            && self
+                .selection
+                .current()
+                .is_some_and(|m| m.key.project == key.project)
+        {
+            self.load_cleanup(window, cx);
         }
         // The job's slot is free: reads of the sidebar that waited can start.
         self.start_queued_summaries(cx);
@@ -1124,12 +1136,12 @@ impl AppState {
     // ---- external programs -----------------------------------------------------------
 
     pub fn open_in_editor(&mut self, path: &Path, window: &mut Window, cx: &mut App) {
-        let command = self.settings.editor_command.clone();
+        let command = self.open_command(devflow_core::settings::Tool::Editor);
         launch(&command, path, "Open in editor", window, cx);
     }
 
     pub fn open_in_terminal(&mut self, path: &Path, window: &mut Window, cx: &mut App) {
-        let command = self.settings.terminal_command.clone();
+        let command = self.open_command(devflow_core::settings::Tool::Terminal);
         launch(&command, path, "Open in terminal", window, cx);
     }
 }
@@ -1384,6 +1396,7 @@ mod tests {
             path: stale.path.clone(),
             instance_id: stale.instance_id,
             fingerprint: stale.fingerprint.clone(),
+            missing: false,
         };
         // Normal and forced alike: the request names the old path and instance,
         // whatever the workspace of that name is by the time it runs.
@@ -1590,6 +1603,7 @@ mod tests {
                 triggers: Vec::new(),
                 configured: true,
                 startable: false,
+                unreadable: None,
             }],
             state_error: None,
             warnings: Vec::new(),

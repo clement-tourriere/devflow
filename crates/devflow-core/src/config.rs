@@ -47,6 +47,43 @@ pub struct Config {
     /// Where the data of workspaces nobody can be asked about comes from.
     #[serde(default, skip_serializing_if = "DataSection::is_default")]
     pub data: DataSection,
+    /// How devflow works with the tools that create worktrees.
+    #[serde(default, skip_serializing_if = "IntegrationsSection::is_default")]
+    pub integrations: IntegrationsSection,
+}
+
+/// `[integrations]`: the Git hook and the agent hosts.
+///
+/// Nothing here decides what a workspace holds, so it is part of no generation
+/// and of no approval: it only changes when the post-checkout hook returns.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct IntegrationsSection {
+    /// What the post-checkout hook does after `git worktree add`: set the
+    /// worktree up before Git returns (`"synchronous"`, the default), or start
+    /// the setup detached and return at once (`"background"`).
+    pub git_hook: GitHookMode,
+}
+
+impl IntegrationsSection {
+    fn is_default(&self) -> bool {
+        *self == IntegrationsSection::default()
+    }
+}
+
+/// When the post-checkout hook's setup runs relative to Git.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHookMode {
+    /// Git waits for the whole setup (4.3 s for a 4 s hook): the worktree is
+    /// ready when `git worktree add` returns.
+    #[default]
+    Synchronous,
+    /// `git worktree add` returns at once; the setup runs detached (its own
+    /// process group, log in the worktree's Git directory). Whoever needs the
+    /// workspace waits for it (`devflow wait`, `devflow setup --wait`,
+    /// `devflow exec --wait`).
+    Background,
 }
 
 /// `[data]`: seed data for runs that cannot prompt.
@@ -414,6 +451,11 @@ pub struct WorktreeSection {
     pub dir: String,
     /// Paths cloned from the source worktree into new worktrees when present.
     pub copy: Vec<String>,
+    /// The ports `DEVFLOW_PORT` is chosen from, `[first, last]` inclusive
+    /// (default `[40000, 49999]`). A port a workspace already has is kept
+    /// whatever this says now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_range: Option<[u16; 2]>,
 }
 
 impl Default for WorktreeSection {
@@ -421,7 +463,19 @@ impl Default for WorktreeSection {
         Self {
             dir: "../{repo}.worktrees".into(),
             copy: Vec::new(),
+            port_range: None,
         }
+    }
+}
+
+/// The ports a workspace's `DEVFLOW_PORT` is chosen from unless
+/// `[worktree] port_range` says otherwise.
+pub const DEFAULT_PORT_RANGE: [u16; 2] = [40000, 49999];
+
+impl WorktreeSection {
+    /// `[first, last]`, inclusive: the configured range or the default.
+    pub fn app_port_range(&self) -> [u16; 2] {
+        self.port_range.unwrap_or(DEFAULT_PORT_RANGE)
     }
 }
 
@@ -1328,13 +1382,43 @@ impl HooksSection {
     }
 }
 
+/// The text of a configuration file, read the way a name somebody else can
+/// replace must be: opened without blocking (a FIFO named `devflow.toml` has no
+/// writer, and an ordinary open would wait for one for good) and checked with
+/// `fstat` on the opened descriptor, which must be a regular file. Anything
+/// else is an error that says so. A link to a file is followed, as before.
+pub(crate) fn read_text(path: &Path) -> std::io::Result<String> {
+    use std::io::Read as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other("it is not a regular file"));
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(text)
+}
+
 impl Config {
-    /// The project file in `root`, if any.
+    /// The project file in `root`, if any. A name that exists as anything at
+    /// all counts (a directory, a link to nothing, an entry that cannot be
+    /// looked at): reading it then fails with the real reason, where
+    /// "is it a file?" would have read the same as "there is none" and sent a
+    /// caller down the not-initialized path. Only a name that is not there
+    /// ([`std::io::ErrorKind::NotFound`]) is absent.
     pub fn find_file(root: &Path) -> Option<PathBuf> {
-        CONFIG_FILES
-            .iter()
-            .map(|name| root.join(name))
-            .find(|path| path.is_file())
+        CONFIG_FILES.iter().map(|name| root.join(name)).find(
+            |path| match std::fs::symlink_metadata(path) {
+                Ok(_) => true,
+                Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+            },
+        )
     }
 
     /// Load the project file plus `devflow.local.toml` from `root`. Without a
@@ -1354,8 +1438,7 @@ impl Config {
                 return Err(not_initialized(root));
             }
         };
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("cannot read {}", path.display()))?;
+        let text = read_text(&path).with_context(|| format!("cannot read {}", path.display()))?;
         let mut value = parse_table(&text, &path)?;
         // Each input is checked on its own before merging: an overlay table
         // replaces a base value of another shape (`[services.db]` over a 0.x
@@ -1365,8 +1448,8 @@ impl Config {
         check_shape(&value, &path)?;
         let local = root.join(LOCAL_CONFIG_FILE);
         if local.is_file() {
-            let text = std::fs::read_to_string(&local)
-                .with_context(|| format!("cannot read {}", local.display()))?;
+            let text =
+                read_text(&local).with_context(|| format!("cannot read {}", local.display()))?;
             let overlay = parse_table(&text, &local)?;
             check_shape(&overlay, &local)?;
             merge(&mut value, overlay);
@@ -1389,13 +1472,12 @@ impl Config {
     /// has an identity. The error is [`NotInitialized`] without a project file.
     pub fn read_identity(root: &Path) -> Result<(uuid::Uuid, String)> {
         let path = Self::find_file(root).ok_or_else(|| not_initialized(root))?;
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("cannot read {}", path.display()))?;
+        let text = read_text(&path).with_context(|| format!("cannot read {}", path.display()))?;
         let mut table = parse_table(&text, &path)?;
         let local = root.join(LOCAL_CONFIG_FILE);
         if local.is_file() {
-            let text = std::fs::read_to_string(&local)
-                .with_context(|| format!("cannot read {}", local.display()))?;
+            let text =
+                read_text(&local).with_context(|| format!("cannot read {}", local.display()))?;
             merge(&mut table, parse_table(&text, &local)?);
         }
         let project = table.get("project").and_then(toml::Value::as_table);
@@ -1466,6 +1548,12 @@ impl Config {
         anyhow::ensure!(!self.project.id.is_nil(), "project.id must be set");
         for (index, entry) in self.worktree.copy.iter().enumerate() {
             validate_relative(entry).with_context(|| format!("invalid worktree.copy[{index}]"))?;
+        }
+        if let Some([first, last]) = self.worktree.port_range {
+            anyhow::ensure!(
+                first >= 1024 && first <= last,
+                "worktree.port_range: expected [first, last] with 1024 <= first <= last <= 65535"
+            );
         }
         self.hooks.validate()?;
         self.data.validate()?;
@@ -1682,8 +1770,8 @@ pub struct ConfigDocument {
 impl ConfigDocument {
     pub fn open(root: &Path) -> Result<Self> {
         let path = Config::find_file(root).ok_or_else(|| not_initialized(root))?;
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("cannot read {}", path.display()))?;
+        let content =
+            read_text(&path).with_context(|| format!("cannot read {}", path.display()))?;
         Ok(Self { path, content })
     }
 
@@ -1696,7 +1784,7 @@ impl ConfigDocument {
     /// opened with. Returns the reopened document.
     pub fn save(&self, text: &str) -> Result<Self> {
         Self::validate(text)?;
-        let current = std::fs::read_to_string(&self.path)
+        let current = read_text(&self.path)
             .with_context(|| format!("cannot read {}", self.path.display()))?;
         if current != self.content {
             return Err(crate::error::ConfigChanged::new(self.path.clone()).into());
@@ -1814,6 +1902,7 @@ fn current_shapes(value: &toml::Table) -> Vec<String> {
     found.extend(has("worktree", &["dir", "copy"]));
     found.extend(has("hooks", &["setup", "switch", "teardown", "timeout"]));
     found.extend(has("pitchfork", &["autostart"]));
+    found.extend(has("integrations", &["git_hook"]));
     found.extend(has(
         "data",
         &[
@@ -2794,6 +2883,131 @@ mod tests {
         );
     }
 
+    /// Run `work` and fail when it does not return: opening a FIFO that has no
+    /// writer blocks for good.
+    #[cfg(unix)]
+    fn promptly<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(work());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("reading the configuration blocked on a FIFO")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_named_like_the_project_file_is_an_error_not_a_hang() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let make = |name: &str| {
+            let path = std::ffi::CString::new(root.join(name).as_os_str().as_bytes()).unwrap();
+            // SAFETY: a valid NUL-terminated path.
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        };
+        make("devflow.toml");
+        // Still classified as present: reading it says why it cannot be used.
+        assert_eq!(Config::find_file(&root), Some(root.join("devflow.toml")));
+        let r = root.clone();
+        let outcome = promptly(move || {
+            (
+                format!("{:#}", Config::load(&r).unwrap_err()),
+                format!("{:#}", Config::read_identity(&r).unwrap_err()),
+                format!("{:#}", ConfigDocument::open(&r).unwrap_err()),
+                format!(
+                    "{:#}",
+                    crate::config_edit::ConfigFiles::read(&r).err().unwrap()
+                ),
+                format!(
+                    "{:#}",
+                    crate::propose::ExistingFiles::read(&r)
+                        .err()
+                        .map(|e| e.to_string())
+                        .unwrap_or_default()
+                ),
+            )
+        });
+        for text in [&outcome.0, &outcome.1, &outcome.2, &outcome.3, &outcome.4] {
+            assert!(text.contains("devflow.toml"), "{text}");
+            assert!(text.contains("not a regular file"), "{text}");
+        }
+        // The local overlay too.
+        std::fs::remove_file(root.join("devflow.toml")).unwrap();
+        std::fs::write(
+            root.join("devflow.toml"),
+            "[project]\nname = \"x\"\nid = \"0b3c9d2e-1111-4222-8333-444455556666\"\n",
+        )
+        .unwrap();
+        make("devflow.local.toml");
+        let r = root.clone();
+        let local = promptly(move || {
+            format!(
+                "{:#}",
+                crate::config_edit::ConfigFiles::read(&r).err().unwrap()
+            )
+        });
+        assert!(local.contains("devflow.local.toml"), "{local}");
+        assert!(local.contains("not a regular file"), "{local}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_project_file_that_is_there_but_not_a_file_is_present_not_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert_eq!(Config::find_file(root), None);
+        let error = Config::load(root).unwrap_err();
+        assert!(
+            error.downcast_ref::<NotInitialized>().is_some(),
+            "{error:#}"
+        );
+        // A directory where the file belongs.
+        std::fs::create_dir(root.join("devflow.toml")).unwrap();
+        assert_eq!(Config::find_file(root), Some(root.join("devflow.toml")));
+        let error = Config::load(root).unwrap_err();
+        assert!(
+            error.downcast_ref::<NotInitialized>().is_none(),
+            "{error:#}"
+        );
+        assert!(format!("{error:#}").contains("cannot read"), "{error:#}");
+        // A link to nothing.
+        std::fs::remove_dir(root.join("devflow.toml")).unwrap();
+        std::os::unix::fs::symlink(root.join("nowhere"), root.join("devflow.toml")).unwrap();
+        assert_eq!(Config::find_file(root), Some(root.join("devflow.toml")));
+        let error = Config::load(root).unwrap_err();
+        assert!(
+            error.downcast_ref::<NotInitialized>().is_none(),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn the_integrations_section_is_optional_strict_and_part_of_no_generation() {
+        let plain = parse("[services.db]\nengine = \"postgres\"\n").unwrap();
+        assert_eq!(plain.integrations.git_hook, GitHookMode::Synchronous);
+        let background = parse(
+            "[services.db]\nengine = \"postgres\"\n[integrations]\ngit_hook = \"background\"\n",
+        )
+        .unwrap();
+        assert_eq!(background.integrations.git_hook, GitHookMode::Background);
+        assert_eq!(plain.env_generation(), background.env_generation());
+        assert_eq!(
+            plain.service_generation("db"),
+            background.service_generation("db")
+        );
+        // Written back only when it is not the default.
+        assert!(!toml::to_string(&plain).unwrap().contains("integrations"));
+        assert!(toml::to_string(&background).unwrap().contains("git_hook"));
+        for bad in [
+            "[integrations]\ngit_hook = \"later\"\n",
+            "[integrations]\nhost = \"t3\"\n",
+        ] {
+            let error = parse(bad).unwrap_err();
+            assert!(format!("{error:#}").contains("integrations"), "{error:#}");
+        }
+    }
+
     #[test]
     fn the_data_section_is_validated_and_part_of_no_generation() {
         let none = parse("").unwrap();
@@ -2981,7 +3195,7 @@ mod tests {
             ),
             (
                 "[worktree]\nbogus = 1\n",
-                "worktree.bogus: unknown key (expected `dir` or `copy`)",
+                "worktree.bogus: unknown key (expected one of `dir`, `copy`, `port_range`)",
             ),
             (
                 "[project]\nname = 123456789\n",

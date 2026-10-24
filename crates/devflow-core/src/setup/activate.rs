@@ -235,6 +235,9 @@ pub enum Repair {
     EnvFile,
     /// devflow's own `pitchfork.local.toml` (the daemons' namespace) was missing.
     PitchforkNamespace,
+    /// The workspace was set up before it had a port of its own: it was given
+    /// one and `.devflow/env` carries it as `DEVFLOW_PORT` now.
+    AppPort,
 }
 
 impl Repair {
@@ -247,6 +250,9 @@ impl Repair {
                  against the server"
             }
             Repair::PitchforkNamespace => "wrote pitchfork.local.toml again",
+            Repair::AppPort => {
+                "gave the workspace its own port and wrote it to .devflow/env as DEVFLOW_PORT"
+            }
         }
     }
 }
@@ -388,13 +394,22 @@ fn namespace_missing(workspace: &Workspace) -> bool {
 /// and they can go missing. Whether `receipt` (read the way the next setup
 /// reads it: migrated, and with what the configuration invalidates reopened)
 /// is such a workspace and one of them is gone.
+///
+/// A workspace set up before ports existed has no `DEVFLOW_PORT` yet. Giving
+/// it one needs the env phase again, which only completes when the recipes are
+/// approved: `port_ok` says whether they are (asked only when it matters), so a
+/// run nobody can approve for never turns a ready workspace into one that
+/// needs attention for a port.
 pub(super) fn repair_needed(
     workspace: &Workspace,
     receipt: &Receipt,
     config: &crate::Config,
+    port_ok: &dyn Fn() -> bool,
 ) -> bool {
     complete(receipt, Phase::Env)
-        && (env_problem(workspace, receipt, config).is_some() || namespace_missing(workspace))
+        && (env_problem(workspace, receipt, config).is_some()
+            || namespace_missing(workspace)
+            || (receipt.app_port.is_none() && port_ok()))
 }
 
 /// What a run repairs, decided from the receipt before anything is written.
@@ -427,6 +442,9 @@ pub(super) fn repair_needed(
 pub(super) struct RepairPlan {
     /// `.devflow/env` is written again, by running the env phase.
     pub env: bool,
+    /// The workspace had no port of its own when the run began (it was set up
+    /// before there was one): the env phase gives it one and writes it.
+    port_missing: bool,
     /// devflow's `pitchfork.local.toml` was not there when the run began.
     namespace_missing: bool,
 }
@@ -434,18 +452,29 @@ pub(super) struct RepairPlan {
 impl RepairPlan {
     /// Decide, and reopen the env phase in `receipt` when its file is gone
     /// (the caller saves the receipt before the phase runs).
-    pub fn reopen(workspace: &Workspace, receipt: &mut Receipt, config: &crate::Config) -> Self {
+    ///
+    /// `port_ok`: the recipes are approved, so the env phase can complete and a
+    /// workspace without a port can be given one (see [`repair_needed`]).
+    pub fn reopen(
+        workspace: &Workspace,
+        receipt: &mut Receipt,
+        config: &crate::Config,
+        port_ok: bool,
+    ) -> Self {
         if !complete(receipt, Phase::Env) {
             // Not finished: the phases run anyway, and writing the files is
             // setup, not repair.
             return Self::default();
         }
         let env = env_problem(workspace, receipt, config).is_some();
-        if env {
+        let port_missing = receipt.app_port.is_none() && port_ok;
+        if env || port_missing {
+            // (Only the env phase: hooks and services stay as they are.)
             receipt.set_phase(Phase::Env, PhaseState::Pending, None);
         }
         Self {
             env,
+            port_missing,
             namespace_missing: namespace_missing(workspace),
         }
     }
@@ -456,6 +485,9 @@ impl RepairPlan {
     pub fn finish(self, runner: &mut Runner<'_>) {
         if self.env {
             runner.repaired.push(Repair::EnvFile);
+        }
+        if self.port_missing && runner.receipt.app_port.is_some() {
+            runner.repaired.push(Repair::AppPort);
         }
         if self.namespace_missing {
             let outcome =

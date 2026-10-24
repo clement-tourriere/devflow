@@ -79,6 +79,14 @@ pub struct InitArgs {
     /// Also install the post-checkout Git hook
     #[arg(long)]
     pub hook: bool,
+    /// Also set up this agent host (repeatable): t3, claude, conductor or cursor. Hosts the
+    /// repository shows signs of are offered at the terminal; unattended runs write only these
+    #[arg(
+        long,
+        value_name = "HOST",
+        value_parser = ["t3", "claude", "conductor", "cursor"]
+    )]
+    pub integrate: Vec<String>,
 }
 
 pub fn run(ctx: &Ctx, args: InitArgs) -> Result<ExitCode> {
@@ -132,6 +140,26 @@ fn plan_only(ctx: &Ctx, root: &Path, args: &InitArgs) -> Result<ExitCode> {
         output::emit(ctx, "init", &plan)?;
     } else {
         say(render_plan(&plan, root, Palette::stdout()));
+        let hosts = devflow_core::integrate::detect(root);
+        if !hosts.is_empty() {
+            say("");
+            say("Agent hosts used here");
+            for detected in hosts {
+                say(format!(
+                    "  {} ({}): {}",
+                    detected.host.label(),
+                    detected.found.join(", "),
+                    match detected.state {
+                        devflow_core::integrate::State::Configured =>
+                            "worktrees are set up by devflow",
+                        devflow_core::integrate::State::NotConfigured =>
+                            "not set up; `devflow init --integrate` (or `devflow integrate`) writes its file",
+                        devflow_core::integrate::State::Conflict =>
+                            "an entry of someone else's stands in the way; `devflow integrate` says which",
+                    }
+                ));
+            }
+        }
         note(
             "Nothing was written. Save the plan with `devflow --json init --plan > plan.json` and \
              apply it with `devflow init --apply plan.json`, or run `devflow init`.",
@@ -202,7 +230,24 @@ fn write(
         ))),
         _ => None,
     };
-    let steps = next_steps(&report, plan, &selection);
+    let requested: Vec<devflow_core::integrate::Host> = args
+        .integrate
+        .iter()
+        .filter_map(|name| devflow_core::integrate::Host::parse(name))
+        .collect();
+    let hosts = match &project {
+        Some(project) => super::integrate::offer(ctx, project, &requested),
+        _ => Vec::new(),
+    };
+    let mut steps = next_steps(&report, plan, &selection);
+    for offered in hosts.iter().filter(|o| !o.configured && o.error.is_none()) {
+        steps.push(format!(
+            "{} is used here but its worktrees are not set up by devflow: `devflow integrate {}` writes {}.",
+            offered.host.label(),
+            offered.host.name(),
+            offered.host.file()
+        ));
+    }
     if ctx.json {
         let hook = hook.as_ref().map(|result| match result {
             Ok(path) => json!({ "installed": true, "path": path }),
@@ -229,6 +274,7 @@ fn write(
             "already_applied": report.already_applied,
             "journal": report.journal,
             "hook": hook,
+            "integrations": hosts.iter().map(super::integrate::Offered::to_json).collect::<Vec<_>>(),
             "next_steps": steps,
         });
         output::emit(ctx, "init", &body)?;
@@ -253,6 +299,25 @@ fn write(
             }
         }
         None => {}
+    }
+    for offered in &hosts {
+        if offered.written {
+            note(format!(
+                "Set up {} worktrees in {} (commit the file)",
+                offered.host.label(),
+                offered.host.file()
+            ));
+        }
+        for conflict in &offered.conflicts {
+            note(format!("warning: {}: {conflict}", offered.host.file()));
+        }
+        if let Some(error) = &offered.error {
+            note(format!(
+                "warning: could not set up {}: {}",
+                offered.host.label(),
+                redact::text(error)
+            ));
+        }
     }
     if !steps.is_empty() {
         note("Next:");

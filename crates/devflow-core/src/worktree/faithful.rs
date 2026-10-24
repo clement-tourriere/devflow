@@ -7,23 +7,26 @@
 //! before anything is created, as a [`Problem`] whose remedies are the way
 //! round: a worktree made by Git itself, which the Git hook then sets up.
 //!
-//! The checks judge the commit that is about to be checked out, and read what
-//! decides Git's attributes and filters:
+//! **LFS is decided by attributes alone.** Pointer files appear only where an
+//! attribute names `filter=lfs`; a `filter.lfs` section in a configuration file
+//! changes nothing on its own. So a repository uses LFS when any attributes
+//! source contains `filter=lfs` (an `[attr]` macro definition included): every
+//! `.gitattributes` of the commit about to be checked out (its whole tree, each
+//! distinct subtree once), `info/attributes`, the effective `core.attributesFile`
+//! (or Git's default location for it) and the system attributes file.
 //!
-//! - every `.gitattributes` of that commit's tree (all of it, each distinct
-//!   subtree once), `info/attributes`, the effective `core.attributesFile`
-//!   (or Git's default for it) and the system attributes file: any of them
-//!   that sets `filter=lfs` makes the repository an LFS repository;
-//! - any `filter.lfs.*` key in the repository's own configuration (its
-//!   `config`, an included file, `config.worktree`). A `filter.lfs` section in
-//!   the global or system configuration alone, which `git lfs install`
-//!   writes, does not: with no attribute naming the filter it never runs;
-//! - `extensions.partialClone` and `remote.*.promisor` in the repository's
-//!   own configuration.
+//! **Configuration is consulted for two things:** where `core.attributesFile`
+//! points, and the partial-clone keys `git clone --filter` writes to the
+//! repository's own configuration (`extensions.partialClone`,
+//! `remote.*.promisor`). Besides libgit2's effective configuration, the
+//! include graph is read from the files themselves ([`super::rawconfig`]),
+//! because libgit2 skips `includeIf "hasconfig:remote.*.url:…"`.
 //!
 //! Absence has to be established, not assumed: a tree too large to scan within
-//! [`MAX_TREE_ENTRIES`], or an attributes file that exists but cannot be read,
-//! is refused as "cannot tell".
+//! [`MAX_TREE_ENTRIES`], an attributes or configuration file that exists but
+//! cannot be read, or an include condition that cannot be evaluated is refused
+//! as "cannot tell".
+use super::rawconfig;
 use crate::remedy::{Problem, Remedy};
 use anyhow::Result;
 use git2::{Commit, ConfigLevel, ObjectType, Oid, Repository};
@@ -44,7 +47,7 @@ pub const MAX_TREE_ENTRIES: usize = 5_000_000;
 /// Refuse a commit libgit2 cannot check out faithfully; return the warnings
 /// for what it can check out but not quite like Git (a sparse checkout).
 pub fn check(repo: &Repository, commit: &Commit, root: &Path) -> Result<Vec<String>> {
-    check_within(repo, commit, root, MAX_TREE_ENTRIES)
+    check_within(repo, commit, root, MAX_TREE_ENTRIES, &gather(repo))
 }
 
 fn check_within(
@@ -52,8 +55,8 @@ fn check_within(
     commit: &Commit,
     root: &Path,
     max_entries: usize,
+    gathered: &Gathered,
 ) -> Result<Vec<String>> {
-    let gathered = gather(repo);
     let settings = &gathered.settings;
     let way_on = |problem: Problem| {
         problem
@@ -65,8 +68,10 @@ fn check_within(
             })
             .into_error()
     };
-    let lfs = lfs(repo, commit, &gathered, max_entries);
-    if let (Lfs::No | Lfs::Unknown(_), Some(why)) = (&lfs, &gathered.unknown) {
+    let lfs = lfs(repo, commit, gathered, max_entries);
+    // A configuration that cannot be read completely is reported first: what
+    // the attributes say may be overridden in the part that was not read.
+    if let Some(why) = &gathered.unknown {
         return Err(way_on(Problem::new(format!(
             "devflow cannot read this repository's configuration completely ({why}), so it \
              cannot tell whether it uses Git LFS or is a partial clone, which a checkout through \
@@ -127,42 +132,17 @@ fn check_within(
 /// What the configuration says that decides the checkout.
 #[derive(Default)]
 struct Gathered {
-    /// Keys (lowercased) and values of the repository's own configuration:
-    /// its `config`, files it includes and `config.worktree`; never the
-    /// global or system files.
+    /// Keys (lowercased) and values of the repository's own configuration, as
+    /// libgit2 and the walk of its files read it; never the global or system
+    /// files. A key without a value is `true`.
     settings: Vec<(String, String)>,
-    /// Attributes files named by `includeIf "hasconfig:…"` files, which
-    /// libgit2 does not evaluate, at any level.
-    attribute_files: Vec<std::path::PathBuf>,
-    /// A condition or an included file that could not be evaluated or read:
-    /// what it holds is not "nothing".
+    /// The effective `core.attributesFile` (the last one Git reads), if any.
+    attributes_file: Option<rawconfig::AttributesSetting>,
+    /// Where Git looks for the user's attributes when none is set.
+    default_attributes: Option<std::path::PathBuf>,
+    /// A condition or a file that could not be evaluated or read: what it
+    /// holds is not "nothing".
     unknown: Option<String>,
-}
-
-/// One configuration entry, with the level of the file it came from.
-struct Record {
-    name: String,
-    value: String,
-    level: ConfigLevel,
-}
-
-fn records(config: &git2::Config) -> Vec<Record> {
-    let Ok(mut entries) = config.entries(None) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    while let Some(entry) = entries.next() {
-        let Ok(entry) = entry else { continue };
-        if let Ok(name) = entry.name() {
-            // A key without a value is `true`.
-            out.push(Record {
-                name: name.to_string(),
-                value: entry.value().unwrap_or("true").to_string(),
-                level: entry.level(),
-            });
-        }
-    }
-    out
 }
 
 fn repository_level(level: ConfigLevel) -> bool {
@@ -172,149 +152,61 @@ fn repository_level(level: ConfigLevel) -> bool {
     )
 }
 
-/// Nested `hasconfig` includes followed this deep.
-const MAX_INCLUDE_DEPTH: usize = 4;
-
 fn gather(repo: &Repository) -> Gathered {
+    let env = rawconfig::Env::process();
+    gather_from(repo, &rawconfig::roots(repo, &env), &env)
+}
+
+fn gather_from(repo: &Repository, roots: &[rawconfig::Root], env: &rawconfig::Env) -> Gathered {
     let mut gathered = Gathered::default();
-    let Ok(config) = repo.config() else {
-        return gathered;
-    };
-    let all = records(&config);
-    let urls: Vec<String> = all
-        .iter()
-        .filter(|r| {
-            let name = r.name.to_ascii_lowercase();
-            name.starts_with("remote.") && name.ends_with(".url")
-        })
-        .map(|r| r.value.clone())
-        .collect();
-    gathered.settings = all
-        .iter()
-        .filter(|r| repository_level(r.level))
-        .map(|r| (r.name.to_ascii_lowercase(), r.value.clone()))
-        .collect();
-    follow_conditional_includes(repo, &all, &urls, 0, &mut gathered);
-    gathered
-}
-
-/// libgit2 evaluates `gitdir`, `gitdir/i` and `onbranch` conditions but
-/// skips `hasconfig:remote.*.url:` ones: evaluate those against the
-/// configured remote URLs and read the files they include. A condition of
-/// another `hasconfig` form, or a pattern this cannot match exactly, makes
-/// the configuration unknown.
-fn follow_conditional_includes(
-    repo: &Repository,
-    records: &[Record],
-    urls: &[String],
-    depth: usize,
-    gathered: &mut Gathered,
-) {
-    for record in records {
-        let lower = record.name.to_ascii_lowercase();
-        let Some(condition) = lower
-            .strip_prefix("includeif.")
-            .and_then(|rest| rest.strip_suffix(".path"))
-        else {
-            continue;
-        };
-        if !condition.starts_with("hasconfig:") {
-            continue;
+    let mut urls = Vec::new();
+    match repo.config() {
+        Ok(config) => {
+            if let Ok(mut entries) = config.entries(None) {
+                while let Some(entry) = entries.next() {
+                    let Ok(entry) = entry else { continue };
+                    let Ok(name) = entry.name() else { continue };
+                    let name = name.to_ascii_lowercase();
+                    // A key without a value is `true`; a value that is not
+                    // text reads as a character no boolean or path is made of.
+                    let value = if entry.has_value() {
+                        String::from_utf8_lossy(entry.value_bytes()).into_owned()
+                    } else {
+                        "true".to_string()
+                    };
+                    if name.starts_with("remote.") && name.ends_with(".url") {
+                        urls.push(value.clone());
+                    }
+                    if repository_level(entry.level()) {
+                        gathered.settings.push((name, value));
+                    }
+                }
+            }
         }
-        // The pattern keeps its case; the keyword does not.
-        let original = &record.name["includeif.".len()..record.name.len() - ".path".len()];
-        let Some(pattern) = condition
-            .strip_prefix("hasconfig:remote.*.url:")
-            .map(|_| &original["hasconfig:remote.*.url:".len()..])
-        else {
-            gathered.unknown = Some(
-                "an includeIf condition other than hasconfig:remote.*.url cannot be evaluated"
+        Err(_) => {
+            gathered.unknown = Some("the repository's configuration cannot be read".into());
+        }
+    }
+    let found = rawconfig::walk(repo, roots, env, &urls);
+    gathered.settings.extend(found.settings);
+    gathered.default_attributes = env.default_attributes();
+    gathered.attributes_file = found.attributes_file.or_else(|| {
+        // Set somewhere the walk does not read: libgit2's view stands.
+        let path = repo.config().ok()?.get_path("core.attributesfile").ok()?;
+        Some(if path.is_absolute() {
+            rawconfig::AttributesSetting::Path(path)
+        } else {
+            rawconfig::AttributesSetting::Unusable(
+                "core.attributesFile is a relative path, which has no directory to be \
+                 relative to"
                     .to_string(),
-            );
-            continue;
-        };
-        if pattern.contains(['[', '\\']) {
-            gathered.unknown =
-                Some("an includeIf hasconfig pattern uses a character class".to_string());
-            continue;
-        }
-        if !urls.iter().any(|url| wildmatch(pattern, url)) {
-            continue;
-        }
-        if depth >= MAX_INCLUDE_DEPTH {
-            gathered.unknown = Some("includeIf files nest too deeply".to_string());
-            continue;
-        }
-        let path = include_path(repo, &record.value, record.level);
-        let included = match git2::Config::open(&path) {
-            Ok(config) => records_of(&config, record.level),
-            // Git ignores an include that is not there.
-            Err(_) if !path.exists() => continue,
-            Err(_) => {
-                gathered.unknown = Some("an included configuration file cannot be read".into());
-                continue;
-            }
-        };
-        for r in &included {
-            let name = r.name.to_ascii_lowercase();
-            if name == "core.attributesfile" {
-                gathered.attribute_files.push(expand(&r.value));
-            }
-            if repository_level(record.level) {
-                gathered.settings.push((name, r.value.clone()));
-            }
-        }
-        follow_conditional_includes(repo, &included, urls, depth + 1, gathered);
+            )
+        })
+    });
+    if gathered.unknown.is_none() {
+        gathered.unknown = found.unknown;
     }
-}
-
-/// The entries of an included file, all taking the level of the including one.
-fn records_of(config: &git2::Config, level: ConfigLevel) -> Vec<Record> {
-    records(config)
-        .into_iter()
-        .map(|r| Record { level, ..r })
-        .collect()
-}
-
-/// An `include` path: `~/` is the home directory, a relative path is relative
-/// to the directory of the file holding the include.
-fn include_path(repo: &Repository, value: &str, level: ConfigLevel) -> std::path::PathBuf {
-    let path = expand(value);
-    if path.is_absolute() {
-        return path;
-    }
-    let home = dirs::home_dir().unwrap_or_default();
-    let base = match level {
-        ConfigLevel::Global => home,
-        ConfigLevel::XDG => home.join(".config").join("git"),
-        ConfigLevel::System | ConfigLevel::ProgramData => "/etc".into(),
-        _ => repo.commondir().to_path_buf(),
-    };
-    base.join(path)
-}
-
-fn expand(value: &str) -> std::path::PathBuf {
-    match value.strip_prefix("~/").zip(dirs::home_dir()) {
-        Some((rest, home)) => home.join(rest),
-        None => value.into(),
-    }
-}
-
-/// Git's glob for `hasconfig`: `?` is one character, `*` and `**` any run of
-/// them. `*` is allowed to cross `/` here, which only makes more includes
-/// match than Git's, never fewer.
-fn wildmatch(pattern: &str, text: &str) -> bool {
-    fn go(p: &[char], t: &[char]) -> bool {
-        match p.split_first() {
-            None => t.is_empty(),
-            Some(('*', rest)) => (0..=t.len()).any(|i| go(rest, &t[i..])),
-            Some(('?', rest)) => !t.is_empty() && go(rest, &t[1..]),
-            Some((c, rest)) => t.first() == Some(c) && go(rest, &t[1..]),
-        }
-    }
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    go(&p, &t)
+    gathered
 }
 
 /// Git's boolean: `true`, `yes`, `on` or a non-zero integer (`k`, `m`, `g`
@@ -354,7 +246,7 @@ fn partial_clone_reason(settings: &[(String, String)]) -> Result<Option<String>,
 }
 
 enum Lfs {
-    /// Something sets `filter=lfs` or configures the filter.
+    /// An attributes source sets `filter=lfs`.
     Uses(String),
     /// Absence could not be established.
     Unknown(String),
@@ -362,21 +254,28 @@ enum Lfs {
 }
 
 fn lfs(repo: &Repository, commit: &Commit, gathered: &Gathered, max: usize) -> Lfs {
-    if let Some((name, _)) = gathered
-        .settings
-        .iter()
-        .find(|(name, _)| name.starts_with("filter.lfs."))
-    {
-        return Lfs::Uses(format!("{name} is set in the repository's configuration"));
-    }
+    use rawconfig::AttributesSetting::{Disabled, Path as File, Unusable};
     let mut unknown = None;
-    let included = gathered.attribute_files.iter().map(|path| {
-        (
+    let mut sources = fixed_attribute_files(repo);
+    // Only the effective `core.attributesFile` counts: an earlier setting,
+    // however unusable, was overridden. With none, Git's default location.
+    match &gathered.attributes_file {
+        Some(File(path)) => sources.push((
             format!("the attributes file {}", path.display()),
             path.clone(),
-        )
-    });
-    for (label, path) in attribute_files(repo).into_iter().chain(included) {
+        )),
+        Some(Disabled) => {}
+        Some(Unusable(why)) => unknown = Some(why.clone()),
+        None => {
+            if let Some(path) = &gathered.default_attributes {
+                sources.push((
+                    format!("the attributes file {}", path.display()),
+                    path.clone(),
+                ));
+            }
+        }
+    }
+    for (label, path) in sources {
         match std::fs::read(&path) {
             Ok(bytes) if sets_lfs_filter(&String::from_utf8_lossy(&bytes)) => {
                 return Lfs::Uses(format!("{label} sets filter=lfs"));
@@ -400,32 +299,21 @@ fn lfs(repo: &Repository, commit: &Commit, gathered: &Gathered, max: usize) -> L
     }
 }
 
-/// Attribute files outside the commit that Git consults for every path.
-fn attribute_files(repo: &Repository) -> Vec<(String, std::path::PathBuf)> {
+/// Attributes files outside the commit that are not named by configuration:
+/// the repository's `info/attributes` and the system file.
+fn fixed_attribute_files(repo: &Repository) -> Vec<(String, std::path::PathBuf)> {
     let mut files = vec![(
         "info/attributes".to_string(),
         repo.commondir().join("info").join("attributes"),
     )];
-    let configured = repo
-        .config()
-        .ok()
-        .and_then(|c| c.get_path("core.attributesfile").ok());
-    let user = configured.or_else(|| {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .filter(|v| !v.is_empty())
-            .map(std::path::PathBuf::from)
-            .or_else(|| dirs::home_dir().map(|h| h.join(".config")))?;
-        Some(base.join("git").join("attributes"))
-    });
-    if let Some(path) = user {
-        files.push((format!("the attributes file {}", path.display()), path));
-    }
-    for system in [
-        "/etc/gitattributes",
-        "/usr/local/etc/gitattributes",
-        "/opt/homebrew/etc/gitattributes",
-    ] {
-        files.push((system.to_string(), system.into()));
+    if std::env::var_os("GIT_ATTR_NOSYSTEM").is_none_or(|v| v.is_empty()) {
+        for system in [
+            "/etc/gitattributes",
+            "/usr/local/etc/gitattributes",
+            "/opt/homebrew/etc/gitattributes",
+        ] {
+            files.push((system.to_string(), system.into()));
+        }
     }
     files
 }
@@ -499,6 +387,9 @@ fn sets_lfs_filter(text: &str) -> bool {
 }
 
 #[cfg(test)]
+mod oracle;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::worktree::testutil::{TestRepo, repo};
@@ -544,32 +435,41 @@ mod tests {
         assert_eq!(partial_clone_reason(&[]), Ok(None));
     }
 
-    #[test]
-    fn hasconfig_patterns_match_like_git_or_wider() {
-        assert!(wildmatch(
-            "git@github.com:work/**",
-            "git@github.com:work/app.git"
-        ));
-        assert!(wildmatch(
-            "git@github.com:work/*",
-            "git@github.com:work/team/app.git"
-        ));
-        assert!(wildmatch(
-            "https://*.example.com/**",
-            "https://git.example.com/a/b"
-        ));
-        assert!(wildmatch("ssh://host/repo?.git", "ssh://host/repo1.git"));
-        assert!(!wildmatch(
-            "git@github.com:work/**",
-            "git@github.com:me/app.git"
-        ));
-        assert!(!wildmatch("https://a/**", "ssh://a/x"));
+    /// The files of `t`'s repository alone: no user or system configuration,
+    /// so a test never depends on the machine it runs on.
+    fn own_roots(t: &TestRepo) -> Vec<rawconfig::Root> {
+        ["config", "config.worktree"]
+            .into_iter()
+            .map(|name| rawconfig::Root {
+                path: t.root.join(".git").join(name),
+                repository: true,
+            })
+            .collect()
     }
 
     fn verdict(t: &TestRepo, max: usize) -> Result<Vec<String>> {
+        verdict_with(t, &[], max)
+    }
+
+    /// `global` files are read as the user's own, with `$HOME` at the root of
+    /// the test directory.
+    fn verdict_with(t: &TestRepo, global: &[&Path], max: usize) -> Result<Vec<String>> {
         let repo = t.project.repo().unwrap();
         let commit = repo.head().unwrap().peel_to_commit().unwrap();
-        check_within(&repo, &commit, &t.root, max)
+        let mut roots: Vec<rawconfig::Root> = global
+            .iter()
+            .map(|path| rawconfig::Root {
+                path: path.to_path_buf(),
+                repository: false,
+            })
+            .collect();
+        roots.extend(own_roots(t));
+        let env = rawconfig::Env {
+            home: Some(t.dir.path().to_path_buf()),
+            xdg_config_home: None,
+        };
+        let gathered = gather_from(&repo, &roots, &env);
+        check_within(&repo, &commit, &t.root, max, &gathered)
     }
 
     fn refusal(result: Result<Vec<String>>) -> String {
@@ -621,13 +521,28 @@ mod tests {
         // 30,000 entries before the one `.gitattributes`, in the last directory.
         let id = big_commit(&git, 300, 100, Some("*.bin filter=lfs\n"));
         let commit = git.find_commit(id).unwrap();
-        let message = refusal(check_within(&git, &commit, &t.root, MAX_TREE_ENTRIES));
+        let message = refusal(check_within(
+            &git,
+            &commit,
+            &t.root,
+            MAX_TREE_ENTRIES,
+            &Gathered::default(),
+        ));
         assert!(message.contains("d299/.gitattributes"), "{message}");
 
         // The same tree without LFS passes.
         let clean = big_commit(&git, 300, 100, Some("*.bin text\n"));
         let commit = git.find_commit(clean).unwrap();
-        assert!(check_within(&git, &commit, &t.root, MAX_TREE_ENTRIES).is_ok());
+        assert!(
+            check_within(
+                &git,
+                &commit,
+                &t.root,
+                MAX_TREE_ENTRIES,
+                &Gathered::default()
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -636,8 +551,14 @@ mod tests {
         let git = t.project.repo().unwrap();
         let clean = big_commit(&git, 50, 100, None);
         let commit = git.find_commit(clean).unwrap();
-        assert!(check_within(&git, &commit, &t.root, 10_000).is_ok());
-        let message = refusal(check_within(&git, &commit, &t.root, 1_000));
+        assert!(check_within(&git, &commit, &t.root, 10_000, &Gathered::default()).is_ok());
+        let message = refusal(check_within(
+            &git,
+            &commit,
+            &t.root,
+            1_000,
+            &Gathered::default(),
+        ));
         assert!(
             message.contains("cannot tell") && message.contains("not scanned in full"),
             "{message}"
@@ -663,7 +584,7 @@ mod tests {
         let id = git.commit(None, &sig, &sig, "same", &tree, &[]).unwrap();
         let commit = git.find_commit(id).unwrap();
         // 200,000 paths, but only 2,100 distinct entries to look at.
-        assert!(check_within(&git, &commit, &t.root, 5_000).is_ok());
+        assert!(check_within(&git, &commit, &t.root, 5_000, &Gathered::default()).is_ok());
     }
 
     #[test]
@@ -699,138 +620,391 @@ mod tests {
         assert!(refusal(verdict(&t, MAX_TREE_ENTRIES)).contains("cannot tell"));
     }
 
-    #[test]
-    fn the_repositorys_own_configuration_counts_at_every_file_it_reads() {
-        // An included file is part of the repository's configuration.
-        let t = repo(None);
-        let git = t.project.repo().unwrap();
-        let included = t.root.join(".git/lfs.inc");
-        std::fs::write(
-            &included,
-            "[filter \"lfs\"]\n\tsmudge = git-lfs smudge -- %f\n",
-        )
-        .unwrap();
-        git.config()
-            .unwrap()
-            .set_str("include.path", included.to_str().unwrap())
-            .unwrap();
-        assert!(refusal(verdict(&t, MAX_TREE_ENTRIES)).contains("filter.lfs.smudge"));
-
-        // The worktree-specific file too.
-        let t = repo(None);
-        let git = t.project.repo().unwrap();
-        std::fs::write(
-            t.root.join(".git/config.worktree"),
-            "[filter \"lfs\"]\n\trequired = true\n",
-        )
-        .unwrap();
-        git.config()
-            .unwrap()
-            .set_str("extensions.worktreeConfig", "true")
-            .unwrap();
-        let _ = git
-            .config()
-            .unwrap()
-            .set_bool("extensions.worktreeConfig", true);
-        // Only asserted where libgit2 reads the file; refusing is the safe side.
-        let reads = t
-            .project
-            .repo()
-            .unwrap()
-            .config()
-            .unwrap()
-            .get_string("filter.lfs.required")
-            .is_ok();
-        assert_eq!(verdict(&t, MAX_TREE_ENTRIES).is_err(), reads);
+    fn write(dir: &Path, name: &str, text: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+        path
     }
 
-    fn with_remote(t: &TestRepo, url: &str) {
-        t.project.repo().unwrap().remote("origin", url).unwrap();
+    fn lfs_attributes(dir: &Path) -> std::path::PathBuf {
+        write(dir, "attrs", "*.psd filter=lfs diff=lfs\n")
+    }
+
+    fn add_to_local_config(t: &TestRepo, text: &str) {
+        let path = t.root.join(".git/config");
+        let mut config = std::fs::read_to_string(&path).unwrap();
+        config.push_str(text);
+        std::fs::write(path, config).unwrap();
+    }
+
+    #[test]
+    fn a_key_without_a_value_is_a_boolean_not_a_crash() {
+        // `[fetch] prune` is in countless global configurations; libgit2 hands
+        // such an entry over without a value.
+        let t = repo(None);
+        add_to_local_config(
+            &t,
+            "[fetch]\n\tprune\n[remote \"origin\"]\n\turl = https://a.example.com/x.git\n",
+        );
+        assert!(verdict(&t, MAX_TREE_ENTRIES).is_ok());
+        // A bare `promisor` is `true`.
+        add_to_local_config(&t, "[remote \"origin\"]\n\tpromisor\n");
+        assert!(refusal(verdict(&t, MAX_TREE_ENTRIES)).contains("partial clone"));
+        // A value that is not text neither panics nor passes for a boolean.
+        let t = repo(None);
+        let path = t.root.join(".git/config");
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"[remote \"origin\"]\n\tpromisor = \xff\xfe\n");
+        std::fs::write(&path, bytes).unwrap();
+        assert!(refusal(verdict(&t, MAX_TREE_ENTRIES)).contains("not a value Git reads"));
+    }
+
+    #[test]
+    fn filter_lfs_configuration_without_an_attribute_is_not_lfs() {
+        // `git lfs install` writes the filter; nothing names it, so no pointer
+        // file can appear.
+        let t = repo(None);
+        add_to_local_config(
+            &t,
+            "[filter \"lfs\"]\n\tsmudge = git-lfs smudge -- %f\n\trequired = true\n",
+        );
+        let global = write(
+            t.dir.path(),
+            "global",
+            "[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n",
+        );
+        assert!(verdict_with(&t, &[&global], MAX_TREE_ENTRIES).is_ok());
+        // With an attribute it is.
+        std::fs::create_dir_all(t.root.join(".git/info")).unwrap();
+        std::fs::write(t.root.join(".git/info/attributes"), "*.psd filter=lfs\n").unwrap();
+        assert!(refusal(verdict_with(&t, &[&global], MAX_TREE_ENTRIES)).contains("Git LFS"));
+    }
+
+    #[test]
+    fn includes_resolve_from_the_directory_of_the_file_that_holds_them() {
+        // global -> sub/a.inc -> b.inc (relative to sub/) -> core.attributesFile.
+        let t = repo(None);
+        let home = t.dir.path().join("home");
+        let attrs = lfs_attributes(&home);
+        let global = write(&home, ".gitconfig", "[include]\n\tpath = conf/a.inc\n");
+        write(&home, "conf/a.inc", "[include]\n\tpath = b.inc\n");
+        write(
+            &home,
+            "conf/b.inc",
+            &format!("[core]\n\tattributesFile = {}\n", attrs.display()),
+        );
+        // The decoy a wrong base directory would find.
+        write(&home, "b.inc", "");
+        let message = refusal(verdict_with(&t, &[&global], MAX_TREE_ENTRIES));
+        assert!(
+            message.contains("attributes file") && message.contains("Git LFS"),
+            "{message}"
+        );
+
+        // `~/` is the test's home.
+        let t = repo(None);
+        let attrs = lfs_attributes(t.dir.path());
+        let global = write(t.dir.path(), "g", "[include]\n\tpath = ~/inc\n");
+        write(
+            t.dir.path(),
+            "inc",
+            &format!("[core]\n\tattributesFile = {}\n", attrs.display()),
+        );
+        assert!(refusal(verdict_with(&t, &[&global], MAX_TREE_ENTRIES)).contains("Git LFS"));
+
+        // A relative core.attributesFile has no directory to be relative to.
+        let t = repo(None);
+        let global = write(t.dir.path(), "g", "[core]\n\tattributesFile = attrs\n");
+        assert!(refusal(verdict_with(&t, &[&global], MAX_TREE_ENTRIES)).contains("cannot tell"));
+    }
+
+    #[test]
+    fn a_hasconfig_include_reaches_a_nested_gitdir_include() {
+        let t = repo(None);
+        let home = t.dir.path().join("home");
+        let attrs = lfs_attributes(&home);
+        t.project
+            .repo()
+            .unwrap()
+            .remote("origin", "https://example.com/team/app.git")
+            .unwrap();
+        let global = write(
+            &home,
+            ".gitconfig",
+            "[includeIf \"hasconfig:remote.*.url:https://example.com/**\"]\n\tpath = work.inc\n",
+        );
+        // The nested condition is evaluated for this repository.
+        write(
+            &home,
+            "work.inc",
+            &format!(
+                "[includeIf \"gitdir:{}/\"]\n\tpath = deep.inc\n\
+                 [includeIf \"gitdir:/somewhere/else/\"]\n\tpath = wrong.inc\n",
+                t.root.display()
+            ),
+        );
+        write(
+            &home,
+            "deep.inc",
+            &format!("[core]\n\tattributesFile = {}\n", attrs.display()),
+        );
+        write(
+            &home,
+            "wrong.inc",
+            "[core]\n\tattributesFile = /nonexistent-wrong\n",
+        );
+        let message = refusal(verdict_with(&t, &[&global], MAX_TREE_ENTRIES));
+        assert!(
+            message.contains("Git LFS") && message.contains("attrs"),
+            "{message}"
+        );
+
+        // Another repository's gitdir condition does not apply.
+        let other = repo(None);
+        let global = write(
+            &home,
+            "other-gitconfig",
+            &format!(
+                "[includeIf \"gitdir:{}/\"]\n\tpath = deep.inc\n",
+                t.root.display()
+            ),
+        );
+        assert!(verdict_with(&other, &[&global], MAX_TREE_ENTRIES).is_ok());
+    }
+
+    #[test]
+    fn onbranch_and_gitdir_patterns_follow_git() {
+        let t = repo(None);
+        let home = t.dir.path().join("home");
+        let attrs = lfs_attributes(&home);
+        let inc = write(
+            &home,
+            "inc",
+            &format!("[core]\n\tattributesFile = {}\n", attrs.display()),
+        );
+        for (condition, applies) in [
+            ("onbranch:main", true),
+            ("onbranch:ma*", true),
+            ("onbranch:release/**", false),
+            ("gitdir:**/shop/.git", true),
+            ("gitdir:shop/.git", true),
+            ("gitdir/i:**/SHOP/.GIT", true),
+            ("gitdir:**/other/.git", false),
+            ("gitdir:~/nowhere/", false),
+        ] {
+            let global = write(
+                &home,
+                "gitconfig",
+                &format!("[includeIf \"{condition}\"]\n\tpath = {}\n", inc.display()),
+            );
+            let verdict = verdict_with(&t, &[&global], MAX_TREE_ENTRIES);
+            assert_eq!(verdict.is_err(), applies, "{condition}: {verdict:?}");
+        }
     }
 
     fn include_if(t: &TestRepo, condition: &str, file_text: &str) {
-        let included = t.root.join(".git").join("cond.inc");
-        std::fs::write(&included, file_text).unwrap();
-        let mut local = std::fs::read_to_string(t.root.join(".git/config")).unwrap();
-        local.push_str(&format!(
-            "[includeIf \"{condition}\"]\n\tpath = {}\n",
-            included.display()
-        ));
-        std::fs::write(t.root.join(".git/config"), local).unwrap();
+        let included = write(&t.root.join(".git"), "cond.inc", file_text);
+        add_to_local_config(
+            t,
+            &format!(
+                "[includeIf \"{condition}\"]\n\tpath = {}\n",
+                included.display()
+            ),
+        );
     }
 
     #[test]
-    fn a_matching_hasconfig_include_is_read_though_libgit2_skips_it() {
-        // filter.lfs through an include that applies to this remote.
+    fn a_matching_hasconfig_include_supplies_attributes_and_partial_clone_keys() {
         let t = repo(None);
-        with_remote(&t, "git@github.com:work/app.git");
-        include_if(
-            &t,
-            "hasconfig:remote.*.url:git@github.com:work/**",
-            "[filter \"lfs\"]\n\tsmudge = git-lfs smudge -- %f\n",
-        );
-        assert!(refusal(verdict(&t, MAX_TREE_ENTRIES)).contains("filter.lfs.smudge"));
-
-        // The same include for another remote applies to nothing here.
-        let t = repo(None);
-        with_remote(&t, "git@github.com:me/app.git");
-        include_if(
-            &t,
-            "hasconfig:remote.*.url:git@github.com:work/**",
-            "[filter \"lfs\"]\n\tsmudge = git-lfs smudge -- %f\n",
-        );
-        assert!(verdict(&t, MAX_TREE_ENTRIES).is_ok());
-
-        // A core.attributesFile that a matching include supplies is read.
-        let t = repo(None);
-        with_remote(&t, "https://example.com/team/app.git");
-        let attributes = t.root.join(".git/attrs");
-        std::fs::write(&attributes, "*.psd filter=lfs\n").unwrap();
+        t.project
+            .repo()
+            .unwrap()
+            .remote("origin", "https://example.com/team/app.git")
+            .unwrap();
+        let attrs = lfs_attributes(t.dir.path());
         include_if(
             &t,
             "hasconfig:remote.*.url:https://example.com/**",
-            &format!("[core]\n\tattributesFile = {}\n", attributes.display()),
+            &format!("[core]\n\tattributesFile = {}\n", attrs.display()),
         );
         assert!(refusal(verdict(&t, MAX_TREE_ENTRIES)).contains("attributes file"));
 
-        // So are partial-clone keys.
         let t = repo(None);
-        with_remote(&t, "https://example.com/team/app.git");
+        t.project
+            .repo()
+            .unwrap()
+            .remote("origin", "https://example.com/team/app.git")
+            .unwrap();
         include_if(
             &t,
             "hasconfig:remote.*.url:https://example.com/**",
             "[remote \"origin\"]\n\tpromisor = 2\n",
         );
         assert!(refusal(verdict(&t, MAX_TREE_ENTRIES)).contains("partial clone"));
+
+        // The same include for another remote applies to nothing here.
+        let t = repo(None);
+        t.project
+            .repo()
+            .unwrap()
+            .remote("origin", "git@github.com:me/app.git")
+            .unwrap();
+        include_if(
+            &t,
+            "hasconfig:remote.*.url:https://example.com/**",
+            "[remote \"origin\"]\n\tpromisor = true\n",
+        );
+        assert!(verdict(&t, MAX_TREE_ENTRIES).is_ok());
+    }
+
+    #[test]
+    fn a_directory_wildcard_matches_zero_or_more_directories() {
+        for (pattern, url, applies) in [
+            (
+                "https://**/team/app.git",
+                "https://example.com/team/app.git",
+                true,
+            ),
+            ("https://**/team/app.git", "https://team/app.git", true),
+            (
+                "https://**/team/app.git",
+                "https://a/b/c/team/app.git",
+                true,
+            ),
+            ("https://*/team/app.git", "https://a/b/team/app.git", false),
+            ("**/app.git", "https://example.com/app.git", true),
+        ] {
+            let t = repo(None);
+            t.project.repo().unwrap().remote("origin", url).unwrap();
+            include_if(
+                &t,
+                &format!("hasconfig:remote.*.url:{pattern}"),
+                "[remote \"origin\"]\n\tpromisor = true\n",
+            );
+            assert_eq!(
+                verdict(&t, MAX_TREE_ENTRIES).is_err(),
+                applies,
+                "{pattern} against {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pathological_pattern_does_not_stall_the_check() {
+        let t = repo(None);
+        let url = format!("https://example.com/{}", "a".repeat(3000));
+        t.project.repo().unwrap().remote("origin", &url).unwrap();
+        include_if(
+            &t,
+            &format!("hasconfig:remote.*.url:{}x", "*a".repeat(60)),
+            "[remote \"origin\"]\n\tpromisor = true\n",
+        );
+        let started = std::time::Instant::now();
+        assert!(verdict(&t, MAX_TREE_ENTRIES).is_ok());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]
     fn a_condition_that_cannot_be_evaluated_is_refused_not_ignored() {
-        for condition in [
-            "hasconfig:remote.*.url:https://[ab].example.com/**",
+        // Another form of hasconfig.
+        let t = repo(None);
+        t.project
+            .repo()
+            .unwrap()
+            .remote("origin", "https://a.example.com/x.git")
+            .unwrap();
+        include_if(
+            &t,
             "hasconfig:branch.*.remote:origin",
-        ] {
-            let t = repo(None);
-            with_remote(&t, "https://a.example.com/x.git");
-            include_if(&t, condition, "[core]\n\tfoo = 1\n");
-            let message = refusal(verdict(&t, MAX_TREE_ENTRIES));
-            assert!(
-                message.contains("cannot read this repository's configuration"),
-                "{message}"
-            );
-        }
+            "[core]\n\tfoo = 1\n",
+        );
+        let message = refusal(verdict(&t, MAX_TREE_ENTRIES));
+        assert!(
+            message.contains("cannot read this repository's configuration"),
+            "{message}"
+        );
         // An include that is simply missing is ignored, as Git does.
         let t = repo(None);
-        with_remote(&t, "https://a.example.com/x.git");
-        include_if(&t, "hasconfig:remote.*.url:https://a.example.com/**", "");
-        std::fs::remove_file(t.root.join(".git/cond.inc")).unwrap();
+        add_to_local_config(&t, "[include]\n\tpath = /nonexistent/devflow/include\n");
         assert!(verdict(&t, MAX_TREE_ENTRIES).is_ok());
+        // A bracket expression is evaluated, as Git evaluates it.
+        let t = repo(None);
+        t.project
+            .repo()
+            .unwrap()
+            .remote("origin", "https://a.example.com/x.git")
+            .unwrap();
+        include_if(
+            &t,
+            "hasconfig:remote.*.url:https://[ab].example.com/**",
+            "[remote \"origin\"]\n\tpromisor = true\n",
+        );
+        assert!(refusal(verdict(&t, MAX_TREE_ENTRIES)).contains("partial clone"));
+        let t = repo(None);
+        t.project
+            .repo()
+            .unwrap()
+            .remote("origin", "https://c.example.com/x.git")
+            .unwrap();
+        include_if(
+            &t,
+            "hasconfig:remote.*.url:https://[ab].example.com/**",
+            "[remote \"origin\"]\n\tpromisor = true\n",
+        );
+        assert!(verdict(&t, MAX_TREE_ENTRIES).is_ok());
+    }
+
+    #[test]
+    fn an_include_that_cannot_be_read_is_not_absent() {
+        use std::os::unix::fs::PermissionsExt;
+        // (An unreadable include in the repository's own configuration stops
+        // libgit2 from opening it at all; the user's files are devflow's to
+        // judge.)
+        let t = repo(None);
+        let included = write(t.dir.path(), "locked.inc", "[core]\n\tfoo = 1\n");
+        let global = write(
+            t.dir.path(),
+            "g",
+            &format!("[include]\n\tpath = {}\n", included.display()),
+        );
+        std::fs::set_permissions(&included, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read(&included).is_ok();
+        let result = verdict_with(&t, &[&global], MAX_TREE_ENTRIES);
+        std::fs::set_permissions(&included, std::fs::Permissions::from_mode(0o644)).unwrap();
+        if readable {
+            // Running as root: permissions do not stop us.
+            return;
+        }
+        let message = refusal(result);
+        assert!(
+            message.contains("cannot read") && message.contains("locked.inc"),
+            "{message}"
+        );
+
+        // The same through a directory that cannot be entered.
+        let t = repo(None);
+        let dir = t.dir.path().join("closed");
+        write(&dir, "x.inc", "");
+        let global = write(
+            t.dir.path(),
+            "g",
+            &format!("[include]\n\tpath = {}/x.inc\n", dir.display()),
+        );
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = verdict_with(&t, &[&global], MAX_TREE_ENTRIES);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(refusal(result).contains("cannot read"));
     }
 
     #[test]
     fn a_promisor_value_git_cannot_read_is_refused() {
         let t = repo(None);
-        with_remote(&t, "https://a.example.com/x.git");
+        t.project
+            .repo()
+            .unwrap()
+            .remote("origin", "https://a.example.com/x.git")
+            .unwrap();
         let git = t.project.repo().unwrap();
         git.config()
             .unwrap()
@@ -861,7 +1035,7 @@ mod tests {
             let id = big_commit(&git, dirs, files, Some("*.bin text\n"));
             let commit = git.find_commit(id).unwrap();
             let started = std::time::Instant::now();
-            check_within(&git, &commit, &t.root, usize::MAX).unwrap();
+            check_within(&git, &commit, &t.root, usize::MAX, &Gathered::default()).unwrap();
             eprintln!(
                 "{} entries ({dirs} directories): {:?}",
                 dirs * files + dirs,
@@ -881,7 +1055,7 @@ mod tests {
                 })
                 .unwrap();
             let started = std::time::Instant::now();
-            let verdict = check_within(&other, &commit, &t.root, usize::MAX);
+            let verdict = check_within(&other, &commit, &t.root, usize::MAX, &Gathered::default());
             eprintln!(
                 "that repository, {count} entries: {:?} ({})",
                 started.elapsed(),

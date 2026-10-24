@@ -45,6 +45,8 @@ impl Where {
     fn crumbs(&self) -> Vec<String> {
         match (self.page, &self.project) {
             (Page::Settings, _) => vec!["devflow".into(), "Settings".into()],
+            (Page::Cleanup, Some(project)) => vec![project.clone(), "Clean up".into()],
+            (Page::Cleanup, None) => vec!["devflow".into(), "Clean up".into()],
             (Page::Project, Some(project)) => vec![project.clone(), self.tab.into()],
             (Page::Project, None) => vec!["devflow".into()],
         }
@@ -166,6 +168,14 @@ mod tests {
         assert_eq!(
             here(None, Page::Project, "Workspaces").crumbs(),
             ["devflow"]
+        );
+        assert_eq!(
+            here(Some("shop"), Page::Cleanup, "Data").crumbs(),
+            ["shop", "Clean up"]
+        );
+        assert_eq!(
+            here(None, Page::Cleanup, "Data").crumbs(),
+            ["devflow", "Clean up"]
         );
     }
 }

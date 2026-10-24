@@ -78,6 +78,53 @@ pub fn hooks_dir(project: &Project) -> Result<PathBuf> {
     })
 }
 
+/// A relative `core.hooksPath`, and what a new worktree finds at it.
+///
+/// Git resolves a relative hooks path inside each worktree. A directory that
+/// is part of the checkout (committed hooks) exists in a new worktree; one
+/// that is generated and ignored does not: husky's `.husky/_` is written by its
+/// `prepare` script and ignored by its own `.gitignore`, so in a worktree made
+/// by `git worktree add` there is no hook to run until something generates it.
+/// A hook devflow installs into the main checkout's copy is not there either
+/// unless it is committed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RelativeHooksPath {
+    /// The setting as written.
+    pub configured: PathBuf,
+    /// The path is husky's generated one (a `.husky` component).
+    pub husky: bool,
+    /// A `post-checkout` hook at that path is part of the committed tree, so a
+    /// new worktree has it.
+    pub committed: bool,
+}
+
+/// The relative `core.hooksPath` of the project, if it has one.
+pub fn relative_hooks_path(project: &Project) -> Result<Option<RelativeHooksPath>> {
+    let repo = project.repo()?;
+    let Some(configured) = repo
+        .config()?
+        .get_path("core.hooksPath")
+        .ok()
+        .filter(|path| !path.as_os_str().is_empty() && path.is_relative())
+    else {
+        return Ok(None);
+    };
+    let hook = configured.join(HOOK_NAME);
+    let committed = repo
+        .head()
+        .ok()
+        .and_then(|head| head.peel_to_tree().ok())
+        .is_some_and(|tree| tree.get_path(&hook).is_ok());
+    let husky = configured
+        .components()
+        .any(|part| part.as_os_str() == ".husky");
+    Ok(Some(RelativeHooksPath {
+        configured,
+        husky,
+        committed,
+    }))
+}
+
 pub fn state(project: &Project) -> Result<InstallState> {
     let path = hooks_dir(project)?.join(HOOK_NAME);
     match std::fs::read(&path) {
@@ -138,6 +185,92 @@ fn write_hook(path: &Path, text: &str) -> Result<()> {
             .with_context(|| format!("cannot make {} executable", path.display()))?;
     }
     Ok(())
+}
+
+/// A setup started detached from the Git hook.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Detached {
+    pub pid: u32,
+    /// Where its output goes: in the worktree's own Git directory.
+    pub log: PathBuf,
+}
+
+/// The file the detached setup of a worktree writes to.
+pub fn background_log(git_dir: &Path) -> PathBuf {
+    crate::receipt::Receipt::logs_dir(git_dir).join("git-hook.log")
+}
+
+/// Git's own variables for the command it runs a hook for. A setup that
+/// outlives the hook must not keep pointing at an index or a repository
+/// Git was using for the checkout.
+const GIT_HOOK_VARIABLES: [&str; 8] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_PREFIX",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_QUARANTINE_PATH",
+];
+
+/// Run `exe args` in `workspace` detached from the hook that started it, and
+/// return at once: its own process group (a signal sent to Git's does not
+/// reach it), no standard input, and standard output and error appended to
+/// [`background_log`] (mode 0600) in `git_dir`.
+#[cfg(unix)]
+pub fn spawn_background(
+    exe: &Path,
+    args: &[&str],
+    workspace: &Path,
+    git_dir: &Path,
+) -> Result<Detached> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::process::CommandExt;
+    let log = background_log(git_dir);
+    let dir = log.parent().context("the log has no directory")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(&log)
+        .with_context(|| format!("cannot open {}", log.display()))?;
+    use std::io::Write as _;
+    writeln!(
+        file,
+        "--- {} setup started by the post-checkout hook ---",
+        chrono::Utc::now().to_rfc3339()
+    )?;
+    let mut command = std::process::Command::new(exe);
+    command
+        .args(args)
+        .current_dir(workspace)
+        .stdin(std::process::Stdio::null())
+        .stdout(file.try_clone()?)
+        .stderr(file)
+        .process_group(0);
+    for variable in GIT_HOOK_VARIABLES {
+        command.env_remove(variable);
+    }
+    let child = command
+        .spawn()
+        .with_context(|| format!("cannot start {}", exe.display()))?;
+    // Not waited for: it runs on after this process is gone, and the system
+    // collects it.
+    let pid = child.id();
+    drop(child);
+    Ok(Detached { pid, log })
+}
+
+#[cfg(not(unix))]
+pub fn spawn_background(
+    _exe: &Path,
+    _args: &[&str],
+    _workspace: &Path,
+    _git_dir: &Path,
+) -> Result<Detached> {
+    anyhow::bail!("a setup in the background is not available on this system")
 }
 
 fn hook_lock(project: &Project) -> PathBuf {

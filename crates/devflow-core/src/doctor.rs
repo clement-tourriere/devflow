@@ -720,7 +720,80 @@ fn hook_trust(project: &Project, cwd: &Path) -> Vec<Check> {
     }]
 }
 
+/// Hosts the repository is used with whose worktrees devflow does not set up
+/// (the host's own script is the dependable way: it runs in the new worktree
+/// whatever Git hooks that checkout has), and a relative `core.hooksPath` that
+/// keeps the Git hook from firing in a new worktree.
+fn host_checks(project: &Project) -> Vec<Check> {
+    use crate::integrate::{self, State};
+    let mut checks = Vec::new();
+    let hosts: Vec<_> = integrate::suggestions(project);
+    let integrate_fixes = |hosts: &[integrate::Detected]| -> Vec<Remedy> {
+        hosts
+            .iter()
+            .map(|detected| Remedy::IntegrateHost {
+                root: project.root.clone(),
+                host: detected.host.name().to_string(),
+            })
+            .collect()
+    };
+    if let Ok(Some(relative)) = githook::relative_hooks_path(project)
+        && !relative.committed
+    {
+        let shown = relative.configured.display();
+        let message = if relative.husky {
+            format!(
+                "core.hooksPath is the relative path {shown}, which husky generates and Git ignores: a worktree made by git worktree add has no hook there, so the post-checkout hook never fires"
+            )
+        } else {
+            format!(
+                "core.hooksPath is the relative path {shown}; Git looks for it inside each worktree, and a post-checkout hook there is not part of a new checkout, so it never fires"
+            )
+        };
+        let mut check = Check::warn(
+            "git-hook-path",
+            message,
+            "set worktrees up from the tool that creates them (its devflow integration), commit the hook, or point core.hooksPath at an absolute directory",
+        );
+        for fix in integrate_fixes(&hosts) {
+            check = check.fix(fix);
+        }
+        checks.push(check);
+    }
+    for detected in hosts {
+        let host = detected.host;
+        let message = format!(
+            "{} is used here ({}) but its worktrees are not set up by devflow",
+            host.label(),
+            detected.found.join(", ")
+        );
+        let hint = match detected.state {
+            State::Conflict => {
+                "an entry of someone else's stands in the way of devflow's; the integration reports it and leaves it alone"
+            }
+            _ => {
+                "writing devflow's setup into the host's project file makes it set new worktrees up"
+            }
+        };
+        checks.push(
+            Check::warn(&format!("integration-{}", host.name()), message, hint).fix(
+                Remedy::IntegrateHost {
+                    root: project.root.clone(),
+                    host: host.name().to_string(),
+                },
+            ),
+        );
+    }
+    checks
+}
+
 fn git_hook(project: &Project) -> Vec<Check> {
+    let mut checks = git_hook_state(project);
+    checks.extend(host_checks(project));
+    checks
+}
+
+fn git_hook_state(project: &Project) -> Vec<Check> {
     vec![match githook::state(project) {
         // An unreleased build moved somebody's hook aside and wrapped it.
         Ok(InstallState::Installed { path }) if githook::legacy_original(&path).is_some() => {
@@ -974,6 +1047,50 @@ fn workspaces(project: &Project) -> Vec<Check> {
             })),
         );
     }
+    // Workspaces Git forgot (or whose directory is gone) that still own
+    // resources, from the ledger's records alone.
+    if let Ok(gone) = crate::gc::summary(project) {
+        if !gone.removed_elsewhere.is_empty() {
+            checks.push(
+                Check::warn(
+                    "workspaces-gone",
+                    format!(
+                        "removed outside devflow, still owning data or processes: {}",
+                        gone.removed_elsewhere.join(", ")
+                    ),
+                    "git worktree remove, and the agent hosts that delete worktrees themselves, leave the data branches, containers and daemons behind; review them and remove the ones you do not need",
+                )
+                .fix(Remedy::CleanUp {
+                    root: project.root.clone(),
+                }),
+            );
+        }
+        if !gone.missing.is_empty() {
+            checks.push(
+                Check::warn(
+                    "workspaces-gone",
+                    format!(
+                        "directory missing, still owning data or processes: {}",
+                        gone.missing.join(", ")
+                    ),
+                    "a worktree on a drive that is not connected looks the same, so connect it first; otherwise review them and remove the ones you do not need",
+                )
+                .fix(Remedy::CleanUp {
+                    root: project.root.clone(),
+                }),
+            );
+        }
+        if gone.unreadable > 0 {
+            checks.push(Check::warn(
+                "workspaces-gone",
+                format!(
+                    "{} workspace record(s) cannot be read, so what those workspaces own is unknown",
+                    gone.unreadable
+                ),
+                "repair or remove the unreadable files in `devflow/workspaces` of the repository's Git directory; nothing they might name is dropped meanwhile",
+            ));
+        }
+    }
     if checks.is_empty() {
         checks.push(Check::ok(
             "workspaces",
@@ -1129,6 +1246,72 @@ mod tests {
     }
 
     #[test]
+    fn a_relative_hooks_path_that_a_new_worktree_lacks_is_explained_with_the_host_integration() {
+        let t = testutil::repo(None);
+        // husky: generated and ignored, so a new worktree has nothing there.
+        t.project
+            .repo()
+            .unwrap()
+            .config()
+            .unwrap()
+            .set_str("core.hooksPath", ".husky/_")
+            .unwrap();
+        std::fs::write(t.root.join("t3.json"), "{}").unwrap();
+        let project = t.project.reload().unwrap();
+        githook::install(&project).unwrap();
+        let checks = run(Some(&project));
+        let path = find(&checks, "git-hook-path");
+        assert_eq!(path.len(), 1, "{checks:?}");
+        assert_eq!(path[0].status, CheckStatus::Warn);
+        assert!(path[0].detail.contains("husky"), "{}", path[0].detail);
+        assert!(path[0].detail.contains(".husky/_"), "{}", path[0].detail);
+        assert!(path[0].detail.contains("never fires"));
+        assert_eq!(
+            path[0].remedies,
+            [Remedy::IntegrateHost {
+                root: t.root.clone(),
+                host: "t3".into()
+            }]
+        );
+        // The host that is used here is reported in its own right.
+        let host = find(&checks, "integration-t3");
+        assert_eq!(host.len(), 1);
+        assert!(host[0].detail.contains("T3 Code is used here (t3.json)"));
+        for check in path.iter().chain(host.iter()) {
+            for text in [Some(&check.detail), check.hint.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                assert!(!has_cli_text(text), "{}: {text}", check.name);
+            }
+        }
+
+        // Once the host is set up, only the hook path stays.
+        let change = crate::integrate::plan(&t.root, crate::integrate::Host::T3, false).unwrap();
+        crate::integrate::apply(&change).unwrap();
+        let checks = run(Some(&project));
+        assert!(find(&checks, "integration-t3").is_empty());
+        assert_eq!(find(&checks, "git-hook-path").len(), 1);
+    }
+
+    #[test]
+    fn a_relative_hooks_path_with_a_committed_hook_is_fine() {
+        let t = testutil::repo(None);
+        std::fs::create_dir_all(t.root.join("tools/hooks")).unwrap();
+        std::fs::write(t.root.join("tools/hooks/post-checkout"), "#!/bin/sh\n").unwrap();
+        testutil::commit_all(&t.project.repo().unwrap(), "hooks");
+        t.project
+            .repo()
+            .unwrap()
+            .config()
+            .unwrap()
+            .set_str("core.hooksPath", "tools/hooks")
+            .unwrap();
+        let checks = run(Some(&t.project.reload().unwrap()));
+        assert!(find(&checks, "git-hook-path").is_empty(), "{checks:?}");
+    }
+
+    #[test]
     fn a_hook_somebody_else_wrote_is_offered_the_line_not_replaced() {
         let t = testutil::repo(None);
         let hook = t.root.join(".git/hooks/post-checkout");
@@ -1249,6 +1432,43 @@ mod tests {
                 .any(|c| c.status == CheckStatus::Warn && c.detail.contains("stuck")),
             "{found:?}"
         );
+    }
+
+    #[test]
+    fn workspaces_git_forgot_are_reported_with_the_clean_up_remedy_and_no_command() {
+        let t = testutil::repo(None);
+        let ws = worktree::create(&t.project, "agent-made", None).unwrap();
+        let mut receipt = crate::receipt::Receipt::new(t.project.id(), "agent-made", None);
+        receipt.processes = Some(crate::receipt::ProcessRecord {
+            started_at: chrono::Utc::now(),
+            ids: vec![format!("{}/web", receipt.slug())],
+        });
+        receipt.save(&ws.git_dir).unwrap();
+        // What an agent host does when it is done: remove the worktree.
+        worktree::force_remove(&t.project, &ws).unwrap();
+
+        let checks = run(Some(&t.project));
+        let found: Vec<&Check> = find(&checks, "workspaces-gone");
+        assert_eq!(found.len(), 1, "{checks:?}");
+        assert_eq!(found[0].status, CheckStatus::Warn);
+        assert!(found[0].detail.contains("agent-made"), "{:?}", found[0]);
+        assert!(
+            !has_cli_text(&found[0].detail) && !has_cli_text(found[0].hint.as_deref().unwrap())
+        );
+        assert_eq!(
+            found[0].remedies,
+            [Remedy::CleanUp {
+                root: t.project.root.clone()
+            }]
+        );
+        // Nothing owned, nothing to say.
+        let quiet = testutil::repo(None);
+        let ws = worktree::create(&quiet.project, "tidy", None).unwrap();
+        crate::receipt::Receipt::new(quiet.project.id(), "tidy", None)
+            .save(&ws.git_dir)
+            .unwrap();
+        worktree::force_remove(&quiet.project, &ws).unwrap();
+        assert!(find(&run(Some(&quiet.project)), "workspaces-gone").is_empty());
     }
 
     #[test]

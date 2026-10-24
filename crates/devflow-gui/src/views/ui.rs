@@ -21,7 +21,7 @@ use gpui_kit::{
     *,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
     Neutral,
     Success,

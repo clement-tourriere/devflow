@@ -286,6 +286,7 @@ mod tests {
             workspace: "feature".into(),
             path: PathBuf::from("/tmp/shop/feature"),
             instance: None,
+            app_port: None,
             namespace: Namespace {
                 value: "df-0b3c9d2e-a1b2c3d4".into(),
                 source: NamespaceSource::Devflow,
@@ -305,6 +306,7 @@ mod tests {
                 triggers: Vec::new(),
                 configured: true,
                 startable: false,
+                unreadable: None,
             }],
             observation: Observation::from_reasons(vec![format!("cannot connect to {URL}")]),
             proxy: Some(ProxyStatus {

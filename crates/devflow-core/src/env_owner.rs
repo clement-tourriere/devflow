@@ -75,8 +75,10 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The names a workspace carries to say which one it is.
-pub const IDENTITY: [&str; 7] = [
+/// The names a workspace carries to say which one it is, and the port it was
+/// given (`DEVFLOW_PORT`: unlike the other `DEVFLOW_*` names it is the
+/// workspace's, never an execution control).
+pub const IDENTITY: [&str; 8] = [
     "DEVFLOW_PROJECT",
     "DEVFLOW_PROJECT_ROOT",
     "DEVFLOW_WORKSPACE",
@@ -84,6 +86,7 @@ pub const IDENTITY: [&str; 7] = [
     "DEVFLOW_SOURCE_PATH",
     "DEVFLOW_WORKSPACE_ID",
     "COMPOSE_PROJECT_NAME",
+    "DEVFLOW_PORT",
 ];
 
 /// The environment variable that lists the names to inherit: comma separated.
@@ -718,8 +721,25 @@ fn is_dotenv(entry: &str) -> bool {
 /// workspace's whenever the command does not go through devflow. Names and
 /// paths only; a file that is a symlink or too large is not read.
 pub fn dotenv_conflicts(config: &Config, worktree: &Path, env: &ChildEnv) -> Vec<DotenvConflict> {
+    dotenv_conflicts_among(config, worktree, env, &[])
+}
+
+/// [`dotenv_conflicts`] that also looks at `copied`: the paths the payload
+/// phase recorded, which include the files `.worktreeinclude` selected.
+pub fn dotenv_conflicts_among(
+    config: &Config,
+    worktree: &Path,
+    env: &ChildEnv,
+    copied: &[String],
+) -> Vec<DotenvConflict> {
     let mut found = Vec::new();
-    for entry in config.worktree.copy.iter().filter(|e| is_dotenv(e)) {
+    let mut entries: Vec<&String> = config.worktree.copy.iter().collect();
+    for entry in copied {
+        if !entries.contains(&entry) {
+            entries.push(entry);
+        }
+    }
+    for entry in entries.into_iter().filter(|e| is_dotenv(e)) {
         let path = worktree.join(entry);
         let Ok(meta) = path.symlink_metadata() else {
             continue;

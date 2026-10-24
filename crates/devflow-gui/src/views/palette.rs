@@ -56,6 +56,9 @@ pub enum PaletteAction {
     /// Show how to install pitchfork (the command and the button are on the
     /// Daemons tab: installing is a click there).
     InstallPitchfork,
+    /// The Clean up page: workspaces Git or an agent host removed, and what
+    /// they still own.
+    CleanUp,
     /// The doctor's checks for the selected workspace.
     RunDoctor,
 }
@@ -66,7 +69,8 @@ impl PaletteAction {
             Self::Project(id) => state.update(cx, |s, cx| s.reveal_project(*id, cx)),
             Self::Tab(tab) => state.update(cx, |s, cx| s.go_to_tab(*tab, cx)),
             Self::NewWorkspace => state.update(cx, |s, cx| s.request_new_workspace(None, cx)),
-            Self::Refresh => state.update(cx, |s, cx| s.refresh_all(cx)),
+            Self::Refresh => state.update(cx, |s, cx| s.refresh_current(window, cx)),
+            Self::CleanUp => state.update(cx, |s, cx| s.open_cleanup_of_selection(window, cx)),
             Self::Settings => state.update(cx, |s, cx| s.set_page(Page::Settings, cx)),
             Self::ToggleTheme => state.update(cx, |s, cx| s.toggle_theme(window, cx)),
             Self::AddProject => state.update(cx, |s, cx| s.add_project(window, cx)),
@@ -252,6 +256,23 @@ fn groups(state: &AppState) -> Vec<Group> {
                 current: false,
                 disabled: !has_project,
                 action: PaletteAction::Refresh,
+            },
+            Entry {
+                label: "Clean up workspaces…".into(),
+                detail: Some("removed outside devflow, still owning data".into()),
+                keywords: vec![
+                    "gc".into(),
+                    "remove".into(),
+                    "orphan".into(),
+                    "leftover".into(),
+                    "worktree".into(),
+                    "delete".into(),
+                ],
+                icon: Lucide::Trash,
+                shortcut: None,
+                current: state.page == Page::Cleanup,
+                disabled: !has_project,
+                action: PaletteAction::CleanUp,
             },
             Entry {
                 label: "Settings".into(),
@@ -606,10 +627,33 @@ mod tests {
                 "New workspace",
                 "Set up devflow…",
                 "Refresh",
+                "Clean up workspaces…",
                 "Settings",
                 "Toggle theme",
                 "Add project…"
             ]
+        );
+    }
+
+    #[test]
+    fn clean_up_needs_a_project_and_is_marked_while_its_page_is_open() {
+        let mut state = state_with(&["shop"], Some(0));
+        let entry = |state: &AppState| {
+            groups(state)
+                .into_iter()
+                .flat_map(|g| g.entries)
+                .find(|e| e.label.as_ref() == "Clean up workspaces…")
+                .map(|e| (e.disabled, e.current))
+                .unwrap()
+        };
+        assert_eq!(entry(&state), (false, false));
+        state.page = crate::model::Page::Cleanup;
+        assert_eq!(entry(&state), (false, true));
+        state.selection.clear();
+        assert_eq!(
+            entry(&state),
+            (true, true),
+            "nothing to clean up without a project"
         );
     }
 

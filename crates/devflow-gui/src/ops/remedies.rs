@@ -13,7 +13,9 @@ use devflow_core::setup::Progress as _;
 use devflow_core::{
     config::EnvPreset,
     config_edit::{self, ConfigFiles, Edit, Target},
-    githook, worktree,
+    githook, integrate,
+    remedy::{Problem, Remedy},
+    worktree,
 };
 use gpui_kit::{
     Context, Window,
@@ -67,6 +69,65 @@ impl AppState {
                         "Worktrees other tools create are set up by the hook at {}",
                         crate::model::shorten_home(&path)
                     ),
+                    ..Done::default()
+                })
+            },
+        );
+    }
+
+    /// Write devflow's setup into the file an agent host reads (T3 Code,
+    /// Claude Code, Conductor, Cursor). Additive: what the file holds is kept,
+    /// and a script of somebody else's is reported, never replaced.
+    pub fn integrate_host(
+        &mut self,
+        root: PathBuf,
+        host: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let label = integrate::Host::parse(&host).map_or(host.clone(), |h| h.label().to_string());
+        let title = format!("Set up {label}");
+        if !self.open_project_at(&root, window, cx, &title) {
+            return;
+        }
+        let Some(wanted) = integrate::Host::parse(&host) else {
+            Self::notify_error(window, cx, &title, "devflow does not know that tool.");
+            return;
+        };
+        self.start_job(
+            title.clone(),
+            true,
+            FailureHint::None,
+            window,
+            cx,
+            move |project, _| {
+                let change = integrate::plan(&project.root, wanted, false)?;
+                let written = integrate::apply(&change)?;
+                if !change.conflicts.is_empty() {
+                    // The rest was written; the entries that are somebody
+                    // else's were left alone, and the file is the way on.
+                    let left: Vec<String> =
+                        change.conflicts.iter().map(|c| c.to_string()).collect();
+                    return Err(Problem::new(format!(
+                        "{} was left alone where another entry is in the way: {}",
+                        change.relative,
+                        left.join("; ")
+                    ))
+                    .with(Remedy::OpenFile {
+                        path: change.file.clone(),
+                    })
+                    .into_error());
+                }
+                Ok(Done {
+                    summary: if written {
+                        format!(
+                            "{} sets worktrees up with devflow now ({}); commit the file",
+                            wanted.label(),
+                            change.relative
+                        )
+                    } else {
+                        format!("{} already sets worktrees up with devflow", wanted.label())
+                    },
                     ..Done::default()
                 })
             },

@@ -1412,6 +1412,13 @@ pub struct DaemonState {
     /// workspace is ready, the configuration is approved, the daemon is not
     /// running and neither it nor what it depends on starts on its own.
     pub startable: bool,
+    /// Why pitchfork's entry for the daemon could not be read as one (an `id`
+    /// that is not `namespace/name`, a pid that is not a number, a missing
+    /// status), when it could not. Whatever `state` says then, the daemon is
+    /// neither known to run nor known to be stopped: see
+    /// [`DaemonState::is_stopped`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unreadable: Option<String>,
 }
 
 /// The `state` of a declared daemon that pitchfork has not listed.
@@ -1434,6 +1441,13 @@ impl DaemonState {
 
     pub fn is_active(&self) -> bool {
         self.status().is_active()
+    }
+
+    /// Positively not running: the entry was read, and its state says no
+    /// process runs (`stopped`, `errored`, `failed`, `available`). An entry that
+    /// could not be read is never stopped, whatever its status string says.
+    pub fn is_stopped(&self) -> bool {
+        self.unreadable.is_none() && self.status().is_inactive()
     }
 
     pub fn failed(&self) -> bool {
@@ -1582,6 +1596,9 @@ pub struct ProcessStatus {
     /// so an action runs against the workspace it showed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instance: Option<uuid::Uuid>,
+    /// The workspace's own port (`DEVFLOW_PORT`), once it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_port: Option<u16>,
     pub namespace: Namespace,
     /// pitchfork was found and runs.
     pub installed: bool,
@@ -1606,6 +1623,35 @@ pub struct ProcessStatus {
     /// Why autostart cannot work here (daemons that start on their own).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub autostart_blocked: Option<String>,
+}
+
+/// Whether the workspace's files declare any pitchfork daemon (no pitchfork is
+/// asked): what decides that `up` or `down` has daemons to act on at all.
+pub fn has_daemons(project: &Project, workspace: &Workspace) -> bool {
+    !configured(&trust::scope_at(project, &workspace.path)).is_empty()
+}
+
+/// Whether daemons of the workspace may be running that are worth asking
+/// pitchfork about: its files declare some, it has any pitchfork file (devflow's
+/// own namespace file included), or devflow recorded starting some, or whether it did cannot be told (an
+/// unreadable record). A daemon
+/// whose definition was removed since it started is found this way (and, with
+/// pitchfork at hand, by the namespace devflow assigned): the current
+/// configuration alone does not say what runs. What decides that a bulk
+/// shutdown has nothing to stop without asking is this being `false`.
+pub fn may_have_daemons(project: &Project, workspace: &Workspace) -> bool {
+    has_daemons(project, workspace)
+        || touches_pitchfork(&workspace.path)
+        || match setup::receipt(project, workspace) {
+            Ok(Some(receipt)) => receipt
+                .processes
+                .is_some_and(|record| !record.ids.is_empty()),
+            Ok(None) => false,
+            // A record that cannot be read is not "no record": whether devflow
+            // started anything here is unknown, and unknown is answered by
+            // asking (the guarded stop path), never by skipping.
+            Err(_) => true,
+        }
 }
 
 /// Is there a pitchfork devflow can use? Its version if so, else why not. Usable
@@ -1758,6 +1804,7 @@ fn compose(
             triggers: d.triggers.iter().cloned().collect(),
             configured: true,
             startable: false,
+            unreadable: None,
         })
         .collect();
     for listed in snapshot
@@ -1781,6 +1828,7 @@ fn compose(
             triggers: Vec::new(),
             configured: false,
             startable: false,
+            unreadable: listed.malformed.clone(),
         };
         match daemons.iter_mut().find(|d| d.name == listed.name) {
             Some(existing) => {
@@ -1875,13 +1923,12 @@ fn compose(
             list.join(", ")
         )
     });
+    let receipt = setup::receipt(project, workspace).ok().flatten();
     ProcessStatus {
         workspace: workspace.name.clone(),
         path: workspace.path.clone(),
-        instance: setup::receipt(project, workspace)
-            .ok()
-            .flatten()
-            .map(|receipt| receipt.instance_id),
+        instance: receipt.as_ref().map(|receipt| receipt.instance_id),
+        app_port: receipt.as_ref().and_then(|receipt| receipt.app_port),
         namespace,
         installed,
         version,
@@ -2315,6 +2362,7 @@ fn report_after(
                 triggers: Vec::new(),
                 configured: false,
                 startable: false,
+                unreadable: listed.malformed.clone(),
             });
         }
         status.daemons.sort_by(|a, b| a.name.cmp(&b.name));
@@ -2544,18 +2592,22 @@ fn plan_stop(
     workspace: &Workspace,
     force: bool,
 ) -> Result<StopPlan, Refusal> {
-    plan_stop_from(pitchfork, project, workspace, &workspace.path, force)
+    plan_stop_from(pitchfork, project, workspace, &workspace.path, force, true)
 }
 
 /// [`plan_stop`] asking pitchfork from `dir`: the workspace's own directory,
 /// or, for a checkout that is gone, a directory that exists (ids carry their
-/// namespace, so no configuration is needed to name a daemon).
+/// namespace, so no configuration is needed to name a daemon). `stops` says
+/// whether the plan is for a stop that will be asked of pitchfork; for a gone
+/// checkout it is not (see [`plan_gone`]), and the plan's warning says that
+/// nothing was stopped.
 fn plan_stop_from(
     pitchfork: &Pitchfork,
     project: &Project,
     workspace: &Workspace,
     dir: &Path,
     force: bool,
+    stops: bool,
 ) -> Result<StopPlan, Refusal> {
     let mut warnings = Vec::new();
     // The daemons of this workspace are the ones in the namespace devflow
@@ -2602,10 +2654,17 @@ fn plan_stop_from(
                 "the daemons the workspace declares",
             )
         };
-        warnings.push(format!(
-            "could not read what pitchfork runs ({error}); asked it to stop {what} without \
-             being able to tell which of them ran"
-        ));
+        warnings.push(if stops {
+            format!(
+                "could not read what pitchfork runs ({error}); asked it to stop {what} without \
+                 being able to tell which of them ran"
+            )
+        } else {
+            format!(
+                "could not read what pitchfork runs ({error}); nothing was stopped, and {what} \
+                 may still be running"
+            )
+        });
         // Whatever the stop does, the namespace stays unresolved until a
         // listing that could be read shows nothing of it running, even when no
         // id is known to ask about.
@@ -3391,7 +3450,7 @@ fn plan_gone(
             "cannot make a directory to ask pitchfork from: {error}"
         ))
     })?;
-    let plan = match plan_stop_from(located, project, workspace, dir.path(), force) {
+    let plan = match plan_stop_from(located, project, workspace, dir.path(), force, false) {
         Ok(plan) => plan,
         // (The generic advice is about stopping them, which is not on offer.)
         Err(Refusal::StateUnknown { detail, .. }) => return Err(unknown(detail)),
@@ -3550,10 +3609,15 @@ pub struct RemovalStopped {
 pub struct StopFailed {
     /// Why, in one sentence.
     pub cause: String,
-    /// The ids that read as stopped afterwards.
+    /// The ids that read as stopped afterwards: a state that says no process
+    /// runs (`stopped`, `errored`, `failed`, `available`), and nothing less.
     pub stopped: Vec<String>,
-    /// The ids still running, or whose state could not be read.
-    pub remaining: Vec<String>,
+    /// The ids listed as running (or waiting, or stopping).
+    pub running: Vec<String>,
+    /// The ids whose state is not known: not listed, in a state devflow does not
+    /// recognise, or an entry that could not be read. Neither running nor not
+    /// running.
+    pub unknown: Vec<String>,
     /// What pitchfork reported after the stop.
     pub report: ProcessReport,
 }
@@ -3677,30 +3741,26 @@ pub fn stop_for_removal_locked(
             .filter(|d| d.is_active())
             .filter_map(|d| d.id.as_deref())
             .collect();
-        let listed: BTreeSet<&str> = report
-            .daemons
-            .iter()
-            .filter_map(|d| d.id.as_deref())
-            .collect();
-        let stopped: Vec<String> = stop
-            .plan
-            .active
-            .iter()
-            .filter(|id| listed.contains(id.as_str()) && !active_now.contains(id.as_str()))
-            .cloned()
-            .collect();
-        let remaining: Vec<String> = stop
-            .plan
-            .active
-            .iter()
-            .filter(|id| !stopped.contains(id))
-            .cloned()
-            .collect();
+        // Stopped only where the state says so; running where it says that;
+        // anything else (unlisted, unknown, malformed) is not known.
+        let (mut stopped, mut running, mut unknown) = (Vec::new(), Vec::new(), Vec::new());
+        for id in &stop.plan.active {
+            match report.daemons.iter().find(|d| d.id.as_deref() == Some(id)) {
+                // (An entry that could not be read is unknown before its status
+                // is looked at: a malformed record that says `stopped` proves
+                // nothing.)
+                Some(daemon) if daemon.unreadable.is_some() => unknown.push(id.clone()),
+                Some(daemon) if daemon.is_stopped() => stopped.push(id.clone()),
+                Some(daemon) if daemon.is_active() => running.push(id.clone()),
+                _ => unknown.push(id.clone()),
+            }
+        }
         if !force {
             return Err(anyhow::Error::new(StopFailed {
                 cause: format!("could not stop the workspace's pitchfork daemons: {why}"),
                 stopped,
-                remaining,
+                running,
+                unknown,
                 report,
             }));
         }
@@ -3715,10 +3775,206 @@ pub fn stop_for_removal_locked(
         });
     }
     Ok(RemovalStopped {
-        stopped: stop.plan.active.clone(),
+        // (Of a stop that was not seen to work, only the ones that read as
+        // stopped; the rest are in `may_still_run`.)
+        stopped: match &may_still_run {
+            None => stop.plan.active.clone(),
+            Some(_) => stop
+                .plan
+                .active
+                .iter()
+                .filter(|id| {
+                    report
+                        .daemons
+                        .iter()
+                        .any(|d| d.id.as_deref() == Some(id) && d.is_stopped())
+                })
+                .cloned()
+                .collect(),
+        },
         warnings,
         may_still_run,
     })
+}
+
+/// What looking at the daemons a workspace's record lists came to.
+#[derive(Debug, Clone, Default)]
+pub struct RecordedCheck {
+    /// The supervisor was read and none of the namespace's daemons runs (or
+    /// devflow recorded none and had no reason to look): the record may stop
+    /// listing them.
+    pub verified: bool,
+    /// Daemons a forced removal went on without being able to rule out.
+    pub may_still_run: Option<MayStillRun>,
+    pub warnings: Vec<String>,
+}
+
+/// What to do about the daemons of a workspace that has no checkout.
+const RECORDED_HINT: &str = "devflow does not stop the daemons of a workspace whose checkout is \
+     gone, because pitchfork would run their lifecycle hooks from a configuration nobody \
+     approved: stop them yourself with pitchfork, or go on without knowing by forcing the \
+     removal, which leaves them running and keeps them on the workspace's record";
+
+/// Ask pitchfork what runs under the namespace of a workspace that has no
+/// receipt and no checkout (`recorded` are the ids its record lists as started
+/// and not seen stop). A query, from an empty directory of our own
+/// ([`NeutralDir`]): the same policy as [`plan_gone`] for a registered
+/// workspace whose checkout is gone. **Nothing is ever stopped here**: a stop
+/// makes the supervisor run `on_stop` and `on_exit` from the configuration at
+/// the directory the daemon was started from, which devflow can neither read
+/// nor ask anyone to approve now that the checkout is gone.
+///
+/// A listing that was read and shows nothing of the namespace running is
+/// `verified`. Daemons found running, a state that cannot be read (pitchfork
+/// missing or not usable, a listing that failed, a supervisor that is down while
+/// devflow recorded a start) are a [`Refusal::StateUnknown`] (forceable), and
+/// with `force` they come back as `may_still_run`, unverified, so the record
+/// keeps naming them. With no id recorded devflow started nothing here:
+/// pitchfork is only asked when `ask_anyway` (the project uses pitchfork, so a
+/// daemon may have been started by hand in the namespace).
+///
+/// `unverified`: an earlier removal went on without seeing that nothing runs
+/// under the namespace, so what devflow recorded starting is not all there may
+/// be. None of those shortcuts applies then: only a listing that was read and
+/// shows nothing of the namespace running (nor any recorded id) clears it, and
+/// "pitchfork missing", "supervisor down" and "nothing recorded" are not that.
+pub fn check_recorded(
+    pitchfork: Option<&Pitchfork>,
+    namespace: &str,
+    recorded: &[String],
+    force: bool,
+    ask_anyway: bool,
+    unverified: bool,
+) -> Result<RecordedCheck, Refusal> {
+    let prefix = format!("{namespace}/");
+    // Every id the record lists, whatever it looks like: an id this does not
+    // look at could not be shown stopped, and the record would still forget it.
+    let ids: Vec<String> = recorded.to_vec();
+    let verified = |warnings: Vec<String>| RecordedCheck {
+        verified: true,
+        warnings,
+        ..RecordedCheck::default()
+    };
+    // Devflow started nothing here, as far as the record knows: no reason to
+    // look, unless the record is in doubt.
+    let nothing_started = ids.is_empty() && !unverified;
+    if nothing_started && !ask_anyway {
+        return Ok(verified(Vec::new()));
+    }
+    let may = |extra: &[String]| {
+        let mut all: BTreeSet<String> = ids.iter().cloned().collect();
+        all.extend(extra.iter().cloned());
+        MayStillRun {
+            namespace: Some(namespace.to_string()),
+            ids: all.into_iter().collect(),
+        }
+    };
+    let unknown = |detail: String| Refusal::StateUnknown {
+        detail,
+        hint: Some(RECORDED_HINT.to_string()),
+    };
+    // Refused, or with `force` gone on past: the daemons may still run.
+    let unsure = |why: Refusal, extra: &[String]| -> Result<RecordedCheck, Refusal> {
+        if !force {
+            return Err(why);
+        }
+        Ok(RecordedCheck {
+            verified: false,
+            may_still_run: Some(may(extra)),
+            warnings: vec![format!(
+                "daemons of this workspace may still be running and were not stopped: {why}"
+            )],
+        })
+    };
+    let Some(located) = pitchfork else {
+        if nothing_started {
+            return Ok(verified(vec![
+                "pitchfork isn't on PATH, so processes started outside devflow can't be checked"
+                    .to_string(),
+            ]));
+        }
+        return unsure(
+            unknown(if ids.is_empty() {
+                format!(
+                    "pitchfork isn't on PATH, so devflow cannot check whether daemons it could \
+                     not rule out earlier still run in the namespace {namespace}"
+                )
+            } else {
+                format!(
+                    "pitchfork isn't on PATH, so devflow cannot check the daemons it recorded \
+                     for this workspace ({})",
+                    ids.join(", ")
+                )
+            }),
+            &[],
+        );
+    };
+    let detection = located.detect_cached();
+    if !detection.usable() {
+        return unsure(unknown(detection.summary()), &[]);
+    }
+    let dir = NeutralDir::create().map_err(|error| {
+        unknown(format!(
+            "cannot make a directory to ask pitchfork from: {error}"
+        ))
+    })?;
+    let snapshot = Snapshot::read(located, dir.path());
+    let problem = snapshot.error.clone().or_else(|| {
+        (snapshot.supervisor_up != Some(false))
+            .then(|| snapshot.unverifiable(namespace))
+            .flatten()
+    });
+    if let Some(error) = problem {
+        return unsure(unknown(error), &[]);
+    }
+    if snapshot.supervisor_up == Some(false) {
+        if nothing_started {
+            return Ok(verified(vec![
+                "pitchfork's supervisor is down; devflow started no daemons here, but \
+                 processes started outside devflow can't be checked"
+                    .to_string(),
+            ]));
+        }
+        return unsure(
+            unknown(if ids.is_empty() {
+                format!(
+                    "pitchfork's supervisor is down, so nothing shows that the daemons that \
+                     may run in the namespace {namespace} do not; a supervisor that crashed \
+                     leaves its daemons running"
+                )
+            } else {
+                format!(
+                    "pitchfork's supervisor is down, and devflow started daemons for this \
+                     workspace ({}) that it has not seen stop; a supervisor that crashed \
+                     leaves its daemons running",
+                    ids.join(", ")
+                )
+            }),
+            &[],
+        );
+    }
+    let active: Vec<String> = snapshot
+        .daemons
+        .iter()
+        .filter(|d| {
+            (d.namespace == namespace || d.id.starts_with(&prefix) || ids.contains(&d.id))
+                && d.is_active()
+        })
+        .map(|d| d.id.clone())
+        .collect();
+    if active.is_empty() {
+        return Ok(verified(Vec::new()));
+    }
+    unsure(
+        unknown(format!(
+            "pitchfork lists {} running, and stopping them makes pitchfork run their lifecycle \
+             hooks (on_stop, on_exit) from the configuration at the directory they were started \
+             from, which devflow cannot read or ask anyone to approve now that the checkout is \
+             gone",
+            active.join(", ")
+        )),
+        &active,
+    )
 }
 
 /// The detection used when only the version matters.

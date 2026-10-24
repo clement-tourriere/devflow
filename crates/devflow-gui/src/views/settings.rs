@@ -1,4 +1,5 @@
-//! Settings page: editor and terminal commands, theme. Saved to gui.toml. The
+//! Settings page: editor and terminal commands (kept in `settings.toml`, shared
+//! with `devflow open`), theme (`gui.toml`). The
 //! theme applies and is saved as soon as it is chosen, as with the title bar's
 //! switch; the page follows when the switch changes it.
 use super::ui;
@@ -131,9 +132,12 @@ impl SettingsView {
 impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let keep_in_menu_bar = self.state.read(cx).settings.keep_in_menu_bar;
-        let path = settings::path()
-            .map(|p| p.display().to_string())
+        let gui = settings::path().ok();
+        let shared = gui
+            .as_ref()
+            .map(|p| p.with_file_name("settings.toml").display().to_string())
             .unwrap_or_default();
+        let gui = gui.map(|p| p.display().to_string()).unwrap_or_default();
         v_flex()
             .size_full()
             .p_6()
@@ -185,6 +189,8 @@ impl Render for SettingsView {
                             ),
                     ),
             )
-            .child(div().text_xs().text_color(ui::muted(cx)).child(format!("Stored in {path}")))
+            .child(div().text_xs().text_color(ui::muted(cx)).child(format!(
+                "Editor and terminal are stored in {shared}, which the command line reads too. The theme and menu bar setting are stored in {gui}."
+            )))
     }
 }

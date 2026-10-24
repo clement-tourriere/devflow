@@ -313,6 +313,30 @@ fn orphans_in(project: &Project, path: &std::path::Path) -> Result<Orphans> {
             }),
         }
     }
+    // A workspace Git forgot has no receipt, but its record in the ledger still
+    // names the instance (and the branches it owns): its branches belong to a
+    // workspace a clean-up can account for, they are not orphans. A record that
+    // cannot be read may name any instance.
+    let records = crate::ledger::list(&project.git_common_dir)?;
+    instances.extend(
+        records
+            .records
+            .iter()
+            .filter(|record| record.project_id == project.id())
+            .map(|record| record.instance_id),
+    );
+    out.incomplete
+        .extend(records.unreadable.iter().map(|record| UnreadReceipt {
+            workspace: format!(
+                "record {}",
+                record
+                    .file
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            ),
+            reason: record.reason.clone(),
+        }));
     for (key, service) in &catalog.services {
         let live = service
             .branches
@@ -753,7 +777,7 @@ mod tests {
 
     #[test]
     fn a_receipt_that_cannot_be_read_makes_ownership_unknown_not_absent() {
-        let (_dir, project, path, branch, _) = owned_branch();
+        let (_dir, project, path, branch, instance) = owned_branch();
         let feature = worktree::find(&project, "feature").unwrap().unwrap();
 
         // Read: the workspace holds the instance, so the branch is no orphan.
@@ -798,9 +822,19 @@ mod tests {
         std::fs::create_dir(&receipt).unwrap();
         assert!(!orphans_in(&project, &path).unwrap().is_complete());
 
-        // Gone: a workspace without a receipt owns no instance, so the branch
-        // is a real orphan and is confirmed as one.
+        // Gone: the receipt alone no longer says who owns a branch, because
+        // the workspace's record names its instance too; `gc` classifies such a
+        // workspace (a receipt missing from a registered worktree is unknown),
+        // it is not an orphan.
         std::fs::remove_dir(&receipt).unwrap();
+        let found = orphans_in(&project, &path).unwrap();
+        assert!(
+            found.is_complete() && found.branches.is_empty(),
+            "{found:?}"
+        );
+        // Neither receipt nor record: nothing holds the instance, so the branch
+        // is a real orphan and is confirmed as one.
+        std::fs::remove_file(crate::ledger::path(&project.git_common_dir, instance)).unwrap();
         let found = orphans_in(&project, &path).unwrap();
         assert!(found.is_complete());
         assert_eq!(found.branches.len(), 1);
@@ -865,6 +899,42 @@ mod tests {
     }
 
     #[test]
+    fn a_workspace_git_forgot_still_holds_its_instance_through_its_record() {
+        let (_dir, project, path, branch, instance) = owned_branch();
+        let feature = worktree::find(&project, "feature").unwrap().unwrap();
+        // `git worktree remove`: the receipt goes with the worktree.
+        worktree::force_remove(&project, &feature).unwrap();
+        assert!(!feature.git_dir.exists());
+
+        // Its record still names the instance, so the branch is a recorded
+        // workspace's, for a clean-up to account for, and not an orphan.
+        let found = orphans_in(&project, &path).unwrap();
+        assert!(
+            found.is_complete() && found.branches.is_empty(),
+            "{found:?}"
+        );
+        let error = confirm_orphan(&project, &path, "cache", branch)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not an orphan any more"), "{error}");
+
+        // A record that cannot be read may name any instance: unknown, not none.
+        let file = crate::ledger::path(&project.git_common_dir, instance);
+        std::fs::write(&file, "{ not json").unwrap();
+        let found = orphans_in(&project, &path).unwrap();
+        assert!(
+            !found.is_complete() && found.branches.is_empty(),
+            "{found:?}"
+        );
+
+        // Without any record the instance is gone and the branch is an orphan.
+        std::fs::remove_file(&file).unwrap();
+        let found = orphans_in(&project, &path).unwrap();
+        assert!(found.is_complete(), "{found:?}");
+        assert_eq!(found.branches.len(), 1, "{found:?}");
+    }
+
+    #[test]
     fn the_workspace_that_binds_a_branch_is_found_only_when_there_is_one() {
         let (dir, project, _, branch, _) = owned_branch();
         let feature = worktree::find(&project, "feature").unwrap().unwrap();
@@ -922,4 +992,283 @@ mod tests {
         let problem = svc.start_problem("it is stopped", Some(branch));
         assert_eq!(problem.remedies[0].command(), None);
     }
+}
+
+// ---------------------------------------------------------------------------
+// A workspace's own containers
+
+/// What the workspace's container of one service did when asked to stop or start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Change {
+    /// It was running and is stopped now (its volume is kept).
+    Stopped,
+    /// It was not running.
+    AlreadyStopped,
+    /// It was not running and is running now.
+    Started,
+    /// It was running.
+    AlreadyRunning,
+    /// It could not be stopped or started; the reason is in [`Changed::reason`].
+    Failed,
+}
+
+/// One container service of a workspace after a stop or a start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Changed {
+    pub key: String,
+    pub engine: Engine,
+    pub branch: Uuid,
+    pub change: Change,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// What stopping or starting the containers of one workspace did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Changes {
+    pub workspace: String,
+    pub path: std::path::PathBuf,
+    /// One entry per container service the workspace is bound to. Empty for a
+    /// workspace with none (or one devflow has not set up).
+    pub services: Vec<Changed>,
+    /// The workspace's services could not be determined (its record cannot be
+    /// read): nothing was stopped or started, and that is a failure, not an
+    /// empty list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl Changes {
+    /// No service failed, and the workspace's services could be determined.
+    pub fn ok(&self) -> bool {
+        self.error.is_none() && self.services.iter().all(|s| s.change != Change::Failed)
+    }
+}
+
+/// The container services `workspace` is bound to: `(key, engine, branch)`.
+/// Bindings of services the configuration no longer has, and ones that were
+/// never completed, are not the workspace's running containers.
+///
+/// A workspace devflow has not set up has none (`Ok` and empty). A receipt that
+/// cannot be read is not "no services": it is an error, because the containers
+/// it would name may be running and nothing has been asked of them.
+fn bound(
+    project: &Project,
+    workspace: &worktree::Workspace,
+) -> std::result::Result<Vec<(String, Engine, Uuid)>, String> {
+    let receipt = match setup::receipt(project, workspace) {
+        Ok(Some(receipt)) => receipt,
+        Ok(None) => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(format!(
+                "the workspace's record cannot be read, so its containers are unknown: {error:#}"
+            ));
+        }
+    };
+    Ok(project
+        .config
+        .containers()
+        .filter_map(|(key, engine, _)| {
+            let binding = binding(&receipt, key, engine).filter(|b| !b.orphaned)?;
+            Some((key.to_string(), engine, binding.branch_id?))
+        })
+        .collect())
+}
+
+fn container_reference(record: &super::catalog::BranchRecord) -> &str {
+    record
+        .container_id
+        .as_deref()
+        .unwrap_or(record.container_name.as_str())
+}
+
+/// Stop the containers of the workspace's own services: the Valkey, Redis and
+/// MySQL branches its receipt binds. Volumes are kept, so the data is there
+/// when they start again, and nothing shared is touched: the project's
+/// PostgreSQL server is not a workspace's container and is never stopped here.
+/// A service that fails does not keep the others from stopping.
+pub fn stop_services(project: &Project, workspace: &worktree::Workspace) -> Changes {
+    let (bound, error) = split(bound(project, workspace));
+    let services = bound
+        .into_iter()
+        .map(|(key, engine, branch)| {
+            let result = Service::open(project, &key).and_then(|svc| svc.down(branch));
+            change(
+                key,
+                engine,
+                branch,
+                result.map(|was_running| {
+                    if was_running {
+                        Change::Stopped
+                    } else {
+                        Change::AlreadyStopped
+                    }
+                }),
+            )
+        })
+        .collect();
+    Changes {
+        workspace: workspace.name.clone(),
+        path: workspace.path.clone(),
+        services,
+        error,
+    }
+}
+
+/// Start the containers of the workspace's own services (see
+/// [`stop_services`]), waiting until each answers.
+pub fn start_services(project: &Project, workspace: &worktree::Workspace) -> Changes {
+    let (bound, error) = split(bound(project, workspace));
+    let services = bound
+        .into_iter()
+        .map(|(key, engine, branch)| {
+            let result = Service::open(project, &key).and_then(|svc| {
+                let was_running = svc
+                    .branch(branch)
+                    .ok()
+                    .flatten()
+                    .and_then(|record| {
+                        super::docker::inspect_container(container_reference(&record)).ok()
+                    })
+                    .map(|container| container.is_some_and(|c| c.running));
+                svc.up(branch)?;
+                Ok(was_running)
+            });
+            change(
+                key,
+                engine,
+                branch,
+                result.map(|was_running| {
+                    if was_running == Some(true) {
+                        Change::AlreadyRunning
+                    } else {
+                        Change::Started
+                    }
+                }),
+            )
+        })
+        .collect();
+    Changes {
+        workspace: workspace.name.clone(),
+        path: workspace.path.clone(),
+        services,
+        error,
+    }
+}
+
+fn split<T>(result: std::result::Result<Vec<T>, String>) -> (Vec<T>, Option<String>) {
+    match result {
+        Ok(list) => (list, None),
+        Err(error) => (Vec::new(), Some(error)),
+    }
+}
+
+fn change(key: String, engine: Engine, branch: Uuid, result: Result<Change>) -> Changed {
+    match result {
+        Ok(change) => Changed {
+            key,
+            engine,
+            branch,
+            change,
+            reason: None,
+        },
+        Err(error) => Changed {
+            key,
+            engine,
+            branch,
+            change: Change::Failed,
+            reason: Some(format!("{error:#}")),
+        },
+    }
+}
+
+/// Where one container of a workspace stands, as `list --wide` shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Run {
+    Running,
+    Stopped,
+    /// The catalog records a branch whose container Docker does not have.
+    Missing,
+    /// Docker could not be asked, or the record could not be read.
+    Unknown,
+}
+
+/// One container service of a workspace and whether it runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct View {
+    pub key: String,
+    pub engine: Engine,
+    pub branch: Uuid,
+    pub state: Run,
+    /// The host port it is published on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+}
+
+/// How long one container is asked about before it counts as unknown.
+const VIEW_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// A workspace's containers as the wide listing has them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Views {
+    pub services: Vec<View>,
+    /// Why they are not known (the workspace's record cannot be read).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// The containers of every workspace in `workspaces`, in the same order. The
+/// catalog is read as a file and each container is asked about once; the
+/// first answer that fails to come (Docker is not running) makes the rest
+/// `unknown` without asking again.
+pub fn views(project: &Project, workspaces: &[worktree::Workspace]) -> Vec<Views> {
+    let catalog = super::catalog::Store::open(project.id(), "")
+        .and_then(|store| store.load_unbound())
+        .ok();
+    let mut docker_down = false;
+    workspaces
+        .iter()
+        .map(|workspace| {
+            let (bound, error) = split(bound(project, workspace));
+            let services = bound
+                .into_iter()
+                .map(|(key, engine, branch)| {
+                    let record = catalog
+                        .as_ref()
+                        .and_then(|catalog| catalog.services.get(&key))
+                        .and_then(|records| records.branch(branch));
+                    let (state, port) = match record {
+                        None => (Run::Unknown, None),
+                        Some(record) if docker_down => (Run::Unknown, record.port),
+                        Some(record) => {
+                            let asked = super::docker::inspect_container_within(
+                                container_reference(record),
+                                VIEW_WAIT,
+                            );
+                            let state = match asked {
+                                Ok(Some(container)) if container.running => Run::Running,
+                                Ok(Some(_)) => Run::Stopped,
+                                Ok(None) => Run::Missing,
+                                Err(_) => {
+                                    docker_down = true;
+                                    Run::Unknown
+                                }
+                            };
+                            (state, record.port)
+                        }
+                    };
+                    View {
+                        key,
+                        engine,
+                        branch,
+                        state,
+                        port,
+                    }
+                })
+                .collect();
+            Views { services, error }
+        })
+        .collect()
 }

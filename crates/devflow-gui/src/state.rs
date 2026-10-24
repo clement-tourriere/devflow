@@ -124,6 +124,8 @@ pub struct AppState {
     pub settings: Settings,
     pub page: Page,
     pub tab: Tab,
+    /// The Clean up page: the last inventory read and what was picked in it.
+    pub cleanup: crate::cleanup::Cleanup,
     pub entries: Vec<Entry>,
     pub entries_error: Option<String>,
     /// The listed projects that cannot be opened as they are, by id (core's
@@ -199,6 +201,7 @@ impl AppState {
             settings,
             page: Page::Project,
             tab: Tab::default(),
+            cleanup: Default::default(),
             entries: Vec::new(),
             entries_error: None,
             problems: HashMap::new(),
@@ -236,6 +239,7 @@ impl AppState {
             settings,
             page: Page::Project,
             tab: Tab::default(),
+            cleanup: Default::default(),
             entries: Vec::new(),
             entries_error: None,
             problems: HashMap::new(),
@@ -953,11 +957,33 @@ impl AppState {
         }
     }
 
+    /// The command that opens a workspace in the editor or the terminal, as
+    /// `settings.toml` says now: it is shared with the command line, which may
+    /// have changed it since the app started. What the app holds is the
+    /// fallback for a file that cannot be read or has no such key.
+    pub(crate) fn open_command(&self, tool: devflow_core::settings::Tool) -> String {
+        use devflow_core::settings::Tool;
+        let stored = self.settings_file_path().ok().and_then(|gui| {
+            devflow_core::settings::load_from(&gui.with_file_name("settings.toml")).ok()
+        });
+        let chosen = stored.and_then(|stored| match tool {
+            Tool::Editor => stored.editor_command,
+            Tool::Terminal => stored.terminal_command,
+        });
+        chosen.unwrap_or_else(|| match tool {
+            Tool::Editor => self.settings.editor_command.clone(),
+            Tool::Terminal => self.settings.terminal_command.clone(),
+        })
+    }
+
     /// Store `settings` (to `gui.toml`) and use them from now on. They are
     /// kept only when the write succeeded. This is the Settings form's Save:
     /// it waits for the file, and its result is shown right away.
     pub fn store_settings(&mut self, settings: Settings) -> anyhow::Result<()> {
         let path = self.settings_file_path()?;
+        // The commands the form changed go to `settings.toml` (read again
+        // first); the rest is the app's own file.
+        settings::save_shared_changes(&path, &self.settings, &settings)?;
         self.settings_writer.write_now(&path, &settings)?;
         self.settings = settings;
         Ok(())
@@ -1062,6 +1088,7 @@ fn apply_loaded(model: &mut ProjectModel, refreshed: Refreshed) {
         Err(message) => model.workspaces_error = Some(message),
     }
     model.fix_selected_workspace();
+    model.cleanup = refreshed.cleanup;
     model.database = refreshed.database;
     // The detail is read on the Data tab only; the other tabs keep the last.
     let mut services = refreshed.services;

@@ -220,6 +220,18 @@ impl Service {
 
     /// Snapshot a branch as the next version of `name`.
     pub fn snapshot_branch(&self, branch: Uuid, name: &str) -> Result<SnapshotRecord> {
+        self.snapshot_branch_if(branch, name, |_| Ok(()))
+    }
+
+    /// [`Service::snapshot_branch`] for a caller that must decide on the branch
+    /// as it is: `check` sees the record in the same locked update that
+    /// records the snapshot, and an error from it records nothing.
+    pub fn snapshot_branch_if(
+        &self,
+        branch: Uuid,
+        name: &str,
+        check: impl FnOnce(&BranchRecord) -> Result<()>,
+    ) -> Result<SnapshotRecord> {
         crate::db::validate_snapshot_name(name)?;
         self.recover_touching(&[branch])?;
         let id = Uuid::new_v4();
@@ -243,6 +255,7 @@ impl Service {
                 "branch {branch} is not ready ({:?})",
                 source.state
             );
+            check(source)?;
             let (image, pin) = (source.image.clone(), source.pin.clone());
             let mysql = source.mysql.clone();
             let version = service.allocate_version(name);

@@ -1,5 +1,8 @@
 //! The window: title bar, sidebar, and either a project or the settings page.
 mod activity_panel;
+mod cleanup;
+#[cfg(test)]
+mod cleanup_tests;
 mod config;
 mod daemons;
 mod data;
@@ -61,6 +64,7 @@ pub struct Shell {
     state: Entity<AppState>,
     project: Entity<project::ProjectView>,
     settings: Entity<settings::SettingsView>,
+    cleanup: Entity<cleanup::CleanupView>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -68,6 +72,7 @@ impl Shell {
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let project = cx.new(|cx| project::ProjectView::new(state.clone(), window, cx));
         let settings = cx.new(|cx| settings::SettingsView::new(state.clone(), window, cx));
+        let cleanup = cx.new(|cx| cleanup::CleanupView::new(state.clone(), window, cx));
         // The shortcuts reach this window through its handle.
         cx.set_global(ShellHandle::new(window, cx.weak_entity()));
         let subscriptions = vec![
@@ -106,6 +111,7 @@ impl Shell {
             state,
             project,
             settings,
+            cleanup,
             _subscriptions: subscriptions,
         }
     }
@@ -133,7 +139,7 @@ impl Shell {
 
     pub fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !Self::page_is_covered(window, cx) {
-            self.state.update(cx, |s, cx| s.refresh_all(cx));
+            self.state.update(cx, |s, cx| s.refresh_current(window, cx));
         }
     }
 
@@ -166,6 +172,7 @@ impl Render for Shell {
         let content = match page {
             Page::Project => self.project.clone().into_any_element(),
             Page::Settings => self.settings.clone().into_any_element(),
+            Page::Cleanup => self.cleanup.clone().into_any_element(),
         };
         v_flex()
             .size_full()

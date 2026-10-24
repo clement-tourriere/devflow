@@ -1,7 +1,7 @@
 //! Workspaces tab: the table with row actions, "New workspace", and the
 //! output of the running (or last) operation.
 use super::{
-    activity_panel::ActivityPanel, dialogs, overview::OverviewView, ui,
+    activity_panel::ActivityPanel, cleanup, dialogs, overview::OverviewView, ui,
     workspace_detail::WorkspaceDetailView,
 };
 use crate::{
@@ -364,18 +364,30 @@ impl WorkspacesView {
 
 impl Render for WorkspacesView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (error, has_detail) = {
+        let (error, has_detail, cleanup) = {
             let state = self.state.read(cx);
             let model = state.selection.current();
             (
                 model.and_then(|m| m.workspaces_error.clone()),
                 model.is_some_and(|m| m.selected_status().is_some()),
+                // Workspaces Git forgot that still own something.
+                model.and_then(|m| {
+                    cleanup::banner_of(&self.state, m.cleanup.as_ref()?, &m.entry.root, cx)
+                }),
             )
         };
         v_flex()
             .size_full()
             .child(div().px_4().pt_3().pb_2().child(self.overview.clone()))
             .children(error.map(|e| div().px_4().pb_2().child(ui::error_banner(e, cx))))
+            .children(cleanup.map(|banner| {
+                div()
+                    .id("cleanup-banner")
+                    .test_support()
+                    .px_4()
+                    .pb_2()
+                    .child(banner)
+            }))
             .child(
                 div()
                     .when(has_detail, |table| table.flex_none().h(px(228.)))

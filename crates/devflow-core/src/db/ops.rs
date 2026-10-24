@@ -965,10 +965,23 @@ pub(super) fn create_snapshot(
     name: &str,
     from_branch: Uuid,
 ) -> Result<SnapshotInfo> {
+    create_snapshot_checked(server, name, from_branch, |_| Ok(()))
+}
+
+/// [`create_snapshot`] for a caller that must decide on the branch as it is
+/// now: `check` sees the row read under the project's advisory lock, right
+/// before anything is cloned, and an error from it leaves everything as it was.
+pub(super) fn create_snapshot_checked(
+    server: &Server,
+    name: &str,
+    from_branch: Uuid,
+    check: impl FnOnce(&meta::BranchRow) -> Result<()>,
+) -> Result<SnapshotInfo> {
     validate_snapshot_name(name)?;
     let mut s = begin(server)?;
     guarded(&mut s, |s| {
         let project = s.project_id();
+        check(&ready_branch(s, from_branch)?)?;
         let mut src = resolve_source(s, ResolvedSource::Branch(from_branch))?;
         let cow = source_capability(s, &src);
         choose_strategy(s, &mut src, cow);

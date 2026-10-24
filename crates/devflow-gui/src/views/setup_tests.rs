@@ -1229,9 +1229,27 @@ fn the_wizard_walks_detect_propose_review_apply_approve_and_done(cx: &mut TestAp
         TrustState::Trusted
     ));
 
-    // f) Done: next steps, and the new-workspace dialog is one click away.
+    // f) Done: next steps, the agent hosts and the Git hook with their
+    // buttons, and the new-workspace dialog is one click away.
+    std::fs::write(root.join("t3.json"), "{}").unwrap();
     click(cx, h, "wizard-next");
     assert_eq!(step(cx, &rig), Step::Done);
+    assert!(exists(cx, h, "wizard-agents"));
+    assert!(exists(cx, h, "wizard-agent-t3"), "T3 Code is used here");
+    assert!(
+        !exists(cx, h, "wizard-agent-cursor"),
+        "only the hosts the repository shows signs of"
+    );
+    assert!(exists(cx, h, "wizard-agent-git-hook"));
+    click_scrolled(cx, h, "wizard-body", "wizard-host-t3");
+    wait(cx, "t3.json gets the setup script", |_| {
+        std::fs::read_to_string(root.join("t3.json"))
+            .is_ok_and(|text| text.contains("devflow setup --wait"))
+    });
+    click_scrolled(cx, h, "wizard-body", "wizard-git-hook");
+    wait(cx, "the Git hook is installed", |_| {
+        root.join(".git/hooks/post-checkout").is_file()
+    });
     assert!(exists(cx, h, "wizard-first-workspace"));
     click_scrolled(cx, h, "wizard-body", "wizard-first-workspace");
     wait(cx, "the new workspace dialog", |cx| {

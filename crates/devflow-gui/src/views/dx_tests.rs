@@ -327,6 +327,7 @@ fn a_decorated_daemon_state_is_drawn_and_counted_as_the_state_it_starts_with() {
         triggers: Vec::new(),
         configured: true,
         startable: false,
+        unreadable: None,
     };
     // Counted as running, drawn green, explained as running.
     for running in [
@@ -1208,6 +1209,40 @@ impl FakeServices {
         self.calls.lock().unwrap().push(call);
     }
 
+    /// One container service of the workspace, changed as `change` says.
+    fn workspace_changes(
+        &self,
+        workspace: &Workspace,
+        change: devflow_core::services::workspace::Change,
+    ) -> devflow_core::services::workspace::Changes {
+        use devflow_core::services::workspace::{Changed, Changes};
+        let receipts = self.receipts.lock().unwrap();
+        let services = receipts
+            .get(&workspace.name)
+            .map(|receipt| {
+                receipt
+                    .services
+                    .iter()
+                    .filter_map(|(key, binding)| {
+                        Some(Changed {
+                            key: key.clone(),
+                            engine: binding.engine,
+                            branch: binding.branch_id?,
+                            change,
+                            reason: None,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Changes {
+            workspace: workspace.name.clone(),
+            path: workspace.path.clone(),
+            services,
+            error: None,
+        }
+    }
+
     fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
     }
@@ -1234,6 +1269,30 @@ impl ServiceBackend for FakeServices {
     fn up(&self, _: &Project, key: &str, branch: Uuid) -> anyhow::Result<String> {
         self.record(format!("up {key} {branch}"));
         Ok("127.0.0.1:6382".into())
+    }
+
+    fn stop_workspace(
+        &self,
+        _: &Project,
+        workspace: &Workspace,
+    ) -> devflow_core::services::workspace::Changes {
+        self.record(format!("stop-workspace {}", workspace.name));
+        self.workspace_changes(
+            workspace,
+            devflow_core::services::workspace::Change::Stopped,
+        )
+    }
+
+    fn start_workspace(
+        &self,
+        _: &Project,
+        workspace: &Workspace,
+    ) -> devflow_core::services::workspace::Changes {
+        self.record(format!("start-workspace {}", workspace.name));
+        self.workspace_changes(
+            workspace,
+            devflow_core::services::workspace::Change::Started,
+        )
     }
 
     fn down(&self, _: &Project, key: &str, branch: Uuid) -> anyhow::Result<bool> {
@@ -3457,12 +3516,14 @@ fn cleaning_up_missing_worktrees_lists_them_first_and_keeps_what_owns_data(
             super::remedies::run_scoped(&h.state, &remedy, window, cx)
         })
         .unwrap();
-        for _ in 0..200 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while std::time::Instant::now() < deadline {
             cx.executor().advance_clock(Duration::from_millis(150));
             cx.run_until_parked();
             if exists(cx, &h, "confirm") {
                 break;
             }
+            std::thread::sleep(Duration::from_millis(5));
         }
         assert!(exists(cx, &h, "confirm"), "the review comes first");
         std::thread::sleep(Duration::from_millis(350));
@@ -3534,5 +3595,75 @@ fn a_workspace_that_waits_for_approval_leads_to_where_it_is_given(cx: &mut TestA
             window.try_find("problem-review-hooks").is_some()
                 || window.try_find("problem-fix-hooks").is_some()
         );
+    });
+}
+
+#[gpui_kit::test]
+fn the_detail_shows_the_workspaces_port_and_stops_and_starts_its_containers(
+    cx: &mut TestAppContext,
+) {
+    let DataRig { h, fake, ids, .. } = &data_rig(cx);
+    update(cx, h, |s, cx| s.set_tab(Tab::Workspaces, cx));
+    // A refresh reads the real list again and drops the fixture's receipts: put
+    // them back, with a port, and select the workspace whose detail is drawn.
+    let prepare = |cx: &mut TestAppContext| {
+        wait(cx, "the workspaces are read", |cx| {
+            cx.read_entity(&h.state, |s, _| s.busy().is_none())
+        });
+        install_workspaces(cx, h, fake, ids);
+        update(cx, h, |s, cx| {
+            let model = s.selection.current_mut().unwrap();
+            let feature = model
+                .workspaces
+                .iter_mut()
+                .find(|w| w.workspace.name == "feature-x")
+                .unwrap();
+            feature.receipt.as_mut().unwrap().app_port = Some(43210);
+            model.selected_workspace = Some(feature.workspace.path.clone());
+            cx.notify();
+        });
+    };
+    prepare(cx);
+    frame(cx, h, |window| {
+        assert!(window.find("detail-app-port").visible(), "the port");
+        assert!(window.find("detail-stop-services").visible());
+        assert!(window.find("detail-start-services").visible());
+    });
+    click(cx, h, "detail-stop-services");
+    wait(cx, "the containers were stopped", |cx| {
+        fake.calls()
+            .contains(&"stop-workspace feature-x".to_string())
+            && cx.read_entity(&h.state, |s, _| s.busy().is_none())
+    });
+    cx.read_entity(&h.state, |s, _| {
+        let activity = s.activity.as_ref().expect("the job left its output");
+        assert_eq!(activity.title, "Stop the services of feature-x");
+        assert!(
+            activity
+                .log
+                .text()
+                .contains("cache: stopped; its data is kept")
+        );
+        assert!(matches!(activity.outcome, Some(Ok(_))));
+    });
+    prepare(cx);
+    click(cx, h, "detail-start-services");
+    wait(cx, "the containers were started", |cx| {
+        fake.calls()
+            .contains(&"start-workspace feature-x".to_string())
+            && cx.read_entity(&h.state, |s, _| s.busy().is_none())
+    });
+    // A workspace with no container service offers neither.
+    update(cx, h, |s, cx| {
+        let model = s.selection.current_mut().unwrap();
+        for w in &mut model.workspaces {
+            if let Some(receipt) = w.receipt.as_mut() {
+                receipt.services.clear();
+            }
+        }
+        cx.notify();
+    });
+    frame(cx, h, |window| {
+        assert!(window.try_find("detail-stop-services").is_none());
     });
 }

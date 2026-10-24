@@ -15,9 +15,13 @@
 //!   still candidates, and refuses the rest with a [`PruneRefusal`].
 //!
 //! A registration that still owns data is never forgotten here: that would
-//! leave its database or service branches recorded nowhere. The way on is
-//! [`Remedy::RemoveWorkspace`], the normal removal, which drops them by
-//! recorded identity.
+//! leave its database or service branches recorded nowhere but the workspace's
+//! record in the ledger ([`crate::ledger`]), which `devflow prune` is not the
+//! tool to work from. What the receipt or the record names counts as owned. The
+//! way on is [`Remedy::RemoveWorkspace`], the normal removal, which drops them
+//! by recorded identity, or [`Remedy::CleanUp`] (`gc`), which does the same
+//! for every workspace whose directory is gone. A registration that is
+//! forgotten while its record lists nothing takes the (empty) record with it.
 use super::{Workspace, list};
 use crate::project::Project;
 use crate::receipt::Receipt;
@@ -73,10 +77,15 @@ impl PruneRefusal {
     /// `root`.
     pub fn remedies(&self, root: &Path, name: &str) -> Vec<Remedy> {
         match self {
-            PruneRefusal::OwnsData { .. } => vec![Remedy::RemoveWorkspace {
-                root: root.to_path_buf(),
-                name: name.to_string(),
-            }],
+            PruneRefusal::OwnsData { .. } => vec![
+                Remedy::RemoveWorkspace {
+                    root: root.to_path_buf(),
+                    name: name.to_string(),
+                },
+                Remedy::CleanUp {
+                    root: root.to_path_buf(),
+                },
+            ],
             _ => Vec::new(),
         }
     }
@@ -100,7 +109,8 @@ pub struct PruneCandidate {
     /// Set when it would not be forgotten; `None` when it can be.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal: Option<PruneRefusal>,
-    /// What can be done instead when it is refused (remove the workspace).
+    /// What can be done instead when it is refused (remove the workspace, or
+    /// clean up).
     #[serde(
         skip_serializing_if = "Vec::is_empty",
         serialize_with = "crate::remedy::serialize_remedies"
@@ -186,16 +196,39 @@ fn parent_problem(workspace: &Workspace) -> Option<PruneRefusal> {
 
 /// What the files say about `workspace`, without any lock: whether it has a
 /// receipt, what that receipt owns, and the refusal that follows from them.
-fn inspect(workspace: &Workspace) -> (bool, Vec<String>, Option<PruneRefusal>) {
+fn inspect(project: &Project, workspace: &Workspace) -> (bool, Vec<String>, Option<PruneRefusal>) {
     if let Some(refusal) = parent_problem(workspace) {
         let receipt = Receipt::load(&workspace.git_dir);
         let has = matches!(receipt, Ok(Some(_)));
         return (has, Vec::new(), Some(refusal));
     }
+    // What the ledger names counts too: the receipt may have been written
+    // before a removal that stopped part-way, or lost.
+    let recorded = recorded_by(project, workspace);
     match Receipt::load(&workspace.git_dir) {
-        Ok(None) => (false, Vec::new(), None),
+        Ok(None) => match recorded {
+            Ok(owns) if owns.is_empty() => (false, Vec::new(), None),
+            Ok(owns) => (false, owns.clone(), Some(PruneRefusal::OwnsData { owns })),
+            Err(reason) => (
+                false,
+                Vec::new(),
+                Some(PruneRefusal::ReceiptUnreadable { reason }),
+            ),
+        },
         Ok(Some(receipt)) => {
-            let owns = owned_by(&receipt);
+            let mut owns = owned_by(&receipt);
+            match recorded {
+                Ok(more) => {
+                    for item in more {
+                        if !owns.contains(&item) {
+                            owns.push(item);
+                        }
+                    }
+                }
+                Err(reason) => {
+                    return (true, owns, Some(PruneRefusal::ReceiptUnreadable { reason }));
+                }
+            }
             let refusal = (!owns.is_empty()).then(|| PruneRefusal::OwnsData { owns: owns.clone() });
             (true, owns, refusal)
         }
@@ -208,6 +241,40 @@ fn inspect(workspace: &Workspace) -> (bool, Vec<String>, Option<PruneRefusal>) {
             }),
         ),
     }
+}
+
+/// What the ledger's records for this registration (by Git's name for it) list:
+/// `Err` when a record cannot be read, which is a state devflow does not know
+/// and so not "owns nothing".
+fn recorded_by(project: &Project, workspace: &Workspace) -> Result<Vec<String>, String> {
+    let Some(id) = id_of(workspace) else {
+        return Ok(Vec::new());
+    };
+    let listing = crate::ledger::list(&project.git_common_dir).map_err(|e| format!("{e:#}"))?;
+    if let Some(bad) = listing.unreadable.first() {
+        return Err(format!(
+            "a workspace record cannot be read ({})",
+            bad.reason
+        ));
+    }
+    let mut owns = Vec::new();
+    for record in listing
+        .records
+        .iter()
+        .filter(|r| r.admin_id.as_deref() == Some(id.as_str()))
+    {
+        for branch in &record.resources.branches {
+            owns.push(match &branch.service {
+                Some(key) => format!("the data of service '{key}'"),
+                None => "a database branch from an older devflow".to_string(),
+            });
+        }
+        if !record.resources.daemons.is_empty() {
+            owns.push("daemons devflow started".to_string());
+        }
+    }
+    owns.dedup();
+    Ok(owns)
 }
 
 /// What a receipt records that only the workspace's removal handles.
@@ -243,7 +310,7 @@ pub fn candidates(project: &Project) -> Result<Vec<PruneCandidate>> {
     Ok(missing(project)?
         .into_iter()
         .map(|(id, workspace)| {
-            let (has_receipt, data, mut refusal) = inspect(&workspace);
+            let (has_receipt, data, mut refusal) = inspect(project, &workspace);
             if refusal.is_none() && has_receipt && Receipt::is_locked(&workspace.git_dir) {
                 refusal = Some(PruneRefusal::Busy);
             }
@@ -307,11 +374,15 @@ pub fn prune(project: &Project, confirmed: &[PruneTarget]) -> Result<PruneOutcom
             continue;
         };
         // Read under the locks: this is the receipt that decides.
-        let (_, _, refusal) = inspect(&workspace);
+        let (_, _, refusal) = inspect(project, &workspace);
         if let Some(refusal) = refusal {
             outcome.refused.push(refused(refusal));
             continue;
         }
+        let instance = Receipt::load(&workspace.git_dir)
+            .ok()
+            .flatten()
+            .map(|receipt| receipt.instance_id);
         let registration = repo.find_worktree(&id)?;
         let mut options = WorktreePruneOptions::new();
         if !registration
@@ -324,6 +395,11 @@ pub fn prune(project: &Project, confirmed: &[PruneTarget]) -> Result<PruneOutcom
         registration
             .prune(Some(&mut options))
             .with_context(|| format!("cannot prune the Git registration of {}", workspace.name))?;
+        // The record listed nothing (checked above): it has nothing left to
+        // say, and would only read as a workspace removed elsewhere.
+        if let Some(instance) = instance {
+            let _ = crate::ledger::Handle::new(&project.git_common_dir, instance).finish();
+        }
         outcome.pruned.push(workspace.name.clone());
     }
     Ok(outcome)
@@ -464,10 +540,15 @@ mod tests {
         assert_eq!(owner.remedies, refusal.remedies(&t.root, "owner"));
         assert_eq!(
             refusal.remedies(&t.root, &owner.name),
-            [Remedy::RemoveWorkspace {
-                root: t.root.clone(),
-                name: "owner".into()
-            }]
+            [
+                Remedy::RemoveWorkspace {
+                    root: t.root.clone(),
+                    name: "owner".into()
+                },
+                Remedy::CleanUp {
+                    root: t.root.clone()
+                }
+            ]
         );
         let plain = listed.iter().find(|c| c.name == "plain").unwrap();
         assert!(plain.has_receipt && plain.refusal.is_none(), "{plain:?}");
@@ -495,7 +576,11 @@ mod tests {
         });
         receipt.save(&ws.git_dir).unwrap();
         let listed = candidates(&t.project).unwrap();
-        assert_eq!(listed[0].data, ["daemons devflow started"]);
+        // (The record keeps naming the branch the receipt let go of.)
+        assert_eq!(
+            listed[0].data,
+            ["daemons devflow started", "the data of service 'cache'"]
+        );
         assert!(listed[0].refusal.is_some());
         std::fs::write(Receipt::path(&ws.git_dir), "{ not json").unwrap();
         let listed = candidates(&t.project).unwrap();
@@ -583,5 +668,65 @@ mod tests {
         assert_eq!(outcome.changed, ["back"]);
         assert!(names(&t.project).contains(&"back".to_string()));
         assert!(ws.path.join(".git").exists());
+    }
+
+    #[test]
+    fn what_the_ledger_names_counts_as_owned_and_an_empty_record_goes_with_the_registration() {
+        let t = repo(None);
+        let empty = gone(&t, "empty");
+        let owner = gone(&t, "owner");
+        let find = |name: &str| {
+            list(&t.project)
+                .unwrap()
+                .into_iter()
+                .find(|w| w.name == name)
+                .unwrap()
+        };
+        for name in ["empty", "owner"] {
+            let ws = find(name);
+            Receipt::new(t.project.id(), name, None)
+                .save(&ws.git_dir)
+                .unwrap();
+        }
+        let owner_instance = Receipt::load(&find("owner").git_dir)
+            .unwrap()
+            .unwrap()
+            .instance_id;
+        // The record lists a branch the receipt (rewritten since) does not.
+        let file = crate::ledger::path(&t.project.git_common_dir, owner_instance);
+        let mut record = crate::ledger::read(&t.project.git_common_dir, owner_instance)
+            .unwrap()
+            .unwrap();
+        record.resources.branches.push(crate::ledger::BranchRef {
+            service: Some("cache".into()),
+            engine: Some(crate::config::Engine::Valkey),
+            id: uuid::Uuid::new_v4(),
+            pending: false,
+        });
+        std::fs::write(&file, serde_json::to_vec(&record).unwrap()).unwrap();
+        let _ = (&empty, &owner);
+
+        let listed = candidates(&t.project).unwrap();
+        let by = |name: &str| listed.iter().find(|c| c.name == name).unwrap();
+        assert!(by("empty").refusal.is_none());
+        let refusal = by("owner").refusal.as_ref().expect("the record owns data");
+        assert!(matches!(refusal, PruneRefusal::OwnsData { owns } if owns[0].contains("cache")));
+        let kinds: Vec<&str> = by("owner").remedies.iter().map(Remedy::kind).collect();
+        assert_eq!(kinds, ["remove_workspace", "clean_up"]);
+
+        let outcome = prune(&t.project, &targets(&listed)).unwrap();
+        assert_eq!(outcome.pruned, ["empty"]);
+        assert_eq!(outcome.refused.len(), 1);
+        let empty_instance = crate::ledger::list(&t.project.git_common_dir)
+            .unwrap()
+            .records
+            .into_iter()
+            .map(|r| r.workspace)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            empty_instance,
+            ["owner"],
+            "the empty record went with its registration"
+        );
     }
 }

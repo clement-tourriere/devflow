@@ -1,8 +1,9 @@
 //! Environment commands (doctor, completions, gui) and process helpers.
 use super::output::{self, Palette, note, say};
+use super::shell;
 use super::{Ctx, ProjectInfo};
 use anyhow::{Result, anyhow, bail};
-use clap::{Args, CommandFactory};
+use clap::Args;
 use clap_complete::Shell;
 use devflow_core::doctor::{self, Check, CheckStatus};
 use devflow_core::error::NotInitialized;
@@ -76,6 +77,7 @@ pub fn doctor(ctx: &Ctx) -> Result<ExitCode> {
         }
     };
     checks.extend(doctor::run_in(project.as_ref(), &ctx.cwd));
+    checks.push(shell_check());
     let failed = checks.iter().any(|check| check.status == CheckStatus::Fail);
     if ctx.json {
         let body = json!({
@@ -92,6 +94,31 @@ pub fn doctor(ctx: &Ctx) -> Result<ExitCode> {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// Whether the shell wrapper started this command: without it `devflow
+/// switch` cannot change the shell's directory.
+fn shell_check() -> Check {
+    if shell::wrapped() {
+        return Check {
+            name: "shell".into(),
+            status: CheckStatus::Ok,
+            detail: "the shell integration is active: `devflow switch` changes this shell's \
+                     directory and `switch -` goes back"
+                .into(),
+            hint: None,
+            remedies: Vec::new(),
+        };
+    }
+    Check {
+        name: "shell".into(),
+        status: CheckStatus::Warn,
+        detail: "the shell integration is not active in this shell: `devflow switch` cannot \
+                 change its directory, and `switch -` is unavailable"
+            .into(),
+        hint: None,
+        remedies: vec![shell::remedy()],
+    }
 }
 
 /// Hint lines under one check: a check with many remedies (an orphan per
@@ -138,9 +165,19 @@ pub struct CompletionsArgs {
     pub shell: Shell,
 }
 
-pub fn completions<C: CommandFactory>(args: CompletionsArgs) -> Result<ExitCode> {
+/// The script that registers devflow's completion with the shell. The
+/// completions themselves are produced by devflow when Tab is pressed
+/// (`COMPLETE=<shell> devflow`), so workspace names are always current; the
+/// script is only the hook into the shell and is best generated again
+/// whenever devflow is upgraded (`eval "$(devflow completions zsh)"`).
+pub fn completions(args: CompletionsArgs) -> Result<ExitCode> {
+    let name = args.shell.to_string();
+    let shells = clap_complete::env::Shells::builtins();
+    let completer = shells
+        .completer(&name)
+        .ok_or_else(|| anyhow!("no completions for {name}"))?;
     let mut buffer = Vec::new();
-    clap_complete::generate(args.shell, &mut C::command(), "devflow", &mut buffer);
+    completer.write_registration("COMPLETE", "devflow", "devflow", "devflow", &mut buffer)?;
     output::say_raw(String::from_utf8_lossy(&buffer));
     Ok(ExitCode::SUCCESS)
 }

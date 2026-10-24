@@ -4501,3 +4501,288 @@ fn measure_a_clone_of_a_large_dataset() {
         );
     }
 }
+
+// ---- agent hosts ------------------------------------------------------------------
+
+/// T3 Code end to end with a container service: `git worktree add` as T3 does,
+/// the `t3.json` script as T3 runs it (`devflow setup --wait`), `devflow exec`,
+/// and the worktree removed through Git. T3 Code has no teardown hook, so the
+/// branch and its container stay recorded in the catalog until `devflow gc`
+/// reconciles them.
+#[test]
+#[ignore = "needs Docker, valkey/valkey:8-alpine and debian:stable-slim"]
+fn t3_code_flow_sets_a_container_service_up_and_leaves_its_branch_recorded_after_git_removes_the_worktree()
+ {
+    use devflow_core::integrate::{self, Host};
+    let fx = Fixture::valkey();
+    let root = fx.project.root.clone();
+    let git = |dir: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    // The integration writes t3.json; T3 Code would run its script.
+    let change = integrate::plan(&root, Host::T3, false).unwrap();
+    integrate::apply(&change).unwrap();
+    let file: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("t3.json")).unwrap()).unwrap();
+    let script = &file["scripts"][0];
+    assert_eq!(script["runOnWorktreeCreate"], true);
+    assert_eq!(script["async"], false);
+    let command = script["command"].as_str().unwrap();
+
+    let worktree = root.parent().unwrap().join("t3-task");
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "t3-task",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    let path = format!(
+        "{}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+        fx.bin.parent().unwrap().display()
+    );
+    // (The binary is named `devflow` in its directory.)
+    let out = Command::new("sh")
+        .current_dir(&worktree)
+        .args(["-c", command])
+        .env("PATH", &path)
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{command}: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The agent's commands see the workspace's own server.
+    let out = Command::new(&fx.bin)
+        .current_dir(&worktree)
+        .args(["exec", "--", "sh", "-c", "echo $REDIS_URL"])
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert!(url.starts_with("redis://"), "{url}");
+
+    let owned = |fx: &Fixture| {
+        fx.service()
+            .records()
+            .unwrap()
+            .branches
+            .iter()
+            .filter(|b| b.name == "t3-task" && b.owner.is_some())
+            .map(|b| (b.id, b.container_id.clone()))
+            .collect::<Vec<_>>()
+    };
+    let before = owned(&fx);
+    assert_eq!(before.len(), 1, "the workspace's branch is recorded");
+    let container = before[0].1.clone().expect("a container id");
+    assert!(container_exists(&container));
+
+    // T3 Code deletes the worktree through Git: no teardown runs.
+    git(
+        &root,
+        &["worktree", "remove", "--force", worktree.to_str().unwrap()],
+    );
+    assert!(!worktree.exists());
+    // The data is still recorded (and running): nothing deleted it, and
+    // nothing claims it is gone.
+    assert_eq!(owned(&fx), before);
+    assert!(container_exists(&container));
+
+    // `devflow gc` is what reconciles it: the workspace Git forgot is listed
+    // with its branch and container, and removing it drops both by their
+    // recorded identity.
+    let gc = |args: &[&str]| {
+        Command::new(&fx.bin)
+            .current_dir(&root)
+            .args(args)
+            .env("PATH", &path)
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap()
+    };
+    let out = gc(&["--json", "gc"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let entry = doc["inventory"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["workspace"] == "t3-task")
+        .unwrap_or_else(|| panic!("{doc}"))
+        .clone();
+    assert_eq!(entry["class"], "removed_elsewhere", "{doc}");
+    assert_eq!(entry["branches"][0]["state"], "owned", "{doc}");
+    assert!(entry["branches"][0]["container"].is_string(), "{doc}");
+    let short = entry["instance"].as_str().unwrap()[..8].to_string();
+    let out = gc(&["--json", "gc", "--remove", &short, "--yes"]);
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(owned(&fx).is_empty(), "the branch is dropped");
+    assert!(!container_exists(&container), "and so is its container");
+}
+
+#[test]
+#[ignore = "needs Docker, valkey/valkey:8-alpine and debian:stable-slim"]
+fn a_workspaces_containers_stop_and_start_together_with_their_data_and_port() {
+    use devflow_core::services::workspace::{self as ws_services, Change, Run};
+    let fx = Fixture::valkey();
+    let first = create(&fx, "feature-a", SetupOptions::default()).unwrap();
+    let url = env_url(&first.workspace.path, "REDIS_URL");
+    let (port, password) = (port_of(&url), password_of(&url));
+    Redis::auth(port, &password)
+        .unwrap()
+        .cmd(&["SET", "kept", "yes"])
+        .unwrap();
+    let id = first.receipt.services["cache"].branch_id.unwrap();
+
+    // The wide listing reads the container's state.
+    let views = ws_services::views(&fx.project, std::slice::from_ref(&first.workspace));
+    assert_eq!(views[0].services.len(), 1);
+    assert_eq!(
+        (views[0].services[0].state, views[0].services[0].port),
+        (Run::Running, Some(port))
+    );
+
+    // Stopped: graceful, the data stays in the volume.
+    let stopped = ws_services::stop_services(&fx.project, &first.workspace);
+    assert!(stopped.ok(), "{stopped:?}");
+    assert_eq!(stopped.services[0].change, Change::Stopped);
+    assert_eq!(stopped.services[0].branch, id);
+    assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+    assert_eq!(
+        ws_services::views(&fx.project, std::slice::from_ref(&first.workspace))[0].services[0]
+            .state,
+        Run::Stopped
+    );
+    // Again: nothing to stop, not an error.
+    assert_eq!(
+        ws_services::stop_services(&fx.project, &first.workspace).services[0].change,
+        Change::AlreadyStopped
+    );
+
+    // Started: the same port, the same password, the saved data.
+    let started = ws_services::start_services(&fx.project, &first.workspace);
+    assert!(started.ok(), "{started:?}");
+    assert_eq!(started.services[0].change, Change::Started);
+    assert_eq!(
+        Redis::auth(port, &password).unwrap().get("kept").as_deref(),
+        Some("yes")
+    );
+    assert_eq!(
+        ws_services::start_services(&fx.project, &first.workspace).services[0].change,
+        Change::AlreadyRunning
+    );
+
+    // A taken port fails that service with the reason and does not stop the call.
+    ws_services::stop_services(&fx.project, &first.workspace);
+    let thief = TcpListener::bind(("127.0.0.1", port)).unwrap();
+    let blocked = ws_services::start_services(&fx.project, &first.workspace);
+    assert!(!blocked.ok());
+    assert_eq!(blocked.services[0].change, Change::Failed);
+    assert!(
+        blocked.services[0]
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.contains(&port.to_string())),
+        "{blocked:?}"
+    );
+    drop(thief);
+}
+
+#[test]
+#[ignore = "needs Docker, valkey/valkey:8-alpine and debian:stable-slim"]
+fn gc_removes_the_container_and_volume_of_a_worktree_git_forgot_and_only_that_one() {
+    use devflow_core::gc;
+    let fx = Fixture::valkey();
+    let gone = create(&fx, "agent-a", SetupOptions::default()).unwrap();
+    let kept = create(&fx, "agent-b", SetupOptions::default()).unwrap();
+    let svc = fx.service();
+    let id_of = |outcome: &devflow_core::setup::SetupOutcome| {
+        outcome.receipt.services["cache"].branch_id.unwrap()
+    };
+    let (branch, kept_branch) = (id_of(&gone), id_of(&kept));
+    let record = svc.branch(branch).unwrap().unwrap();
+    assert!(container_exists(&record.container_name) && volume_exists(&record.volume));
+
+    // An agent host removes the worktree: the receipt goes with it, and
+    // nothing but the ledger's record names the branch any more.
+    devflow_core::worktree::force_remove(&fx.project, &gone.workspace).unwrap();
+    assert!(!gone.workspace.git_dir.exists());
+    let inventory = gc::inventory(&fx.project, &gc::Options::default()).unwrap();
+    let entry = inventory.entry(gone.receipt.instance_id).unwrap();
+    assert_eq!(entry.class, gc::Class::RemovedElsewhere, "{entry:?}");
+    assert_eq!(entry.branches.len(), 1);
+    let measured = &entry.branches[0];
+    assert_eq!(measured.presence, gc::Presence::Owned);
+    assert!(
+        measured.container.is_some(),
+        "the container's state is measured: {measured:?}"
+    );
+    assert_eq!(
+        inventory.entry(kept.receipt.instance_id).unwrap().class,
+        gc::Class::Active
+    );
+
+    let outcome = gc::remove(
+        &fx.project,
+        &gc::RemoveRequest {
+            targets: vec![entry.target().unwrap()],
+            snapshot: true,
+            ..Default::default()
+        },
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(outcome.removed.len(), 1, "{:?}", outcome.skipped);
+    let snapshot = &outcome.removed[0].snapshots[0];
+    assert!(snapshot.starts_with("cache/gc-agent-a-"), "{snapshot}");
+    assert!(svc.branch(branch).unwrap().is_none(), "the record is gone");
+    assert!(
+        !container_exists(&record.container_name) && !volume_exists(&record.volume),
+        "the recorded container and volume went, by identity"
+    );
+    assert!(svc.branch(kept_branch).unwrap().is_some());
+    let name = snapshot
+        .strip_prefix("cache/")
+        .and_then(|rest| rest.split_once("@v"))
+        .map(|(name, _)| name)
+        .unwrap();
+    assert!(
+        svc.find_snapshot(name, None).is_ok(),
+        "the snapshot taken first is kept"
+    );
+    assert!(
+        devflow_core::ledger::list(&fx.project.git_common_dir)
+            .unwrap()
+            .records
+            .iter()
+            .all(|r| r.workspace != "agent-a")
+    );
+}

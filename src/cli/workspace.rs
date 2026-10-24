@@ -3,33 +3,38 @@ use super::output::{self, Palette, Printer, note, say};
 use super::{Ctx, EXIT_ATTENTION, ProjectInfo, shell, trust};
 use anyhow::{Result, anyhow, bail};
 use clap::{Args, Subcommand};
+use devflow_core::config::GitHookMode;
 use devflow_core::db::DataSource;
 use devflow_core::error::{Busy, PartialRemoval, Protected};
 use devflow_core::health::{self, ProjectProblem};
 use devflow_core::pitchfork::Pitchfork;
 use devflow_core::receipt::{Phase, PhaseState, Receipt, Status};
-use devflow_core::remedy::Remedy;
+use devflow_core::remedy::{Problem, Remedy};
+use devflow_core::services::workspace as container_services;
 use devflow_core::setup::{
     self, CreateRequest, RemoveOptions, RemoveOutcome, ServiceRun, SetupOptions, SetupOutcome,
     WorkspaceStatus,
 };
+use devflow_core::wide::{self, Wide};
 use devflow_core::worktree::{self, Workspace};
 use devflow_core::{Project, githook, redact, registry};
 use serde::Serialize;
 use serde_json::json;
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Args)]
 pub struct SwitchArgs {
-    /// Workspace (branch) name
-    pub name: String,
+    /// Workspace (branch) name; `-` for the previous workspace of this shell;
+    /// without a name, pick one from a list (at a terminal)
+    #[arg(add = super::complete::workspace())]
+    pub name: Option<String>,
     /// Create the workspace
-    #[arg(short = 'c', long)]
+    #[arg(short = 'c', long, requires = "name")]
     pub create: bool,
     /// Code origin for a new workspace: where payloads and data come from (default: the default workspace)
-    #[arg(long, value_name = "WS", requires = "create")]
+    #[arg(long, value_name = "WS", requires = "create", add = super::complete::workspace())]
     pub from: Option<String>,
     /// Where a new branch starts: a branch, tag, commit or remote branch such as origin/NAME, which NAME then tracks (default: the remote branch of that name if there is one, else the HEAD of --from or of the default workspace)
     #[arg(long, value_name = "REF", requires = "create")]
@@ -53,11 +58,17 @@ pub struct ListArgs {
     /// List every registered project instead of the current one
     #[arg(long)]
     pub all: bool,
+    /// Add what costs more to find: uncommitted changes, distance from the default
+    /// branch's upstream, merge evidence, last activity, port, containers and
+    /// daemons (asks Docker and pitchfork)
+    #[arg(long, conflicts_with = "all")]
+    pub wide: bool,
 }
 
 #[derive(Args)]
 pub struct PathArgs {
     /// Workspace name, branch or path
+    #[arg(add = super::complete::workspace())]
     pub name: String,
 }
 
@@ -81,11 +92,26 @@ pub struct SetupArgs {
     /// Entry point of the post-checkout Git hook: never prompts and never fails
     #[arg(long, hide = true)]
     pub from_git_hook: bool,
+    /// The background run the Git hook started (`[integrations] git_hook = "background"`): setup, with nobody waiting for it
+    #[arg(long, hide = true, requires = "from_git_hook")]
+    pub detached: bool,
+    /// When another run is setting this worktree up, wait for it and report how it ended (0 ready, 2 not ready or still running at --timeout)
+    #[arg(long, conflicts_with = "from_git_hook")]
+    pub wait: bool,
+    /// With --wait: give up waiting after this long (for example 90s or 10m; default 15m)
+    #[arg(
+        long,
+        value_name = "DURATION",
+        value_parser = devflow_core::wait::parse_timeout,
+        requires = "wait"
+    )]
+    pub timeout: Option<std::time::Duration>,
 }
 
 #[derive(Args)]
 pub struct RemoveArgs {
     /// Workspace name, branch or path
+    #[arg(add = super::complete::workspace())]
     pub name: String,
     /// Remove dirty or locked worktrees and continue past failing teardown hooks
     #[arg(long)]
@@ -117,8 +143,179 @@ impl HookAction {
 
 // --- switch -------------------------------------------------------------
 
+/// Where `switch` goes: the project, the workspace as `find` takes it, and the
+/// exact directory to land in when the person named one (`switch -` returns to
+/// the directory this shell left, not to a workspace's root).
+struct Target {
+    project: Project,
+    name: String,
+    land_in: Option<PathBuf>,
+}
+
+fn switch_target(ctx: &Ctx, args: &SwitchArgs) -> Result<Target> {
+    match args.name.as_deref() {
+        Some("-") if !args.create => previous_target(),
+        Some(name) => Ok(Target {
+            project: ctx.project()?,
+            name: name.to_string(),
+            land_in: None,
+        }),
+        None => {
+            let project = ctx.project()?;
+            let name = pick(ctx, &project)?;
+            Ok(Target {
+                project,
+                name,
+                land_in: None,
+            })
+        }
+    }
+}
+
+/// `switch -`: the workspace this shell was in before its last `devflow
+/// switch`, found from the directory the shell wrapper remembers.
+fn previous_target() -> Result<Target> {
+    if !shell::wrapped() {
+        return Err(Problem::new(
+            "going back to the previous workspace needs the shell integration: it is the \
+             wrapper that remembers where this shell came from",
+        )
+        .with(shell::remedy())
+        .into_error());
+    }
+    let Some(previous) = shell::previous() else {
+        bail!(
+            "this shell has not changed workspace yet, so there is no previous one to go back to"
+        );
+    };
+    let directory = previous.canonicalize().map_err(|_| {
+        anyhow!(
+            "the previous directory {} no longer exists",
+            previous.display()
+        )
+    })?;
+    let project = Project::discover(&directory).map_err(|error| {
+        error.context(format!(
+            "the previous directory {} is not in a devflow project",
+            directory.display()
+        ))
+    })?;
+    let workspace = worktree::containing(&project, &directory)?.ok_or_else(|| {
+        anyhow!(
+            "the previous directory {} is not inside a workspace of {}",
+            directory.display(),
+            project.name()
+        )
+    })?;
+    Ok(Target {
+        name: workspace.path.display().to_string(),
+        project,
+        land_in: Some(directory),
+    })
+}
+
+/// Choose a workspace from a list: the ones entered most recently first, with
+/// their branch, status and where they drifted. Needs a terminal.
+fn pick(ctx: &Ctx, project: &Project) -> Result<String> {
+    if !ctx.interactive() {
+        return Err(Problem::new(
+            "a workspace name is required: there is no terminal to pick one from",
+        )
+        .with(Remedy::ChooseWorkspace {
+            root: project.root.clone(),
+        })
+        .into_error());
+    }
+    let mut items = setup::list(project)?;
+    items.retain(|item| !item.workspace.missing);
+    setup::recent_first(&mut items);
+    let current = current_path(ctx, &items);
+    let now = chrono::Utc::now();
+    let width = items
+        .iter()
+        .map(|item| item.workspace.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let branch_width = items
+        .iter()
+        .map(|item| branch_label(item).chars().count())
+        .max()
+        .unwrap_or(0);
+    let choices: Vec<Choice> = items
+        .iter()
+        .map(|item| {
+            let marker = if current == Some(&item.workspace.path) {
+                "*"
+            } else {
+                " "
+            };
+            let active = item
+                .receipt
+                .as_ref()
+                .and_then(|receipt| receipt.last_active_at)
+                .map(|at| output::ago(at, now))
+                .unwrap_or_default();
+            let mut label = format!(
+                "{marker} {:<width$}  {:<branch_width$}  {}",
+                item.workspace.name,
+                branch_label(item),
+                status_label(item),
+            );
+            if let Some(drift) = &item.drift {
+                label.push_str(&format!("  ({})", drift.describe()));
+            }
+            if !active.is_empty() {
+                label.push_str(&format!("  {active}"));
+            }
+            Choice {
+                label,
+                path: item.workspace.path.display().to_string(),
+            }
+        })
+        .collect();
+    anyhow::ensure!(!choices.is_empty(), "this project has no workspaces");
+    // Enter switches to the workspace entered last before this one.
+    let start = choices
+        .iter()
+        .position(|choice| Some(choice.path.as_str()) != current.map(|p| p.to_str().unwrap_or("")))
+        .unwrap_or(0);
+    match inquire::Select::new("Switch to", choices)
+        .with_starting_cursor(start)
+        .with_page_size(15)
+        .prompt()
+    {
+        Ok(choice) => Ok(choice.path),
+        Err(
+            inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
+        ) => bail!("cancelled"),
+        Err(error) => Err(error.into()),
+    }
+}
+
+struct Choice {
+    label: String,
+    path: String,
+}
+
+impl std::fmt::Display for Choice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+fn branch_label(item: &WorkspaceStatus) -> String {
+    item.workspace
+        .branch
+        .clone()
+        .unwrap_or_else(|| "(detached)".into())
+}
+
 pub fn switch(ctx: &Ctx, args: SwitchArgs) -> Result<ExitCode> {
-    let project = ctx.project()?;
+    let Target {
+        project,
+        name,
+        land_in,
+    } = switch_target(ctx, &args)?;
     ctx.register(&project);
     let mut options = SetupOptions {
         data_from: args.data_from,
@@ -137,7 +334,7 @@ pub fn switch(ctx: &Ctx, args: SwitchArgs) -> Result<ExitCode> {
             || (!args.no_hooks && !project.config.hooks.switch.is_empty());
         options.approval = trust::resolve(ctx, &project, &source, relevant)?;
         let mut request = CreateRequest {
-            name: args.name,
+            name,
             from: args.from,
             base: args.base,
             options: options.clone(),
@@ -145,7 +342,7 @@ pub fn switch(ctx: &Ctx, args: SwitchArgs) -> Result<ExitCode> {
         let mut outcome = match setup::create_and_activate(&project, request.clone(), &mut printer)
         {
             Ok(outcome) => outcome,
-            Err(error) => return in_progress(ctx, "switch", &project, None, error),
+            Err(error) => return in_progress(ctx, "switch", &project, None, error, None),
         };
         // The review was of the workspace this one is made from. An existing
         // branch can hold other hooks, [env] or pitchfork files: core ran none
@@ -161,32 +358,57 @@ pub fn switch(ctx: &Ctx, args: SwitchArgs) -> Result<ExitCode> {
                 request.options = options.clone();
                 outcome = match setup::create_and_activate(&project, request, &mut printer) {
                     Ok(outcome) => outcome,
-                    Err(error) => return in_progress(ctx, "switch", &project, None, error),
+                    Err(error) => return in_progress(ctx, "switch", &project, None, error, None),
                 };
             }
         }
         (outcome, true)
     } else {
-        let workspace = worktree::find(&project, &args.name)?.ok_or_else(|| {
+        let workspace = worktree::find(&project, &name)?.ok_or_else(|| {
             anyhow!(
                 "workspace '{0}' does not exist; create it with `devflow switch -c {0}`",
-                args.name
+                name
             )
         })?;
         let relevant = switch_needs_trust(&project, &workspace, args.no_hooks);
         options.approval = trust::resolve(ctx, &project, &workspace.path, relevant)?;
         match setup::activate(&project, &workspace, options, &mut printer) {
             Ok(outcome) => (outcome, false),
-            Err(error) => return in_progress(ctx, "switch", &project, Some(&workspace), error),
+            Err(error) => {
+                return in_progress(
+                    ctx,
+                    "switch",
+                    &project,
+                    Some(&workspace),
+                    error,
+                    land_in.as_deref(),
+                );
+            }
         }
     };
     // Setup, the switch hooks and `[pitchfork] autostart` all ran in core; the
     // outcome reports each apart from readiness, which alone sets the exit code.
     let code = report(ctx, "switch", &project, &outcome, created)?;
     if !ctx.json {
-        hand_off(&outcome.workspace.path);
+        hand_off(&landing(
+            ctx,
+            &project,
+            &outcome.workspace,
+            land_in.as_deref(),
+        ));
     }
     Ok(code)
+}
+
+/// Where the shell lands in `target`: the directory `switch -` returns to, else
+/// the subdirectory the caller is in (`apps/web`) when `target` has it, else
+/// the workspace's root.
+fn landing(ctx: &Ctx, project: &Project, target: &Workspace, exact: Option<&Path>) -> PathBuf {
+    if let Some(exact) = exact.filter(|dir| dir.starts_with(&target.path)) {
+        return exact.to_path_buf();
+    }
+    let here = worktree::containing(project, &ctx.cwd).ok().flatten();
+    worktree::landing(&ctx.cwd, here.as_ref(), target)
 }
 
 /// `Busy` is not a failure: another devflow process is setting the workspace
@@ -198,6 +420,7 @@ fn in_progress(
     project: &Project,
     workspace: Option<&Workspace>,
     error: anyhow::Error,
+    exact: Option<&Path>,
 ) -> Result<ExitCode> {
     let Some(busy) = error.downcast_ref::<Busy>() else {
         return Err(error);
@@ -226,7 +449,7 @@ fn in_progress(
         if command == "switch"
             && let Some(workspace) = workspace
         {
-            hand_off(&workspace.path);
+            hand_off(&landing(ctx, project, workspace, exact));
         }
     }
     Ok(ExitCode::from(EXIT_ATTENTION))
@@ -272,14 +495,76 @@ pub fn list(ctx: &Ctx, args: ListArgs) -> Result<ExitCode> {
         return list_all(ctx);
     }
     let project = ctx.project()?;
+    // Workspaces Git or an agent host removed, which still own data: from the
+    // ledger's records alone, never a server or Docker.
+    let gone = devflow_core::gc::summary(&project)
+        .ok()
+        .filter(|summary| summary.count() > 0);
+    let cleanup = |body: &mut serde_json::Value| {
+        if let Some(gone) = &gone {
+            body["cleanup"] = json!({
+                "removed_elsewhere": gone.removed_elsewhere,
+                "missing": gone.missing,
+                "message": gone.sentence(),
+                "remedies": devflow_core::remedy::describe(&[Remedy::CleanUp {
+                    root: project.root.clone(),
+                }]),
+            });
+        }
+    };
+    let note_cleanup = || {
+        if let (Some(sentence), Some(hint)) = (
+            gone.as_ref().and_then(|gone| gone.sentence()),
+            Remedy::CleanUp {
+                root: project.root.clone(),
+            }
+            .hint(),
+        ) {
+            note(format!("{sentence}; {hint}"));
+        }
+    };
+    if args.wide {
+        let items = wide::list(&project)?;
+        if ctx.json {
+            let mut body = json!({ "project": ProjectInfo::of(&project), "workspaces": items });
+            cleanup(&mut body);
+            output::emit(ctx, "list", &body)?;
+        } else {
+            let rows: Vec<Row> = items
+                .iter()
+                .map(|item| (&item.status, Some(&item.wide)))
+                .collect();
+            say(workspace_table(ctx, &rows));
+            note_cleanup();
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
     let items = setup::list(&project)?;
     if ctx.json {
-        let body = json!({ "project": ProjectInfo::of(&project), "workspaces": items });
+        let mut body = json!({ "project": ProjectInfo::of(&project), "workspaces": items });
+        cleanup(&mut body);
         output::emit(ctx, "list", &body)?;
     } else {
-        say(workspace_table(ctx, &items));
+        say(workspace_table(ctx, &plain(&items)));
+        note_cleanup();
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// A listed workspace and, in the wide listing, its extra columns.
+type Row<'a> = (&'a WorkspaceStatus, Option<&'a Wide>);
+
+fn plain(items: &[WorkspaceStatus]) -> Vec<Row<'_>> {
+    items.iter().map(|item| (item, None)).collect()
+}
+
+/// The checkout containing the caller's directory (deepest path wins).
+fn current_path<'a>(ctx: &Ctx, items: &'a [WorkspaceStatus]) -> Option<&'a PathBuf> {
+    items
+        .iter()
+        .filter(|item| ctx.cwd.starts_with(&item.workspace.path))
+        .max_by_key(|item| item.workspace.path.components().count())
+        .map(|item| &item.workspace.path)
 }
 
 fn list_all(ctx: &Ctx) -> Result<ExitCode> {
@@ -334,7 +619,7 @@ fn list_all(ctx: &Ctx) -> Result<ExitCode> {
         }
         say(format!("{}  {}", row.name, output::tilde(&row.root)));
         match (&row.workspaces, &row.error) {
-            (Some(items), _) => say(workspace_table(ctx, items)),
+            (Some(items), _) => say(workspace_table(ctx, &plain(items))),
             (None, Some(error)) => say(format!("  ! {}", redact::text(error))),
             (None, None) => {}
         }
@@ -347,16 +632,18 @@ fn list_all(ctx: &Ctx) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn workspace_table(ctx: &Ctx, items: &[WorkspaceStatus]) -> String {
+fn workspace_table(ctx: &Ctx, listed: &[Row<'_>]) -> String {
+    let wide = listed.iter().any(|(_, wide)| wide.is_some());
     // The workspace containing the caller's directory (deepest path wins).
-    let current = items
+    let current = listed
         .iter()
-        .filter(|item| ctx.cwd.starts_with(&item.workspace.path))
-        .max_by_key(|item| item.workspace.path.components().count())
-        .map(|item| &item.workspace.path);
-    let rows: Vec<Vec<String>> = items
+        .map(|(item, _)| &item.workspace.path)
+        .filter(|path| ctx.cwd.starts_with(path))
+        .max_by_key(|path| path.components().count());
+    let now = chrono::Utc::now();
+    let rows: Vec<Vec<String>> = listed
         .iter()
-        .map(|item| {
+        .map(|(item, wide)| {
             let workspace = &item.workspace;
             let marker = if current == Some(&workspace.path) {
                 "*"
@@ -371,7 +658,7 @@ fn workspace_table(ctx: &Ctx, items: &[WorkspaceStatus]) -> String {
                         None => "—".to_string(),
                     }
                 });
-            vec![
+            let mut cells = vec![
                 format!("{marker} {}", workspace.name),
                 workspace
                     .branch
@@ -379,14 +666,23 @@ fn workspace_table(ctx: &Ctx, items: &[WorkspaceStatus]) -> String {
                     .unwrap_or_else(|| "(detached)".into()),
                 status_label(item),
                 database,
-                output::tilde(&workspace.path),
-            ]
+            ];
+            if let Some(wide) = wide {
+                cells.extend(wide_cells(wide, now));
+            }
+            cells.push(output::tilde(&workspace.path));
+            cells
         })
         .collect();
-    let mut text = output::table(&["  NAME", "BRANCH", "STATUS", "DATABASE", "PATH"], &rows);
+    let mut headers = vec!["  NAME", "BRANCH", "STATUS", "DATABASE"];
+    if wide {
+        headers.extend(WIDE_HEADERS);
+    }
+    headers.push("PATH");
+    let mut text = output::table(&headers, &rows);
     // A checkout on another branch than the workspace was created for, and a
     // derived file that went missing: said under the table, not in a column.
-    for item in items {
+    for (item, wide) in listed {
         let notes = [
             item.drift.as_ref().map(|drift| drift.describe()),
             item.env_file.map(|problem| problem.describe().to_string()),
@@ -394,8 +690,96 @@ fn workspace_table(ctx: &Ctx, items: &[WorkspaceStatus]) -> String {
         for note in notes.into_iter().flatten() {
             text.push_str(&format!("\n  ! {}: {note}", item.workspace.name));
         }
+        if let Some(wide) = wide
+            && let Some(why) = &wide.daemons_unobserved
+        {
+            text.push_str(&format!(
+                "\n  ? {}: what runs was not observed: {}",
+                item.workspace.name,
+                redact::text(why)
+            ));
+        }
+        // The URLs of the daemons that have one: too long for a column.
+        if let Some(wide) = wide {
+            for daemon in &wide.daemons {
+                if let Some(url) = &daemon.url {
+                    text.push_str(&format!(
+                        "\n  {}: {} {url}",
+                        item.workspace.name, daemon.name
+                    ));
+                }
+            }
+        }
     }
     text
+}
+
+const WIDE_HEADERS: [&str; 7] = [
+    "PORT", "CHANGES", "UPSTREAM", "MERGED", "ACTIVE", "SERVICES", "DAEMONS",
+];
+
+fn wide_cells(wide: &Wide, now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
+    let dash = || "—".to_string();
+    let list = |cells: Vec<String>| {
+        if cells.is_empty() {
+            dash()
+        } else {
+            cells.join(" ")
+        }
+    };
+    vec![
+        wide.app_port.map_or_else(dash, |port| port.to_string()),
+        match wide.dirty {
+            Some(true) => "dirty".to_string(),
+            Some(false) => "clean".to_string(),
+            None => "?".to_string(),
+        },
+        wide.ahead_behind.as_ref().map_or_else(dash, |ab| {
+            format!("↑{} ↓{} {}", ab.ahead, ab.behind, ab.against)
+        }),
+        wide.merged
+            .map_or_else(dash, |merged| merged.describe().to_string()),
+        wide.last_active_at
+            .map_or_else(dash, |at| output::ago(at, now)),
+        if wide.services_error.is_some() {
+            "?".to_string()
+        } else {
+            list(
+                wide.services
+                    .iter()
+                    .map(|service| format!("{}:{}", service.key, service_state(service)))
+                    .collect(),
+            )
+        },
+        {
+            let shown = list(
+                wide.daemons
+                    .iter()
+                    .map(|daemon| {
+                        let ports: Vec<String> =
+                            daemon.ports.iter().map(|port| format!(":{port}")).collect();
+                        format!("{}:{}{}", daemon.name, daemon.state, ports.join(""))
+                    })
+                    .collect(),
+            );
+            // What runs could not be observed: say so, never "none".
+            if wide.daemons_unobserved.is_some() {
+                format!("? {shown}").replace("? —", "?")
+            } else {
+                shown
+            }
+        },
+    ]
+}
+
+fn service_state(service: &container_services::View) -> &'static str {
+    use container_services::Run;
+    match service.state {
+        Run::Running => "running",
+        Run::Stopped => "stopped",
+        Run::Missing => "missing",
+        Run::Unknown => "?",
+    }
 }
 
 fn status_label(item: &WorkspaceStatus) -> String {
@@ -479,7 +863,14 @@ pub fn setup(ctx: &Ctx, args: SetupArgs) -> Result<ExitCode> {
         &mut printer,
     ) {
         Ok(outcome) => outcome,
-        Err(error) => return in_progress(ctx, "setup", &project, Some(&workspace), error),
+        // Another run holds the workspace: `--wait` waits for it instead of
+        // reporting it as running, and reports how it ended.
+        Err(error) if args.wait && error.downcast_ref::<Busy>().is_some() => {
+            let timeout = args.timeout.unwrap_or(devflow_core::wait::DEFAULT_TIMEOUT);
+            let waited = super::wait::wait_for(ctx, &project, &workspace, timeout)?;
+            return super::wait::report(ctx, "setup", &project, &waited);
+        }
+        Err(error) => return in_progress(ctx, "setup", &project, Some(&workspace), error, None),
     };
     match outcome {
         Some(mut outcome) => {
@@ -517,6 +908,19 @@ fn setup_from_git_hook(ctx: &Ctx, args: SetupArgs) -> ExitCode {
         let project = ctx.project()?;
         ctx.register(&project);
         let workspace = current_workspace(ctx, &project)?;
+        // `[integrations] git_hook = "background"`: Git does not wait for the
+        // setup. Start it detached and return; whoever needs the workspace
+        // waits for it (`devflow wait`). A worktree that is already set up
+        // starts nothing.
+        if !args.detached
+            && project.config.integrations.git_hook == GitHookMode::Background
+            && args.data_from.is_none()
+            && args.database_url.is_none()
+            && !args.new_instance
+            && start_in_background(&project, &workspace, args.if_new)
+        {
+            return Ok(None);
+        }
         let options = SetupOptions {
             data_from: args.data_from,
             database_url: args.database_url,
@@ -548,6 +952,44 @@ fn setup_from_git_hook(ctx: &Ctx, args: SetupArgs) -> ExitCode {
         )),
     }
     ExitCode::SUCCESS
+}
+
+/// Start the hook's setup detached; `true` when the hook has nothing left to
+/// do (it started, or the worktree is ready already), `false` to set up here
+/// instead.
+fn start_in_background(project: &Project, workspace: &Workspace, if_new: bool) -> bool {
+    if if_new
+        && matches!(
+            setup::receipt(project, workspace),
+            Ok(Some(receipt)) if receipt.status() == Status::Ready
+        )
+    {
+        return true;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let mut args = vec!["setup", "--from-git-hook", "--detached"];
+    if if_new {
+        args.push("--if-new");
+    }
+    match githook::spawn_background(&exe, &args, &workspace.path, &workspace.git_dir) {
+        Ok(started) => {
+            note(format!(
+                "devflow: setting up {} in the background; its log is {}",
+                workspace.name,
+                started.log.display()
+            ));
+            true
+        }
+        Err(error) => {
+            note(format!(
+                "devflow: cannot set up in the background ({}); setting it up now",
+                redact::text(&format!("{error:#}"))
+            ));
+            false
+        }
+    }
 }
 
 fn current_workspace(ctx: &Ctx, project: &Project) -> Result<Workspace> {
@@ -740,6 +1182,7 @@ pub fn remove(ctx: &Ctx, args: RemoveArgs) -> Result<ExitCode> {
         pitchfork: None,
         // The user named the workspace on the command line just now.
         expect: None,
+        ..RemoveOptions::default()
     };
     // A hint to run this again with `--force` repeats what decides what is
     // removed: left out, the forced run would remove the worktree and keep

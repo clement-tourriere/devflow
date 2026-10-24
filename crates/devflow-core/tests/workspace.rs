@@ -95,6 +95,16 @@ fn quiet_pitchfork() -> devflow_core::pitchfork::Pitchfork {
     devflow_core::pitchfork::Pitchfork::at(dir.path().join("pitchfork"))
 }
 
+/// The workspace's process lock can be taken again. Waited for briefly, as
+/// `Receipt::is_locked` retries: a lock is released when the last duplicate of
+/// its descriptor closes, and a process another test thread is spawning holds
+/// one until it execs.
+fn released_process_lock(git_dir: &Path) -> bool {
+    Receipt::process_lock_waiting(git_dir, std::time::Duration::from_secs(2))
+        .unwrap()
+        .is_some()
+}
+
 fn protection(error: &anyhow::Error) -> &Protected {
     error
         .downcast_ref::<Protected>()
@@ -808,6 +818,8 @@ fn if_new_skips_a_ready_workspace_even_while_it_is_locked_but_not_an_unready_one
     for phase in Phase::ALL {
         done.set_phase(phase, PhaseState::Done, None);
     }
+    // (With the port every workspace has: one without would be repaired.)
+    done.app_port = Some(41999);
     done.save(&w.git_dir).unwrap();
     assert_eq!(done.status(), Status::Ready);
     // Its derived file is there, with the manifest: nothing to repair either.
@@ -3025,7 +3037,9 @@ fn env_vars_include_database_entries_only_when_bound() {
             "DEVFLOW_WORKSPACE_PATH",
             "DEVFLOW_SOURCE_PATH",
             "DEVFLOW_WORKSPACE_ID",
-            "COMPOSE_PROJECT_NAME"
+            "COMPOSE_PROJECT_NAME",
+            // The workspace's own port, chosen when its env phase ran.
+            "DEVFLOW_PORT",
         ]
     );
     // Every generated name is one a recipe may reference (and none can be set).
@@ -3133,6 +3147,7 @@ fn expecting(w: &Workspace, instance_id: Option<uuid::Uuid>) -> setup::ExpectedW
         path: w.path.clone(),
         instance_id,
         fingerprint: w.fingerprint.clone(),
+        missing: false,
     }
 }
 
@@ -4813,8 +4828,10 @@ fn renaming_a_service_never_reuses_its_orphaned_branch_and_recovery_is_by_record
     assert!(recovered.receipt.creating.is_none());
     connect(&took.url).unwrap();
 
-    // The same intent under another service key recovers nothing: the
-    // branch it names is another service's.
+    // The same intent under another service key recovers nothing: the branch
+    // it names is another service's. Nor is it overwritten: with one slot for
+    // the intent, provisioning `main` over it would erase the only evidence
+    // that the branch was made, so the phase is refused until it is settled.
     let mut other = receipt_of(&a_ws);
     other.services.remove("main");
     other.creating = Some(devflow_core::receipt::PendingBranch {
@@ -4824,7 +4841,7 @@ fn renaming_a_service_never_reuses_its_orphaned_branch_and_recovery_is_by_record
     });
     other.set_phase(Phase::Services, PhaseState::Started, None);
     other.save(&a_ws.git_dir).unwrap();
-    let again = setup::setup(
+    let error = setup::setup(
         &project,
         &a_ws,
         SetupOptions::default(),
@@ -4832,14 +4849,22 @@ fn renaming_a_service_never_reuses_its_orphaned_branch_and_recovery_is_by_record
         false,
         &mut NoProgress,
     )
-    .unwrap()
-    .unwrap();
-    assert_eq!(again.status, Status::Ready, "{:?}", again.receipt.phases);
-    assert_ne!(
-        again.receipt.services["main"].branch_id,
-        Some(lost),
-        "an intent recorded for `db` is not `main`'s to recover"
+    .unwrap_err();
+    let said = format!("{error:#}");
+    assert!(
+        said.contains(&lost.to_string()) && said.contains("no longer configured"),
+        "{said}"
     );
+    let kept = receipt_of(&a_ws);
+    assert!(
+        !kept.services.contains_key("main"),
+        "`main` is not provisioned over it"
+    );
+    assert_eq!(kept.creating.map(|p| p.branch_id), Some(lost));
+    // A removal still accounts for it: the instance created it, so it is dropped.
+    let removed = setup::remove(&project, "a", RemoveOptions::default(), &mut NoProgress).unwrap();
+    assert_eq!(removed.dropped_branch, Some(lost), "{removed:?}");
+    assert!(server.branch(lost).unwrap().is_none(), "no branch leaked");
 }
 
 #[test]
@@ -6935,50 +6960,417 @@ fn crashed_creation(
 fn a_branch_recorded_before_its_creation_stops_the_removal_when_it_cannot_be_looked_for() {
     // `remove` planned its drops from the bindings alone: a crash between the
     // creation and the binding, then a removal, leaked the branch for good.
+    // The workspace's record in the ledger survives the receipt, so the removal
+    // can stop before any effect and still be forced: the branch stays named.
     let (t, w, id) = crashed_creation(
         UNREACHABLE_SERVER,
         "db",
         Some(devflow_core::config::Engine::Postgres),
     );
     let ran = w.path.parent().unwrap().join("teardown-ran");
-    for force in [false, true] {
-        let error = setup::remove(
-            &t.project,
-            "w",
-            RemoveOptions {
-                force,
-                ..Default::default()
-            },
-            &mut NoProgress,
-        )
-        .unwrap_err();
-        let protected = error
-            .downcast_ref::<Protected>()
-            .unwrap_or_else(|| panic!("{error:#}"));
-        // The receipt dies with the worktree and would take the only name of
-        // the branch with it: `force` does not accept that.
-        assert!(!protected.forceable, "force={force}: {}", protected.reason);
+    let error =
+        setup::remove(&t.project, "w", RemoveOptions::default(), &mut NoProgress).unwrap_err();
+    let protected = error
+        .downcast_ref::<Protected>()
+        .unwrap_or_else(|| panic!("{error:#}"));
+    assert!(protected.forceable, "{}", protected.reason);
+    assert!(
+        protected.reason.contains(&id.to_string())
+            && protected
+                .reason
+                .contains("cannot reach the database server")
+            && protected.reason.contains("service 'db'"),
+        "{}",
+        protected.reason
+    );
+    let kinds: Vec<&str> = protected
+        .remedies
+        .iter()
+        .map(devflow_core::remedy::Remedy::kind)
+        .collect();
+    assert_eq!(kinds, ["setup", "reconcile_databases"], "{kinds:?}");
+    // Before any effect: no teardown, the worktree and its receipt are there.
+    assert!(!ran.exists() && w.path.is_dir());
+    assert_eq!(
+        receipt_of(&w).creating.map(|p| p.branch_id),
+        Some(id),
+        "the receipt still names the branch"
+    );
+
+    // Forced, the worktree and receipt go and the record keeps naming the branch.
+    let out = setup::remove(
+        &t.project,
+        "w",
+        RemoveOptions {
+            force: true,
+            ..Default::default()
+        },
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert!(!w.path.exists());
+    assert_eq!(out.still_recorded.len(), 1, "{out:?}");
+    assert!(out.still_recorded[0].contains(&id.to_string()));
+    let records = devflow_core::ledger::list(&t.project.git_common_dir)
+        .unwrap()
+        .records;
+    assert_eq!(records.len(), 1);
+    assert!(records[0].resources.branches[0].pending);
+    assert_eq!(records[0].resources.branches[0].id, id);
+}
+
+/// A workspace whose receipt says what a crash would have left: the creation of
+/// a branch of service `db` begun on `recorded`, never bound, while `db` is
+/// configured as `extra` says now.
+fn pending_on_another_engine(
+    extra: &str,
+    recorded: devflow_core::config::Engine,
+) -> (Repo, Workspace, uuid::Uuid) {
+    let t = repo(&Hooks::default(), extra);
+    let w = worktree::create(&t.project, "w", None).unwrap();
+    let id = uuid::Uuid::new_v4();
+    let mut receipt = Receipt::new(t.project.id(), "w", None);
+    receipt.set_phase(Phase::Materialize, PhaseState::Done, Some("made".into()));
+    receipt.creating = Some(devflow_core::receipt::PendingBranch {
+        service: "db".into(),
+        branch_id: id,
+        engine: Some(recorded),
+    });
+    receipt.save(&w.git_dir).unwrap();
+    (t, w, id)
+}
+
+#[test]
+fn setup_and_activation_keep_a_pending_branch_of_another_engine_unresolved() {
+    use devflow_core::config::Engine;
+    use devflow_core::remedy::Remedy;
+    // The PostgreSQL creation succeeded, devflow crashed before binding it,
+    // and `services.db` is a Valkey service now. Setup (and activation, which
+    // runs it) with `--data-from empty` used to take the identity of the
+    // PostgreSQL branch for a Valkey one and overwrite the intent, after which
+    // a removal could no longer account for the PostgreSQL branch.
+    for (extra, recorded) in [
+        ("[services.db]\nengine = \"valkey\"\n", Engine::Postgres),
+        (MANAGED, Engine::Valkey),
+    ] {
+        let (t, w, id) = pending_on_another_engine(extra, recorded);
+        let options = || SetupOptions {
+            data_from: Some(DataSource::Empty),
+            ..Default::default()
+        };
+        let errors = [
+            setup::setup(&t.project, &w, options(), false, false, &mut NoProgress).unwrap_err(),
+            setup::activate(&t.project, &w, options(), &mut NoProgress).unwrap_err(),
+        ];
+        for error in errors {
+            let said = format!("{error:#}");
+            assert!(
+                said.contains(&id.to_string()) && said.contains("unresolved"),
+                "{said}"
+            );
+            // Typed: the ways on are remedies, not wording.
+            let remedies = devflow_core::remedy::remedies_of(&error);
+            let kinds: Vec<&str> = remedies.iter().map(Remedy::kind).collect();
+            assert_eq!(
+                kinds,
+                [
+                    if recorded == Engine::Postgres {
+                        "reconcile_databases"
+                    } else {
+                        "reconcile_service"
+                    },
+                    "remove_workspace",
+                    "open_file",
+                    "setup"
+                ],
+                "{said}"
+            );
+            // The intent is exactly what it was: same branch, same backend.
+            let kept = receipt_of(&w).creating.expect("the intent is kept");
+            assert_eq!((kept.branch_id, kept.engine), (id, Some(recorded)));
+            assert!(receipt_of(&w).services.is_empty(), "nothing was bound");
+        }
+        // And a removal still accounts for it: it looks in the recorded
+        // backend, and the project has no PostgreSQL server to ask any more,
+        // so it stops before any effect, naming the branch. The workspace's
+        // record in the ledger survives the receipt, so (W2-A) forcing is
+        // possible: the branch stays named, with its backend, for `gc`.
+        // (The other direction asks the container catalog, which needs
+        // Docker; not here.)
+        if recorded == Engine::Postgres {
+            let removal = setup::remove(&t.project, "w", RemoveOptions::default(), &mut NoProgress)
+                .unwrap_err();
+            let protected = removal
+                .downcast_ref::<Protected>()
+                .unwrap_or_else(|| panic!("{removal:#}"));
+            assert!(protected.forceable && protected.reason.contains(&id.to_string()));
+            assert!(w.path.is_dir(), "nothing was touched");
+            let forced = setup::remove(
+                &t.project,
+                "w",
+                RemoveOptions {
+                    force: true,
+                    ..Default::default()
+                },
+                &mut NoProgress,
+            )
+            .unwrap();
+            assert!(
+                forced
+                    .still_recorded
+                    .iter()
+                    .any(|r| r.contains(&id.to_string())),
+                "{forced:?}"
+            );
+            let kept = devflow_core::ledger::list(&t.project.git_common_dir)
+                .unwrap()
+                .records
+                .into_iter()
+                .flat_map(|record| record.resources.branches)
+                .find(|branch| branch.id == id)
+                .expect("the record keeps naming the branch");
+            assert_eq!((kept.pending, kept.engine), (true, Some(Engine::Postgres)));
+        }
+    }
+}
+
+const ATTACH: &str = "postgres://dfl_x:pw@db.internal:6543/df_proj_x"; // kingfisher:ignore
+
+/// Setup and activation, each with `--database-url`, on a workspace whose
+/// receipt holds the creation `pending`, begun and never bound.
+fn attach_with_pending(
+    extra: &str,
+    pending: devflow_core::receipt::PendingBranch,
+) -> (Repo, Workspace, [anyhow::Result<()>; 2]) {
+    let t = repo(&Hooks::default(), extra);
+    let w = worktree::create(&t.project, "w", None).unwrap();
+    let mut receipt = Receipt::new(t.project.id(), "w", None);
+    receipt.set_phase(Phase::Materialize, PhaseState::Done, Some("made".into()));
+    receipt.creating = Some(pending);
+    receipt.save(&w.git_dir).unwrap();
+    let options = || SetupOptions {
+        database_url: Some(ATTACH.into()),
+        ..Default::default()
+    };
+    let results = [
+        setup::setup(&t.project, &w, options(), false, false, &mut NoProgress).map(|_| ()),
+        setup::activate(&t.project, &w, options(), &mut NoProgress).map(|_| ()),
+    ];
+    (t, w, results)
+}
+
+/// What the workspace's record in the ledger (which outlives the receipt)
+/// says about the branch `id`.
+fn recorded_branch(t: &Repo, id: uuid::Uuid) -> Option<devflow_core::ledger::BranchRef> {
+    devflow_core::ledger::list(&t.project.git_common_dir)
+        .unwrap()
+        .records
+        .into_iter()
+        .flat_map(|record| record.resources.branches)
+        .find(|branch| branch.id == id)
+}
+
+#[test]
+fn another_service_cannot_erase_a_pending_intent_before_its_own_guard() {
+    use devflow_core::config::Engine;
+    use devflow_core::receipt::PendingBranch;
+    // `db` has an unresolved PostgreSQL creation and is a Valkey service now;
+    // a PostgreSQL service `aaa`, which sorts before it, was added. Resuming
+    // with `--database-url` attached `aaa` first, and its binding cleared the
+    // intent before `db` reached its guard: a removal could then no longer
+    // account for the original branch. The intent is looked at before any
+    // service is touched.
+    let id = uuid::Uuid::new_v4();
+    let pending = PendingBranch {
+        service: "db".into(),
+        branch_id: id,
+        engine: Some(Engine::Postgres),
+    };
+    let (t, w, results) = attach_with_pending(
+        "[services.aaa]\nengine = \"postgres\"\n\n[services.db]\nengine = \"valkey\"\n",
+        pending,
+    );
+    for (how, result) in ["setup", "activation"].into_iter().zip(results) {
+        let error = result.expect_err(how);
+        let said = format!("{error:#}");
         assert!(
-            protected.reason.contains(&id.to_string())
-                && protected
-                    .reason
-                    .contains("cannot reach the database server")
-                && protected.reason.contains("service 'db'"),
-            "{}",
-            protected.reason
+            said.contains(&id.to_string()) && said.contains("unresolved"),
+            "{how}: {said}"
         );
-        let kinds: Vec<&str> = protected
-            .remedies
+        let kinds: Vec<&str> = devflow_core::remedy::remedies_of(&error)
             .iter()
             .map(devflow_core::remedy::Remedy::kind)
             .collect();
-        assert_eq!(kinds, ["setup", "reconcile_databases"], "{kinds:?}");
-        // Before any effect: no teardown, the worktree and its receipt are there.
-        assert!(!ran.exists() && w.path.is_dir());
+        assert_eq!(
+            kinds,
+            [
+                "reconcile_databases",
+                "remove_workspace",
+                "open_file",
+                "setup"
+            ],
+            "{how}: {said}"
+        );
+        // Nothing was touched: `aaa` is not attached, the intent is as it was.
+        let after = receipt_of(&w);
+        assert!(after.services.is_empty(), "{how}: {:?}", after.services);
+        let kept = after.creating.expect("the intent is kept");
+        assert_eq!(
+            (kept.service.as_str(), kept.branch_id, kept.engine),
+            ("db", id, Some(Engine::Postgres)),
+            "{how}"
+        );
+        // The workspace's record, which outlives the receipt, still lists the
+        // branch as pending on the backend it was begun on.
+        let listed = recorded_branch(&t, id).unwrap_or_else(|| panic!("{how}: not recorded"));
+        assert_eq!(
+            (listed.pending, listed.engine, listed.service.as_deref()),
+            (true, Some(Engine::Postgres), Some("db")),
+            "{how}"
+        );
+    }
+}
+
+#[test]
+fn a_pending_intent_stays_on_the_workspace_record_through_a_forced_removal() {
+    use devflow_core::config::Engine;
+    use devflow_core::receipt::PendingBranch;
+    // The same scenario, with the PostgreSQL service `aaa` pointing at a
+    // server nobody can reach: resuming with `--database-url` is refused, a
+    // plain removal stops before any effect and names the branch, and
+    // forcing it leaves the branch named, with its backend, on the record
+    // (W2-A) for `gc`, not in a receipt that goes with the worktree.
+    let id = uuid::Uuid::new_v4();
+    let extra = format!(
+        "{}\n[services.db]\nengine = \"valkey\"\n",
+        UNREACHABLE_SERVER.replace("[services.db]", "[services.aaa]")
+    );
+    let (t, w, results) = attach_with_pending(
+        &extra,
+        PendingBranch {
+            service: "db".into(),
+            branch_id: id,
+            engine: Some(Engine::Postgres),
+        },
+    );
+    for (how, result) in ["setup", "activation"].into_iter().zip(results) {
+        let said = format!("{:#}", result.expect_err(how));
+        assert!(
+            said.contains(&id.to_string()) && said.contains("unresolved"),
+            "{how}: {said}"
+        );
+        assert!(
+            receipt_of(&w).services.is_empty(),
+            "{how}: aaa was attached"
+        );
         assert_eq!(
             receipt_of(&w).creating.map(|p| p.branch_id),
             Some(id),
-            "the receipt still names the branch"
+            "{how}"
+        );
+    }
+    assert_eq!(
+        recorded_branch(&t, id).map(|b| (b.pending, b.engine)),
+        Some((true, Some(Engine::Postgres)))
+    );
+
+    let error =
+        setup::remove(&t.project, "w", RemoveOptions::default(), &mut NoProgress).unwrap_err();
+    let protected = error
+        .downcast_ref::<Protected>()
+        .unwrap_or_else(|| panic!("{error:#}"));
+    assert!(protected.forceable && protected.reason.contains(&id.to_string()));
+    assert!(w.path.is_dir(), "nothing was touched");
+
+    let forced = setup::remove(
+        &t.project,
+        "w",
+        RemoveOptions {
+            force: true,
+            ..Default::default()
+        },
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert!(
+        forced
+            .still_recorded
+            .iter()
+            .any(|r| r.contains(&id.to_string())),
+        "{forced:?}"
+    );
+    assert!(!w.path.exists());
+    let kept = recorded_branch(&t, id).expect("the record keeps naming the branch");
+    assert_eq!(
+        (kept.pending, kept.engine, kept.service.as_deref()),
+        (true, Some(Engine::Postgres), Some("db"))
+    );
+}
+
+#[test]
+fn a_pending_intent_of_a_service_no_longer_configured_stops_the_others() {
+    use devflow_core::config::Engine;
+    use devflow_core::receipt::PendingBranch;
+    // The intent is the only evidence that the branch was made; with one slot,
+    // provisioning or attaching another service would replace it.
+    let id = uuid::Uuid::new_v4();
+    let (t, w, results) = attach_with_pending(
+        "[services.main]\nengine = \"postgres\"\n",
+        PendingBranch {
+            service: "db".into(),
+            branch_id: id,
+            engine: Some(Engine::Postgres),
+        },
+    );
+    for (how, result) in ["setup", "activation"].into_iter().zip(results) {
+        let said = format!("{:#}", result.expect_err(how));
+        assert!(
+            said.contains(&id.to_string()) && said.contains("no longer configured"),
+            "{how}: {said}"
+        );
+        let after = receipt_of(&w);
+        assert!(after.services.is_empty(), "{how}");
+        assert_eq!(after.creating.map(|p| p.branch_id), Some(id), "{how}");
+        assert_eq!(
+            recorded_branch(&t, id).map(|b| (b.pending, b.engine)),
+            Some((true, Some(Engine::Postgres))),
+            "{how}"
+        );
+    }
+}
+
+#[test]
+fn an_attachment_clears_no_intent_that_is_not_its_own() {
+    use devflow_core::config::Engine;
+    use devflow_core::receipt::PendingBranch;
+    // No service is configured (a URL-only attachment), and the receipt holds
+    // an intent for a service that is gone: attaching binds the default
+    // service and leaves the other's intent where it is, for a removal to find.
+    let id = uuid::Uuid::new_v4();
+    let (t, w, results) = attach_with_pending(
+        "",
+        PendingBranch {
+            service: "gone".into(),
+            branch_id: id,
+            engine: Some(Engine::Postgres),
+        },
+    );
+    for (how, result) in ["setup", "activation"].into_iter().zip(results) {
+        result.unwrap_or_else(|e| panic!("{how}: {e:#}"));
+        let after = receipt_of(&w);
+        assert_eq!(after.services["db"].url, ATTACH, "{how}");
+        let kept = after.creating.expect("the other service's intent is kept");
+        assert_eq!(
+            (kept.service.as_str(), kept.branch_id),
+            ("gone", id),
+            "{how}"
+        );
+        // The attachment is not data the workspace owns; the pending branch
+        // is still listed on the record.
+        assert_eq!(
+            recorded_branch(&t, id).map(|b| (b.pending, b.service)),
+            Some((true, Some("gone".to_string()))),
+            "{how}"
         );
     }
 }
@@ -7009,38 +7401,28 @@ fn a_pending_branch_of_a_service_the_configuration_dropped_cannot_be_placed() {
     // Nothing in the configuration or the receipt says which backend holds the
     // branch, no container service of that name is recorded, and the project
     // has no postgres service to ask: it cannot be ruled out, so it is not
-    // forgotten (not even by force).
+    // forgotten. The record keeps naming it, so forcing leaves it there.
     let (t, w, id) = crashed_creation("", "ghost", None);
-    for force in [false, true] {
-        let error = setup::remove(
-            &t.project,
-            "w",
-            RemoveOptions {
-                force,
-                ..Default::default()
-            },
-            &mut NoProgress,
-        )
-        .unwrap_err();
-        let protected = error
-            .downcast_ref::<Protected>()
-            .unwrap_or_else(|| panic!("{error:#}"));
-        assert!(!protected.forceable, "force={force}");
-        assert!(
-            protected.reason.contains(&id.to_string()),
-            "{}",
-            protected.reason
-        );
-        assert!(
-            protected
-                .remedies
-                .iter()
-                .any(|r| matches!(r, devflow_core::remedy::Remedy::Setup { .. })),
-            "{:?}",
-            protected.remedies
-        );
-        assert!(w.path.is_dir());
-    }
+    let error =
+        setup::remove(&t.project, "w", RemoveOptions::default(), &mut NoProgress).unwrap_err();
+    let protected = error
+        .downcast_ref::<Protected>()
+        .unwrap_or_else(|| panic!("{error:#}"));
+    assert!(protected.forceable);
+    assert!(
+        protected.reason.contains(&id.to_string()),
+        "{}",
+        protected.reason
+    );
+    assert!(
+        protected
+            .remedies
+            .iter()
+            .any(|r| matches!(r, devflow_core::remedy::Remedy::Setup { .. })),
+        "{:?}",
+        protected.remedies
+    );
+    assert!(w.path.is_dir());
     // Keeping the data is the person's own decision about it.
     setup::remove(
         &t.project,
@@ -7053,6 +7435,13 @@ fn a_pending_branch_of_a_service_the_configuration_dropped_cannot_be_placed() {
     )
     .unwrap();
     assert!(!w.path.exists());
+    assert!(
+        devflow_core::ledger::list(&t.project.git_common_dir)
+            .unwrap()
+            .records
+            .is_empty(),
+        "kept data is no longer named"
+    );
 }
 
 #[test]
@@ -7758,7 +8147,7 @@ fn switch_hooks_run_under_the_receipt_lock_so_nothing_else_sets_the_workspace_up
         assert!(out.switch_hooks.unwrap().ok);
     });
     assert!(!Receipt::is_locked(&w.git_dir), "released afterwards");
-    assert!(Receipt::try_process_lock(&w.git_dir).unwrap().is_some());
+    assert!(released_process_lock(&w.git_dir));
 }
 
 #[test]
@@ -8022,7 +8411,7 @@ fn entering_a_workspace_with_autostart_hands_its_process_lock_to_the_start() {
         "{started:?}"
     );
     assert!(!Receipt::is_locked(&w.git_dir));
-    assert!(Receipt::try_process_lock(&w.git_dir).unwrap().is_some());
+    assert!(released_process_lock(&w.git_dir));
 }
 
 #[test]
@@ -8495,4 +8884,998 @@ fn a_worktree_adopted_while_detached_records_it_and_shows_no_drift_until_it_move
         listed.drift.map(|d| d.branch),
         Some(Some("topic".to_string()))
     );
+}
+
+// --- the app port ---------------------------------------------------------
+
+fn setup_counter_repo() -> Repo {
+    repo(
+        &Hooks {
+            setup: &["echo ran >> .devflow/setup-runs"],
+            ..Default::default()
+        },
+        "[env]\nPORT = \"${DEVFLOW_PORT}\"\n",
+    )
+}
+
+fn setup_runs_of(w: &Workspace) -> usize {
+    std::fs::read_to_string(w.path.join(".devflow/setup-runs"))
+        .map(|text| text.lines().count())
+        .unwrap_or(0)
+}
+
+#[test]
+fn a_workspace_gets_one_port_of_its_own_and_recipes_may_use_it() {
+    let t = setup_counter_repo();
+    trust::approve(&t.project).unwrap();
+    let a = create(&t.project, "a", SetupOptions::default()).unwrap();
+    let b = create(&t.project, "b", SetupOptions::default()).unwrap();
+    let port = a.receipt.app_port.expect("a port");
+    assert!((40000..=49999).contains(&port));
+    assert_eq!(
+        a.receipt.app_port_source,
+        Some(devflow_core::ports::PortSource::Allocated)
+    );
+    assert_ne!(
+        a.receipt.app_port, b.receipt.app_port,
+        "one port per workspace"
+    );
+    assert_eq!(a.receipt.pending_app_port, None);
+    let env = env_map(&a.workspace);
+    assert_eq!(env["DEVFLOW_PORT"], port.to_string());
+    assert_eq!(env["PORT"], port.to_string(), "a recipe references it");
+    // It is an owned name: the manifest lists it.
+    let declared = env_file::read_contents(&a.workspace.path)
+        .unwrap()
+        .declared
+        .unwrap();
+    assert!(declared.contains("DEVFLOW_PORT"), "{declared:?}");
+    // The machine-wide reservation lists both.
+    let reserved = devflow_core::ports::reserved();
+    assert!(
+        reserved
+            .iter()
+            .any(|(p, _, i)| *p == port && *i == a.receipt.instance_id)
+    );
+
+    // Kept: entering again, with something listening on it, changes nothing.
+    let held = std::net::TcpListener::bind(("127.0.0.1", port));
+    let again = setup::activate(
+        &t.project,
+        &a.workspace,
+        SetupOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(again.receipt.app_port, Some(port));
+    drop(held);
+}
+
+#[test]
+fn a_recipe_cannot_set_the_port() {
+    init();
+    let dir = tempfile::tempdir().unwrap();
+    let text = config_text(&Hooks::default(), "[env]\nDEVFLOW_PORT = \"3000\"\n");
+    std::fs::write(dir.path().join("devflow.toml"), text).unwrap();
+    let error = Config::load(dir.path()).unwrap_err().to_string();
+    assert!(
+        error.contains("DEVFLOW_PORT") && error.contains("reserved"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_ready_workspace_without_a_port_is_given_one_without_running_hooks_again() {
+    let t = setup_counter_repo();
+    trust::approve(&t.project).unwrap();
+    let w = create(&t.project, "old", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    assert_eq!(setup_runs_of(&w), 1);
+    // A workspace set up before ports existed.
+    let mut receipt = receipt_of(&w);
+    receipt.app_port = None;
+    receipt.app_port_source = None;
+    receipt.save(&w.git_dir).unwrap();
+    let before = env_map(&w);
+    // The configuration generation did not change: it is ready, not reopened.
+    let listed = setup::list(&t.project).unwrap();
+    let item = listed.iter().find(|i| i.workspace.path == w.path).unwrap();
+    assert_eq!(item.status, Some(Status::Ready));
+
+    let out = setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    assert_eq!(out.status, Status::Ready);
+    assert_eq!(out.repaired, [Repair::AppPort]);
+    let port = out.receipt.app_port.expect("a port");
+    let after = env_map(&w);
+    assert_eq!(after["DEVFLOW_PORT"], port.to_string());
+    assert_eq!(after["PORT"], port.to_string());
+    for (key, value) in &before {
+        if key != "PORT" {
+            assert_eq!(after.get(key), Some(value), "{key}");
+        }
+    }
+    assert_eq!(setup_runs_of(&w), 1, "no setup hook ran again");
+
+    // Entering again repairs nothing.
+    let out = setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    assert!(out.repaired.is_empty());
+    assert_eq!(out.receipt.app_port, Some(port));
+}
+
+#[test]
+fn a_port_is_not_added_where_the_recipes_are_not_approved() {
+    let t = setup_counter_repo();
+    trust::approve(&t.project).unwrap();
+    let w = create(&t.project, "old", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    let mut receipt = receipt_of(&w);
+    receipt.app_port = None;
+    receipt.save(&w.git_dir).unwrap();
+    trust::revoke(&t.project).unwrap();
+    let out = setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    assert_eq!(
+        out.status,
+        Status::Ready,
+        "a port never makes a ready workspace need attention"
+    );
+    assert!(out.repaired.is_empty());
+    assert_eq!(out.receipt.app_port, None);
+}
+
+#[test]
+fn the_port_is_chosen_by_ledger_and_bind_check_and_resumes_where_it_stopped() {
+    let t = plain();
+    let a = create(&t.project, "a", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    let b = create(&t.project, "b", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    let c = create(&t.project, "c", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    let mut project = t.project.clone();
+    // A range with room for two.
+    project.config.worktree.port_range = Some([47000, 47001]);
+    let clear = |w: &Workspace| {
+        let mut receipt = receipt_of(w);
+        receipt.app_port = None;
+        receipt.save(&w.git_dir).unwrap();
+        devflow_core::ports::release(t.project.id(), receipt.instance_id, &w.path);
+        receipt
+    };
+    let mut ra = clear(&a);
+    let mut rb = clear(&b);
+    let mut rc = clear(&c);
+    // Something listens on the first candidate of `a`.
+    let first = devflow_core::ports::candidates(&project.config, project.id(), ra.instance_id)[0];
+    let ensured = devflow_core::ports::ensure_with(&project, &a, &mut ra, &|port| port != first);
+    assert_eq!(
+        ensured.port,
+        Some(if first == 47000 { 47001 } else { 47000 })
+    );
+    assert!(ensured.allocated && ensured.warnings.is_empty());
+    // The other takes the remaining one: a ledger entry keeps them apart
+    // although nothing listens on either.
+    let ensured = devflow_core::ports::ensure_with(&project, &b, &mut rb, &|_| true);
+    assert!(ensured.allocated);
+    assert_ne!(ensured.port, ra.app_port);
+    // Nothing is left for the third: no port, and it says why.
+    let ensured = devflow_core::ports::ensure_with(&project, &c, &mut rc, &|_| true);
+    assert_eq!(ensured.port, None);
+    assert!(
+        ensured
+            .warnings
+            .iter()
+            .any(|w| w.contains("47000") && w.contains("47001")),
+        "{:?}",
+        ensured.warnings
+    );
+    assert_eq!(receipt_of(&c).pending_app_port, None);
+
+    // Resume: a candidate journaled before the reservation is the one taken.
+    devflow_core::ports::release(t.project.id(), ra.instance_id, &a.path);
+    let mut ra = clear(&a);
+    let candidates = devflow_core::ports::candidates(&project.config, project.id(), ra.instance_id);
+    ra.pending_app_port = Some(candidates[1]);
+    ra.save(&a.git_dir).unwrap();
+    let ensured = devflow_core::ports::ensure_with(&project, &a, &mut ra, &|port| {
+        port == candidates[1] || port == candidates[0]
+    });
+    assert_eq!(
+        ensured.port,
+        Some(candidates[1]),
+        "resumes at the journaled candidate"
+    );
+    assert_eq!(receipt_of(&a).app_port, Some(candidates[1]));
+    assert_eq!(receipt_of(&a).pending_app_port, None);
+    // Release on removal.
+    let instance = ra.instance_id;
+    devflow_core::ports::release(t.project.id(), instance, &a.path);
+    assert!(
+        devflow_core::ports::reserved()
+            .iter()
+            .all(|(_, _, i)| *i != instance)
+    );
+}
+
+#[test]
+fn removal_gives_the_port_back() {
+    let t = plain();
+    let w = create(&t.project, "gone", SetupOptions::default()).unwrap();
+    let instance = w.receipt.instance_id;
+    assert!(
+        devflow_core::ports::reserved()
+            .iter()
+            .any(|(_, _, i)| *i == instance)
+    );
+    setup::remove(
+        &t.project,
+        "gone",
+        RemoveOptions {
+            pitchfork: Some(quiet_pitchfork()),
+            ..Default::default()
+        },
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert!(
+        devflow_core::ports::reserved()
+            .iter()
+            .all(|(_, _, i)| *i != instance)
+    );
+}
+
+#[test]
+fn conductors_port_is_used_where_conductor_made_the_workspace() {
+    if !in_child(
+        "conductors_port_is_used_where_conductor_made_the_workspace",
+        &[("CONDUCTOR_PORT", "47311")],
+    ) {
+        return;
+    }
+    let t = plain();
+    // Conductor says which workspace it runs in: that is the evidence.
+    // SAFETY: this runs alone in a child process (see `in_child`).
+    unsafe {
+        std::env::set_var(
+            "CONDUCTOR_WORKSPACE_PATH",
+            worktree::path_for(&t.project, "conducted"),
+        );
+    }
+    let w = create(&t.project, "conducted", SetupOptions::default()).unwrap();
+    assert_eq!(w.receipt.app_port, Some(47311));
+    assert_eq!(
+        w.receipt.app_port_source,
+        Some(devflow_core::ports::PortSource::Conductor)
+    );
+    assert_eq!(env_map(&w.workspace)["DEVFLOW_PORT"], "47311");
+}
+
+#[test]
+fn a_shell_in_another_conductor_workspace_does_not_lend_its_port() {
+    if !in_child(
+        "a_shell_in_another_conductor_workspace_does_not_lend_its_port",
+        &[
+            ("CONDUCTOR_PORT", "47321"),
+            ("CONDUCTOR_WORKSPACE_PATH", "/conductor/elsewhere"),
+        ],
+    ) {
+        return;
+    }
+    let t = plain();
+    let w = create(&t.project, "other", SetupOptions::default()).unwrap();
+    let port = w.receipt.app_port.expect("a port");
+    assert_ne!(port, 47321);
+    assert_eq!(
+        w.receipt.app_port_source,
+        Some(devflow_core::ports::PortSource::Allocated)
+    );
+}
+
+#[test]
+fn a_no_db_workspace_set_up_before_ports_is_not_reopened_and_runs_no_hook_again() {
+    let t = repo(
+        &Hooks {
+            setup: &["echo ran >> .devflow/setup-runs"],
+            ..Default::default()
+        },
+        "",
+    );
+    trust::approve(&t.project).unwrap();
+    let w = create(
+        &t.project,
+        "old",
+        SetupOptions {
+            no_db: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .workspace;
+    assert_eq!(setup_runs_of(&w), 1);
+    // The receipt as the release before ports wrote it: the generation that
+    // hashed the names without `DEVFLOW_PORT`, and no port.
+    let mut receipt = receipt_of(&w);
+    assert!(receipt.services_skipped_on_request());
+    receipt.app_port = None;
+    receipt.app_port_source = None;
+    receipt.env_generation =
+        Some(devflow_core::receipt::previous_env_generation_without_services(&t.project.config));
+    receipt.save(&w.git_dir).unwrap();
+    let listed = setup::list(&t.project).unwrap();
+    let item = listed.iter().find(|i| i.workspace.path == w.path).unwrap();
+    assert_eq!(
+        item.status,
+        Some(Status::Ready),
+        "not reopened by an upgrade"
+    );
+
+    let out = setup::activate(&t.project, &w, SetupOptions::default(), &mut NoProgress).unwrap();
+    assert_eq!(out.status, Status::Ready);
+    assert_eq!(out.repaired, [Repair::AppPort]);
+    assert_eq!(setup_runs_of(&w), 1, "no completed hook ran again");
+    assert!(env_map(&w).contains_key("DEVFLOW_PORT"));
+    // Stamped with the current generation: a later release's new name is
+    // no drift either.
+    let current = receipt_of(&w);
+    assert_ne!(
+        current.env_generation.as_deref(),
+        Some(
+            devflow_core::receipt::previous_env_generation_without_services(&t.project.config)
+                .as_str()
+        )
+    );
+    assert_eq!(current.status(), Status::Ready);
+}
+
+#[test]
+fn an_inherited_conductor_port_alone_is_given_to_nobody() {
+    if !in_child(
+        "an_inherited_conductor_port_alone_is_given_to_nobody",
+        &[("CONDUCTOR_PORT", "47331")],
+    ) {
+        return;
+    }
+    // An agent inside one Conductor workspace creating several: no
+    // CONDUCTOR_WORKSPACE_PATH says the port is theirs, so each allocates.
+    let t = plain();
+    let a = create(&t.project, "a", SetupOptions::default()).unwrap();
+    let b = create(&t.project, "b", SetupOptions::default()).unwrap();
+    for w in [&a, &b] {
+        assert_ne!(w.receipt.app_port, Some(47331));
+        assert_eq!(
+            w.receipt.app_port_source,
+            Some(devflow_core::ports::PortSource::Allocated)
+        );
+    }
+    assert_ne!(a.receipt.app_port, b.receipt.app_port);
+}
+
+#[test]
+fn a_new_identity_does_not_keep_the_old_identitys_port() {
+    let t = plain();
+    let w = create(&t.project, "forked", SetupOptions::default()).unwrap();
+    let (old_instance, old_port) = (w.receipt.instance_id, w.receipt.app_port.unwrap());
+    let out = setup::setup(
+        &t.project,
+        &w.workspace,
+        SetupOptions::default(),
+        false,
+        true,
+        &mut NoProgress,
+    )
+    .unwrap()
+    .expect("setup ran");
+    assert_ne!(out.receipt.instance_id, old_instance);
+    let new_port = out.receipt.app_port.expect("the new identity has a port");
+    assert_eq!(out.receipt.pending_app_port, None);
+    assert_eq!(
+        env_map(&out.workspace)["DEVFLOW_PORT"],
+        new_port.to_string()
+    );
+    let reserved = devflow_core::ports::reserved();
+    assert!(
+        reserved.iter().all(|(_, _, i)| *i != old_instance),
+        "{reserved:?}"
+    );
+    assert!(
+        reserved
+            .iter()
+            .any(|(p, _, i)| *p == new_port && *i == out.receipt.instance_id)
+    );
+    let _ = old_port;
+}
+
+#[test]
+fn replacing_an_identity_gives_up_that_checkouts_reservation_only() {
+    let t = plain();
+    let a = create(&t.project, "orig", SetupOptions::default()).unwrap();
+    let b = create(&t.project, "copy", SetupOptions::default()).unwrap();
+    // `copy` is a copy of `orig`: the same identity and port, at another path.
+    let mut copy = receipt_of(&b.workspace);
+    copy.instance_id = a.receipt.instance_id;
+    copy.app_port = a.receipt.app_port;
+    copy.save(&b.workspace.git_dir).unwrap();
+    let ensured = devflow_core::ports::ensure(&t.project, &b.workspace, &mut copy);
+    assert_eq!(ensured.port, a.receipt.app_port);
+    let holders = |instance| {
+        devflow_core::ports::reserved()
+            .iter()
+            .filter(|(_, _, i)| *i == instance)
+            .count()
+    };
+    assert_eq!(
+        holders(a.receipt.instance_id),
+        2,
+        "two checkouts, one identity"
+    );
+    // The copy takes a new identity: the original keeps its reservation.
+    devflow_core::ports::forget_replaced(t.project.id(), a.receipt.instance_id, &b.workspace.path);
+    assert_eq!(holders(a.receipt.instance_id), 1);
+}
+
+#[test]
+fn a_moved_checkout_keeps_its_port_reserved() {
+    let t = plain();
+    let a = create(&t.project, "moving", SetupOptions::default()).unwrap();
+    let port = a.receipt.app_port.unwrap();
+    let to = a.workspace.path.with_file_name("moved-elsewhere");
+    let moved = std::process::Command::new("git")
+        .current_dir(&t.root)
+        .args(["worktree", "move"])
+        .arg(&a.workspace.path)
+        .arg(&to)
+        .output();
+    let moved = moved.expect("git is needed to move a worktree");
+    assert!(
+        moved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&moved.stderr)
+    );
+    // A workspace whose range holds only that port finds it taken, though the
+    // directory the reservation was made for is gone.
+    let mut project = t.project.clone();
+    project.config.worktree.port_range = Some([port.max(1024), port.max(1024)]);
+    let other = create(&t.project, "other", SetupOptions::default()).unwrap();
+    let mut receipt = receipt_of(&other.workspace);
+    receipt.app_port = None;
+    receipt.save(&other.workspace.git_dir).unwrap();
+    devflow_core::ports::release(t.project.id(), receipt.instance_id, &other.workspace.path);
+    let ensured =
+        devflow_core::ports::ensure_with(&project, &other.workspace, &mut receipt, &|_| true);
+    assert_eq!(
+        ensured.port, None,
+        "the moved checkout's port is not free to take"
+    );
+    // Seen again at its new place, the reservation follows it.
+    let moved_ws = ws(&t.project, "moving");
+    assert_eq!(
+        moved_ws.path.canonicalize().unwrap(),
+        to.canonicalize().unwrap()
+    );
+    let mut kept = receipt_of(&moved_ws);
+    let ensured = devflow_core::ports::ensure(&t.project, &moved_ws, &mut kept);
+    assert_eq!(ensured.port, Some(port));
+    assert!(ensured.warnings.is_empty(), "{:?}", ensured.warnings);
+}
+
+#[test]
+#[ignore = "needs Docker and the postgres:18 image"]
+fn managed_postgres_gc_removes_the_database_of_a_worktree_git_forgot() {
+    use devflow_core::gc;
+    let t = repo(&Hooks::default(), MANAGED);
+    let _cleanup = managed_cleanup(&t.project);
+    let empty = || SetupOptions {
+        data_from: Some(DataSource::Empty),
+        ..Default::default()
+    };
+    let kept = create(&t.project, "kept", empty()).unwrap();
+    let gone = create(&t.project, "gone", empty()).unwrap();
+    assert_eq!(gone.status, Status::Ready, "{:?}", gone.receipt.phases);
+    let kept_branch = binding(&kept.receipt).branch_id.unwrap();
+    let branch = binding(&gone.receipt).branch_id.unwrap();
+    let server = devflow_core::db::Server::for_project(&t.project)
+        .unwrap()
+        .unwrap();
+    assert!(server.branch(branch).unwrap().is_some());
+
+    // What an agent host does when it is done: remove the worktree. The
+    // receipt goes with it; the record in the ledger is what still names the
+    // branch.
+    worktree::force_remove(&t.project, &gone.workspace).unwrap();
+    assert!(!gone.workspace.git_dir.exists());
+    assert_eq!(
+        gc::summary(&t.project).unwrap().removed_elsewhere,
+        ["gone"],
+        "list and doctor see it from files alone"
+    );
+
+    let inventory = gc::inventory(&t.project, &gc::Options::default()).unwrap();
+    let entry = inventory.entry(gone.receipt.instance_id).unwrap();
+    assert_eq!(entry.class, gc::Class::RemovedElsewhere, "{entry:?}");
+    assert!(entry.removable);
+    assert_eq!(entry.branches.len(), 1);
+    assert_eq!(entry.branches[0].presence, gc::Presence::Owned);
+    assert!(
+        entry.branches[0].size_bytes.is_some_and(|size| size > 0),
+        "the size is measured: {:?}",
+        entry.branches[0]
+    );
+    assert!(entry.merge.is_some());
+    assert_eq!(
+        inventory.entry(kept.receipt.instance_id).unwrap().class,
+        gc::Class::Active
+    );
+
+    let outcome = gc::remove(
+        &t.project,
+        &gc::RemoveRequest {
+            targets: vec![entry.target().unwrap()],
+            snapshot: true,
+            pitchfork: Some(quiet_pitchfork()),
+            ..Default::default()
+        },
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(outcome.removed.len(), 1, "{:?}", outcome.skipped);
+    let removed = &outcome.removed[0];
+    assert_eq!(removed.snapshots.len(), 1, "{removed:?}");
+    assert!(
+        removed.snapshots[0].starts_with("database/gc-gone-"),
+        "{removed:?}"
+    );
+    assert_eq!(removed.dropped.len(), 1, "{removed:?}");
+    assert!(
+        server.branch(branch).unwrap().is_none(),
+        "the database branch is gone"
+    );
+    assert!(
+        server.branch(kept_branch).unwrap().is_some(),
+        "the other workspace's branch is untouched"
+    );
+    assert!(
+        server
+            .list_snapshots()
+            .unwrap()
+            .iter()
+            .any(|snapshot| snapshot.name.starts_with("gc-gone-")),
+        "the snapshot taken first is kept"
+    );
+    assert!(
+        devflow_core::ledger::list(&t.project.git_common_dir)
+            .unwrap()
+            .records
+            .iter()
+            .all(|record| record.workspace != "gone"),
+        "everything was accounted for: the record is gone"
+    );
+    assert!(gc::summary(&t.project).unwrap().is_empty());
+}
+
+/// A workspace Git forgot, with a database branch, as the first of a pair of
+/// workspaces on a managed server.
+fn forgotten_with_a_branch(t: &Repo, name: &str) -> (devflow_core::receipt::Receipt, uuid::Uuid) {
+    let created = create(
+        &t.project,
+        name,
+        SetupOptions {
+            data_from: Some(DataSource::Empty),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        created.status,
+        Status::Ready,
+        "{:?}",
+        created.receipt.phases
+    );
+    let branch = binding(&created.receipt).branch_id.unwrap();
+    worktree::force_remove(&t.project, &created.workspace).unwrap();
+    (created.receipt, branch)
+}
+
+#[test]
+#[ignore = "needs Docker and the postgres:18 image"]
+fn managed_postgres_gc_snapshots_a_branch_recorded_before_its_creation_finished() {
+    use devflow_core::gc;
+    let t = repo(&Hooks::default(), MANAGED);
+    let _cleanup = managed_cleanup(&t.project);
+    let (receipt, branch) = forgotten_with_a_branch(&t, "pending");
+    // What a crash between recording the branch and binding it leaves: the
+    // record lists it as pending, and the backend has it ready.
+    let path = devflow_core::ledger::path(&t.project.git_common_dir, receipt.instance_id);
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record["resources"]["branches"][0]["pending"] = true.into();
+    std::fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+
+    let inventory = gc::inventory(&t.project, &gc::Options::default()).unwrap();
+    let entry = inventory.entry(receipt.instance_id).unwrap();
+    assert!(entry.removable, "{entry:?}");
+    assert!(entry.branches[0].pending);
+    assert_eq!(entry.branches[0].presence, gc::Presence::Owned);
+    assert_eq!(entry.branches[0].ready, Some(true));
+
+    let outcome = gc::remove(
+        &t.project,
+        &gc::RemoveRequest {
+            targets: vec![entry.target().unwrap()],
+            snapshot: true,
+            pitchfork: Some(quiet_pitchfork()),
+            ..Default::default()
+        },
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(outcome.removed.len(), 1, "{:?}", outcome.skipped);
+    assert_eq!(
+        outcome.removed[0].snapshots.len(),
+        1,
+        "a pending branch the backend has ready is snapshotted: {:?}",
+        outcome.removed[0]
+    );
+    let server = devflow_core::db::Server::for_project(&t.project)
+        .unwrap()
+        .unwrap();
+    assert!(server.branch(branch).unwrap().is_none());
+    assert!(
+        server
+            .list_snapshots()
+            .unwrap()
+            .iter()
+            .any(|snapshot| snapshot.name.starts_with("gc-pending-"))
+    );
+}
+
+#[test]
+#[ignore = "needs Docker and the postgres:18 image"]
+fn managed_postgres_gc_never_drops_data_that_a_reset_replaced_after_it_was_shown() {
+    use devflow_core::{db::ResolvedSource, gc};
+    let t = repo(&Hooks::default(), MANAGED);
+    let _cleanup = managed_cleanup(&t.project);
+    let (receipt, branch) = forgotten_with_a_branch(&t, "reset-since");
+    let server = devflow_core::db::Server::for_project(&t.project)
+        .unwrap()
+        .unwrap();
+
+    let inventory = gc::inventory(&t.project, &gc::Options::default()).unwrap();
+    let shown = inventory
+        .entry(receipt.instance_id)
+        .unwrap()
+        .target()
+        .unwrap();
+    assert!(
+        shown
+            .backend
+            .iter()
+            .any(|b| b.id == branch && b.generation.is_some()),
+        "the generation the person was shown travels with the request: {shown:?}"
+    );
+
+    // Somebody resets the branch meanwhile: same id, same owner, new data.
+    server
+        .reset_branch(branch, ResolvedSource::Empty)
+        .expect("the reset");
+    for snapshot in [false, true] {
+        let outcome = gc::remove(
+            &t.project,
+            &gc::RemoveRequest {
+                targets: vec![shown.clone()],
+                snapshot,
+                pitchfork: Some(quiet_pitchfork()),
+                ..Default::default()
+            },
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(outcome.removed.is_empty(), "snapshot={snapshot}");
+        assert!(
+            outcome.skipped[0]
+                .reason
+                .contains("not the data that was shown"),
+            "snapshot={snapshot}: {:?}",
+            outcome.skipped
+        );
+        assert!(
+            server.branch(branch).unwrap().is_some(),
+            "the reset data is still there (snapshot={snapshot})"
+        );
+    }
+    // What is shown now is what a removal drops.
+    let again = gc::inventory(&t.project, &gc::Options::default()).unwrap();
+    let outcome = gc::remove(
+        &t.project,
+        &gc::RemoveRequest {
+            targets: vec![again.entry(receipt.instance_id).unwrap().target().unwrap()],
+            pitchfork: Some(quiet_pitchfork()),
+            ..Default::default()
+        },
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(outcome.removed.len(), 1, "{:?}", outcome.skipped);
+    assert!(server.branch(branch).unwrap().is_none());
+}
+
+fn instances_holding_ports() -> Vec<uuid::Uuid> {
+    devflow_core::ports::reserved()
+        .into_iter()
+        .map(|(_, _, instance)| instance)
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn the_old_identitys_port_stays_until_the_replacement_is_durable() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = plain();
+    let w = create(&t.project, "swap", SetupOptions::default()).unwrap();
+    let old = w.receipt.instance_id;
+    let dir = w.workspace.git_dir.join("devflow");
+    // The replacement receipt cannot be written: the old one stays the
+    // checkout's, and so does its port.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let denied = std::fs::File::create(dir.join("probe")).is_ok();
+    let failed = setup::setup(
+        &t.project,
+        &w.workspace,
+        SetupOptions::default(),
+        false,
+        true,
+        &mut NoProgress,
+    );
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if denied {
+        return; // (running as a user the permission does not stop)
+    }
+    assert!(failed.is_err());
+    assert_eq!(receipt_of(&w.workspace).instance_id, old);
+    assert!(instances_holding_ports().contains(&old), "still reserved");
+
+    // The replacement lands but the release never ran (a crash, a lock that
+    // timed out): nothing at this path carries the old identity any more, so
+    // the next reconciliation of the ledger drops it.
+    let mut replaced = receipt_of(&w.workspace);
+    replaced.instance_id = uuid::Uuid::new_v4();
+    replaced.app_port = None;
+    replaced.save(&w.workspace.git_dir).unwrap();
+    assert!(
+        !instances_holding_ports().contains(&old),
+        "retired by reconciliation"
+    );
+}
+
+#[test]
+fn a_reused_path_does_not_inherit_a_removed_workspaces_reservation() {
+    let t = plain();
+    let first = create(&t.project, "reused", SetupOptions::default()).unwrap();
+    let old = first.receipt.instance_id;
+    // The host removes the workspace behind devflow's back and makes another
+    // at the same path.
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(&t.root)
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&[
+        "worktree",
+        "remove",
+        "--force",
+        first.workspace.path.to_str().unwrap(),
+    ]);
+    let second = create(&t.project, "reused", SetupOptions::default()).unwrap();
+    assert_eq!(second.workspace.path, first.workspace.path);
+    assert_ne!(second.receipt.instance_id, old);
+    assert!(
+        !instances_holding_ports().contains(&old),
+        "the directory exists, but its owner is another identity"
+    );
+    assert!(instances_holding_ports().contains(&second.receipt.instance_id));
+}
+
+#[test]
+fn an_unreadable_ledger_is_refused_not_started_again() {
+    if !in_child("an_unreadable_ledger_is_refused_not_started_again", &[]) {
+        return;
+    }
+    let t = plain();
+    let a = create(&t.project, "a", SetupOptions::default()).unwrap();
+    let ledger = devflow_core::paths::data_dir()
+        .unwrap()
+        .join("ports/ledger.json");
+    std::fs::write(&ledger, "{ this is not json").unwrap();
+    // gc's release by identity does not touch a ledger it cannot read either.
+    devflow_core::ports::release_instance(t.project.id(), a.receipt.instance_id);
+    // A workspace that needs a port is not given one from a ledger nobody can
+    // read: A's server is stopped, and a bind check could not tell.
+    let b = create(&t.project, "b", SetupOptions::default()).unwrap();
+    assert_eq!(b.receipt.app_port, None);
+    let warning = b.warnings.join("\n");
+    assert!(
+        warning.contains("ledger.json") && warning.contains("cannot be read"),
+        "{warning}"
+    );
+    assert!(
+        b.remedies.iter().any(|r| matches!(r, devflow_core::remedy::Remedy::OpenFile { path } if path.ends_with("ledger.json"))),
+        "{:?}",
+        b.remedies
+    );
+    assert_eq!(
+        std::fs::read_to_string(&ledger).unwrap(),
+        "{ this is not json",
+        "left as it was"
+    );
+    assert!(!ledger.with_extension("json.unreadable").exists());
+    // A port a workspace already has is kept regardless.
+    let again = setup::activate(
+        &t.project,
+        &a.workspace,
+        SetupOptions::default(),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(again.receipt.app_port, a.receipt.app_port);
+    // Once the file is dealt with, allocation works again.
+    std::fs::remove_file(&ledger).unwrap();
+    let mut receipt = receipt_of(&b.workspace);
+    let ensured = devflow_core::ports::ensure(&t.project, &b.workspace, &mut receipt);
+    assert!(ensured.allocated && ensured.port.is_some(), "{ensured:?}");
+}
+
+#[test]
+fn the_same_instance_id_in_two_projects_is_two_reservations() {
+    let a = plain();
+    let b = plain();
+    let mut project_a = a.project.clone();
+    let mut project_b = b.project.clone();
+    project_a.config.worktree.port_range = Some([47200, 47200]);
+    project_b.config.worktree.port_range = Some([47200, 47200]);
+    let wa = create(&a.project, "wa", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    let wb = create(&b.project, "wb", SetupOptions::default())
+        .unwrap()
+        .workspace;
+    let clear = |project: &Project, w: &Workspace, instance: Option<uuid::Uuid>| {
+        let mut receipt = receipt_of(w);
+        devflow_core::ports::release(project.id(), receipt.instance_id, &w.path);
+        receipt.app_port = None;
+        if let Some(instance) = instance {
+            receipt.instance_id = instance;
+        }
+        receipt.save(&w.git_dir).unwrap();
+        receipt
+    };
+    let mut ra = clear(&a.project, &wa, None);
+    // An orchestrator gave both projects' workspaces the same instance id.
+    let mut rb = clear(&b.project, &wb, Some(ra.instance_id));
+    let got = devflow_core::ports::ensure_with(&project_a, &wa, &mut ra, &|_| true);
+    assert_eq!(got.port, Some(47200));
+    // B is not A: the one port in range is taken, not "its own".
+    let got = devflow_core::ports::ensure_with(&project_b, &wb, &mut rb, &|_| true);
+    assert_eq!(got.port, None, "{got:?}");
+    // And releasing B's identity leaves A's reservation alone.
+    devflow_core::ports::release(b.project.id(), rb.instance_id, &wb.path);
+    assert!(
+        devflow_core::ports::reserved()
+            .iter()
+            .any(|(p, project, i)| *p == 47200
+                && *project == a.project.id()
+                && *i == ra.instance_id)
+    );
+}
+
+#[test]
+fn a_moved_workspace_keeps_its_port_when_another_takes_its_old_path() {
+    let t = plain();
+    let a = create(&t.project, "mover", SetupOptions::default()).unwrap();
+    let (old_path, instance, port) = (
+        a.workspace.path.clone(),
+        a.receipt.instance_id,
+        a.receipt.app_port.unwrap(),
+    );
+    let to = old_path.with_file_name("mover-moved");
+    let out = std::process::Command::new("git")
+        .current_dir(&t.root)
+        .args(["worktree", "move"])
+        .arg(&old_path)
+        .arg(&to)
+        .output()
+        .expect("git");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Another workspace is registered at the old path before A's entry was
+    // ever refreshed.
+    let added = std::process::Command::new("git")
+        .current_dir(&t.root)
+        .args(["worktree", "add", "-b", "newcomer"])
+        .arg(&old_path)
+        .output()
+        .expect("git");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let adopted = ws(&t.project, "newcomer");
+    assert_eq!(
+        adopted.path.canonicalize().unwrap(),
+        old_path.canonicalize().unwrap()
+    );
+    let b = setup::setup(
+        &t.project,
+        &adopted,
+        SetupOptions::default(),
+        false,
+        false,
+        &mut NoProgress,
+    )
+    .unwrap()
+    .expect("adopted");
+    assert_ne!(b.receipt.instance_id, instance);
+    // A's identity is carried at its new place: the reservation stays A's.
+    let holders = |instance| {
+        devflow_core::ports::reserved()
+            .iter()
+            .filter(|(p, _, i)| *i == instance && *p == port)
+            .count()
+    };
+    assert_eq!(holders(instance), 1, "kept, and not duplicated");
+    // B, allocating from a range of exactly A's port, cannot have it.
+    let mut project = t.project.clone();
+    project.config.worktree.port_range = Some([port, port]);
+    let mut receipt = receipt_of(&b.workspace);
+    devflow_core::ports::release(t.project.id(), receipt.instance_id, &b.workspace.path);
+    receipt.app_port = None;
+    receipt.save(&b.workspace.git_dir).unwrap();
+    let got = devflow_core::ports::ensure_with(&project, &b.workspace, &mut receipt, &|_| true);
+    assert_eq!(got.port, None, "{got:?}");
+    // A keeps its port, now recorded at the place it is.
+    let moved = ws(&t.project, "mover");
+    let mut kept = receipt_of(&moved);
+    assert_eq!(kept.instance_id, instance);
+    let got = devflow_core::ports::ensure(&t.project, &moved, &mut kept);
+    assert_eq!(got.port, Some(port));
+    assert!(got.warnings.is_empty(), "{:?}", got.warnings);
+    assert_eq!(holders(instance), 1);
+}
+
+#[test]
+fn a_duplicate_reservation_of_one_identity_is_deduplicated() {
+    let t = plain();
+    let a = create(&t.project, "orig2", SetupOptions::default()).unwrap();
+    let b = create(&t.project, "copy2", SetupOptions::default()).unwrap();
+    let instance = a.receipt.instance_id;
+    let mut copy = receipt_of(&b.workspace);
+    copy.instance_id = instance;
+    copy.app_port = a.receipt.app_port;
+    copy.save(&b.workspace.git_dir).unwrap();
+    devflow_core::ports::ensure(&t.project, &b.workspace, &mut copy);
+    let holders = || {
+        devflow_core::ports::reserved()
+            .iter()
+            .filter(|(_, _, i)| *i == instance)
+            .count()
+    };
+    assert_eq!(holders(), 2);
+    // The copy takes a new identity and never gives its reservation up.
+    copy.instance_id = uuid::Uuid::new_v4();
+    copy.app_port = None;
+    copy.save(&b.workspace.git_dir).unwrap();
+    assert_eq!(holders(), 1, "the original's reservation is the one left");
 }

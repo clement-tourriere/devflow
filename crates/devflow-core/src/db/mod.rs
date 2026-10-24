@@ -497,6 +497,31 @@ impl Server {
         })
     }
 
+    /// [`Server::drop_branch_owned_by`] that also requires the branch to be at
+    /// `generation` (a reset bumps it while keeping the id and the owner),
+    /// judged on the same row under the same lock: a branch whose data was
+    /// replaced since the caller looked at it is left alone.
+    pub fn drop_branch_owned_at(
+        &self,
+        id: uuid::Uuid,
+        instance: uuid::Uuid,
+        generation: i32,
+    ) -> Result<bool> {
+        ops::drop_branch_checked(self, id, |row| {
+            anyhow::ensure!(
+                row.instance_id == Some(instance),
+                "branch {id} was not created by this workspace's instance, so it is left alone"
+            );
+            anyhow::ensure!(
+                row.generation == generation,
+                "branch {id} was reset since it was looked at (generation {} now, {generation} \
+                 then), so it is left alone",
+                row.generation
+            );
+            Ok(())
+        })
+    }
+
     /// Set a new random password for a `ready` branch role and return the URL.
     pub fn rotate_credentials(&self, id: uuid::Uuid) -> Result<BranchCredentials> {
         ops::rotate_credentials(self, id)
@@ -541,6 +566,33 @@ impl Server {
     /// Seal a new version of snapshot `name` from a branch.
     pub fn create_snapshot(&self, name: &str, from_branch: uuid::Uuid) -> Result<SnapshotInfo> {
         ops::create_snapshot(self, name, from_branch)
+    }
+
+    /// [`Server::create_snapshot`] that also requires the branch to be at
+    /// `generation` and the instance's, judged on the same row under the same
+    /// lock: a branch whose data was replaced (a reset bumps the generation
+    /// and keeps the id and the owner) since the caller looked at it is not
+    /// snapshotted.
+    pub fn create_snapshot_owned_at(
+        &self,
+        name: &str,
+        from_branch: uuid::Uuid,
+        instance: uuid::Uuid,
+        generation: i32,
+    ) -> Result<SnapshotInfo> {
+        ops::create_snapshot_checked(self, name, from_branch, |row| {
+            anyhow::ensure!(
+                row.instance_id == Some(instance),
+                "branch {from_branch} was not created by this workspace's instance"
+            );
+            anyhow::ensure!(
+                row.generation == generation,
+                "branch {from_branch} was reset since it was looked at (generation {} now, \
+                 {generation} then)",
+                row.generation
+            );
+            Ok(())
+        })
     }
 
     pub fn list_snapshots(&self) -> Result<Vec<SnapshotInfo>> {

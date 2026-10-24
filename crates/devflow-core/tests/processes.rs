@@ -5214,13 +5214,13 @@ fn a_gone_checkout_whose_daemons_cannot_be_seen_is_state_unknown_and_keeps_its_r
     )
     .unwrap();
     assert!(fake.mutations().is_empty(), "{:?}", fake.mutations());
+    // It says it could not read, and that nothing was stopped: it never asked.
+    let said = out.warnings.join("\n");
     assert!(
-        out.warnings
-            .iter()
-            .any(|w| w.contains("could not read what pitchfork runs")),
-        "{:?}",
-        out.warnings
+        said.contains("could not read what pitchfork runs") && said.contains("nothing was stopped"),
+        "{said}"
     );
+    assert!(!said.contains("asked it to stop"), "{said}");
     assert_eq!(
         out.may_still_run,
         Some(processes::MayStillRun {
@@ -5485,6 +5485,201 @@ fn a_stop_that_ended_half_way_is_a_partial_removal_that_keeps_the_report() {
         "{partial:?}"
     );
     assert!(partial.stop_report.as_ref().unwrap().state_error.is_some());
+}
+
+#[test]
+fn a_state_that_turned_unknown_during_the_removal_is_not_a_stopped_daemon() {
+    // The stop ran, `web` reads as stopped, and `worker` is in a state devflow
+    // does not recognise: neither running nor not running. It is not counted as
+    // stopped; the report says it is not known, apart from what still runs.
+    for odd in ["paused", "unknown"] {
+        let fake = Fake::new();
+        let t = repo(
+            Some(
+                "[daemons.web]\nrun = \"a\"\n[daemons.worker]\nrun = \"b\"\n[daemons.api]\nrun = \"c\"\n",
+            ),
+            "",
+        );
+        let ws = ready(&t, "feature", true);
+        let ns = namespace_of(&t, &ws);
+        fake.json(
+            "list.json",
+            &json!([
+                listed(&ns, "web", "running", Some(1), None),
+                listed(&ns, "worker", "running", Some(2), None),
+                listed(&ns, "api", "running", Some(3), None),
+            ]),
+        );
+        fake.json(
+            "after_stop.json",
+            &json!([
+                listed(&ns, "web", "stopped", None, None),
+                listed(&ns, "worker", odd, None, None),
+                listed(&ns, "api", "running", Some(3), None),
+            ]),
+        );
+        let error = setup::remove(
+            &t.project,
+            "feature",
+            removal_options(&fake, false),
+            &mut NoProgress,
+        )
+        .unwrap_err();
+        let partial = error
+            .downcast_ref::<devflow_core::error::PartialRemoval>()
+            .unwrap_or_else(|| panic!("{odd}: {error:#}"));
+        assert_eq!(
+            partial.done,
+            [format!("stopped the pitchfork daemon {ns}/web")],
+            "{odd}: only a positively stopped daemon is done: {partial:?}"
+        );
+        let remains = partial.remains.join("\n");
+        assert!(
+            remains.contains(&format!("the pitchfork daemon {ns}/api still runs")),
+            "{odd}: {remains}"
+        );
+        assert!(
+            remains.contains(&format!(
+                "whether the pitchfork daemon {ns}/worker still runs is not known"
+            )),
+            "{odd}: {remains}"
+        );
+        assert!(
+            !partial
+                .remains
+                .contains(&format!("the pitchfork daemon {ns}/worker still runs")),
+            "{odd}: not claimed to run: {remains}"
+        );
+        assert!(ws.path.exists());
+
+        // Forced: only what read as stopped is reported stopped, and the rest
+        // is listed as possibly running.
+        let out = setup::remove(
+            &t.project,
+            "feature",
+            removal_options(&fake, true),
+            &mut NoProgress,
+        )
+        .unwrap();
+        assert_eq!(out.stopped_daemons, [format!("{ns}/web")], "{odd}: {out:?}");
+        let may = out.may_still_run.expect("what may still run");
+        assert!(
+            may.ids.contains(&format!("{ns}/worker")) && may.ids.contains(&format!("{ns}/api")),
+            "{odd}: {may:?}"
+        );
+    }
+}
+
+/// pitchfork's entry for `web` as a record that cannot be read as one: it says
+/// `stopped`, and its pid is not a number.
+fn malformed_stopped(ns: &str) -> Value {
+    json!({"id": format!("{ns}/web"), "status": "stopped", "pid": "x"})
+}
+
+#[test]
+fn a_malformed_record_is_never_a_stopped_daemon() {
+    // The record is malformed (the parser says so and the report carries a
+    // `state_error`), yet its status string says `stopped`: the conversion to
+    // the report used to drop the flag, and the daemon landed among the stopped
+    // ones, in the report and in the forced removal's result.
+    let two = |ns: &str| {
+        json!([
+            listed(ns, "web", "running", Some(1), None),
+            listed(ns, "worker", "running", Some(2), None),
+        ])
+    };
+    let t = repo(
+        Some("[daemons.web]\nrun = \"a\"\n[daemons.worker]\nrun = \"b\"\n"),
+        "",
+    );
+    let ws = ready(&t, "feature", true);
+    let ns = namespace_of(&t, &ws);
+    let after = json!([
+        malformed_stopped(&ns),
+        listed(&ns, "worker", "stopped", None, None)
+    ]);
+    let parsed = pitchfork::parse_list(&serde_json::to_string(&after).unwrap()).unwrap();
+    let web = parsed.iter().find(|d| d.name == "web").unwrap();
+    assert!(
+        web.malformed.is_some() && web.status == "stopped",
+        "the premise: malformed, and it says stopped: {web:?}"
+    );
+
+    // The stop's own report.
+    let fake = Fake::new();
+    fake.json("list.json", &two(&ns));
+    fake.json("after_stop.json", &after);
+    let report = processes::stop_with(
+        Some(&fake.pitchfork()),
+        &t.project,
+        &ws,
+        &StopOptions::default(),
+    )
+    .unwrap();
+    assert!(!report.ok(), "{report:?}");
+    assert!(report.state_error.is_some(), "{report:?}");
+    let web = report.daemons.iter().find(|d| d.name == "web").unwrap();
+    assert!(
+        web.unreadable.is_some() && !web.is_stopped() && web.state == "stopped",
+        "what it says is kept, but it is not stopped: {web:?}"
+    );
+    let worker = report.daemons.iter().find(|d| d.name == "worker").unwrap();
+    assert!(
+        worker.unreadable.is_none() && worker.is_stopped(),
+        "{worker:?}"
+    );
+
+    // A removal that stops them: `worker` is done, `web` is not known.
+    let fake = Fake::new();
+    fake.json("list.json", &two(&ns));
+    fake.json("after_stop.json", &after);
+    let error = setup::remove(
+        &t.project,
+        "feature",
+        removal_options(&fake, false),
+        &mut NoProgress,
+    )
+    .unwrap_err();
+    let partial = error
+        .downcast_ref::<devflow_core::error::PartialRemoval>()
+        .unwrap_or_else(|| panic!("{error:#}"));
+    assert_eq!(
+        partial.done,
+        [format!("stopped the pitchfork daemon {ns}/worker")],
+        "{partial:?}"
+    );
+    assert!(
+        partial.remains.contains(&format!(
+            "whether the pitchfork daemon {ns}/web still runs is not known"
+        )),
+        "{partial:?}"
+    );
+    assert!(
+        !partial
+            .remains
+            .contains(&format!("the pitchfork daemon {ns}/web still runs")),
+        "not claimed to run either: {partial:?}"
+    );
+    let kept = partial.stop_report.as_ref().expect("the stop report");
+    assert!(
+        kept.daemons
+            .iter()
+            .any(|d| d.name == "web" && d.unreadable.is_some() && !d.is_stopped()),
+        "{kept:?}"
+    );
+
+    // Forced: only `worker` is reported stopped; `web` may still run.
+    let out = setup::remove(
+        &t.project,
+        "feature",
+        removal_options(&fake, true),
+        &mut NoProgress,
+    )
+    .unwrap();
+    assert_eq!(out.stopped_daemons, [format!("{ns}/worker")], "{out:?}");
+    let may = out.may_still_run.expect("what may still run");
+    assert!(may.ids.contains(&format!("{ns}/web")), "{may:?}");
+    assert!(!ws.path.exists());
 }
 
 #[test]

@@ -398,14 +398,26 @@ pub fn render(state: &Entity<AppState>, cx: &mut App) -> impl IntoElement {
         });
     }
     let settings_active = app.page == Page::Settings;
+    let cleanup_active = app.page == Page::Cleanup;
+    let has_project = app.selection.current().is_some();
 
     let add = state.clone();
     let settings = state.clone();
+    let cleanup = state.clone();
     let app_items = vec![
         Node::Item(Box::new(
             SidebarMenuItem::new("Add project…")
                 .icon(Icon::new(IconName::Plus))
                 .on_click(move |_, window, cx| add.update(cx, |s, cx| s.add_project(window, cx))),
+        )),
+        Node::Item(Box::new(
+            SidebarMenuItem::new("Clean up")
+                .icon(Icon::new(Lucide::Trash))
+                .active(cleanup_active)
+                .disable(!has_project)
+                .on_click(move |_, window, cx| {
+                    cleanup.update(cx, |s, cx| s.open_cleanup_of_selection(window, cx))
+                }),
         )),
         Node::Item(Box::new(
             SidebarMenuItem::new("Settings")

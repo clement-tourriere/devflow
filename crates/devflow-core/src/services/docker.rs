@@ -723,6 +723,53 @@ pub fn inspect_container_within(
     Ok(parsed.get(0).map(parse_container))
 }
 
+/// The memory every running container uses right now, by container id (the
+/// first 12 characters Docker shows) in bytes: one `docker stats --no-stream`
+/// for all of them, bounded like a query. A container that is not running is
+/// not listed.
+pub fn memory_in_use() -> Result<BTreeMap<String, u64>> {
+    let out = query(
+        &["stats", "--no-stream", "--format", "{{.ID}}\t{{.MemUsage}}"],
+        query_bound(),
+        crate::subprocess::DEFAULT_MAX_OUTPUT,
+    )?;
+    if !out.ok {
+        bail!(
+            "`docker stats` failed: {}",
+            crate::redact::text(out.stderr.trim())
+        );
+    }
+    Ok(out
+        .stdout
+        .lines()
+        .filter_map(|line| {
+            let (id, usage) = line.split_once('\t')?;
+            Some((id.trim().to_string(), parse_size(usage.split('/').next()?)?))
+        })
+        .collect())
+}
+
+/// `12.5MiB`, `1.2GiB`, `340kB`, `0B` as bytes.
+fn parse_size(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let split = text.find(|c: char| c.is_ascii_alphabetic())?;
+    let (number, unit) = text.split_at(split);
+    let number: f64 = number.trim().parse().ok()?;
+    let scale: f64 = match unit.trim() {
+        "B" => 1.0,
+        "kB" | "KB" => 1e3,
+        "MB" => 1e6,
+        "GB" => 1e9,
+        "TB" => 1e12,
+        "KiB" => 1024.0,
+        "MiB" => 1024.0 * 1024.0,
+        "GiB" => 1024.0 * 1024.0 * 1024.0,
+        "TiB" => 1024.0_f64.powi(4),
+        _ => return None,
+    };
+    Some((number * scale) as u64)
+}
+
 fn parse_container(value: &Value) -> ContainerInfo {
     let labels = value["Config"]["Labels"]
         .as_object()
@@ -1202,6 +1249,16 @@ pub fn list_project_volumes(project: &str) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn docker_stats_sizes_are_read_as_bytes() {
+        assert_eq!(parse_size("0B"), Some(0));
+        assert_eq!(parse_size("12.5MiB "), Some(13_107_200));
+        assert_eq!(parse_size("1GiB"), Some(1 << 30));
+        assert_eq!(parse_size("340kB"), Some(340_000));
+        assert_eq!(parse_size("--"), None);
+        assert_eq!(parse_size("3 parsecs"), None);
+    }
 
     #[test]
     fn a_deadline_bounds_every_call_made_inside_it_and_only_inside_it() {

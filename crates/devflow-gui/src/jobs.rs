@@ -623,6 +623,9 @@ pub enum LoadError {
 pub struct Refreshed {
     pub project: Arc<Project>,
     pub workspaces: Section<Vec<WorkspaceStatus>>,
+    /// The workspaces gone from Git that still own something, from files
+    /// alone; `None` when the records could not be read.
+    pub cleanup: Option<devflow_core::gc::Summary>,
     pub database: DatabaseModel,
     pub services: ServicesModel,
     pub trust: Section<TrustState>,
@@ -653,6 +656,7 @@ pub fn refresh(request: RefreshRequest) -> Result<Refreshed, LoadError> {
         return Err(LoadError::Problem(problem));
     }
     let workspaces = catch(|| setup::list(&project));
+    let cleanup = catch(|| devflow_core::gc::summary(&project)).ok();
     let database = load_database(&project);
     let services = request.services.backend.load(
         &project,
@@ -685,6 +689,7 @@ pub fn refresh(request: RefreshRequest) -> Result<Refreshed, LoadError> {
     Ok(Refreshed {
         project: Arc::new(project),
         workspaces,
+        cleanup,
         database,
         services,
         trust,

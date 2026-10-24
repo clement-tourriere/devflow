@@ -11,6 +11,7 @@ use devflow_core::processes::{
     self, Autostart, DEFAULT_START_TIMEOUT, DEFAULT_STOP_TIMEOUT, DaemonState, Namespace,
     ProcessReport, ProcessStatus, StartOptions, StopOptions,
 };
+use devflow_core::services::workspace as container_services;
 use devflow_core::worktree::{self, Workspace};
 use devflow_core::{Project, redact};
 use serde::Serialize;
@@ -21,7 +22,11 @@ use std::time::Duration;
 #[derive(Args)]
 pub struct UpArgs {
     /// Workspace name, branch or path (default: the one you are in)
+    #[arg(add = super::complete::workspace())]
     pub name: Option<String>,
+    /// Also start the workspace's own containers (Valkey, Redis, MySQL), first
+    #[arg(long)]
+    pub services: bool,
     /// Start only this daemon (and what it depends on); repeatable
     #[arg(long = "daemon", value_name = "NAME")]
     pub daemon: Vec<String>,
@@ -33,7 +38,15 @@ pub struct UpArgs {
 #[derive(Args)]
 pub struct DownArgs {
     /// Workspace name, branch or path (default: the one you are in)
+    #[arg(add = super::complete::workspace(), conflicts_with = "all")]
     pub name: Option<String>,
+    /// Also stop the workspace's own containers (Valkey, Redis, MySQL); their
+    /// data is kept and the project's PostgreSQL server is never stopped
+    #[arg(long)]
+    pub services: bool,
+    /// Every workspace of the project
+    #[arg(long)]
+    pub all: bool,
     /// Stop even though the pitchfork configuration changed since it was approved
     #[arg(long)]
     pub force: bool,
@@ -45,6 +58,7 @@ pub struct DownArgs {
 #[derive(Args)]
 pub struct PsArgs {
     /// Workspace name, branch or path (default: the one you are in)
+    #[arg(add = super::complete::workspace())]
     pub name: Option<String>,
     /// Every workspace of the project
     #[arg(long, conflicts_with = "name")]
@@ -99,6 +113,15 @@ pub fn up(ctx: &Ctx, args: UpArgs) -> Result<ExitCode> {
     let project = ctx.project()?;
     let workspace = target(ctx, &project, args.name.as_deref())?;
     ctx.target_is(&workspace.path);
+    // The containers first: the daemons may connect to them.
+    let services = args
+        .services
+        .then(|| container_services::start_services(&project, &workspace));
+    // Without `--services` a workspace with nothing to start says so (a
+    // refusal); with it, only the containers may be what was asked for.
+    if services.is_some() && !processes::has_daemons(&project, &workspace) {
+        return render_both(ctx, "up", &project, vec![(workspace, None, services)]);
+    }
     // An unapproved pitchfork configuration is shown and asked about at the
     // terminal, like hooks are; the approval is of exactly what was shown.
     let approval = trust::resolve(ctx, &project, &workspace.path, true)?;
@@ -109,23 +132,192 @@ pub fn up(ctx: &Ctx, args: UpArgs) -> Result<ExitCode> {
         ..StartOptions::default()
     };
     let report =
-        processes::start_with(Pitchfork::locate().as_ref(), &project, &workspace, &options)?;
-    render_report(ctx, "up", &project, &report)
+        processes::start_with(Pitchfork::locate().as_ref(), &project, &workspace, &options);
+    match services {
+        None => render_report(ctx, "up", &project, &report?),
+        Some(_) => render_both(
+            ctx,
+            "up",
+            &project,
+            vec![(workspace, Some(report), services)],
+        ),
+    }
 }
 
 pub fn down(ctx: &Ctx, args: DownArgs) -> Result<ExitCode> {
     let project = ctx.project()?;
-    let workspace = target(ctx, &project, args.name.as_deref())?;
-    ctx.target_is(&workspace.path);
+    let workspaces: Vec<Workspace> = if args.all {
+        worktree::list(&project)?
+            .into_iter()
+            .filter(|w| !w.missing)
+            .collect()
+    } else {
+        let workspace = target(ctx, &project, args.name.as_deref())?;
+        ctx.target_is(&workspace.path);
+        vec![workspace]
+    };
+    let pitchfork = Pitchfork::locate();
     let options = StopOptions {
         timeout: Duration::from_secs(args.timeout.max(1)),
         force: args.force,
         approval: None,
         expect_instance: None,
     };
-    let report =
-        processes::stop_with(Pitchfork::locate().as_ref(), &project, &workspace, &options)?;
-    render_report(ctx, "down", &project, &report)
+    // One workspace, daemons only: the report and the errors are the same as
+    // they have always been.
+    if !args.all && !args.services {
+        let report = processes::stop_with(pitchfork.as_ref(), &project, &workspaces[0], &options)?;
+        return render_report(ctx, "down", &project, &report);
+    }
+    let mut results = Vec::new();
+    for workspace in workspaces {
+        // Which daemons run is pitchfork's to say under the namespace devflow
+        // assigned, not the current configuration's: a daemon whose definition
+        // was removed since it started still runs. So pitchfork is asked
+        // whenever anything says this workspace has or had daemons (a
+        // declaration, a pitchfork file, devflow's own record of a start), and
+        // a failure to ask is reported, never skipped. A workspace with none of
+        // those never had any: there is nothing to stop.
+        let daemons = processes::may_have_daemons(&project, &workspace)
+            .then(|| processes::stop_with(pitchfork.as_ref(), &project, &workspace, &options));
+        // Daemons first: they may be using the containers.
+        let services = args
+            .services
+            .then(|| container_services::stop_services(&project, &workspace));
+        results.push((workspace, daemons, services));
+    }
+    render_both(ctx, "down", &project, results)
+}
+
+/// One workspace's daemons and containers after an `up` or a `down` that
+/// touched both (or several workspaces).
+type Outcome = (
+    Workspace,
+    Option<Result<ProcessReport>>,
+    Option<container_services::Changes>,
+);
+
+fn render_both(
+    ctx: &Ctx,
+    command: &str,
+    project: &Project,
+    results: Vec<Outcome>,
+) -> Result<ExitCode> {
+    let ok = results.iter().all(|(_, daemons, services)| {
+        daemons
+            .as_ref()
+            .is_none_or(|daemons| daemons.as_ref().is_ok_and(ProcessReport::ok))
+            && services
+                .as_ref()
+                .is_none_or(container_services::Changes::ok)
+    });
+    if ctx.json {
+        #[derive(Serialize)]
+        struct One<'a> {
+            workspace: &'a str,
+            path: &'a std::path::Path,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            daemons: Option<&'a ProcessReport>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            daemons_error: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            services: Option<&'a container_services::Changes>,
+        }
+        let workspaces: Vec<One> = results
+            .iter()
+            .map(|(workspace, daemons, services)| One {
+                workspace: &workspace.name,
+                path: &workspace.path,
+                daemons: daemons.as_ref().and_then(|d| d.as_ref().ok()),
+                daemons_error: daemons
+                    .as_ref()
+                    .and_then(|d| d.as_ref().err())
+                    .map(|error| redact::text(&format!("{error:#}"))),
+                services: services.as_ref(),
+            })
+            .collect();
+        let body = json!({
+            "project": ProjectInfo::of(project),
+            "ok": ok,
+            "workspaces": workspaces,
+        });
+        output::emit(ctx, command, &body)?;
+    } else {
+        let palette = Palette::stdout();
+        let several = results.len() > 1;
+        for (workspace, daemons, services) in &results {
+            match daemons {
+                Some(Ok(report)) => {
+                    for line in report_lines(report, palette) {
+                        say(line);
+                    }
+                }
+                Some(Err(error)) => say(format!(
+                    "{} {}: daemons: {}",
+                    palette.yellow("!"),
+                    workspace.name,
+                    redact::text(&format!("{error:#}"))
+                )),
+                None => {}
+            }
+            if let Some(changes) = services {
+                for line in service_lines(changes, palette, several || daemons.is_none()) {
+                    say(line);
+                }
+            }
+        }
+    }
+    Ok(if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+fn service_lines(
+    changes: &container_services::Changes,
+    palette: Palette,
+    named: bool,
+) -> Vec<String> {
+    use container_services::Change;
+    if let Some(error) = &changes.error {
+        return vec![format!(
+            "{} {}: container services: {}",
+            palette.yellow("!"),
+            changes.workspace,
+            redact::text(error)
+        )];
+    }
+    if changes.services.is_empty() {
+        return if named {
+            vec![format!("{}: no container services", changes.workspace)]
+        } else {
+            Vec::new()
+        };
+    }
+    changes
+        .services
+        .iter()
+        .map(|service| {
+            let (symbol, what) = match service.change {
+                Change::Stopped => (palette.green("✓"), "stopped; its data is kept".to_string()),
+                Change::AlreadyStopped => (palette.green("✓"), "was not running".to_string()),
+                Change::Started => (palette.green("✓"), "started".to_string()),
+                Change::AlreadyRunning => (palette.green("✓"), "was already running".to_string()),
+                Change::Failed => (
+                    palette.yellow("!"),
+                    format!(
+                        "failed: {}",
+                        redact::text(service.reason.as_deref().unwrap_or("unknown reason"))
+                    ),
+                ),
+            };
+            format!(
+                "{symbol} {}: {} ({}) {what}",
+                changes.workspace, service.key, service.engine
+            )
+        })
+        .collect()
 }
 
 fn render_report(
@@ -232,18 +424,33 @@ pub fn ps(ctx: &Ctx, args: PsArgs) -> Result<ExitCode> {
 
 fn ps_lines(statuses: &[ProcessStatus], all: bool, palette: Palette) -> Vec<String> {
     let mut lines = Vec::new();
+    let app_port = |status: &ProcessStatus| {
+        status
+            .app_port
+            .map_or_else(|| "—".to_string(), |port| port.to_string())
+    };
     if all {
         let mut rows = Vec::new();
         for status in statuses {
             for daemon in &status.daemons {
-                rows.push(daemon_row(Some(&status.workspace), daemon));
+                let mut row = daemon_row(Some(&status.workspace), daemon);
+                row.insert(1, app_port(status));
+                rows.push(row);
             }
         }
         if rows.is_empty() {
             lines.push("No daemons in any workspace.".to_string());
+            let ports: Vec<Vec<String>> = statuses
+                .iter()
+                .filter(|status| status.app_port.is_some())
+                .map(|status| vec![status.workspace.clone(), app_port(status)])
+                .collect();
+            if !ports.is_empty() {
+                lines.push(table(&["WORKSPACE", "APP PORT"], &ports));
+            }
         } else {
             lines.push(table(
-                &["WORKSPACE", "DAEMON", "STATE", "PORT", "URL"],
+                &["WORKSPACE", "APP PORT", "DAEMON", "STATE", "PORT", "URL"],
                 &rows,
             ));
         }
@@ -252,6 +459,12 @@ fn ps_lines(statuses: &[ProcessStatus], all: bool, palette: Palette) -> Vec<Stri
             lines.push(format!("{}: no daemons.", status.workspace));
         } else {
             lines.push(daemon_table(&status.daemons, None));
+        }
+        if let Some(port) = status.app_port {
+            lines.push(format!(
+                "{}: app port {port} (DEVFLOW_PORT)",
+                status.workspace
+            ));
         }
     }
     for status in statuses {
@@ -626,6 +839,7 @@ mod tests {
             triggers: Vec::new(),
             configured: true,
             startable: true,
+            unreadable: None,
         }
     }
 

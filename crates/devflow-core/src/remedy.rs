@@ -116,6 +116,11 @@ pub enum Remedy {
     /// [`crate::worktree::prune`]). A registration that still owns data, or
     /// whose folder is missing too (an unplugged drive), is never forgotten.
     PruneWorktrees { root: PathBuf },
+    /// Review the workspaces whose worktree is gone (removed by Git or by an
+    /// agent host, or a directory deleted) and that still own data branches,
+    /// containers or daemons, and remove the ones the person picks
+    /// ([`crate::gc::inventory`], [`crate::gc::remove`]).
+    CleanUp { root: PathBuf },
     /// Remove the workspace `name` of the project at `root`.
     RemoveWorkspace { root: PathBuf, name: String },
     /// Switch to the workspace `name` of the project at `root`.
@@ -154,6 +159,21 @@ pub enum Remedy {
         name: String,
         candidates: Vec<PathBuf>,
     },
+    /// Write devflow's setup into the file an agent host reads
+    /// ([`crate::integrate`]); `host` is the name `devflow integrate` takes
+    /// (`t3`, `claude`, `conductor`, `cursor`). Additive: what the file holds
+    /// is kept, and a script of somebody else's is never replaced.
+    IntegrateHost { root: PathBuf, host: String },
+    /// Name a workspace of the project at `root` (a command that needs one was
+    /// given none and cannot ask: no terminal).
+    ChooseWorkspace { root: PathBuf },
+    /// Turn on the shell integration, the wrapper `devflow switch` needs to
+    /// change the directory of the shell it runs in (and to go back with
+    /// `switch -`). `shell` is the shell it is for, when known.
+    ShellIntegration {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell: Option<String>,
+    },
 }
 
 impl Remedy {
@@ -184,6 +204,7 @@ impl Remedy {
             Remedy::CopyHookLine { .. } => "copy_hook_line",
             Remedy::InstallPitchfork => "install_pitchfork",
             Remedy::PruneWorktrees { .. } => "prune_worktrees",
+            Remedy::CleanUp { .. } => "clean_up",
             Remedy::RemoveWorkspace { .. } => "remove_workspace",
             Remedy::SwitchTo { .. } => "switch_to",
             Remedy::AddEnvPreset { .. } => "add_env_preset",
@@ -192,6 +213,9 @@ impl Remedy {
             Remedy::CreateSeedSnapshot { .. } => "create_seed_snapshot",
             Remedy::ChooseDataSource { .. } => "choose_data_source",
             Remedy::UsePath { .. } => "use_path",
+            Remedy::IntegrateHost { .. } => "integrate_host",
+            Remedy::ChooseWorkspace { .. } => "choose_workspace",
+            Remedy::ShellIntegration { .. } => "shell_integration",
         }
     }
 
@@ -241,6 +265,7 @@ impl Remedy {
             Remedy::CopyHookLine { .. } => "Copy the line",
             Remedy::InstallPitchfork => "Install pitchfork…",
             Remedy::PruneWorktrees { .. } => "Review missing worktrees…",
+            Remedy::CleanUp { .. } => "Clean up workspaces…",
             Remedy::RemoveWorkspace { name, .. } => {
                 return format!("Remove {name}…");
             }
@@ -257,6 +282,13 @@ impl Remedy {
             }
             Remedy::ChooseDataSource { .. } => "Choose where the data comes from…",
             Remedy::UsePath { .. } => "Choose a workspace by its folder",
+            Remedy::IntegrateHost { host, .. } => {
+                let label =
+                    crate::integrate::Host::parse(host).map_or(host.as_str(), |h| h.label());
+                return format!("Set up {label}");
+            }
+            Remedy::ChooseWorkspace { .. } => "Choose a workspace…",
+            Remedy::ShellIntegration { .. } => "Turn on the shell integration",
         }
         .to_string()
     }
@@ -322,8 +354,10 @@ impl Remedy {
                 Some("devflow db reconcile --drop-orphans".to_string())
             }
             Remedy::InstallGitHook { .. } => Some("devflow hook install".to_string()),
+            Remedy::IntegrateHost { host, .. } => Some(format!("devflow integrate {}", word(host))),
             Remedy::InstallPitchfork => Some("devflow pitchfork install".to_string()),
             Remedy::PruneWorktrees { .. } => Some("devflow prune".to_string()),
+            Remedy::CleanUp { .. } => Some("devflow gc".to_string()),
             Remedy::RemoveWorkspace { name, .. } => Some(format!("devflow remove {}", word(name))),
             Remedy::SwitchTo { name, .. } => Some(format!("devflow switch {}", word(name))),
             Remedy::AddEnvPreset { preset, .. } => {
@@ -349,6 +383,14 @@ impl Remedy {
                 )
             }),
             Remedy::ChooseDataSource { .. } => None,
+            Remedy::ChooseWorkspace { .. } => Some("devflow list".to_string()),
+            Remedy::ShellIntegration { shell } => Some(format!(
+                "eval \"$(devflow shell-init{})\"",
+                shell
+                    .as_deref()
+                    .map(|shell| format!(" {shell}"))
+                    .unwrap_or_default()
+            )),
             // Which command is the caller's: it puts the path where it put the name.
             Remedy::UsePath { .. }
             | Remedy::Retry
@@ -406,6 +448,12 @@ impl Remedy {
                 "run `{}` to see the worktrees whose directory is gone and forget the ones that own nothing",
                 self.command()?
             )),
+            Remedy::CleanUp { .. } => Some(format!(
+                "run `{}` to see the workspaces whose worktree is gone and what they still own \
+                 (`{} --remove ID` removes the ones you pick; nothing is removed unless you ask)",
+                self.command()?,
+                self.command()?
+            )),
             Remedy::ClearInherited => Some(
                 "open a new shell, or unset DEVFLOW_WORKSPACE_PATH and DEVFLOW_WORKSPACE_ID \
                  and the other variables of that workspace; to go on anyway set \
@@ -427,6 +475,14 @@ impl Remedy {
                 "pass `--data-from` with a workspace, `snapshot:NAME`, `branch:ID` or `empty`"
                     .to_string(),
             ),
+            Remedy::ChooseWorkspace { .. } => Some(format!(
+                "name a workspace: `{}` lists them",
+                self.command()?
+            )),
+            Remedy::ShellIntegration { .. } => Some(format!(
+                "add `{}` to your shell profile (then open a new shell) so `devflow switch` can change directory",
+                self.command()?
+            )),
             Remedy::UsePath { name, candidates } => Some(format!(
                 "give the path of the one you mean instead of '{name}': {}",
                 candidates
@@ -441,6 +497,7 @@ impl Remedy {
             | Remedy::ReconcileService { .. }
             | Remedy::ReconcileDatabases { .. }
             | Remedy::InstallGitHook { .. }
+            | Remedy::IntegrateHost { .. }
             | Remedy::InstallPitchfork
             | Remedy::SwitchTo { .. }
             | Remedy::AddEnvPreset { .. } => Some(format!("run `{}`", self.command()?)),
@@ -735,6 +792,7 @@ mod tests {
             },
             Remedy::InstallPitchfork,
             Remedy::PruneWorktrees { root: "/p".into() },
+            Remedy::CleanUp { root: "/p".into() },
             Remedy::RemoveWorkspace {
                 root: "/p".into(),
                 name: "a".into(),

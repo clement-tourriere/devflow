@@ -38,6 +38,9 @@ pub type Section<T> = Result<T, String>;
 pub enum Page {
     Project,
     Settings,
+    /// Workspaces Git or an agent host removed, and what they still own
+    /// (`devflow_core::gc`), for the open project.
+    Cleanup,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -332,6 +335,7 @@ impl WorkspaceRef {
             path: self.path.clone(),
             instance_id: self.instance_id,
             fingerprint: self.fingerprint.clone(),
+            missing: false,
         }
     }
 }
@@ -382,6 +386,9 @@ pub struct ProjectModel {
     pub project: Option<Arc<Project>>,
     pub workspaces: Vec<WorkspaceStatus>,
     pub workspaces_error: Option<String>,
+    /// Workspaces gone from Git that still own resources, from the ledger's
+    /// records alone (the Workspaces tab's banner); `None` until read.
+    pub cleanup: Option<devflow_core::gc::Summary>,
     pub database: DatabaseModel,
     /// The container services (Valkey, Redis, MySQL): counts always, detail on
     /// the Data tab.
@@ -419,6 +426,7 @@ impl ProjectModel {
             project: None,
             workspaces: Vec::new(),
             workspaces_error: None,
+            cleanup: None,
             database: DatabaseModel::default(),
             services: ServicesModel::default(),
             trust: None,

@@ -387,17 +387,33 @@ impl Drift {
 
 /// [`Config::env_generation`] with no service in it: the `[env]` recipes and
 /// presets, and the names the configuration declares
-/// ([`crate::env_owner::declared_names`]). A workspace without services still
-/// owns the variables its services would export (a `--no-db` workspace owns
-/// `DATABASE_URL`), so adding PostgreSQL, or changing the variable a service
-/// exports, changes what `.devflow/env` must list even though no service
-/// applies to the workspace.
+/// ([`crate::env_owner::declared_names`]) **that depend on the configuration**.
+/// A workspace without services still owns the variables its services would
+/// export (a `--no-db` workspace owns `DATABASE_URL`), so adding PostgreSQL, or
+/// changing the variable a service exports, changes what `.devflow/env` must
+/// list even though no service applies to the workspace.
+///
+/// The names devflow generates for every workspace whatever the configuration
+/// ([`crate::env_owner::IDENTITY`]) are left out: a release that adds one
+/// (`DEVFLOW_PORT` was the first) changes what the file lists but not what the
+/// configuration says, so it must not make a workspace look drifted and run its
+/// hooks again. Its file is written again by the repair that runs no hook.
 fn env_generation_without_services(config: &Config) -> String {
-    digest(&(
-        "env.v3.no-services",
-        config.env.canonical(),
-        crate::env_owner::declared_names(config),
-    ))
+    let mut names = crate::env_owner::declared_names(config);
+    for always in crate::env_owner::IDENTITY {
+        names.remove(always);
+    }
+    digest(&("env.v4.no-services", config.env.canonical(), names))
+}
+
+/// The generation the release before `DEVFLOW_PORT` stamped on a `--no-db`
+/// workspace: it hashed every declared name, identity included. It still reads
+/// as current ([`Receipt::drift`]). Public for the tests that need a receipt as
+/// that release wrote it.
+pub fn previous_env_generation_without_services(config: &Config) -> String {
+    let mut names = crate::env_owner::declared_names(config);
+    names.remove("DEVFLOW_PORT");
+    digest(&("env.v3.no-services", config.env.canonical(), names))
 }
 
 /// The generation a `--no-db` workspace recorded before it covered the
@@ -546,6 +562,19 @@ pub struct Receipt {
     /// not been activated since this was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_active_at: Option<DateTime<Utc>>,
+    /// The workspace's own port, exported as `DEVFLOW_PORT`: chosen once (see
+    /// [`crate::ports`]) and kept, never moved because something else listens
+    /// on it later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_port: Option<u16>,
+    /// Where `app_port` came from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_port_source: Option<crate::ports::PortSource>,
+    /// The port an allocation is in the middle of reserving, recorded before
+    /// the machine-wide reservation is written so a run that stopped there
+    /// resumes at the same candidate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_app_port: Option<u16>,
 }
 
 impl Receipt {
@@ -579,6 +608,9 @@ impl Receipt {
             created_at: now,
             updated_at: now,
             last_active_at: None,
+            app_port: None,
+            app_port_source: None,
+            pending_app_port: None,
         }
     }
 
@@ -718,6 +750,7 @@ impl Receipt {
                 written != config.env_generation()
                     && !(skipped
                         && (written == env_generation_without_services(config)
+                            || written == previous_env_generation_without_services(config)
                             || written == legacy_env_generation_without_services(config)))
             }),
             ..Drift::default()
@@ -1076,12 +1109,23 @@ impl Receipt {
 
     /// Write the receipt (0600). Only a current-version receipt is written: a
     /// version 1 file read without a configuration must be migrated first.
+    ///
+    /// The workspace's record in the repository's common Git directory
+    /// ([`crate::ledger`]) is written first, so the ownership the receipt names
+    /// is never recorded only here: the receipt goes with the worktree, the
+    /// record does not. Callers hold the receipt lock.
     pub fn save(&self, git_dir: &Path) -> Result<()> {
         ensure!(
             self.version == VERSION,
             "refusing to write a version {} receipt; migrate it first",
             self.version
         );
+        // Nothing is written into a Git directory Git no longer has: a host
+        // that removed the worktree while it was being set up took the
+        // directory away, and writing the receipt would bring back a stray
+        // one, with the workspace's provisioning carrying on unrecorded.
+        ensure_git_dir(git_dir)?;
+        crate::ledger::sync(git_dir, self)?;
         let text = serde_json::to_vec_pretty(self)?;
         crate::fsutil::write_atomic(&Self::path(git_dir), &text, true)
     }
@@ -1089,6 +1133,7 @@ impl Receipt {
     /// Exclusive lock for a setup run on this worktree. Returns `None` when
     /// another process holds it.
     pub fn try_lock(git_dir: &Path) -> Result<Option<ReceiptLock>> {
+        ensure_git_dir(git_dir)?;
         let dir = git_dir.join("devflow");
         std::fs::create_dir_all(&dir)?;
         let file = std::fs::OpenOptions::new()
@@ -1110,6 +1155,7 @@ impl Receipt {
     /// the workspace's daemons holds it. See the module documentation for the
     /// lock order.
     pub fn try_process_lock(git_dir: &Path) -> Result<Option<ProcessLock>> {
+        ensure_git_dir(git_dir)?;
         let dir = git_dir.join("devflow");
         std::fs::create_dir_all(&dir)?;
         let file = std::fs::OpenOptions::new()
@@ -1201,6 +1247,19 @@ impl Receipt {
     pub fn logs_dir(git_dir: &Path) -> PathBuf {
         git_dir.join("devflow").join("logs")
     }
+}
+
+/// `git_dir` is a directory that is there: the receipt, its locks and its logs
+/// live inside it, and creating the path would resurrect a worktree's
+/// administrative directory that Git removed.
+fn ensure_git_dir(git_dir: &Path) -> Result<()> {
+    ensure!(
+        git_dir.is_dir(),
+        "the Git directory of this worktree is gone ({}): Git removed the worktree, and \
+         nothing is written into a directory it no longer has",
+        git_dir.display()
+    );
+    Ok(())
 }
 
 /// Held for the duration of a setup run; released on drop.
@@ -1980,6 +2039,23 @@ mod tests {
         assert!(!no_db.env_generation_is_legacy(&serviced));
         no_db.env_generation = Some(serviced.env_generation());
         assert!(!no_db.env_generation_is_legacy(&serviced));
+        // What the release before `DEVFLOW_PORT` stamped (every declared name,
+        // identity included) is current too: a name devflow itself adds is no
+        // change to the configuration, and runs no hook again.
+        no_db.env_generation = Some(previous_env_generation_without_services(&serviced));
+        assert_ne!(
+            no_db.env_generation.as_deref(),
+            Some(env_generation_without_services(&serviced).as_str())
+        );
+        assert_eq!(no_db.drift(&serviced), Drift::default());
+        assert!(!no_db.reopen(&serviced));
+        assert!(!no_db.env_generation_is_legacy(&serviced));
+        // ... while that release's stamp of an older configuration still drifts.
+        no_db.env_generation = Some(previous_env_generation_without_services(&plain));
+        assert!(no_db.drift(&serviced).env);
+        // The current generation names nothing devflow generates itself.
+        no_db.stamp_env_generation(&serviced);
+        assert_eq!(no_db.drift(&serviced), Drift::default());
         // A legacy stamp of an older `[env]` is an ordinary drift, not legacy.
         no_db.env_generation = Some(legacy_env_generation_without_services(&plain));
         assert!(no_db.drift(&serviced).env);

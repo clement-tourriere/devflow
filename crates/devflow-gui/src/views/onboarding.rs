@@ -16,7 +16,7 @@
 //! ones `devflow init` and `devflow trust` make. Applying never installs a
 //! tool, approves a hook or runs a command; approval is its own, explicit step.
 use super::{
-    pitchfork_panel,
+    pitchfork_panel, remedies,
     ui::{self, Tone},
     widgets::{banner, caption, card, chip, mono, section_header},
 };
@@ -28,12 +28,15 @@ use crate::{
 use devflow_core::{
     detect::{self, Facts},
     error::StalePlan,
+    githook::{self, InstallState, RelativeHooksPath},
+    integrate::{self, Detected},
     project::Project,
     propose::{
         self, ApplyReport, Confidence, DiffKind, ExistingFiles, FileChange, FilePreview,
         FileStatus, Item, ItemKind, PlanOptions, PostgresChoice, Proposal,
     },
     redact, registry,
+    remedy::Remedy,
     trust::{self, Scope, TrustState},
 };
 use gpui_kit::{
@@ -547,8 +550,30 @@ pub struct OnboardingView {
     /// again after an install. `None` until it was read.
     offer: Option<PitchforkOffer>,
     offer_epoch: u64,
+    /// The agent hosts and the Git hook, read when the Done step opens and
+    /// again after any change in the app (a button there ran a job).
+    agents: AgentsInfo,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
+}
+
+/// What the Done step says about the tools that create worktrees.
+#[derive(Clone, Default)]
+struct AgentsInfo {
+    hosts: Vec<Detected>,
+    hook: Option<InstallState>,
+    relative: Option<RelativeHooksPath>,
+}
+
+fn read_agents(root: &Path) -> AgentsInfo {
+    let project = Project::open(root).ok();
+    AgentsInfo {
+        hosts: integrate::detect(root),
+        hook: project.as_ref().and_then(|p| githook::state(p).ok()),
+        relative: project
+            .as_ref()
+            .and_then(|p| githook::relative_hooks_path(p).ok().flatten()),
+    }
 }
 
 /// Open the wizard for the project at `root`.
@@ -598,6 +623,7 @@ impl OnboardingView {
             approved: false,
             offer: None,
             offer_epoch: 0,
+            agents: AgentsInfo::default(),
             focus: cx.focus_handle(),
             _subscriptions: Vec::new(),
         };
@@ -610,6 +636,9 @@ impl OnboardingView {
                 if epoch != this.offer_epoch {
                     this.offer_epoch = epoch;
                     this.reload_offer(window, cx);
+                }
+                if this.step == Step::Done {
+                    this.agents = read_agents(&this.root);
                 }
                 cx.notify();
             }));
@@ -827,6 +856,9 @@ impl OnboardingView {
             }
             Step::Approve | Step::Detected => {
                 self.step = self.step.next().unwrap_or(self.step);
+                if self.step == Step::Done {
+                    self.agents = read_agents(&self.root);
+                }
             }
             Step::Done => self.close(window, cx),
         }
@@ -1547,6 +1579,7 @@ impl OnboardingView {
                         cx,
                     )),
             )
+            .child(self.agents_card(cx))
             .child(
                 Button::new("wizard-first-workspace")
                     .primary()
@@ -1556,6 +1589,152 @@ impl OnboardingView {
                         this.create_first_workspace(window, cx)
                     })),
             )
+            .test_support()
+            .into_any_element()
+    }
+
+    /// The tools that create worktrees: each host the repository is used with
+    /// and the Git hook, with what each can and cannot do. Every button is a
+    /// remedy core names, and runs as a job like any other action.
+    fn agents_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        let root = self.root.clone();
+        let hosts = self.agents.hosts.clone();
+        let hook = self.agents.hook.clone();
+        let relative = self.agents.relative.clone();
+        let row = |id: String,
+                   title: String,
+                   detail: String,
+                   status: AnyElement,
+                   action: Option<Button>,
+                   cx: &App| {
+            h_flex()
+                .id(SharedString::from(id))
+                .w_full()
+                .px_3()
+                .py_2()
+                .gap_3()
+                .items_start()
+                .justify_between()
+                .child(
+                    v_flex()
+                        .gap_0p5()
+                        .min_w_0()
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
+                        .child(div().text_xs().text_color(ui::muted(cx)).child(detail)),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(status)
+                        .children(action.map(|button| button.small())),
+                )
+                .test_support()
+                .into_any_element()
+        };
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for detected in &hosts {
+            let host = detected.host;
+            let (label, tone) = match detected.state {
+                integrate::State::Configured => ("set up", Tone::Success),
+                integrate::State::NotConfigured => ("not set up", Tone::Warning),
+                integrate::State::Conflict => ("something is in the way", Tone::Danger),
+            };
+            let action = (detected.state != integrate::State::Configured).then(|| {
+                remedies::button_with_id(
+                    &self.state,
+                    SharedString::from(format!("wizard-host-{}", host.name())),
+                    &Remedy::IntegrateHost {
+                        root: root.clone(),
+                        host: host.name().to_string(),
+                    },
+                    false,
+                )
+            });
+            rows.push(row(
+                format!("wizard-agent-{}", host.name()),
+                host.label().to_string(),
+                format!(
+                    "Used here ({}). Its setup script runs devflow in every new worktree, and the agent waits until it is ready. {}",
+                    detected.found.join(", "),
+                    match host {
+                        integrate::Host::Claude =>
+                            "Claude Code creates and removes its worktrees through devflow; the branch is kept.",
+                        integrate::Host::Conductor =>
+                            "Archiving a workspace removes it; its branch is kept.",
+                        _ => "The tool has no hook for deleting a worktree: what a deleted one leaves behind is found again by the clean-up.",
+                    }
+                ),
+                chip(label, tone, cx).into_any_element(),
+                action,
+                cx,
+            ));
+        }
+        if hosts.is_empty() {
+            rows.push(
+                div()
+                    .id("wizard-agent-none")
+                    .px_3()
+                    .py_2()
+                    .text_sm()
+                    .text_color(ui::muted(cx))
+                    .child(
+                        "No agent host found in the repository (T3 Code, Claude Code, Conductor, Cursor). Their setup is offered here when one appears.",
+                    )
+                    .test_support()
+                    .into_any_element(),
+            );
+        }
+        // The Git hook: sets up worktrees whatever tool made them, with limits.
+        let (hook_label, hook_tone, hook_action) = match &hook {
+            Some(InstallState::Installed { .. }) => ("installed", Tone::Success, None),
+            Some(InstallState::Foreign { .. }) => {
+                ("another tool's hook is there", Tone::Warning, None)
+            }
+            Some(InstallState::NotInstalled) | None => (
+                "not installed",
+                Tone::Warning,
+                Some(remedies::button_with_id(
+                    &self.state,
+                    SharedString::from("wizard-git-hook"),
+                    &Remedy::InstallGitHook { root: root.clone() },
+                    false,
+                )),
+            ),
+        };
+        let mut limits = String::from(
+            "Sets up a worktree made by any tool that uses Git (git worktree add). Its limits: Git waits for the whole setup before it returns, unless the project asks for it to run in the background; it never runs where Git's hooks folder is not part of the new checkout",
+        );
+        if let Some(relative) = relative.filter(|r| !r.committed) {
+            limits.push_str(&format!(
+                " (this repository's is {}{}, so it does not fire in a new worktree)",
+                relative.configured.display(),
+                if relative.husky {
+                    ", which husky generates"
+                } else {
+                    ""
+                }
+            ));
+        }
+        limits.push_str("; and a hook another tool wrote is never edited.");
+        rows.push(row(
+            "wizard-agent-git-hook".into(),
+            "Git hook".into(),
+            limits,
+            chip(hook_label, hook_tone, cx).into_any_element(),
+            hook_action,
+            cx,
+        ));
+        card(cx)
+            .id("wizard-agents")
+            .child(section_header(
+                Lucide::Server,
+                "Agents and automation",
+                Some("Optional. Nothing here is written until you click.".into()),
+                None,
+                cx,
+            ))
+            .children(rows)
             .test_support()
             .into_any_element()
     }

@@ -53,6 +53,11 @@ impl Env {
             .stdin(Stdio::null());
         for var in [
             "DEVFLOW_CD_FILE",
+            "DEVFLOW_WRAPPED",
+            "DEVFLOW_PREVIOUS",
+            "COMPLETE",
+            "CONDUCTOR_PORT",
+            "CONDUCTOR_WORKSPACE_PATH",
             "DEVFLOW_TRUST_HOOKS",
             "DEVFLOW_NON_INTERACTIVE",
             "DEVFLOW_INSTANCE_ID",
@@ -933,6 +938,8 @@ fn shell_init_prints_the_wrapper() {
         ok(&out);
         let text = stdout(&out);
         assert!(text.contains("DEVFLOW_CD_FILE"), "{shell}: {text}");
+        assert!(text.contains("DEVFLOW_WRAPPED=1"), "{shell}: {text}");
+        assert!(text.contains("DEVFLOW_PREVIOUS"), "{shell}: {text}");
         assert!(text.contains("command devflow"), "{shell}: {text}");
         assert!(text.contains(shell), "{shell}: {text}");
     }
@@ -5948,4 +5955,947 @@ fn list_says_when_a_set_up_workspace_lost_its_env_file() {
     ok(&env.run(&["--non-interactive", "switch", "feature/g"]));
     assert!(path.join(".devflow/env").is_file());
     assert!(!stdout(ok(&env.run(&["list"]))).contains("env is missing"));
+}
+
+// --- navigation: picker, `-`, subdirectories, completion, open ---------------
+
+/// Commit `files` (relative path, content) on the repository's current branch.
+fn commit_files(env: &Env, files: &[(&str, &str)]) {
+    let git = git2::Repository::open(&env.repo).unwrap();
+    let mut index = git.index().unwrap();
+    for (path, content) in files {
+        let full = env.repo.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(&full, content).unwrap();
+        index.add_path(Path::new(path)).unwrap();
+    }
+    index.write().unwrap();
+    let tree = git.find_tree(index.write_tree().unwrap()).unwrap();
+    let parent = git.head().unwrap().peel_to_commit().unwrap();
+    let sig = git2::Signature::now("Test", "test@example.com").unwrap();
+    git.commit(Some("HEAD"), &sig, &sig, "files", &tree, &[&parent])
+        .unwrap();
+}
+
+/// The name of the main checkout's workspace (its branch: `master` or `main`
+/// depending on Git's configuration).
+fn default_name(env: &Env) -> String {
+    let doc = json(&env.run(&["--json", "list"]));
+    doc["workspaces"][0]["workspace"]["name"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// A workspace `name` created through the CLI; its path.
+fn workspace(env: &Env, name: &str) -> PathBuf {
+    let out = env.run(&["--json", "--non-interactive", "switch", "-c", name]);
+    ok(&out);
+    PathBuf::from(json(&out)["path"].as_str().unwrap())
+}
+
+/// Run `switch` the way the shell wrapper does, and read where it asked the
+/// shell to go.
+fn switch_through_wrapper(
+    env: &Env,
+    dir: &Path,
+    args: &[&str],
+    previous: Option<&Path>,
+) -> (Output, String) {
+    let handoff = env.root.join("cd-file");
+    std::fs::write(&handoff, "").unwrap();
+    let mut command = env.command(dir);
+    command
+        .args(["--non-interactive", "switch"])
+        .args(args)
+        .env("DEVFLOW_CD_FILE", &handoff)
+        .env("DEVFLOW_WRAPPED", "1");
+    if let Some(previous) = previous {
+        command.env("DEVFLOW_PREVIOUS", previous);
+    }
+    let out = command.output().unwrap();
+    let target = std::fs::read_to_string(&handoff).unwrap();
+    (out, target)
+}
+
+#[test]
+fn switch_without_a_name_needs_a_terminal_and_says_what_to_do() {
+    let env = Env::new();
+    env.init();
+    let out = env.run(&["switch"]);
+    failed(&out);
+    assert!(stderr(&out).contains("no terminal"), "{}", describe(&out));
+    assert!(
+        stderr(&out).contains("hint: name a workspace: `devflow list`"),
+        "{}",
+        describe(&out)
+    );
+    let doc = json(&env.run(&["--json", "switch"]));
+    assert!(
+        doc["error"].as_str().unwrap().contains("no terminal"),
+        "{doc}"
+    );
+    assert_eq!(doc["remedies"][0]["kind"], "choose_workspace", "{doc}");
+    // `-c` still needs its name.
+    failed(&env.run(&["switch", "-c"]));
+}
+
+#[test]
+fn switch_dash_returns_to_the_directory_the_shell_left() {
+    let env = Env::new();
+    env.init();
+    commit_files(&env, &[("apps/web/index.js", "x\n")]);
+    let feature = workspace(&env, "feature/a");
+
+    // Without the wrapper there is nothing that remembers.
+    let out = env.run(&["--non-interactive", "switch", "-"]);
+    failed(&out);
+    assert!(
+        stderr(&out).contains("shell integration"),
+        "{}",
+        describe(&out)
+    );
+    assert!(stderr(&out).contains("shell-init"), "{}", describe(&out));
+    let doc = json(&env.run(&["--json", "switch", "-"]));
+    assert_eq!(doc["remedies"][0]["kind"], "shell_integration", "{doc}");
+
+    // With it, but before the first change of directory.
+    let (out, target) = switch_through_wrapper(&env, &env.repo, &["-"], None);
+    failed(&out);
+    assert!(stderr(&out).contains("no previous"), "{}", describe(&out));
+    assert!(target.is_empty());
+
+    // The shell was in feature/a/apps/web and left it: back there, exactly.
+    let there = feature.join("apps/web");
+    let (out, target) = switch_through_wrapper(&env, &env.repo, &["-"], Some(&there));
+    ok(&out);
+    assert!(same_path(&target, &there), "{target}\n{}", describe(&out));
+
+    // A directory that is gone, or is no workspace's, is said.
+    let (out, _) = switch_through_wrapper(&env, &env.repo, &["-"], Some(&feature.join("gone")));
+    failed(&out);
+    assert!(
+        stderr(&out).contains("no longer exists"),
+        "{}",
+        describe(&out)
+    );
+    let outside = env.root.join("home");
+    let (out, _) = switch_through_wrapper(&env, &env.repo, &["-"], Some(&outside));
+    failed(&out);
+    assert!(
+        stderr(&out).contains("not in a devflow project"),
+        "{}",
+        describe(&out)
+    );
+}
+
+#[test]
+fn switch_keeps_the_subdirectory_when_the_target_has_it() {
+    let env = Env::new();
+    env.init();
+    commit_files(&env, &[("apps/web/index.js", "x\n")]);
+    let feature = workspace(&env, "feature/a");
+    let main = default_name(&env);
+    std::fs::create_dir_all(env.repo.join("only-here")).unwrap();
+
+    let (out, target) =
+        switch_through_wrapper(&env, &env.repo.join("apps/web"), &["feature/a"], None);
+    ok(&out);
+    assert!(
+        same_path(&target, &feature.join("apps/web")),
+        "{target}\n{}",
+        describe(&out)
+    );
+    // The target has no such directory: its root.
+    let (out, target) =
+        switch_through_wrapper(&env, &env.repo.join("only-here"), &["feature/a"], None);
+    ok(&out);
+    assert!(same_path(&target, &feature), "{target}\n{}", describe(&out));
+    // Back from the feature's subdirectory to the main checkout's.
+    let (out, target) =
+        switch_through_wrapper(&env, &feature.join("apps/web"), &[main.as_str()], None);
+    ok(&out);
+    assert!(
+        same_path(&target, &env.repo.join("apps/web")),
+        "{target}\n{}",
+        describe(&out)
+    );
+    // Without the wrapper the path is printed.
+    let out = env.run_in(
+        &env.repo.join("apps/web"),
+        &["--non-interactive", "switch", "feature/a"],
+    );
+    ok(&out);
+    assert!(
+        same_path(&stdout(&out), &feature.join("apps/web")),
+        "{}",
+        describe(&out)
+    );
+}
+
+/// The words the shell would hand devflow to complete (`words`, the last being
+/// the one being typed).
+fn complete(env: &Env, dir: &Path, words: &[&str]) -> Vec<String> {
+    let mut command = env.command(dir);
+    command
+        .env("COMPLETE", "bash")
+        .env("_CLAP_IFS", "\n")
+        .env("_CLAP_COMPLETE_INDEX", (words.len()).to_string())
+        .arg("--")
+        .arg("devflow")
+        .args(words);
+    let out = command.output().unwrap();
+    ok(&out);
+    stdout(&out).lines().map(str::to_string).collect()
+}
+
+#[test]
+fn workspace_names_complete_from_local_state_for_the_commands_that_take_one() {
+    let env = Env::new();
+    env.init();
+    workspace(&env, "feature/a");
+    workspace(&env, "fix-b");
+    for command in ["switch", "path", "remove", "up", "down", "ps", "open"] {
+        assert_eq!(
+            complete(&env, &env.repo, &[command, "f"]),
+            ["feature/a", "fix-b"],
+            "{command}"
+        );
+    }
+    let all = complete(&env, &env.repo, &["path", ""]);
+    assert!(
+        all.contains(&default_name(&env)) && all.contains(&"fix-b".to_string()),
+        "{all:?}"
+    );
+    assert_eq!(complete(&env, &env.repo, &["path", "fe"]), ["feature/a"]);
+    // `--from` takes one too.
+    assert_eq!(
+        complete(&env, &env.repo, &["switch", "-c", "x", "--from", "fe"]),
+        ["feature/a"]
+    );
+    // `-C` is honoured: from outside the project, with `-C` naming it.
+    let elsewhere = env.root.join("home");
+    let repo = env.repo.to_str().unwrap();
+    assert_eq!(
+        complete(&env, &elsewhere, &["-C", repo, "path", "fe"]),
+        ["feature/a"]
+    );
+    assert_eq!(
+        complete(&env, &elsewhere, &["path", "-C", repo, "fe"]),
+        ["feature/a"]
+    );
+    // A directory that is no project completes nothing (and does not fail).
+    let outside = complete(&env, &env.root.join("home"), &["path", ""]);
+    assert!(
+        outside.iter().all(|word| word.starts_with('-')),
+        "only options, no workspace: {outside:?}"
+    );
+    // The registration script is the hook into the shell.
+    for shell in ["bash", "zsh", "fish"] {
+        let out = env.run(&["completions", shell]);
+        ok(&out);
+        assert!(
+            stdout(&out).contains("COMPLETE"),
+            "{shell}: {}",
+            stdout(&out)
+        );
+    }
+}
+
+#[test]
+fn the_wrapper_in_a_real_shell_changes_directory_and_goes_back() {
+    let bash = Path::new("/bin/bash");
+    if !bash.is_file() {
+        return;
+    }
+    let env = Env::new();
+    env.init();
+    commit_files(&env, &[("apps/web/index.js", "x\n")]);
+    let feature = workspace(&env, "feature/a");
+    let bin = Path::new(env!("CARGO_BIN_EXE_devflow")).parent().unwrap();
+    let script = format!(
+        "eval \"$(devflow shell-init bash)\"\n\
+         cd {repo}/apps/web\n\
+         devflow --non-interactive switch feature/a >/dev/null 2>&1\n\
+         echo \"1 $PWD\"\n\
+         devflow --non-interactive switch - >/dev/null 2>&1\n\
+         echo \"2 $PWD\"\n\
+         devflow --non-interactive switch - >/dev/null 2>&1\n\
+         echo \"3 $PWD\"\n\
+         COMPLETE=bash _CLAP_COMPLETE_INDEX=2 devflow -- devflow path fe\n",
+        repo = env.repo.display()
+    );
+    let out = env
+        .command(&env.repo)
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .arg("-c")
+        .arg(&script)
+        .output();
+    // (`Command::new` was the devflow binary: run bash through the same environment.)
+    drop(out);
+    let mut command = Command::new(bash);
+    command
+        .current_dir(&env.repo)
+        .env("HOME", env.root.join("home"))
+        .env("DEVFLOW_CONFIG_DIR", env.root.join("config"))
+        .env("DEVFLOW_DATA_DIR", env.root.join("data"))
+        .env("NO_COLOR", "1")
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env_remove("DEVFLOW_PREVIOUS")
+        .stdin(Stdio::null())
+        .arg("-c")
+        .arg(&script);
+    let out = command.output().unwrap();
+    ok(&out);
+    let lines: Vec<String> = stdout(&out).lines().map(str::to_string).collect();
+    let at = |n: usize| lines[n].split_once(' ').unwrap().1.to_string();
+    assert!(
+        same_path(&at(0), &feature.join("apps/web")),
+        "{}",
+        describe(&out)
+    );
+    assert!(
+        same_path(&at(1), &env.repo.join("apps/web")),
+        "{}",
+        describe(&out)
+    );
+    assert!(
+        same_path(&at(2), &feature.join("apps/web")),
+        "{}",
+        describe(&out)
+    );
+    // The completion request went straight through the wrapper.
+    assert_eq!(lines[3], "feature/a", "{}", describe(&out));
+}
+
+#[test]
+fn list_wide_adds_what_the_default_listing_leaves_out() {
+    let env = Env::new();
+    env.init();
+    let feature = workspace(&env, "feature/a");
+    std::fs::write(feature.join("scratch.txt"), "x\n").unwrap();
+
+    // The default listing is unchanged: no wide object, no extra column.
+    let doc = json(&env.run(&["--json", "list"]));
+    assert!(doc["workspaces"][0].get("wide").is_none(), "{doc}");
+    let human = stdout(&env.run(&["list"]));
+    assert!(!human.contains("CHANGES"), "{human}");
+
+    let doc = json(&env.run(&["--json", "list", "--wide"]));
+    let item = doc["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["workspace"]["name"] == "feature/a")
+        .unwrap();
+    assert_eq!(item["wide"]["dirty"], true, "{item}");
+    let port = item["wide"]["app_port"].as_u64().expect("a port");
+    assert!((40000..=49999).contains(&port));
+    assert_eq!(item["wide"]["ahead_behind"]["ahead"], 0, "{item}");
+    assert!(item["wide"]["last_active_at"].is_string(), "{item}");
+    assert_eq!(item["wide"]["services"], json!([]));
+    assert_eq!(item["wide"]["daemons"], json!([]));
+    let main = &doc["workspaces"][0];
+    assert!(main["wide"]["dirty"].is_boolean(), "{main}");
+    assert!(
+        main["wide"].get("ahead_behind").is_none(),
+        "the default workspace has no base: {main}"
+    );
+
+    let human = stdout(&env.run(&["list", "--wide"]));
+    let header = human.lines().next().unwrap();
+    for column in [
+        "PORT", "CHANGES", "UPSTREAM", "MERGED", "ACTIVE", "SERVICES", "DAEMONS",
+    ] {
+        assert!(header.contains(column), "{human}");
+    }
+    let line = human.lines().find(|l| l.contains("feature/a")).unwrap();
+    assert!(
+        line.contains("dirty") && line.contains(&port.to_string()),
+        "{human}"
+    );
+    failed(&env.run(&["list", "--wide", "--all"]));
+}
+
+#[test]
+fn open_runs_the_configured_editor_or_terminal_in_the_workspace() {
+    let env = Env::new();
+    env.init();
+    let feature = workspace(&env, "feature/a");
+    let editor = env.fake_program(
+        "fake-editor",
+        "echo \"PWD=$(pwd)\" >> \"$FAKE_LOG\"\nfor a in \"$@\"; do echo \"ARG=$a\" >> \"$FAKE_LOG\"; done",
+    );
+    let terminal = env.fake_program(
+        "fake-terminal",
+        "for a in \"$@\"; do echo \"ARG=$a\" >> \"$FAKE_LOG\"; done",
+    );
+    std::fs::write(
+        env.root.join("config/settings.toml"),
+        format!(
+            "editor_command = \"{}/fake-editor --flag\"\nterminal_command = \"{}/fake-terminal --cwd={{path}}\"\n",
+            editor.dir.display(),
+            terminal.dir.display()
+        ),
+    )
+    .unwrap();
+    let run = |args: &[&str], log: &FakeProgram| {
+        let out = env
+            .command(&env.repo)
+            .env("FAKE_LOG", &log.log)
+            .args(args)
+            .output()
+            .unwrap();
+        ok(&out);
+        out
+    };
+    // JSON starts it and reports what it started.
+    let out = run(&["--json", "open", "feature/a"], &editor);
+    let doc = json(&out);
+    assert_eq!(doc["tool"], "editor", "{doc}");
+    // The envelope's `command` is the document's name; what was started is `argv`.
+    assert_eq!(doc["command"], "open", "{doc}");
+    assert_eq!(doc["argv"][1], "--flag", "{doc}");
+    // (The program was started detached: wait until it has written all it will.)
+    for _ in 0..100 {
+        let written = std::fs::read_to_string(&editor.log).unwrap_or_default();
+        if written.lines().count() >= 3 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(editor.args(), ["--flag", feature.to_str().unwrap()]);
+    assert!(
+        editor
+            .lines()
+            .iter()
+            .any(|l| l.starts_with("PWD=") && same_path(&l[4..], &feature)),
+        "{:?}",
+        editor.lines()
+    );
+    // The terminal, with `{path}` replaced.
+    run(&["open", "--terminal", "feature/a"], &terminal);
+    assert_eq!(terminal.args(), [format!("--cwd={}", feature.display())]);
+    // Without a name: the workspace the caller is in.
+    let out = env
+        .command(&feature)
+        .env("FAKE_LOG", env.root.join("again.log"))
+        .arg("open")
+        .output()
+        .unwrap();
+    ok(&out);
+    assert!(env.root.join("again.log").exists());
+    failed(&env.run(&["open", "--editor", "--terminal"]));
+    failed(&env.run(&["open", "nope"]));
+
+    // A program that is not there: the settings file is the way on.
+    std::fs::write(
+        env.root.join("config/settings.toml"),
+        "editor_command = \"/definitely/not/installed\"\n",
+    )
+    .unwrap();
+    let out = env.run(&["open", "feature/a"]);
+    failed(&out);
+    assert!(stderr(&out).contains("cannot run"), "{}", describe(&out));
+    assert!(stderr(&out).contains("settings.toml"), "{}", describe(&out));
+}
+
+#[test]
+fn every_workspace_gets_a_port_that_ps_and_exec_show() {
+    let env = Env::new();
+    env.init();
+    let a = workspace(&env, "feature/a");
+    let b = workspace(&env, "feature/b");
+    let port_of = |name: &str| -> u64 {
+        let doc = json(&env.run(&["--json", "ps", name]));
+        doc["workspaces"][0]["app_port"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{doc}"))
+    };
+    let (pa, pb) = (port_of("feature/a"), port_of("feature/b"));
+    assert_ne!(pa, pb);
+    assert!(stdout(&env.run(&["ps", "feature/a"])).contains(&format!("app port {pa}")));
+    // The same port is in the file and in a command run through `exec`.
+    let out = env
+        .command(&a)
+        .args(["exec", "--", "sh", "-c", "echo $DEVFLOW_PORT"])
+        .output()
+        .unwrap();
+    ok(&out);
+    assert_eq!(stdout(&out).trim(), pa.to_string());
+    let env_file = std::fs::read_to_string(b.join(".devflow/env")).unwrap();
+    assert!(
+        env_file.contains(&format!("DEVFLOW_PORT='{pb}'")),
+        "{env_file}"
+    );
+    // A caller's DEVFLOW_PORT is the caller's workspace's, not this one's.
+    let out = env
+        .command(&a)
+        .env("DEVFLOW_PORT", "1")
+        .args(["exec", "--", "sh", "-c", "echo $DEVFLOW_PORT"])
+        .output()
+        .unwrap();
+    ok(&out);
+    assert_eq!(stdout(&out).trim(), pa.to_string());
+}
+
+#[test]
+fn up_and_down_take_services_and_all_without_any() {
+    let env = Env::new();
+    env.init();
+    workspace(&env, "feature/a");
+    // No container services and no daemons: nothing to do, and not an error
+    // once the person asked for the services or for every workspace.
+    let out = env.run(&["--json", "down", "--services", "feature/a"]);
+    ok(&out);
+    let doc = json(&out);
+    assert_eq!(doc["ok"], true, "{doc}");
+    assert_eq!(
+        doc["workspaces"][0]["services"]["services"],
+        json!([]),
+        "{doc}"
+    );
+    let out = env.run(&["--json", "down", "--all", "--services"]);
+    ok(&out);
+    let doc = json(&out);
+    assert_eq!(doc["workspaces"].as_array().unwrap().len(), 2, "{doc}");
+    let out = env.run(&["--json", "up", "--services", "feature/a"]);
+    ok(&out);
+    assert_eq!(json(&out)["workspaces"][0]["workspace"], "feature/a");
+    // Plain `down` keeps saying that there is nothing configured.
+    failed(&env.run(&["down", "feature/a"]));
+    failed(&env.run(&["down", "--all", "feature/a"]));
+}
+
+#[test]
+fn bulk_shutdown_and_the_wide_listing_find_a_daemon_whose_definition_was_removed() {
+    let env = Env::new();
+    let fake = env.fake_pitchfork();
+    let (path, namespace) = env.workspace_with_daemon(&fake);
+    // The daemon runs, then its definition is removed from the worktree.
+    fake.set(
+        "list.json",
+        &serde_json::to_string(&json!([daemon(&namespace, "running", Some(4242))])).unwrap(),
+    );
+    std::fs::write(
+        path.join("pitchfork.toml"),
+        "# nothing is declared any more\n",
+    )
+    .unwrap();
+
+    // The wide listing still shows what runs under the workspace's namespace.
+    let doc = json(ok(&env.run_fake(
+        &fake,
+        &env.repo,
+        &["--json", "list", "--wide"],
+    )));
+    let item = doc["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["workspace"]["name"] == "feature/p")
+        .unwrap();
+    assert_eq!(item["wide"]["daemons"][0]["name"], "web", "{item}");
+    assert_eq!(item["wide"]["daemons"][0]["state"], "running", "{item}");
+
+    // `down --all --force` stops it by its full id instead of skipping a
+    // workspace whose configuration declares nothing.
+    let out = env.run_fake(&fake, &env.repo, &["--json", "down", "--all", "--force"]);
+    let doc = json(&out);
+    assert!(
+        fake.mutations().contains(&format!("stop {namespace}/web")),
+        "{:?}\n{doc}",
+        fake.mutations()
+    );
+}
+
+#[test]
+fn a_receipt_that_cannot_be_read_is_not_a_workspace_without_services() {
+    let env = Env::new();
+    env.init();
+    let feature = workspace(&env, "feature/a");
+    let git_dir = git2::Repository::open(&feature)
+        .unwrap()
+        .path()
+        .to_path_buf();
+    std::fs::write(git_dir.join("devflow/receipt.json"), "{ not json").unwrap();
+
+    for args in [
+        ["--json", "down", "--services", "feature/a"],
+        ["--json", "up", "--services", "feature/a"],
+    ] {
+        let out = env.run(&args);
+        failed(&out);
+        let doc = json(&out);
+        assert_eq!(doc["ok"], false, "{doc}");
+        let services = &doc["workspaces"][0]["services"];
+        assert!(
+            services["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("cannot be read")),
+            "{doc}"
+        );
+        assert_eq!(services["services"], json!([]), "{doc}");
+    }
+    let out = env.run(&["down", "--services", "feature/a"]);
+    failed(&out);
+    assert!(
+        stdout(&out).contains("container services"),
+        "{}",
+        describe(&out)
+    );
+}
+
+// --- gc: workspaces Git or an agent host removed ---------------------------------
+
+/// What an agent host does when it is done with a worktree: delete the
+/// directory and Git's registration of it, and nothing else.
+fn removed_by_a_host(env: &Env, path: &Path) {
+    let path = path.canonicalize().unwrap();
+    let git = git2::Repository::open(&env.repo).unwrap();
+    let name = git
+        .worktrees()
+        .unwrap()
+        .iter()
+        .flatten()
+        .flatten()
+        .map(str::to_string)
+        .find(|name| {
+            git.find_worktree(name)
+                .map(|w| w.path().canonicalize().ok().as_deref() == Some(path.as_path()))
+                .unwrap_or(false)
+        })
+        .expect("a registered worktree at that path");
+    let registration = git.find_worktree(&name).unwrap();
+    std::fs::remove_dir_all(&path).unwrap();
+    registration
+        .prune(Some(
+            git2::WorktreePruneOptions::new().valid(true).locked(true),
+        ))
+        .unwrap();
+}
+
+#[test]
+fn gc_finds_what_a_host_left_behind_and_removes_only_what_is_named() {
+    let env = Env::new();
+    let fake = env.fake_pitchfork();
+    let (path, namespace) = env.workspace_with_daemon(&fake);
+    fake.set(
+        "after_start.json",
+        &serde_json::to_string(&json!([daemon(&namespace, "running", Some(4242))])).unwrap(),
+    );
+    ok(&env.run_fake(&fake, &path, &["--json", "--non-interactive", "up"]));
+    assert_eq!(fake.mutations(), [format!("start -q {namespace}/web")]);
+    removed_by_a_host(&env, &path);
+
+    // Nothing but the main checkout is registered; `list` says what is left,
+    // from files alone, with the way on.
+    let doc = json(ok(&env.run(&["--json", "list"])));
+    assert_eq!(doc["workspaces"].as_array().unwrap().len(), 1, "{doc}");
+    assert_eq!(
+        doc["cleanup"]["removed_elsewhere"],
+        json!(["feature/p"]),
+        "{doc}"
+    );
+    assert_eq!(doc["cleanup"]["remedies"][0]["kind"], "clean_up", "{doc}");
+    assert_eq!(
+        doc["cleanup"]["remedies"][0]["command"], "devflow gc",
+        "{doc}"
+    );
+    let out = env.run(&["list"]);
+    ok(&out);
+    assert!(
+        stderr(&out).contains("1 workspace removed outside devflow still own data or processes")
+            && stderr(&out).contains("devflow gc"),
+        "{}",
+        describe(&out)
+    );
+    assert!(
+        !stdout(&out).contains("removed outside"),
+        "the table stays a table"
+    );
+    // `doctor` reports it, with the same remedy.
+    let doc = json(&env.run(&["--json", "doctor"]));
+    let check = doc["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "workspaces-gone")
+        .unwrap_or_else(|| panic!("{doc}"));
+    assert_eq!(check["remedies"][0]["kind"], "clean_up", "{doc}");
+
+    // The inventory changes nothing.
+    let doc = json(ok(&env.run_fake(&fake, &env.repo, &["--json", "gc"])));
+    assert_eq!(doc["command"], "gc", "{doc}");
+    let entries = doc["inventory"]["entries"].as_array().unwrap();
+    let entry = entries
+        .iter()
+        .find(|e| e["workspace"] == "feature/p")
+        .unwrap_or_else(|| panic!("{doc}"));
+    assert_eq!(entry["class"], "removed_elsewhere", "{doc}");
+    assert_eq!(entry["removable"], true, "{doc}");
+    assert_eq!(
+        entry["daemons"],
+        json!([format!("{namespace}/web")]),
+        "{doc}"
+    );
+    assert_eq!(entry["merge"]["state"], "merged", "{doc}");
+    let instance = entry["instance"].as_str().unwrap().to_string();
+    let short = &instance[..8];
+    let text = stdout(ok(&env.run_fake(&fake, &env.repo, &["gc"])));
+    for needle in [
+        short,
+        "feature/p",
+        "removed elsewhere",
+        "1 daemon",
+        "merged into",
+    ] {
+        assert!(text.contains(needle), "{needle:?} missing:\n{text}");
+    }
+    assert_eq!(
+        fake.mutations().len(),
+        1,
+        "only the start: {:?}",
+        fake.mutations()
+    );
+
+    // Naming it is not enough without --yes in a script: nothing is removed.
+    let doc = json(ok(&env.run_fake(
+        &fake,
+        &env.repo,
+        &["--json", "gc", "--remove", short],
+    )));
+    assert_eq!(doc["confirmed"], false, "{doc}");
+    assert_eq!(doc["removed"], json!([]), "{doc}");
+    assert_eq!(fake.mutations().len(), 1);
+    // An id that names nothing is an error that lists nothing it was not given.
+    failed(&env.run_fake(
+        &fake,
+        &env.repo,
+        &["--json", "gc", "--remove", "deadbeef", "--yes"],
+    ));
+
+    // A daemon that runs is never stopped by a clean-up (pitchfork would run its
+    // lifecycle hooks from a configuration nobody approved): the removal is
+    // refused, forceable, and nothing was touched.
+    fake.set(
+        "list.json",
+        &serde_json::to_string(&json!([
+            daemon(&namespace, "running", Some(4242)),
+            daemon("df-someone-else", "running", Some(1)),
+        ]))
+        .unwrap(),
+    );
+    let out = env.run_fake(
+        &fake,
+        &env.repo,
+        &["--json", "gc", "--remove", short, "--yes"],
+    );
+    failed(&out);
+    let doc = json(&out);
+    assert_eq!(doc["removed"], json!([]), "{doc}");
+    assert_eq!(doc["skipped"][0]["forceable"], true, "{doc}");
+    assert!(
+        doc["skipped"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("lifecycle hooks"),
+        "{doc}"
+    );
+    assert!(
+        doc["error"].as_str().unwrap().contains("feature/p"),
+        "{doc}"
+    );
+    assert_eq!(
+        fake.mutations().len(),
+        1,
+        "never stopped: {:?}",
+        fake.mutations()
+    );
+
+    // Once the person stopped it, the listing shows nothing of the namespace
+    // running and the record goes.
+    fake.set(
+        "list.json",
+        &serde_json::to_string(&json!([
+            daemon(&namespace, "stopped", None),
+            daemon("df-someone-else", "running", Some(1)),
+        ]))
+        .unwrap(),
+    );
+    let doc = json(ok(&env.run_fake(
+        &fake,
+        &env.repo,
+        &["--json", "gc", "--remove", short, "--yes"],
+    )));
+    assert_eq!(doc["confirmed"], true, "{doc}");
+    assert_eq!(doc["removed"][0]["workspace"], "feature/p", "{doc}");
+    assert_eq!(doc["skipped"], json!([]), "{doc}");
+    assert_eq!(
+        fake.mutations(),
+        [format!("start -q {namespace}/web")],
+        "devflow stopped nothing"
+    );
+    let records = env.repo.join(".git/devflow/workspaces");
+    assert!(
+        std::fs::read_dir(&records).map(|d| d.count()).unwrap_or(0) == 0,
+        "the record is gone"
+    );
+    // Nothing left to say.
+    let doc = json(ok(&env.run(&["--json", "list"])));
+    assert!(doc.get("cleanup").is_none(), "{doc}");
+    let text = stdout(ok(&env.run(&["gc"])));
+    assert!(
+        text.contains("No workspace was removed outside devflow"),
+        "{text}"
+    );
+}
+
+#[test]
+fn gc_never_removes_an_active_workspace_even_when_it_is_named() {
+    let env = Env::new();
+    env.init();
+    let out = env.run(&[
+        "--json",
+        "--non-interactive",
+        "switch",
+        "-c",
+        "feature/live",
+    ]);
+    ok(&out);
+    let path = PathBuf::from(json(&out)["path"].as_str().unwrap());
+    let doc = json(ok(&env.run(&["--json", "gc", "--all"])));
+    let entry = doc["inventory"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["workspace"] == "feature/live")
+        .unwrap_or_else(|| panic!("{doc}"))
+        .clone();
+    assert_eq!(entry["class"], "active", "{doc}");
+    assert_eq!(entry["removable"], false, "{doc}");
+    let short = entry["instance"].as_str().unwrap()[..8].to_string();
+    let out = env.run(&["--json", "gc", "--remove", &short, "--yes"]);
+    failed(&out);
+    let doc = json(&out);
+    assert_eq!(doc["removed"], json!([]), "{doc}");
+    assert!(
+        doc["error"].as_str().unwrap().contains("active workspace"),
+        "{doc}"
+    );
+    assert!(path.is_dir(), "the checkout is untouched");
+    // --snapshot, --force and --yes need something to remove.
+    failed(&env.run(&["--json", "gc", "--yes"]));
+}
+
+#[test]
+fn removing_a_name_that_only_a_record_remembers_points_to_gc() {
+    let env = Env::new();
+    let fake = env.fake_pitchfork();
+    let (path, namespace) = env.workspace_with_daemon(&fake);
+    fake.set(
+        "after_start.json",
+        &serde_json::to_string(&json!([daemon(&namespace, "running", Some(4242))])).unwrap(),
+    );
+    ok(&env.run_fake(&fake, &path, &["--json", "--non-interactive", "up"]));
+    removed_by_a_host(&env, &path);
+    let out = env.run(&["--json", "remove", "feature/p"]);
+    failed(&out);
+    let doc = json(&out);
+    assert!(
+        doc["error"]
+            .as_str()
+            .unwrap()
+            .contains("removed outside devflow"),
+        "{doc}"
+    );
+    assert_eq!(doc["remedies"][0]["kind"], "clean_up", "{doc}");
+    assert_eq!(doc["remedies"][0]["command"], "devflow gc", "{doc}");
+}
+
+#[test]
+fn bulk_shutdown_does_not_read_an_unreadable_record_as_no_daemons() {
+    let env = Env::new();
+    let fake = env.fake_pitchfork();
+    let (path, namespace) = env.workspace_with_daemon(&fake);
+    fake.set(
+        "list.json",
+        &serde_json::to_string(&json!([daemon(&namespace, "running", Some(4242))])).unwrap(),
+    );
+    // Every pitchfork file is gone and the record cannot be read: nothing says
+    // whether devflow started anything here, and nothing says it did not.
+    std::fs::remove_file(path.join("pitchfork.toml")).unwrap();
+    std::fs::remove_file(path.join("pitchfork.local.toml")).unwrap();
+    let git_dir = git2::Repository::open(&path).unwrap().path().to_path_buf();
+    std::fs::write(git_dir.join("devflow/receipt.json"), "{ not json").unwrap();
+
+    let out = env.run_fake(&fake, &env.repo, &["--json", "down", "--all"]);
+    failed(&out);
+    let doc = json(&out);
+    assert_eq!(doc["ok"], false, "{doc}");
+    let item = doc["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| {
+            w["workspace"] == "feature/p"
+                || w["path"].as_str().is_some_and(|p| p.ends_with("feature-p"))
+        })
+        .unwrap();
+    assert!(
+        item.get("daemons_error").is_some() || item["daemons"]["state_error"].is_string(),
+        "reached the guarded stop path, which did not call it a success: {item}"
+    );
+}
+
+#[test]
+fn the_wide_listing_says_unknown_when_pitchfork_could_not_be_asked() {
+    let env = Env::new();
+    let fake = env.fake_pitchfork();
+    let (_path, _namespace) = env.workspace_with_daemon(&fake);
+    fake.set("list_fail", "");
+    let doc = json(ok(&env.run_fake(
+        &fake,
+        &env.repo,
+        &["--json", "list", "--wide"],
+    )));
+    let item = doc["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["workspace"]["name"] == "feature/p")
+        .unwrap();
+    assert!(
+        item["wide"]["daemons_unobserved"].is_string(),
+        "an unobserved listing says so: {item}"
+    );
+    assert_eq!(item["wide"]["daemons"][0]["state"], "unknown", "{item}");
+    let human = stdout(ok(&env.run_fake(&fake, &env.repo, &["list", "--wide"])));
+    let line = human.lines().find(|l| l.contains("feature/p")).unwrap();
+    assert!(
+        line.contains('?') && !line.contains("not started"),
+        "{human}"
+    );
+    assert!(human.contains("what runs was not observed"), "{human}");
+    // Observed again: back to the facts.
+    std::fs::remove_file(fake.dir.join("list_fail")).unwrap();
+    let doc = json(ok(&env.run_fake(
+        &fake,
+        &env.repo,
+        &["--json", "list", "--wide"],
+    )));
+    let item = doc["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["workspace"]["name"] == "feature/p")
+        .unwrap();
+    assert!(item["wide"].get("daemons_unobserved").is_none(), "{item}");
+    assert_eq!(item["wide"]["daemons"][0]["state"], "not started", "{item}");
 }

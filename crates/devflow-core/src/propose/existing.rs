@@ -216,10 +216,15 @@ fn read_one(root: &Path, name: &str) -> Result<Option<String>> {
     if metadata.len() > MAX_BYTES {
         bail!("{name} is larger than 1 MiB; devflow will not rewrite it");
     }
-    let bytes = std::fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
-    String::from_utf8(bytes)
-        .map(Some)
-        .map_err(|_| anyhow::anyhow!("{name} is not valid UTF-8"))
+    // Opened without blocking and checked on the descriptor: a FIFO put in
+    // place of the file since the `lstat` cannot stall the read.
+    crate::config::read_text(&path).map(Some).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidData {
+            anyhow::anyhow!("{name} is not valid UTF-8")
+        } else {
+            anyhow::Error::new(error).context(format!("cannot read {}", path.display()))
+        }
+    })
 }
 
 #[cfg(test)]

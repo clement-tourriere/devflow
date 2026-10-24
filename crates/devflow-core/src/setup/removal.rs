@@ -24,16 +24,25 @@
 //! alone and no helper is called while a lock is held that would take it
 //! again.
 //!
-//! What cannot be looked at is not "gone". A bound branch whose backend cannot
-//! be asked stops the removal before any effect, forceably (`force` leaves it
-//! and says so). A branch recorded as about to be created that cannot be
-//! resolved stops it for good: the receipt dying with the worktree would leave
-//! a branch nothing names, and `force` does not accept that; resuming setup
-//! (which recovers it by its recorded identity) or reconciling the service is
-//! the way on.
+//! What cannot be looked at is not "gone". A branch whose backend cannot be
+//! asked stops the removal before any effect, forceably (`force` leaves it and
+//! says so). The receipt dies with the worktree, so what is left is named by
+//! the workspace's record ([`crate::ledger`]), which survives it: a branch
+//! recorded as about to be created that cannot be resolved is forceable too,
+//! and stays recorded for `gc` or a later removal. Without a record (a
+//! directory that is not a Git directory) it stops the removal for good:
+//! resuming setup (which recovers it by its recorded identity) or reconciling
+//! the service is the way on.
+//!
+//! The same planning serves a workspace that has no receipt any more
+//! ([`plan_recorded`]): its record names the branches, and `gc` removes them.
+//! Each branch a removal accounts for (dropped, found to belong to somebody
+//! else, or found not to exist) is released from the record; each effect is
+//! journaled before it happens.
 use super::{connect, recoverable};
 use crate::config::Engine;
 use crate::db::Server;
+use crate::ledger::{self, Effect};
 use crate::project::Project;
 use crate::receipt::Receipt;
 use crate::remedy::Remedy;
@@ -41,6 +50,8 @@ use crate::services::catalog::Store;
 use crate::services::{self, Service};
 use crate::worktree::{Workspace, protected_with};
 use anyhow::{Result, ensure};
+use std::collections::BTreeMap;
+use std::path::Path;
 use uuid::Uuid;
 
 /// A branch of the workspace, and where the receipt has it.
@@ -108,18 +119,46 @@ fn named(project: &Project, receipt: &Receipt) -> Vec<Named> {
     all
 }
 
+/// Every branch `record` names, in the order it lists them. The backend each
+/// was begun on is the one recorded with it (`None`: looked for everywhere).
+fn named_from_record(record: &ledger::Record) -> Vec<Named> {
+    record
+        .resources
+        .branches
+        .iter()
+        .map(|branch| Named {
+            what: match &branch.service {
+                Some(key) => format!("service '{key}'"),
+                None => "a database from an earlier build".to_string(),
+            },
+            engine: branch.lookup_engine(),
+            id: branch.id,
+            pending: branch.pending,
+            key: branch.service.clone(),
+        })
+        .collect()
+}
+
 /// What the removal drops, decided before it changes anything.
 #[derive(Default)]
-pub(super) struct DataPlan {
+pub(crate) struct DataPlan {
     instance: Option<Uuid>,
     postgres: Option<Server>,
     postgres_ids: Vec<Uuid>,
     containers: Vec<(Service, Uuid)>,
+    /// The service key each PostgreSQL id was recorded under, for the journal.
+    keys: BTreeMap<Uuid, Option<String>>,
+    /// Branches that need no effect (somebody else's, or not there): accounted
+    /// for as soon as the removal starts.
+    settled: Vec<Uuid>,
+    /// What the person saw of each branch (see [`ledger::BranchExpect`]),
+    /// checked again under the backend's lock right before it is dropped.
+    expect: BTreeMap<Uuid, ledger::BranchExpect>,
 }
 
 impl DataPlan {
     /// What the plan will drop, for a message that says what remains.
-    pub(super) fn describe(&self) -> Vec<String> {
+    pub(crate) fn describe(&self) -> Vec<String> {
         let mut all: Vec<String> = self
             .postgres_ids
             .iter()
@@ -143,15 +182,18 @@ struct Blocking {
 /// What the problems found by [`plan`] come to.
 #[derive(Default)]
 struct Problems {
-    /// `force` leaves these (a bound branch whose backend cannot be asked).
+    /// `force` leaves these (a bound branch whose backend cannot be asked, a
+    /// pending one the ledger keeps naming).
     forceable: Vec<String>,
+    /// What can be done about the forceable ones besides forcing.
+    forceable_remedies: Vec<Remedy>,
     /// `force` does not (a branch recorded before its creation that cannot be
     /// resolved).
     blocking: Vec<Blocking>,
 }
 
 impl Problems {
-    fn settle(self, workspace: &Workspace, force: bool, warnings: &mut Vec<String>) -> Result<()> {
+    fn settle(self, name: &str, force: bool, warnings: &mut Vec<String>) -> Result<()> {
         if !self.blocking.is_empty() {
             let reason = self
                 .blocking
@@ -166,7 +208,7 @@ impl Problems {
                     remedies.push(remedy);
                 }
             }
-            return Err(protected_with(&workspace.name, reason, false, remedies));
+            return Err(protected_with(name, reason, false, remedies));
         }
         if self.forceable.is_empty() {
             return Ok(());
@@ -175,18 +217,24 @@ impl Problems {
             warnings.extend(
                 self.forceable
                     .into_iter()
-                    .map(|reason| format!("{reason}; it was left alone")),
+                    .map(|reason| format!("{reason}; it was left alone and stays recorded")),
             );
             return Ok(());
         }
+        let mut remedies: Vec<Remedy> = Vec::new();
+        for remedy in self.forceable_remedies {
+            if !remedies.contains(&remedy) {
+                remedies.push(remedy);
+            }
+        }
         Err(protected_with(
-            &workspace.name,
+            name,
             format!(
                 "{}; remove the workspace and keep its data, or force the removal to leave it",
                 self.forceable.join("; ")
             ),
             true,
-            Vec::new(),
+            remedies,
         ))
     }
 }
@@ -203,8 +251,14 @@ enum Lookup<T> {
 /// What the inspections share.
 struct Cx<'a> {
     project: &'a Project,
-    workspace: &'a Workspace,
+    /// The workspace's name, for messages.
+    name: &'a str,
+    /// Its checkout, when it still has one.
+    checkout: Option<&'a Path>,
     instance: Uuid,
+    /// The ledger names every branch looked at: one that cannot be resolved
+    /// stays recorded when the removal is forced, so nothing is lost.
+    recorded: bool,
 }
 
 /// The project's PostgreSQL server, asked for once.
@@ -226,9 +280,13 @@ impl Cx<'_> {
     /// left half done.
     fn unresolved(&self, named: &Named, why: &str, key: Option<&str>, postgres: bool) -> Blocking {
         let root = self.project.root.clone();
-        let mut remedies = vec![Remedy::Setup {
-            workspace: self.workspace.path.clone(),
-        }];
+        let mut remedies: Vec<Remedy> = self
+            .checkout
+            .map(|workspace| Remedy::Setup {
+                workspace: workspace.to_path_buf(),
+            })
+            .into_iter()
+            .collect();
         if postgres {
             remedies.push(Remedy::ReconcileDatabases { root: root.clone() });
         }
@@ -249,6 +307,32 @@ impl Cx<'_> {
         }
     }
 
+    /// A pending branch that cannot be looked for: forceable when the ledger
+    /// keeps naming it, for good otherwise.
+    fn cannot_resolve(
+        &self,
+        named: &Named,
+        why: &str,
+        key: Option<&str>,
+        postgres: bool,
+        problems: &mut Problems,
+    ) {
+        if self.recorded {
+            let blocking = self.unresolved(named, why, key, postgres);
+            problems.forceable.push(format!(
+                "branch {} was recorded as about to be created for {} when setup stopped, and \
+                 it cannot be looked for ({why}); forcing the removal leaves it named by the \
+                 workspace's record, for a later clean-up",
+                named.id, named.what
+            ));
+            problems.forceable_remedies.extend(blocking.remedies);
+        } else {
+            problems
+                .blocking
+                .push(self.unresolved(named, why, key, postgres));
+        }
+    }
+
     fn inspect_postgres(
         &self,
         pg: &mut Pg,
@@ -259,9 +343,7 @@ impl Cx<'_> {
     ) {
         let cannot = |why: String, problems: &mut Problems| {
             if branch.pending {
-                problems
-                    .blocking
-                    .push(self.unresolved(branch, &why, None, true));
+                self.cannot_resolve(branch, &why, None, true, problems);
             } else {
                 problems.forceable.push(why);
             }
@@ -270,14 +352,19 @@ impl Cx<'_> {
             Ok(Some(server)) => match server.branch(branch.id) {
                 Ok(Some(info)) if info.instance_id == Some(self.instance) => {
                     plan.postgres_ids.push(branch.id);
+                    plan.keys.insert(branch.id, branch.key.clone());
                 }
-                Ok(Some(_)) => warnings.push(format!(
-                    "database branch {} was created by another instance and was left alone",
-                    branch.id
-                )),
+                Ok(Some(_)) => {
+                    plan.settled.push(branch.id);
+                    warnings.push(format!(
+                        "database branch {} was created by another instance and was left alone",
+                        branch.id
+                    ))
+                }
                 // Recorded before the creation, which never happened.
-                Ok(None) if branch.pending => {}
+                Ok(None) if branch.pending => plan.settled.push(branch.id),
                 Ok(None) => {
+                    plan.settled.push(branch.id);
                     warnings.push(format!("database branch {} no longer exists", branch.id))
                 }
                 Err(e) => cannot(
@@ -321,25 +408,41 @@ impl Cx<'_> {
             Ok((Some(record), svc)) if record.owner == Some(self.instance) => {
                 plan.containers.push((svc, branch.id));
             }
-            Ok((Some(_), _)) => warnings.push(format!(
-                "branch {} of service '{key}' was created by another instance and was left alone",
-                branch.id
-            )),
-            Ok((None, _)) if branch.pending => {}
-            Ok((None, _)) => warnings.push(format!(
-                "branch {} of service '{key}' no longer exists",
-                branch.id
-            )),
+            Ok((Some(_), _)) => {
+                plan.settled.push(branch.id);
+                warnings.push(format!(
+                    "branch {} of service '{key}' was created by another instance and was left alone",
+                    branch.id
+                ))
+            }
+            Ok((None, _)) if branch.pending => plan.settled.push(branch.id),
+            Ok((None, _)) => {
+                plan.settled.push(branch.id);
+                warnings.push(format!(
+                    "branch {} of service '{key}' no longer exists",
+                    branch.id
+                ))
+            }
             Err(e) if branch.pending => {
-                problems
-                    .blocking
-                    .push(self.unresolved(branch, &format!("{e:#}"), Some(key), false))
+                self.cannot_resolve(branch, &format!("{e:#}"), Some(key), false, problems)
             }
             Err(e) => problems.forceable.push(format!(
                 "cannot inspect the branch of service '{key}': {e:#}"
             )),
         }
     }
+}
+
+/// What a removal knows besides the receipt.
+#[derive(Default)]
+pub(super) struct Basis<'a> {
+    /// The workspace's record in the ledger names the branches too, so what
+    /// cannot be resolved can be left (forced).
+    pub recorded: bool,
+    /// Branches the person asked to keep.
+    pub disowned: &'a [Uuid],
+    /// What the person saw of the branches (see [`ledger::BranchExpect`]).
+    pub expect: &'a [ledger::BranchExpect],
 }
 
 /// Look at every branch the receipt names (see the module documentation).
@@ -349,23 +452,73 @@ pub(super) fn plan(
     workspace: &Workspace,
     receipt: &Receipt,
     force: bool,
+    basis: Basis<'_>,
+    warnings: &mut Vec<String>,
+) -> Result<DataPlan> {
+    let Basis {
+        recorded,
+        disowned,
+        expect,
+    } = basis;
+    let cx = Cx {
+        project,
+        name: &workspace.name,
+        checkout: Some(workspace.path.as_path()),
+        instance: receipt.instance_id,
+        recorded,
+    };
+    // Branches the person asked to keep (a removal with --keep-data that
+    // stopped half-way, resumed without the flag) are not this removal's to
+    // drop, whatever the receipt it left behind still says.
+    let (kept, owned): (Vec<Named>, Vec<Named>) = named(project, receipt)
+        .into_iter()
+        .partition(|branch| disowned.contains(&branch.id));
+    for branch in kept {
+        warnings.push(format!(
+            "branch {} of {} was kept at your request and is left alone",
+            branch.id, branch.what
+        ));
+    }
+    plan_named(cx, owned, expect, force, warnings)
+}
+
+/// [`plan`] for a workspace that has no receipt any more: the branches its
+/// record in the ledger names.
+pub(crate) fn plan_recorded(
+    project: &Project,
+    record: &ledger::Record,
+    expect: &[ledger::BranchExpect],
+    force: bool,
     warnings: &mut Vec<String>,
 ) -> Result<DataPlan> {
     let cx = Cx {
         project,
-        workspace,
-        instance: receipt.instance_id,
+        name: &record.workspace,
+        checkout: None,
+        instance: record.instance_id,
+        recorded: true,
     };
+    plan_named(cx, named_from_record(record), expect, force, warnings)
+}
+
+fn plan_named(
+    cx: Cx<'_>,
+    named: Vec<Named>,
+    expect: &[ledger::BranchExpect],
+    force: bool,
+    warnings: &mut Vec<String>,
+) -> Result<DataPlan> {
+    let project = cx.project;
     let mut plan = DataPlan {
         instance: Some(cx.instance),
+        expect: expect.iter().map(|e| (e.id, e.clone())).collect(),
         ..DataPlan::default()
     };
     let mut problems = Problems::default();
     let mut pg = Pg::default();
 
-    let (unplaced, placed): (Vec<Named>, Vec<Named>) = named(project, receipt)
-        .into_iter()
-        .partition(|n| n.engine.is_none());
+    let (unplaced, placed): (Vec<Named>, Vec<Named>) =
+        named.into_iter().partition(|n| n.engine.is_none());
     let (postgres, containers): (Vec<Named>, Vec<Named>) = placed
         .into_iter()
         .partition(|n| n.engine == Some(Engine::Postgres));
@@ -423,7 +576,9 @@ pub(super) fn plan(
             (Lookup::Found(info), _) => {
                 if info.instance_id == Some(cx.instance) {
                     plan.postgres_ids.push(branch.id);
+                    plan.keys.insert(branch.id, branch.key.clone());
                 } else {
+                    plan.settled.push(branch.id);
                     warnings.push(format!(
                         "database branch {} was created by another instance and was left alone",
                         branch.id
@@ -434,6 +589,7 @@ pub(super) fn plan(
                 if record.owner == Some(cx.instance) {
                     plan.containers.push((svc, branch.id));
                 } else {
+                    plan.settled.push(branch.id);
                     warnings.push(format!(
                         "branch {} of service '{key}' was created by another instance and was \
                          left alone",
@@ -441,20 +597,18 @@ pub(super) fn plan(
                     ));
                 }
             }
-            (Lookup::Absent, Lookup::Absent) => {}
+            (Lookup::Absent, Lookup::Absent) => plan.settled.push(branch.id),
             (postgres, catalog) => {
                 let why = match (postgres, catalog) {
                     (Lookup::Unknown(why), _) | (_, Lookup::Unknown(why)) => why,
                     _ => "it was not found".to_string(),
                 };
-                problems
-                    .blocking
-                    .push(cx.unresolved(branch, &why, Some(key), true));
+                cx.cannot_resolve(branch, &why, Some(key), true, &mut problems);
             }
         }
     }
 
-    problems.settle(workspace, force, warnings)?;
+    problems.settle(cx.name, force, warnings)?;
     if !plan.postgres_ids.is_empty() {
         plan.postgres = match pg.state.take() {
             Some(Ok(server)) => server,
@@ -465,7 +619,7 @@ pub(super) fn plan(
 }
 
 /// A drop that failed part-way, with what was already dropped and what is left.
-pub(super) struct Failed {
+pub(crate) struct Failed {
     pub cause: anyhow::Error,
     pub done: Vec<String>,
     pub remains: Vec<String>,
@@ -473,48 +627,119 @@ pub(super) struct Failed {
     pub forceable: bool,
 }
 
+/// What [`execute`] did.
+pub(crate) struct Executed {
+    /// The first branch dropped.
+    pub first: Option<Uuid>,
+    /// What was dropped, for a message.
+    pub done: Vec<String>,
+}
+
 /// Drop what [`plan`] found, by recorded identity, with the backends'
 /// journal-aware operations. Each is decided again under the lock it holds for
 /// the deletion, so a branch that changed hands since the plan is left alone.
 /// With `force` a failure is a warning; without it a [`Failed`] that stops the
-/// removal before the worktree goes. The first branch dropped is returned, with
-/// what was dropped, for a message.
-pub(super) fn execute(
+/// removal before the worktree goes.
+///
+/// With a `ledger` handle, every drop is journaled before it is made (an error
+/// there stops the removal: an effect nobody wrote down cannot be finished
+/// later), and each branch that is accounted for (dropped, somebody else's, not
+/// there) is released from the record. A branch left by a forced failure stays
+/// recorded.
+pub(crate) fn execute(
     plan: DataPlan,
     force: bool,
     warnings: &mut Vec<String>,
-) -> Result<(Option<Uuid>, Vec<String>), Failed> {
+    ledger: Option<&ledger::Handle>,
+) -> Result<Executed, Failed> {
     let Some(instance) = plan.instance else {
-        return Ok((None, Vec::new()));
+        return Ok(Executed {
+            first: None,
+            done: Vec::new(),
+        });
     };
     let mut dropped = None;
     let mut done: Vec<String> = Vec::new();
     let mut remaining: Vec<String> = plan.describe();
-    let failed = |cause: anyhow::Error, done: &[String], remaining: &[String]| Failed {
+    let failed = |cause: anyhow::Error, done: &[String], remaining: &[String], forceable| Failed {
         cause,
         done: done.to_vec(),
         remains: remaining.to_vec(),
-        forceable: true,
+        forceable,
     };
+    // Bookkeeping that follows an effect which already happened is a warning:
+    // a record that still lists a dropped branch only reads "no longer
+    // exists" the next time it is looked at.
+    let account = |ids: &[Uuid], warnings: &mut Vec<String>| {
+        if let Some(handle) = ledger
+            && let Err(e) = handle.release_branches(ids)
+        {
+            warnings.push(format!("could not update the workspace's record: {e:#}"));
+        }
+    };
+    let finished = |effect: &Effect, note: Option<String>, warnings: &mut Vec<String>| {
+        if let Some(handle) = ledger
+            && let Err(e) = handle.done(effect, note)
+        {
+            warnings.push(format!("could not update the workspace's record: {e:#}"));
+        }
+    };
+    let intend = |effect: &Effect| -> anyhow::Result<()> {
+        match ledger {
+            Some(handle) => handle.intend(effect),
+            None => Ok(()),
+        }
+    };
+    account(&plan.settled, warnings);
     if let Some(server) = &plan.postgres {
         for id in plan.postgres_ids {
             let label = format!("database branch {id}");
-            match server.drop_branch_owned_by(id, instance) {
+            let effect = Effect::DropBranch {
+                service: plan.keys.get(&id).cloned().flatten(),
+                branch: id,
+            };
+            if let Err(e) = intend(&effect) {
+                return Err(failed(e, &done, &remaining, false));
+            }
+            let dropped_now = match plan.expect.get(&id).and_then(|e| e.generation) {
+                Some(generation) => server.drop_branch_owned_at(id, instance, generation as i32),
+                None => server.drop_branch_owned_by(id, instance),
+            };
+            match dropped_now {
                 Ok(true) => {
                     dropped.get_or_insert(id);
                     done.push(format!("dropped {label}"));
                     remaining.retain(|r| *r != label);
+                    finished(&effect, None, warnings);
+                    account(&[id], warnings);
                 }
-                Ok(false) => remaining.retain(|r| *r != label),
-                Err(e) if force => {
-                    warnings.push(format!("could not drop database branch {id}: {e:#}"));
+                Ok(false) => {
                     remaining.retain(|r| *r != label);
+                    finished(
+                        &effect,
+                        Some("not there, or not this instance's".to_string()),
+                        warnings,
+                    );
+                    account(&[id], warnings);
+                }
+                Err(e) if force => {
+                    warnings.push(format!(
+                        "could not drop database branch {id}: {e:#}; it stays recorded"
+                    ));
+                    remaining.retain(|r| *r != label);
+                    if let Some(handle) = ledger {
+                        handle.failed(&effect, &format!("{e:#}"));
+                    }
                 }
                 Err(e) => {
+                    if let Some(handle) = ledger {
+                        handle.failed(&effect, &format!("{e:#}"));
+                    }
                     return Err(failed(
                         e.context(format!("cannot drop database branch {id}")),
                         &done,
                         &remaining,
+                        true,
                     ));
                 }
             }
@@ -522,11 +747,31 @@ pub(super) fn execute(
     }
     for (svc, id) in plan.containers {
         let label = format!("branch {id} of service '{}'", svc.key);
+        let effect = Effect::DropBranch {
+            service: Some(svc.key.clone()),
+            branch: id,
+        };
+        if let Err(e) = intend(&effect) {
+            return Err(failed(e, &done, &remaining, false));
+        }
+        let expected = plan.expect.get(&id);
         let removed = svc.remove_branch_if(id, |record| {
             ensure!(
                 record.owner == Some(instance),
                 "branch {id} was not created by this workspace's instance"
             );
+            // A reset replaces the data and keeps the id and the owner: it is
+            // the data that was looked at that is dropped, or nothing.
+            if let Some(expected) = expected {
+                ensure!(
+                    expected.generation.is_none_or(|g| g == record.generation)
+                        && expected.volume.as_ref().is_none_or(|v| *v == record.volume),
+                    "branch {id} was reset since it was looked at (volume {}, generation {} \
+                     now), so it is left alone",
+                    record.volume,
+                    record.generation
+                );
+            }
             Ok(())
         });
         match removed {
@@ -534,27 +779,43 @@ pub(super) fn execute(
                 dropped.get_or_insert(id);
                 done.push(format!("dropped {label}"));
                 remaining.retain(|r| *r != label);
+                finished(&effect, None, warnings);
+                account(&[id], warnings);
             }
             // Recovered away meanwhile (an interrupted creation is rolled back
             // before the branch is looked at): nothing is left to drop.
-            Err(_) if matches!(svc.branch(id), Ok(None)) => remaining.retain(|r| *r != label),
+            Err(_) if matches!(svc.branch(id), Ok(None)) => {
+                remaining.retain(|r| *r != label);
+                finished(&effect, Some("already gone".to_string()), warnings);
+                account(&[id], warnings);
+            }
             Err(e) if force => {
                 warnings.push(format!(
-                    "could not drop branch {id} of service '{}': {e:#}",
+                    "could not drop branch {id} of service '{}': {e:#}; it stays recorded",
                     svc.key
                 ));
                 remaining.retain(|r| *r != label);
+                if let Some(handle) = ledger {
+                    handle.failed(&effect, &format!("{e:#}"));
+                }
             }
             Err(e) => {
+                if let Some(handle) = ledger {
+                    handle.failed(&effect, &format!("{e:#}"));
+                }
                 return Err(failed(
                     e.context(format!("cannot drop branch {id} of service '{}'", svc.key)),
                     &done,
                     &remaining,
+                    true,
                 ));
             }
         }
     }
-    Ok((dropped, done))
+    Ok(Executed {
+        first: dropped,
+        done,
+    })
 }
 
 #[cfg(test)]
@@ -716,7 +977,7 @@ mod tests {
             instance: Some(receipt.instance_id),
             postgres: Server::for_project(&project).unwrap(),
             postgres_ids: vec![a, b],
-            containers: Vec::new(),
+            ..DataPlan::default()
         };
         assert_eq!(
             plan.describe(),
@@ -726,7 +987,7 @@ mod tests {
             ]
         );
         let mut warnings = Vec::new();
-        let Err(failed) = execute(plan, false, &mut warnings) else {
+        let Err(failed) = execute(plan, false, &mut warnings, None) else {
             panic!("the server cannot be reached");
         };
         assert!(failed.done.is_empty());
@@ -750,10 +1011,10 @@ mod tests {
             instance: Some(receipt.instance_id),
             postgres: Server::for_project(&project).unwrap(),
             postgres_ids: vec![a],
-            containers: Vec::new(),
+            ..DataPlan::default()
         };
-        let (first, done) = execute(plan, true, &mut warnings).ok().unwrap();
-        assert_eq!((first, done.len()), (None, 0));
+        let executed = execute(plan, true, &mut warnings, None).ok().unwrap();
+        assert_eq!((executed.first, executed.done.len()), (None, 0));
         assert!(
             warnings
                 .iter()
@@ -777,9 +1038,16 @@ mod tests {
         let workspace = workspace_of(&project, &receipt);
         for force in [false, true] {
             let mut warnings = Vec::new();
-            let error = plan(&project, &workspace, &receipt, force, &mut warnings)
-                .err()
-                .unwrap_or_else(|| panic!("force={force}"));
+            let error = plan(
+                &project,
+                &workspace,
+                &receipt,
+                force,
+                Basis::default(),
+                &mut warnings,
+            )
+            .err()
+            .unwrap_or_else(|| panic!("force={force}"));
             let protected = error
                 .downcast_ref::<crate::error::Protected>()
                 .unwrap_or_else(|| panic!("{error:#}"));
@@ -802,15 +1070,30 @@ mod tests {
         let mut bound = Receipt::new(project.id(), "feature", None);
         bound.services.insert("db".into(), pg_binding(id, true));
         let mut warnings = Vec::new();
-        let error = plan(&project, &workspace, &bound, false, &mut warnings)
-            .err()
-            .unwrap();
+        let error = plan(
+            &project,
+            &workspace,
+            &bound,
+            false,
+            Basis::default(),
+            &mut warnings,
+        )
+        .err()
+        .unwrap();
         assert!(
             error
                 .downcast_ref::<crate::error::Protected>()
                 .is_some_and(|p| p.forceable)
         );
-        plan(&project, &workspace, &bound, true, &mut warnings).unwrap();
+        plan(
+            &project,
+            &workspace,
+            &bound,
+            true,
+            Basis::default(),
+            &mut warnings,
+        )
+        .unwrap();
         assert!(
             warnings.iter().any(|w| w.contains("it was left alone")),
             "{warnings:?}"
@@ -835,9 +1118,16 @@ mod tests {
             let workspace = workspace_of(&project, &receipt);
             for force in [false, true] {
                 let mut warnings = Vec::new();
-                let error = plan(&project, &workspace, &receipt, force, &mut warnings)
-                    .err()
-                    .unwrap_or_else(|| panic!("{engine:?} force={force}: accepted as absent"));
+                let error = plan(
+                    &project,
+                    &workspace,
+                    &receipt,
+                    force,
+                    Basis::default(),
+                    &mut warnings,
+                )
+                .err()
+                .unwrap_or_else(|| panic!("{engine:?} force={force}: accepted as absent"));
                 let protected = error
                     .downcast_ref::<crate::error::Protected>()
                     .unwrap_or_else(|| panic!("{error:#}"));
@@ -850,5 +1140,103 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_pending_branch_the_ledger_names_can_be_left_when_forced_and_stays_recorded() {
+        let (_dir, project) = unreachable_server();
+        let mut receipt = Receipt::new(project.id(), "feature", None);
+        let id = Uuid::new_v4();
+        receipt.creating = Some(PendingBranch {
+            service: "db".into(),
+            branch_id: id,
+            engine: Some(Engine::Postgres),
+        });
+        let workspace = workspace_of(&project, &receipt);
+        let mut warnings = Vec::new();
+        let error = plan(
+            &project,
+            &workspace,
+            &receipt,
+            false,
+            Basis {
+                recorded: true,
+                ..Basis::default()
+            },
+            &mut warnings,
+        )
+        .err()
+        .unwrap();
+        let protected = error.downcast_ref::<crate::error::Protected>().unwrap();
+        assert!(protected.forceable, "{}", protected.reason);
+        assert!(protected.reason.contains(&id.to_string()));
+        let kinds: Vec<&str> = protected.remedies.iter().map(Remedy::kind).collect();
+        assert_eq!(kinds, ["setup", "reconcile_databases"]);
+
+        let plan = plan(
+            &project,
+            &workspace,
+            &receipt,
+            true,
+            Basis {
+                recorded: true,
+                ..Basis::default()
+            },
+            &mut warnings,
+        )
+        .unwrap();
+        assert!(plan.settled.is_empty() && plan.postgres_ids.is_empty());
+        assert!(
+            warnings.iter().any(|w| w.contains("stays recorded")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_record_without_a_receipt_is_planned_like_a_receipt() {
+        let (_dir, project) = unreachable_server();
+        let id = Uuid::new_v4();
+        let mut record = crate::ledger::Record {
+            version: crate::ledger::VERSION,
+            instance_id: Uuid::new_v4(),
+            project_id: project.id(),
+            checkout: crate::ledger::Checkout {
+                main: project.root.clone(),
+                common_dir: project.git_common_dir.clone(),
+                identity: None,
+            },
+            workspace: "feature".into(),
+            worktree: project.root.join("w"),
+            admin_id: Some("w".into()),
+            fingerprint: None,
+            branch: None,
+            head: None,
+            created_at: chrono::Utc::now(),
+            last_active_at: None,
+            app_port: None,
+            updated_at: chrono::Utc::now(),
+            state: crate::ledger::State::Removing,
+            resources: crate::ledger::Resources::default(),
+            journal: Vec::new(),
+        };
+        record.resources.branches.push(crate::ledger::BranchRef {
+            service: Some("db".into()),
+            engine: Some(Engine::Postgres),
+            id,
+            pending: false,
+        });
+        // The server cannot be asked: the branch is neither dropped nor
+        // forgotten; the removal stops, or leaves it recorded when forced.
+        let mut warnings = Vec::new();
+        let error = plan_recorded(&project, &record, &[], false, &mut warnings)
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .downcast_ref::<crate::error::Protected>()
+                .is_some_and(|p| p.forceable)
+        );
+        let forced = plan_recorded(&project, &record, &[], true, &mut warnings).unwrap();
+        assert!(forced.settled.is_empty() && forced.describe().is_empty());
     }
 }

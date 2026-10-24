@@ -638,6 +638,11 @@ pub trait ServiceBackend: Send + Sync + 'static {
     fn up(&self, project: &Project, key: &str, branch: Uuid) -> Result<String>;
     /// Stop it, keeping its data; whether it was running.
     fn down(&self, project: &Project, key: &str, branch: Uuid) -> Result<bool>;
+    /// Stop the containers of the workspace's own services, keeping their
+    /// data and leaving the project's PostgreSQL server alone.
+    fn stop_workspace(&self, project: &Project, workspace: &Workspace) -> workspace::Changes;
+    /// Start them again.
+    fn start_workspace(&self, project: &Project, workspace: &Workspace) -> workspace::Changes;
     /// The branch's connection URL with its password: for the clipboard only.
     fn url(&self, project: &Project, key: &str, branch: Uuid) -> Result<String>;
     /// Seal a new version of `name` from the workspace's branch; `name@vN`.
@@ -750,6 +755,14 @@ impl ServiceBackend for CoreServices {
 
     fn down(&self, project: &Project, key: &str, branch: Uuid) -> Result<bool> {
         Service::open(project, key)?.down(branch)
+    }
+
+    fn stop_workspace(&self, project: &Project, workspace: &Workspace) -> workspace::Changes {
+        workspace::stop_services(project, workspace)
+    }
+
+    fn start_workspace(&self, project: &Project, workspace: &Workspace) -> workspace::Changes {
+        workspace::start_services(project, workspace)
     }
 
     fn url(&self, project: &Project, key: &str, branch: Uuid) -> Result<String> {

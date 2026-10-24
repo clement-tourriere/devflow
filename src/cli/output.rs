@@ -106,6 +106,18 @@ pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
     lines.join("\n")
 }
 
+/// How long ago `then` was, as a listing shows it (`5m ago`, `3h ago`, `2d ago`).
+pub fn ago(then: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> String {
+    let seconds = (now - then).num_seconds().max(0);
+    match seconds {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{}m ago", seconds / 60),
+        3600..=86_399 => format!("{}h ago", seconds / 3600),
+        86_400..=2_591_999 => format!("{}d ago", seconds / 86_400),
+        _ => format!("{}mo ago", seconds / 2_592_000),
+    }
+}
+
 /// Aligned `key  value` lines.
 pub fn key_values(pairs: &[(&str, String)]) -> String {
     let width = pairs

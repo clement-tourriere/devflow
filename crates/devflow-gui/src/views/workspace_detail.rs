@@ -147,6 +147,11 @@ pub struct Detail {
     /// How the container services stood when the workspace was last entered
     /// in this app (empty before that).
     pub services: Vec<ServiceNote>,
+    /// The workspace's own port (`DEVFLOW_PORT`), once it has one.
+    pub app_port: Option<u16>,
+    /// The workspace is bound to container services (Valkey, Redis, MySQL):
+    /// the header offers to stop and start them.
+    pub container_services: bool,
 }
 
 /// One container service as the last entry of the workspace left it.
@@ -454,6 +459,12 @@ impl Detail {
                 .as_ref()
                 .map(|project| status.remedies(project))
                 .unwrap_or_default(),
+            app_port: receipt.and_then(|r| r.app_port),
+            container_services: receipt.is_some_and(|r| {
+                r.services
+                    .values()
+                    .any(|binding| !binding.orphaned && binding.engine.is_container())
+            }),
             drift: status.drift.as_ref().map(|drift| shown(&drift.describe())),
             env_file: status
                 .env_file
@@ -719,6 +730,45 @@ impl WorkspaceDetailView {
                 move |_, window, cx| state.update(cx, |s, cx| s.open_in_editor(&path, window, cx)),
             )
         };
+        // Stop (or start) the workspace's own containers; the data stays.
+        let services = |start: bool| {
+            // Found again by its checkout when clicked: its name is a label.
+            let (state, at) = (self.state.clone(), detail.path.clone());
+            Button::new(if start {
+                "detail-start-services"
+            } else {
+                "detail-stop-services"
+            })
+            .icon(if start {
+                IconName::Play
+            } else {
+                IconName::Square
+            })
+            .ghost()
+            .small()
+            .tooltip(if start {
+                "Start the workspace's containers"
+            } else {
+                "Stop the workspace's containers; their data is kept"
+            })
+            .disabled(
+                busy || matches!(detail.state, WorkspaceState::Missing | WorkspaceState::Busy),
+            )
+            .on_click(move |_, window, cx| {
+                let found = state.read(cx).selection.current().and_then(|model| {
+                    Some((
+                        model.project_ref(),
+                        model.workspace_at(&at)?.workspace.clone(),
+                    ))
+                });
+                let Some((owner, workspace)) = found else {
+                    return;
+                };
+                state.update(cx, |s, cx| {
+                    s.workspace_services(owner, workspace, start, window, cx)
+                });
+            })
+        };
         let retry = {
             let state = self.state.clone();
             // Found again by its checkout when clicked: its name is a label.
@@ -804,6 +854,9 @@ impl WorkspaceDetailView {
                             .gap_1()
                             .items_center()
                             .child(retry)
+                            .when(detail.container_services, |row| {
+                                row.child(services(false)).child(services(true))
+                            })
                             .child(finder)
                             .child(terminal)
                             .child(editor),
@@ -821,6 +874,14 @@ impl WorkspaceDetailView {
                             .text_color(ui::muted(cx)),
                     )
                     .child(detail.branch.clone())
+                    .when_some(detail.app_port, |row, port| {
+                        row.child("·").child(ui::pill(
+                            "detail-app-port",
+                            format!("port {port}"),
+                            Tone::Neutral,
+                            "This workspace's own port, for its dev server (DEVFLOW_PORT)",
+                        ))
+                    })
                     .child("·")
                     .child(div().min_w_0().truncate().child(shorten_home(&detail.path)))
                     .child(

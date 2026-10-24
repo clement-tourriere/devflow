@@ -11,8 +11,13 @@ use git2::{
 use serde::Serialize;
 use std::path::{Component, Path, PathBuf};
 
+mod evidence;
 mod faithful;
+#[cfg(test)]
+mod gitoracle;
 mod prune;
+mod rawconfig;
+pub use evidence::{Merge, MergeEvidence, merge_evidence};
 pub use prune::{
     PruneCandidate, PruneOutcome, PruneRefusal, PruneRefused, PruneTarget,
     candidates as prune_candidates, prune,
@@ -203,6 +208,59 @@ fn named_by_receipt(project: &Project, mut workspace: Workspace) -> Workspace {
         workspace.name = created;
     }
     workspace
+}
+
+/// A name a workspace answers to, with where it is: what a completion or a
+/// picker offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Named {
+    pub name: String,
+    pub path: PathBuf,
+    /// The directory is gone.
+    pub missing: bool,
+}
+
+/// Every name the workspaces of `project` go by, from local Git and receipts
+/// alone (no server, no Docker): the name each was created under, and the
+/// branch it holds now when that is another one. A name that two workspaces
+/// answer to is listed once for each: [`find`] refuses it, listing both paths.
+pub fn names(project: &Project) -> Result<Vec<Named>> {
+    let mut found: Vec<Named> = Vec::new();
+    for workspace in list(project)? {
+        let created = receipt_name(project, &workspace).unwrap_or_else(|| workspace.name.clone());
+        let held = workspace.branch.clone();
+        for name in std::iter::once(created).chain(held) {
+            if !found
+                .iter()
+                .any(|seen| seen.name == name && seen.path == workspace.path)
+            {
+                found.push(Named {
+                    name,
+                    path: workspace.path.clone(),
+                    missing: workspace.missing,
+                });
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Where a shell that moves from `from` into the workspace `target` should
+/// land: the same subdirectory of the workspace it was in (`apps/web`) when
+/// `target` has it, else `target`'s root. `source` is the workspace `from`
+/// lies in, if any. A subdirectory that leaves `target` by a link is not kept.
+pub fn landing(from: &Path, source: Option<&Workspace>, target: &Workspace) -> PathBuf {
+    let relative = source
+        .and_then(|source| from.strip_prefix(&source.path).ok())
+        .filter(|relative| !relative.as_os_str().is_empty());
+    let Some(relative) = relative else {
+        return target.path.clone();
+    };
+    let candidate = target.path.join(relative);
+    match candidate.canonicalize() {
+        Ok(real) if real.is_dir() && real.starts_with(&target.path) => candidate,
+        _ => target.path.clone(),
+    }
 }
 
 /// The workspace containing `dir`, if any. Nested checkouts win over their
@@ -1312,6 +1370,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn landing_keeps_the_subdirectory_when_the_target_has_it() {
+        let t = repo(None);
+        std::fs::create_dir_all(t.root.join("apps/web")).unwrap();
+        std::fs::write(t.root.join("apps/web/index.js"), "x\n").unwrap();
+        let main = list(&t.project).unwrap().remove(0);
+        let other = create(&t.project, "feature/a", None).unwrap();
+        // The target has no apps/web (it was made from a commit without): the root.
+        let from = t.root.join("apps/web");
+        assert_eq!(landing(&from, Some(&main), &other), other.path);
+        // Once it has, the same subdirectory.
+        std::fs::create_dir_all(other.path.join("apps/web")).unwrap();
+        assert_eq!(
+            landing(&from, Some(&main), &other),
+            other.path.join("apps/web")
+        );
+        // From a workspace's root, or from outside any workspace: the root.
+        assert_eq!(landing(&t.root, Some(&main), &other), other.path);
+        assert_eq!(landing(&from, None, &other), other.path);
+        // A subdirectory that is a link out of the target is not followed.
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(other.path.join("libs")).unwrap();
+            std::fs::create_dir_all(t.root.join("libs/deep")).unwrap();
+            std::fs::remove_dir_all(other.path.join("libs")).unwrap();
+            std::os::unix::fs::symlink(outside.path(), other.path.join("libs")).unwrap();
+            std::fs::create_dir_all(outside.path().join("deep")).unwrap();
+            assert_eq!(
+                landing(&t.root.join("libs/deep"), Some(&main), &other),
+                other.path
+            );
+        }
+    }
+
+    #[test]
+    fn names_list_what_each_workspace_answers_to() {
+        let t = repo(None);
+        let ws = create(&t.project, "feature/a", None).unwrap();
+        let named = names(&t.project).unwrap();
+        let listed: Vec<&str> = named.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(listed, ["main", "feature/a"]);
+        assert_eq!(named[1].path, ws.path);
+        assert!(named.iter().all(|n| !n.missing));
+        // The branch the checkout holds now is a name too, once it differs
+        // from the one the workspace was created under (a receipt records it).
+        let mut receipt = crate::receipt::Receipt::new(t.project.id(), "created-as", None);
+        receipt.save(&ws.git_dir).unwrap();
+        let listed: Vec<String> = names(&t.project)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .collect();
+        assert_eq!(listed, ["main", "created-as", "feature/a"]);
+        receipt.workspace = "feature/a".into();
+        receipt.save(&ws.git_dir).unwrap();
+        assert_eq!(names(&t.project).unwrap().len(), 2);
+    }
+
+    #[test]
     fn sanitize_replaces_unsafe_characters() {
         assert_eq!(sanitize("feature/a b"), "feature-a-b");
         assert_eq!(sanitize("agent//TASK--1"), "agent-TASK-1");
@@ -2278,7 +2395,8 @@ mod tests {
         assert!(create(&t.project, "lfs-b", None).is_err());
         untouched_after_refusal(&t, "lfs-b");
 
-        // Repository configuration counts, even without attributes.
+        // The filter's configuration alone is not LFS: with no attribute naming
+        // it, no pointer file can appear.
         let t = repo(None);
         t.project
             .repo()
@@ -2287,8 +2405,8 @@ mod tests {
             .unwrap()
             .set_str("filter.lfs.smudge", "git-lfs smudge -- %f")
             .unwrap();
-        assert!(create(&t.project, "lfs-c", None).is_err());
-        untouched_after_refusal(&t, "lfs-c");
+        let created = create(&t.project, "lfs-c", None).unwrap();
+        assert!(created.path.join("README.md").is_file());
 
         // The base is what is judged: LFS only in another commit's tree does
         // not stop a worktree on a commit without it.

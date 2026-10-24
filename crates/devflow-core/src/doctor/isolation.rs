@@ -264,7 +264,24 @@ fn bound_database(
 }
 
 fn dotenv(project: &Project, workspace: &str, path: &Path, env: &ChildEnv) -> Option<Check> {
-    let conflicts = env_owner::dotenv_conflicts(&project.config, path, env);
+    // The files the payload phase carried over, `.worktreeinclude` ones too.
+    let copied: Vec<String> = crate::worktree::containing(project, path)
+        .ok()
+        .flatten()
+        .and_then(|workspace| {
+            crate::receipt::Receipt::load(&workspace.git_dir)
+                .ok()
+                .flatten()
+        })
+        .map(|receipt| {
+            receipt
+                .payload
+                .into_iter()
+                .map(|record| record.path)
+                .collect()
+        })
+        .unwrap_or_default();
+    let conflicts = env_owner::dotenv_conflicts_among(&project.config, path, env, &copied);
     if conflicts.is_empty() {
         return None;
     }
